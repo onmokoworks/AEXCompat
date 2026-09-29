@@ -75,7 +75,7 @@ def _run_session(request: dict[str, Any], timeout_ms: int | None = 5000) -> dict
     wrapper = _wrapper_path()
     if not wrapper.is_file():
         raise AEXCompatSessionError("blender_session_wrapper_missing")
-    harness_calls = 2 if request.get("mode") == "render_aex" and "parameter_override" in request else 1
+    harness_calls = 2 if request.get("mode") == "render_aex" and ("parameter_override" in request or "parameter_overrides" in request) else 1
     try:
         process = subprocess.Popen(
             _python_command() + [str(wrapper)],
@@ -211,6 +211,7 @@ def evaluate_rgba8(
     timeout_ms: int | None = None,
     render_path: str = "classic",
     parameter_override: dict[str, int | float] | None = None,
+    parameter_overrides: list[dict[str, int | float]] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Validate one RGBA8 frame and return only verified worker pixels."""
 
@@ -245,11 +246,15 @@ def evaluate_rgba8(
         },
     }
     if mode == "render_aex":
+        if parameter_override is not None and parameter_overrides is not None:
+            raise AEXCompatSessionError("choose one parameter override form")
         request["render_path"] = render_path
         if parameter_override is not None:
             request["parameter_override"] = parameter_override
-    elif parameter_override is not None:
-        raise AEXCompatSessionError("parameter_override requires render_aex")
+        if parameter_overrides is not None:
+            request["parameter_overrides"] = parameter_overrides
+    elif parameter_override is not None or parameter_overrides is not None:
+        raise AEXCompatSessionError("parameter overrides require render_aex")
     response = _run_session(request, timeout_ms=timeout_ms)
     expected_statuses = {"rendered"} if mode == "render_aex" else {"identity_only", "fixture_transform"}
     expected_success = mode == "render_aex"
@@ -260,6 +265,8 @@ def evaluate_rgba8(
         or (mode == "render_aex" and response.get("failure_class") != "none")
     ):
         raise AEXCompatSessionError(str(response.get("failure_class", "session_failed")))
+    if mode != "render_aex" and ("parameter_override" in response or "parameter_overrides" in response):
+        raise AEXCompatSessionError("worker_protocol_error")
     if response.get("input") != {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}:
         raise AEXCompatSessionError("worker_protocol_error")
     if mode == "render_aex":
@@ -286,7 +293,8 @@ def evaluate_rgba8(
         ):
             raise AEXCompatSessionError("worker_protocol_error")
         applied = response.get("parameter_override")
-        if parameter_override is None and applied is not None:
+        applied_many = response.get("parameter_overrides")
+        if parameter_override is None and applied is not None or parameter_overrides is None and applied_many is not None:
             raise AEXCompatSessionError("worker_protocol_error")
         if parameter_override is not None and (
             not isinstance(applied, dict)
@@ -303,6 +311,33 @@ def evaluate_rgba8(
             )
         ):
             raise AEXCompatSessionError("worker_protocol_error")
+        if parameter_overrides is not None:
+            if not isinstance(applied_many, list) or len(applied_many) != len(parameter_overrides):
+                raise AEXCompatSessionError("worker_protocol_error")
+            shared_description = None
+            for requested, recorded in zip(parameter_overrides, applied_many):
+                if (
+                    not isinstance(recorded, dict)
+                    or type(recorded.get("slot")) is not int
+                    or recorded.get("slot") != requested.get("slot")
+                    or not _finite_scalar(recorded.get("value"))
+                    or recorded.get("value") != requested.get("value")
+                    or recorded.get("kind") not in {"integer", "float", "angle"}
+                    or not _sha256_text(recorded.get("description_sha256"))
+                    or not _sha256_text(recorded.get("description_plugin_sha256"))
+                    or type(recorded.get("description_files_unchanged")) not in (bool, type(None))
+                    or recorded.get("description_matches_render_plugin") is not (
+                        recorded["description_plugin_sha256"] == identity["sha256"]
+                    )
+                ):
+                    raise AEXCompatSessionError("worker_protocol_error")
+                description = (
+                    recorded["description_sha256"], recorded["description_plugin_sha256"],
+                    recorded["description_files_unchanged"],
+                )
+                if shared_description is not None and description != shared_description:
+                    raise AEXCompatSessionError("worker_protocol_error")
+                shared_description = description
     output = response.get("output")
     if not isinstance(output, dict) or output.get("encoding") != "base64-rgba8":
         raise AEXCompatSessionError("worker_protocol_error")
@@ -331,6 +366,10 @@ def _configure_bake_button(node: Any, button: Any) -> None:
     button.parameter_kind = node.parameter_kind
     button.parameter_integer_value = node.parameter_integer_value
     button.parameter_value_text = node.parameter_value_text
+    button.parameter_overrides_json = json.dumps([
+        {"slot": item.slot, "value": item.integer_value if item.kind == "integer" else item.value_text}
+        for item in node.selected_parameter_items
+    ], separators=(",", ":")) if node.selected_parameter_items else ""
     button.selected_description_plugin_sha = node.description_plugin_sha
 
 
@@ -349,15 +388,59 @@ def _parameter_override(slot: int, kind: str, integer_value: int, value_text: st
     return {"slot": slot, "value": value}
 
 
+def _named_parameter_overrides(node: Any) -> list[dict[str, int | float]]:
+    return [
+        _parameter_override(item.slot, item.kind, item.integer_value, item.value_text, 0.0)
+        for item in node.selected_parameter_items
+    ]
+
+
+def _parse_parameter_overrides(value: str) -> list[dict[str, int | float]]:
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise AEXCompatSessionError("duplicate parameter override field")
+            result[key] = item
+        return result
+    try:
+        parsed = json.loads(
+            value, object_pairs_hook=unique,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("non-finite number")),
+        )
+    except (ValueError, UnicodeError) as exc:
+        raise AEXCompatSessionError("invalid parameter override list") from exc
+    if not isinstance(parsed, list) or not 1 <= len(parsed) <= 16:
+        raise AEXCompatSessionError("parameter override list must contain 1..16 values")
+    seen: set[int] = set()
+    for entry in parsed:
+        if (
+            not isinstance(entry, dict) or set(entry) != {"slot", "value"}
+            or type(entry["slot"]) is not int or entry["slot"] < 1 or entry["slot"] in seen
+        ):
+            raise AEXCompatSessionError("invalid or duplicate parameter override")
+        if isinstance(entry["value"], str):
+            try:
+                entry["value"] = float(entry["value"])
+            except ValueError as exc:
+                raise AEXCompatSessionError("parameter value must be finite") from exc
+        if not _finite_scalar(entry["value"]):
+            raise AEXCompatSessionError("parameter value must be finite")
+        seen.add(entry["slot"])
+    return parsed
+
+
 def _parameter_slot_changed(node: Any, _context: Any) -> None:
     node.parameter_kind = ""
     node.parameter_value_text = ""
+    node.selected_parameter_items.clear()
 
 
 def _plugin_source_changed(node: Any, _context: Any) -> None:
     node.parameter_items.clear()
     node.selected_parameter_index = 0
     node.parameter_slot = 0
+    node.selected_parameter_items.clear()
     node.description_source = ""
     node.description_plugin_sha = ""
 
@@ -371,9 +454,24 @@ class AEXCompatScalarParameter(bpy.types.PropertyGroup):
     value_text: StringProperty(name="Default")
 
 
+class AEXCompatChosenParameter(bpy.types.PropertyGroup):
+    slot: IntProperty(name="Slot")
+    name: StringProperty(name="Name")
+    kind: StringProperty(name="Kind")
+    integer_value: IntProperty(name="Integer value")
+    value_text: StringProperty(name="Decimal value")
+
+
 class AEXCOMPAT_UL_scalar_parameters(bpy.types.UIList):
     def draw_item(self, _context: Any, layout: Any, _data: Any, item: Any, _icon: Any, _active_data: Any, _active_propname: Any, _index: int) -> None:
         layout.label(text=f"{item.name} (#{item.slot}, {item.kind})")
+
+
+class AEXCOMPAT_UL_chosen_parameters(bpy.types.UIList):
+    def draw_item(self, _context: Any, layout: Any, _data: Any, item: Any, _icon: Any, _active_data: Any, _active_propname: Any, _index: int) -> None:
+        row = layout.row(align=True)
+        row.label(text=f"{item.name} (#{item.slot})")
+        row.prop(item, "integer_value" if item.kind == "integer" else "value_text", text="")
 
 
 class AEXCompatCompositorNode(bpy.types.CompositorNode):
@@ -405,6 +503,8 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
     parameter_integer_value: IntProperty(name="Integer value", default=0)
     parameter_value_text: StringProperty(name="Decimal value", default="")
     parameter_items: CollectionProperty(type=AEXCompatScalarParameter)
+    selected_parameter_items: CollectionProperty(type=AEXCompatChosenParameter)
+    selected_override_index: IntProperty(name="Selected override", default=0, min=0)
     selected_parameter_index: IntProperty(name="Selected parameter", default=0, min=0)
     description_source: StringProperty(name="Described plugin source", default="")
     description_plugin_sha: StringProperty(name="Described plugin SHA-256", default="")
@@ -431,10 +531,18 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
                 index = min(self.selected_parameter_index, len(self.parameter_items) - 1)
                 selected = self.parameter_items[index]
                 layout.label(text=f"Range {selected.minimum_text} .. {selected.maximum_text}; default {selected.value_text}")
-                choose = layout.operator("aexcompat.choose_parameter", text="Use selected parameter")
+                choose = layout.operator("aexcompat.choose_parameter", text="Add/update selected parameter")
                 _configure_node_locator(self, choose)
-            layout.prop(self, "parameter_slot")
-            if self.parameter_slot:
+            if self.selected_parameter_items:
+                layout.template_list(
+                    "AEXCOMPAT_UL_chosen_parameters", "", self, "selected_parameter_items",
+                    self, "selected_override_index", rows=4,
+                )
+                remove = layout.operator("aexcompat.remove_parameter", text="Remove selected override")
+                _configure_node_locator(self, remove)
+            else:
+                layout.prop(self, "parameter_slot")
+            if self.parameter_slot and not self.selected_parameter_items:
                 if self.parameter_kind == "integer":
                     layout.prop(self, "parameter_integer_value")
                 elif self.parameter_kind in {"float", "angle"}:
@@ -447,11 +555,17 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
     def evaluate_rgba8(self, rgba: bytes, width: int, height: int, **kwargs: Any) -> tuple[bytes, dict[str, Any]]:
         options = dict(kwargs)
         options.setdefault("render_path", self.render_path)
-        if self.transport_mode == "render_aex" and self.parameter_slot:
-            options.setdefault("parameter_override", _parameter_override(
-                self.parameter_slot, self.parameter_kind, self.parameter_integer_value,
-                self.parameter_value_text, self.parameter_value,
-            ))
+        if (
+            self.transport_mode == "render_aex" and (self.parameter_slot or self.selected_parameter_items)
+            and "parameter_override" not in options and "parameter_overrides" not in options
+        ):
+            if self.selected_parameter_items:
+                options.setdefault("parameter_overrides", _named_parameter_overrides(self))
+            else:
+                options.setdefault("parameter_override", _parameter_override(
+                    self.parameter_slot, self.parameter_kind, self.parameter_integer_value,
+                    self.parameter_value_text, self.parameter_value,
+                ))
         return evaluate_rgba8(
             rgba,
             width,
@@ -511,6 +625,7 @@ class AEXCompatRefreshParametersOperator(bpy.types.Operator):
         node.parameter_items.clear()
         node.selected_parameter_index = 0
         node.parameter_slot = 0
+        node.selected_parameter_items.clear()
         node.description_source = ""
         node.description_plugin_sha = ""
         try:
@@ -551,12 +666,47 @@ class AEXCompatChooseParameterOperator(bpy.types.Operator):
             self.report({"ERROR"}, "refresh AEX parameters before selection")
             return {"CANCELLED"}
         item = node.parameter_items[node.selected_parameter_index]
-        node.parameter_slot = item.slot
-        node.parameter_kind = item.kind
+        if not node.selected_parameter_items:
+            node.parameter_slot = item.slot
+            node.parameter_kind = item.kind
+            if item.kind == "integer":
+                node.parameter_integer_value = int(item.value_text)
+            else:
+                node.parameter_value_text = item.value_text
+        existing = next((selected for selected in node.selected_parameter_items if selected.slot == item.slot), None)
+        if existing is None:
+            if len(node.selected_parameter_items) >= 16:
+                self.report({"ERROR"}, "at most 16 named parameters can be baked")
+                return {"CANCELLED"}
+            existing = node.selected_parameter_items.add()
+        existing.slot = item.slot
+        existing.name = item.name
+        existing.kind = item.kind
         if item.kind == "integer":
-            node.parameter_integer_value = int(item.value_text)
+            existing.integer_value = int(item.value_text)
         else:
-            node.parameter_value_text = item.value_text
+            existing.value_text = item.value_text
+        return {"FINISHED"}
+
+
+class AEXCompatRemoveParameterOperator(bpy.types.Operator):
+    bl_idname = "aexcompat.remove_parameter"
+    bl_label = "Remove selected AEX parameter"
+
+    tree_name: StringProperty()
+    node_name: StringProperty()
+    owner_type: StringProperty(default="GROUP")
+    owner_name: StringProperty(default="")
+
+    def execute(self, _context: Any):
+        node = _find_descriptor_node(self.owner_type, self.owner_name or self.tree_name, self.tree_name, self.node_name)
+        if node is None or not 0 <= node.selected_override_index < len(node.selected_parameter_items):
+            self.report({"ERROR"}, "selected override not found")
+            return {"CANCELLED"}
+        node.selected_parameter_items.remove(node.selected_override_index)
+        node.selected_override_index = max(0, min(node.selected_override_index, len(node.selected_parameter_items) - 1))
+        if not node.selected_parameter_items:
+            node.parameter_slot = 0
         return {"FINISHED"}
 
 
@@ -622,6 +772,7 @@ class AEXCompatBakeImageOperator(bpy.types.Operator):
     parameter_kind: StringProperty(name="Selected parameter kind", default="")
     parameter_integer_value: IntProperty(name="Integer value", default=0)
     parameter_value_text: StringProperty(name="Decimal value", default="")
+    parameter_overrides_json: StringProperty(name="Named parameter overrides", default="")
     selected_description_plugin_sha: StringProperty(name="Described plugin SHA-256", default="")
 
     def execute(self, context: Any):
@@ -633,6 +784,7 @@ class AEXCompatBakeImageOperator(bpy.types.Operator):
             if self.mode == "render_aex" and source.alpha_mode != "STRAIGHT":
                 raise AEXCompatSessionError("render_aex requires a straight-alpha source image")
             raw, width, height, color_space = _image_to_rgba8(source)
+            overrides = _parse_parameter_overrides(self.parameter_overrides_json) if self.mode == "render_aex" and self.parameter_overrides_json else None
             output, response = evaluate_rgba8(
                 raw,
                 width,
@@ -646,8 +798,8 @@ class AEXCompatBakeImageOperator(bpy.types.Operator):
                 parameter_override=_parameter_override(
                     self.parameter_slot, self.parameter_kind, self.parameter_integer_value,
                     self.parameter_value_text, self.parameter_value,
-                )
-                if self.mode == "render_aex" and self.parameter_slot else None,
+                ) if self.mode == "render_aex" and self.parameter_slot and overrides is None else None,
+                parameter_overrides=overrides if self.mode == "render_aex" else None,
             )
             output_image = _rgba8_to_image(self.output_image_name, output, width, height)
             if self.connect_native:
@@ -655,10 +807,11 @@ class AEXCompatBakeImageOperator(bpy.types.Operator):
         except AEXCompatSessionError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        applied = response.get("parameter_override")
+        applied = response.get("parameter_override") or response.get("parameter_overrides")
+        applied_records = applied if isinstance(applied, list) else [applied]
         if (
-            self.selected_description_plugin_sha and isinstance(applied, dict)
-            and applied.get("description_plugin_sha256") != self.selected_description_plugin_sha
+            self.selected_description_plugin_sha
+            and any(isinstance(record, dict) and record.get("description_plugin_sha256") != self.selected_description_plugin_sha for record in applied_records)
         ):
             self.report({"WARNING"}, "AEX changed since parameter refresh; refresh the list")
         self.report({"INFO"}, f"{response['status']} ({response['failure_class']})")
@@ -666,8 +819,9 @@ class AEXCompatBakeImageOperator(bpy.types.Operator):
 
 
 _CLASSES = (
-    AEXCompatScalarParameter, AEXCOMPAT_UL_scalar_parameters, AEXCompatCompositorNode,
-    AEXCompatRefreshParametersOperator, AEXCompatChooseParameterOperator,
+    AEXCompatScalarParameter, AEXCompatChosenParameter,
+    AEXCOMPAT_UL_scalar_parameters, AEXCOMPAT_UL_chosen_parameters, AEXCompatCompositorNode,
+    AEXCompatRefreshParametersOperator, AEXCompatChooseParameterOperator, AEXCompatRemoveParameterOperator,
     AEXCompatBakeImageOperator,
 )
 _MENU = None

@@ -54,6 +54,12 @@ def test_identity_transport_is_explicitly_not_aex_success():
     assert result["host_success"] is False
     assert result["plugin_identity"]["source_relative_path"] == "fixtures/not-loaded.aex"
     assert result["diff"] == {"byte_count": 16, "changed_bytes": 0, "max_abs_delta": 0}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**result, "parameter_overrides": [{
+            "slot": 1, "kind": "integer", "value": 1,
+            "description_sha256": "0" * 64, "description_plugin_sha256": "0" * 64,
+            "description_files_unchanged": True, "description_matches_render_plugin": False,
+        }]}, SCHEMA)
 
 
 def test_non_identity_mode_stays_fail_closed():
@@ -470,6 +476,109 @@ def test_scalar_override_uses_single_canonical_record_and_smart_fixture(fake_ren
     assert observed[0]["parameters"] == [{**description["parameters"][0], "value": 80.0}]
     assert result["parameter_override"]["description_matches_render_plugin"] is True
     assert result["parameter_override"]["value"] == 80.0
+
+
+@pytest.mark.parametrize("disabled_field", ["enabled", "visible"])
+def test_legacy_single_override_keeps_hidden_or_disabled_scalar_behavior(fake_render_environment, monkeypatch, disabled_field):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    description["parameters"][0][disabled_field] = False
+    observed = []
+
+    def harness(args, *unused, **kwargs):
+        if "--describe-aex" in args:
+            return json.dumps(description).encode()
+        observed.append(json.loads(Path(args[4]).read_text())["parameters"])
+        return _fake_harness(args, *unused, **kwargs)
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_override"] = {"slot": 1, "value": 80.0}
+    result = SESSION.build_response(payload)
+    assert result["status"] == "rendered" and result["parameter_override"]["value"] == 80.0
+    assert observed == [[{**description["parameters"][0], "value": 80.0}]]
+
+
+@pytest.mark.parametrize("render_path", ["classic", "smart"])
+def test_multiple_scalar_overrides_use_one_description_and_one_render(fake_render_environment, monkeypatch, render_path):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    second = {**description["parameters"][0], "slot": 2, "name": "Iterations", "kind": "integer", "value": 3.0, "maximum": 2147483647.0}
+    description["parameters"].append(second)
+    description["defaults"].append(dict(second))
+    calls = []
+    observed = []
+
+    def harness(args, *unused, **kwargs):
+        calls.append(args)
+        if "--describe-aex" in args:
+            return json.dumps(description).encode()
+        observed.append(json.loads(Path(args[4]).read_text())["parameters"])
+        return _fake_harness(args, *unused, **kwargs)
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["render_path"] = render_path
+    payload["parameter_overrides"] = [{"slot": 1, "value": 80.0}, {"slot": 2, "value": 16777217}]
+    result = SESSION.build_response(payload)
+    jsonschema.validate(result, SCHEMA)
+    assert result["status"] == "rendered" and "parameter_override" not in result
+    assert result["render_path"] == render_path
+    assert [record["slot"] for record in result["parameter_overrides"]] == [1, 2]
+    assert result["parameter_overrides"][1]["value"] == 16777217
+    assert observed == [[{**description["parameters"][0], "value": 80.0}, {**second, "value": 16777217}]]
+    assert len(calls) == 2 and "--describe-aex" in calls[0] and "--render-fixture" in calls[1]
+
+
+@pytest.mark.parametrize("case", [
+    "empty", "too_many", "duplicate", "unknown", "hidden", "disabled", "non_scalar", "out_of_range", "bad_integer", "both_forms", "malformed",
+])
+def test_multiple_scalar_overrides_reject_invalid_selection_before_render(fake_render_environment, monkeypatch, case):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    second = {**description["parameters"][0], "slot": 2, "name": "Second"}
+    description["parameters"].append(second)
+    description["defaults"].append(dict(second))
+    overrides = [{"slot": 1, "value": 5.0}, {"slot": 2, "value": 6.0}]
+    if case == "empty":
+        overrides = []
+    elif case == "too_many":
+        overrides = [{"slot": index, "value": 1.0} for index in range(1, 18)]
+    elif case == "duplicate":
+        overrides[1]["slot"] = 1
+    elif case == "unknown":
+        overrides[1]["slot"] = 3
+    elif case == "hidden":
+        description["parameters"][1]["visible"] = False
+    elif case == "disabled":
+        description["parameters"][1]["enabled"] = False
+    elif case == "non_scalar":
+        description["parameters"][1]["kind"] = "color"
+    elif case == "out_of_range":
+        overrides[1]["value"] = 999.0
+    elif case == "bad_integer":
+        description["parameters"][1]["kind"] = "integer"
+        overrides[1]["value"] = 6.5
+    elif case == "malformed":
+        overrides[1]["value"] = True
+    calls = []
+
+    def harness(args, *_unused, **_kwargs):
+        calls.append(args)
+        assert "--describe-aex" in args
+        return json.dumps(description).encode()
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_overrides"] = overrides
+    if case == "both_forms":
+        payload["parameter_override"] = {"slot": 1, "value": 5.0}
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+    assert len(calls) <= 1
 
 
 @pytest.mark.parametrize("slot,value,kind", [(2, 4.0, "float"), (1, 256.0, "float"), (1, 4.5, "integer"), (1, 4.0, "color")])
