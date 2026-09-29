@@ -205,6 +205,7 @@ enum LegacyWin64Import {
     UncaughtExceptions,
     CxxThrowException,
     RtDynamicCast,
+    Atan2F,
     CopySign,
     Cos,
     CosF,
@@ -1092,6 +1093,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CopySign
         }
         (_, "_copysign" | "copysign") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "atan2f") => LegacyWin64Import::Atan2F,
+        (_, "atan2f") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
         (_, "cos") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceil") => LegacyWin64Import::Ceil,
@@ -2612,6 +2615,9 @@ fn install_win64_import(
                             }
                         }),
                     )?;
+                }
+                LegacyWin64Import::Atan2F => {
+                    install_atan2f_import(unicorn, stub)?;
                 }
                 LegacyWin64Import::Cos => {
                     install_double_import(unicorn, stub, "cos", f64::cos)?;

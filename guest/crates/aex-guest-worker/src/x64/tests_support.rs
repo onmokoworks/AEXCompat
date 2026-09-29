@@ -12589,6 +12589,16 @@ fn fdclass_returns_ucrt_fpclass_masks() {
 #[test]
 fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
     let crt_math = "api-ms-win-crt-math-l1-1-0.dll";
+    for library in [crt_math, "ucrtbase.dll"] {
+        assert_eq!(
+            dispatch_win64_import(library, "atan2f"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Atan2F)
+        );
+    }
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "atan2f"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
     assert_eq!(
         dispatch_win64_import(crt_math, "cosf"),
         Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CosF)
@@ -12686,6 +12696,83 @@ fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
     assert_eq!(
         dispatch_win64_import("fixture.dll", "fmodf"),
         Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn win64_crt_atan2f_uses_y_then_x_in_scalar_xmm_registers() {
+    const ATAN2F_IMPORT: u64 = STUB_BASE + 0x1e4;
+
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.mem_write(ATAN2F_IMPORT, &[0xc3]).unwrap();
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            ATAN2F_IMPORT,
+            "api-ms-win-crt-math-l1-1-0.dll",
+            "atan2f",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Atan2F)
+    );
+
+    let call_atan2f = |engine: &mut GuestEngine<'static>, y: f32, x: f32| {
+        let mut xmm0 = [0xa5; 16];
+        xmm0[..4].copy_from_slice(&y.to_le_bytes());
+        let mut xmm1 = [0x5a; 16];
+        xmm1[..4].copy_from_slice(&x.to_le_bytes());
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &xmm0)
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM1, &xmm1)
+            .unwrap();
+        engine.call_win64(ATAN2F_IMPORT, [0; 6]).unwrap();
+        let output = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        assert_eq!(&output[4..], &xmm0[4..]);
+        assert_eq!(
+            engine
+                .unicorn
+                .reg_read_long(RegisterX86::XMM1)
+                .unwrap()
+                .as_ref(),
+            &xmm1
+        );
+        f32::from_le_bytes(output[..4].try_into().unwrap())
+    };
+
+    assert_eq!(
+        call_atan2f(&mut engine, 0.0, 1.0).to_bits(),
+        0.0f32.to_bits()
+    );
+    assert_eq!(
+        call_atan2f(&mut engine, -0.0, 1.0).to_bits(),
+        (-0.0f32).to_bits()
+    );
+    for (y, x, expected) in [
+        (1.0, 0.0, std::f32::consts::FRAC_PI_2),
+        (-1.0, 0.0, -std::f32::consts::FRAC_PI_2),
+        (1.0, 1.0, std::f32::consts::FRAC_PI_4),
+        (0.0, -1.0, std::f32::consts::PI),
+        (-0.0, -1.0, -std::f32::consts::PI),
+    ] {
+        let actual = call_atan2f(&mut engine, y, x);
+        assert!(
+            (actual - expected).abs() <= 4.0 * f32::EPSILON,
+            "atan2f({y}, {x}) = {actual}, expected {expected}"
+        );
+    }
+    assert!(call_atan2f(&mut engine, f32::NAN, 1.0).is_nan());
+    assert!(call_atan2f(&mut engine, 1.0, f32::NAN).is_nan());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .math_calls
+            .iter()
+            .any(|call| call.starts_with("atan2f("))
     );
 }
 
