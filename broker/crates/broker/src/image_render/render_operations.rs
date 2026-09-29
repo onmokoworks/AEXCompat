@@ -142,7 +142,7 @@ fn render_audio_via_length_one_session(
         parameters: Some(parameters),
         dependencies: Vec::new(),
         dependency_search_dirs: match plugin_path.parent() {
-            Some(parent) => vec![parent.to_path_buf()],
+            Some(_) => crate::after_effects_install::in_place_dependency_search_dirs(plugin_path),
             None => {
                 return AudioWrapperOutcome::Fallback(
                     "plugin path has no parent directory to search for dependencies".to_string(),

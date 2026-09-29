@@ -606,6 +606,36 @@ enum SessionWrapperOutcome {
     Fallback(String),
 }
 
+fn in_place_session_search_dirs(
+    plugin_path: &Path,
+    dependencies: &[ApprovedImageArtifact],
+    explicit_roots: &[PathBuf],
+) -> io::Result<Vec<PathBuf>> {
+    let parent = plugin_path
+        .parent()
+        .ok_or_else(|| invalid("plugin path has no parent directory to search for dependencies"))?;
+    let mut roots = if explicit_roots.is_empty() {
+        crate::after_effects_install::in_place_dependency_search_dirs(plugin_path)
+    } else {
+        vec![parent.to_path_buf()]
+    };
+    for dependency in dependencies {
+        let dependency_parent = dependency
+            .path
+            .parent()
+            .ok_or_else(|| invalid("approved dependency has no parent directory"))?;
+        if !roots.iter().any(|root| root == dependency_parent) {
+            roots.push(dependency_parent.to_path_buf());
+        }
+    }
+    for root in explicit_roots {
+        if !roots.iter().any(|seen| seen == root) {
+            roots.push(root.clone());
+        }
+    }
+    Ok(roots)
+}
+
 // The whole `image_render` module is `#[cfg(windows)]` (lib.rs), and the render
 // workers are Windows executables, so there is no non-Windows render path. The
 // former `#[cfg(not(windows))]` shim here was dead code that never compiled on
@@ -630,29 +660,14 @@ fn render_classic_via_length_one_session(
         Err(error) => return SessionWrapperOutcome::Failure(error),
     };
     let output_checksum_detail = output_checksum_detail_requested();
-    let mut dependency_search_dirs = match request.plugin_path.parent() {
-        Some(parent) => vec![parent.to_path_buf()],
-        None => {
-            return SessionWrapperOutcome::Failure(invalid(
-                "plugin path has no parent directory to search for dependencies",
-            ));
-        }
+    let dependency_search_dirs = match in_place_session_search_dirs(
+        request.plugin_path,
+        request.dependencies,
+        request.explicit_dependency_search_dirs,
+    ) {
+        Ok(roots) => roots,
+        Err(error) => return SessionWrapperOutcome::Failure(error),
     };
-    for dependency in request.dependencies {
-        let Some(parent) = dependency.path.parent() else {
-            return SessionWrapperOutcome::Failure(invalid(
-                "approved dependency has no parent directory",
-            ));
-        };
-        if !dependency_search_dirs.iter().any(|root| root == parent) {
-            dependency_search_dirs.push(parent.to_path_buf());
-        }
-    }
-    for root in request.explicit_dependency_search_dirs {
-        if !dependency_search_dirs.iter().any(|seen| seen == root) {
-            dependency_search_dirs.push(root.clone());
-        }
-    }
     let session_request = SessionOpenRequest {
         repository: request.repository,
         plugin_path: request.plugin_path,
@@ -1197,27 +1212,11 @@ pub struct InteractiveRenderSession {
 #[cfg(windows)]
 impl InteractiveRenderSession {
     pub fn open(request: InteractiveSessionOpen<'_>) -> io::Result<Self> {
-        let mut dependency_search_dirs = vec![
-            request
-                .plugin_path
-                .parent()
-                .ok_or_else(|| invalid("interactive plugin path has no parent directory"))?
-                .to_path_buf(),
-        ];
-        for dependency in &request.dependencies {
-            let parent = dependency
-                .path
-                .parent()
-                .ok_or_else(|| invalid("interactive dependency has no parent directory"))?;
-            if !dependency_search_dirs.iter().any(|root| root == parent) {
-                dependency_search_dirs.push(parent.to_path_buf());
-            }
-        }
-        for root in request.dependency_search_dirs {
-            if !dependency_search_dirs.iter().any(|seen| seen == &root) {
-                dependency_search_dirs.push(root);
-            }
-        }
+        let dependency_search_dirs = in_place_session_search_dirs(
+            request.plugin_path,
+            &request.dependencies,
+            &request.dependency_search_dirs,
+        )?;
         let session = crate::render_session::RenderSession::open(
             crate::render_session::SessionOpenRequest {
                 repository: request.repository,
