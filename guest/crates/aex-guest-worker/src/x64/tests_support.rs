@@ -23264,6 +23264,7 @@ fn errno_pointer_is_coherent_with_crt_errors_and_memory_operations() {
         install_win64_import(&mut engine.unicorn, ERRNO, dll, "_errno").unwrap();
         install_win64_import(&mut engine.unicorn, OPEN, "ucrtbase.dll", "fopen").unwrap();
         install_win64_import(&mut engine.unicorn, SET, "ucrtbase.dll", "memset").unwrap();
+        assert_eq!(engine.unicorn.mem_read_as_vec(SET, 1).unwrap(), [0xc3]);
         engine.unicorn.get_data_mut().crt_errno = 77;
         let pointer = engine.call_win64(ERRNO, [0; 6]).unwrap();
         assert_eq!(get_guest_crt_errno(&engine.unicorn).unwrap(), 77);
