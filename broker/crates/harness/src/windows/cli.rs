@@ -496,6 +496,136 @@ fn cli_inspection_failure_document(message: &str) -> serde_json::Value {
     })
 }
 
+fn registered_cli_runtime_roots(plugin: &Path) -> Result<Vec<PathBuf>, String> {
+    let plugin = canonical_deverbatim(plugin)?;
+    let unresolved: Vec<String> = discover_adjacent_imports(&plugin)?
+        .warnings
+        .into_iter()
+        .map(|warning| warning.basename)
+        .collect();
+    registered_cli_runtime_roots_for_unresolved(&plugin, &unresolved)
+}
+
+fn registered_cli_runtime_roots_for_unresolved(
+    plugin: &Path,
+    unresolved: &[String],
+) -> Result<Vec<PathBuf>, String> {
+    use aexcompat_broker::installed_runtime_roots::{
+        RegisteredRuntimeLookup, associated_registered_install_roots,
+        matching_registered_runtime_roots, matching_registered_runtime_roots_by_basename,
+    };
+
+    let parent = plugin
+        .parent()
+        .ok_or("AEX has no parent folder")?
+        .to_path_buf();
+    if unresolved.is_empty() {
+        return Ok(vec![parent]);
+    }
+    let associated = associated_registered_install_roots(plugin);
+    let lookup = if associated.is_empty() {
+        matching_registered_runtime_roots(unresolved)
+    } else {
+        matching_registered_runtime_roots_by_basename(unresolved, &associated)
+    };
+    let found = match lookup {
+        RegisteredRuntimeLookup::Found(found) => found,
+        RegisteredRuntimeLookup::IndexTruncated => {
+            return Err("Registered runtime index was truncated".into());
+        }
+    };
+    admit_cli_runtime_roots(plugin, unresolved, &found, associated.is_empty())
+}
+
+fn admit_cli_runtime_roots(
+    plugin: &Path,
+    unresolved: &[String],
+    found: &std::collections::BTreeMap<String, Vec<PathBuf>>,
+    require_ancestor: bool,
+) -> Result<Vec<PathBuf>, String> {
+    use aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
+
+    let parent = plugin
+        .parent()
+        .ok_or("AEX has no parent folder")?
+        .to_path_buf();
+    let mut roots = vec![parent];
+    for basename in unresolved {
+        let candidates = found
+            .get(&basename.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default();
+        let candidates = cli_runtime_candidates_for_plugin(plugin, candidates, require_ancestor);
+        if let Some(candidate) = unique_cli_runtime_candidate(basename, candidates)? {
+            if !roots.iter().any(|root| same_windows_path(root, &candidate)) {
+                if roots.len() == MAX_SEARCH_ROOTS {
+                    return Err("CLI dependency search folder limit exceeded".into());
+                }
+                roots.push(candidate);
+            }
+        }
+    }
+    Ok(roots)
+}
+
+fn cli_runtime_candidates_for_plugin(
+    plugin: &Path,
+    candidates: Vec<PathBuf>,
+    require_ancestor: bool,
+) -> Vec<PathBuf> {
+    if !require_ancestor {
+        return candidates;
+    }
+    candidates
+        .into_iter()
+        .filter(|root| {
+            canonical_runtime_dependency_root(root)
+                .is_ok_and(|root| plugin.starts_with(&root))
+        })
+        .collect()
+}
+
+fn unique_cli_runtime_candidate(
+    basename: &str,
+    candidates: Vec<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    if candidates.len() > 1 {
+        return Err(format!("Ambiguous registered runtime dependency: {basename}"));
+    }
+    let Some(candidate) = candidates.into_iter().next() else {
+        return Ok(None);
+    };
+    let root = canonical_runtime_dependency_root(&candidate)?;
+    let path = root.join(basename);
+    if !fs::metadata(&path)
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        return Err(format!("Registered runtime candidate disappeared: {basename}"));
+    }
+    Ok(Some(root))
+}
+
+fn inspected_plugin_parameters_with_roots(
+    repository: &Path,
+    plugin: &Path,
+    hash: &str,
+    dependency_search_dirs: Vec<PathBuf>,
+) -> Result<Vec<aexcompat_broker::image_render::InteractiveParameter>, std::io::Error> {
+    let plugin = canonical_deverbatim(plugin).map_err(std::io::Error::other)?;
+    let expected_size = fs::metadata(&plugin)?.len();
+    let expected_sha256 = decode_sha256(hash).map_err(std::io::Error::other)?;
+    aexcompat_broker::image_render::inspect_experimental_via_discovery_in_place(
+        repository,
+        aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
+            path: plugin,
+            expected_sha256,
+            expected_size,
+        },
+        dependency_search_dirs,
+    )
+    .map(|(parameters, _)| parameters)
+}
+
 fn required_inspected_plugin_parameters(
     repository: &Path,
     plugin: &Path,
@@ -503,21 +633,11 @@ fn required_inspected_plugin_parameters(
 ) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
     let inspected = (|| {
         let plugin = canonical_deverbatim(plugin).map_err(std::io::Error::other)?;
-        let expected_size = fs::metadata(&plugin)?.len();
-        let expected_sha256 = decode_sha256(hash).map_err(std::io::Error::other)?;
         let dependency_search_dirs = plugin.parent().map(Path::to_path_buf).into_iter().collect();
-        aexcompat_broker::image_render::inspect_experimental_via_discovery_in_place(
-            repository,
-            aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
-                path: plugin,
-                expected_sha256,
-                expected_size,
-            },
-            dependency_search_dirs,
-        )
+        inspected_plugin_parameters_with_roots(repository, &plugin, hash, dependency_search_dirs)
     })();
     match inspected {
-        Ok((parameters, _)) => parameters,
+        Ok(parameters) => parameters,
         Err(error) => {
             eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
             std::process::exit(1);
@@ -769,9 +889,23 @@ fn main() -> eframe::Result {
         };
         // The preflight seals the same approved dependency artifacts the render
         // dispatches with, so a plug-in that imports one loads in both.
-        let dependency_roots = std::env::var_os("AEXCOMPAT_MULTIFILTER_DEPENDENCY_DIRS")
+        let mut dependency_roots = std::env::var_os("AEXCOMPAT_MULTIFILTER_DEPENDENCY_DIRS")
             .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
             .unwrap_or_default();
+        let mut auto_discovered_roots = false;
+        if policy.is_none() && dependency_roots.is_empty() {
+            let discovered = match registered_cli_runtime_roots(plugin) {
+                Ok(roots) => roots,
+                Err(error) => {
+                    eprintln!("{}", cli_inspection_failure_document(&error));
+                    std::process::exit(1);
+                }
+            };
+            if discovered.len() > 1 {
+                dependency_roots = discovered;
+                auto_discovered_roots = true;
+            }
+        }
         let render_dependencies = if dependency_roots.is_empty() {
             Vec::new()
         } else {
@@ -790,6 +924,19 @@ fn main() -> eframe::Result {
         };
         let parameters = if dependency_roots.is_empty() {
             required_plugin_parameters(&repository, plugin, &hash)
+        } else if auto_discovered_roots {
+            match inspected_plugin_parameters_with_roots(
+                &repository,
+                plugin,
+                &hash,
+                dependency_roots.clone(),
+            ) {
+                Ok(parameters) => parameters,
+                Err(error) => {
+                    eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
+                    std::process::exit(1);
+                }
+            }
         } else {
             match aexcompat_broker::image_render::inspect_experimental_in_place(
                 &repository,
@@ -1809,7 +1956,25 @@ fn main() -> eframe::Result {
     if args.len() == 3 && args[1] == "--inspect-experimental" {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let parameters = required_inspected_plugin_parameters(&repository, plugin, &hash);
+        let roots = match registered_cli_runtime_roots(plugin) {
+            Ok(roots) => roots,
+            Err(error) => {
+                eprintln!("{}", cli_inspection_failure_document(&error));
+                std::process::exit(1);
+            }
+        };
+        let parameters = match inspected_plugin_parameters_with_roots(
+            &repository,
+            plugin,
+            &hash,
+            roots,
+        ) {
+            Ok(parameters) => parameters,
+            Err(error) => {
+                eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
+                std::process::exit(1);
+            }
+        };
         println!("{}", serde_json::to_string_pretty(&parameters).unwrap());
         return Ok(());
     }
