@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, IntVectorProperty, StringProperty
 
 
 ADDON_VERSION = (1, 0, 0)
@@ -41,6 +41,12 @@ def _finite_scalar(value: Any) -> bool:
         return math.isfinite(float(value))
     except OverflowError:
         return False
+
+
+def _argb8(value: Any) -> bool:
+    return isinstance(value, list) and len(value) == 4 and all(
+        type(channel) is int and 0 <= channel <= 255 for channel in value
+    )
 
 
 def _repo_root() -> Path:
@@ -132,7 +138,7 @@ def _run_session(request: dict[str, Any], timeout_ms: int | None = 5000) -> dict
 
 
 def describe_aex(plugin_source: str) -> dict[str, Any]:
-    """Wait for one scalar catalog without starting a frame render."""
+    """Wait for one editable parameter catalog without starting a frame render."""
     response = _run_session({
         "schema_version": SCHEMA_VERSION,
         "request_kind": "aexcompat_blender_session",
@@ -182,15 +188,20 @@ def describe_aex(plugin_source: str) -> dict[str, Any]:
         raise AEXCompatSessionError("worker_protocol_error")
     seen: set[int] = set()
     for entry in catalog:
-        if (
-            not isinstance(entry, dict)
-            or set(entry) != {"slot", "name", "kind", "minimum", "maximum", "value"}
-            or type(entry["slot"]) is not int or entry["slot"] < 1 or entry["slot"] in seen
-            or not isinstance(entry["name"], str)
-            or not isinstance(entry["kind"], str) or entry["kind"] not in {"integer", "float", "angle"}
-            or any(not _finite_scalar(entry[key]) for key in ("minimum", "maximum", "value"))
-            or not entry["minimum"] <= entry["value"] <= entry["maximum"]
-            or (entry["kind"] == "integer" and not float(entry["value"]).is_integer())
+        if not isinstance(entry, dict) or (
+            type(entry.get("slot")) is not int or entry["slot"] < 1 or entry["slot"] in seen
+            or not isinstance(entry.get("name"), str)
+            or not isinstance(entry.get("kind"), str)
+            or (entry.get("kind") == "color" and (
+                set(entry) != {"slot", "name", "kind", "color"} or not _argb8(entry.get("color"))
+            ))
+            or (entry.get("kind") != "color" and (
+                set(entry) != {"slot", "name", "kind", "minimum", "maximum", "value"}
+                or entry.get("kind") not in {"integer", "float", "angle"}
+                or any(not _finite_scalar(entry[key]) for key in ("minimum", "maximum", "value"))
+                or not entry["minimum"] <= entry["value"] <= entry["maximum"]
+                or (entry["kind"] == "integer" and not float(entry["value"]).is_integer())
+            ))
         ):
             raise AEXCompatSessionError("worker_protocol_error")
         seen.add(entry["slot"])
@@ -211,7 +222,7 @@ def evaluate_rgba8(
     timeout_ms: int | None = None,
     render_path: str = "classic",
     parameter_override: dict[str, int | float] | None = None,
-    parameter_overrides: list[dict[str, int | float]] | None = None,
+    parameter_overrides: list[dict[str, Any]] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Validate one RGBA8 frame and return only verified worker pixels."""
 
@@ -300,7 +311,8 @@ def evaluate_rgba8(
             not isinstance(applied, dict)
             or applied.get("slot") != parameter_override.get("slot")
             or applied.get("value") != parameter_override.get("value")
-            or applied.get("kind") not in {"integer", "float", "angle"}
+            or not isinstance(applied.get("kind"), str)
+            or applied["kind"] not in {"integer", "float", "angle"}
             or not isinstance(applied.get("description_sha256"), str)
             or len(applied["description_sha256"]) != 64
             or not isinstance(applied.get("description_plugin_sha256"), str)
@@ -316,13 +328,21 @@ def evaluate_rgba8(
                 raise AEXCompatSessionError("worker_protocol_error")
             shared_description = None
             for requested, recorded in zip(parameter_overrides, applied_many):
+                color_requested = isinstance(requested, dict) and "color" in requested
+                typed_value_valid = (
+                    _argb8(recorded.get("color")) and recorded.get("color") == requested.get("color")
+                    and recorded.get("kind") == "color" and "value" not in recorded
+                ) if color_requested and isinstance(recorded, dict) else (
+                    _finite_scalar(recorded.get("value")) and recorded.get("value") == requested.get("value")
+                    and isinstance(recorded.get("kind"), str)
+                    and recorded["kind"] in {"integer", "float", "angle"} and "color" not in recorded
+                ) if isinstance(requested, dict) and isinstance(recorded, dict) else False
                 if (
                     not isinstance(recorded, dict)
+                    or not isinstance(requested, dict)
                     or type(recorded.get("slot")) is not int
                     or recorded.get("slot") != requested.get("slot")
-                    or not _finite_scalar(recorded.get("value"))
-                    or recorded.get("value") != requested.get("value")
-                    or recorded.get("kind") not in {"integer", "float", "angle"}
+                    or not typed_value_valid
                     or not _sha256_text(recorded.get("description_sha256"))
                     or not _sha256_text(recorded.get("description_plugin_sha256"))
                     or type(recorded.get("description_files_unchanged")) not in (bool, type(None))
@@ -367,7 +387,9 @@ def _configure_bake_button(node: Any, button: Any) -> None:
     button.parameter_integer_value = node.parameter_integer_value
     button.parameter_value_text = node.parameter_value_text
     button.parameter_overrides_json = json.dumps([
-        {"slot": item.slot, "value": item.integer_value if item.kind == "integer" else item.value_text}
+        {"slot": item.slot, **({"color": list(item.color_argb)} if item.kind == "color" else {
+            "value": item.integer_value if item.kind == "integer" else item.value_text,
+        })}
         for item in node.selected_parameter_items
     ], separators=(",", ":")) if node.selected_parameter_items else ""
     button.selected_description_plugin_sha = node.description_plugin_sha
@@ -388,14 +410,15 @@ def _parameter_override(slot: int, kind: str, integer_value: int, value_text: st
     return {"slot": slot, "value": value}
 
 
-def _named_parameter_overrides(node: Any) -> list[dict[str, int | float]]:
+def _named_parameter_overrides(node: Any) -> list[dict[str, Any]]:
     return [
+        {"slot": item.slot, "color": list(item.color_argb)} if item.kind == "color" else
         _parameter_override(item.slot, item.kind, item.integer_value, item.value_text, 0.0)
         for item in node.selected_parameter_items
     ]
 
 
-def _parse_parameter_overrides(value: str) -> list[dict[str, int | float]]:
+def _parse_parameter_overrides(value: str) -> list[dict[str, Any]]:
     def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, item in pairs:
@@ -415,10 +438,15 @@ def _parse_parameter_overrides(value: str) -> list[dict[str, int | float]]:
     seen: set[int] = set()
     for entry in parsed:
         if (
-            not isinstance(entry, dict) or set(entry) != {"slot", "value"}
+            not isinstance(entry, dict) or set(entry) not in ({"slot", "value"}, {"slot", "color"})
             or type(entry["slot"]) is not int or entry["slot"] < 1 or entry["slot"] in seen
         ):
             raise AEXCompatSessionError("invalid or duplicate parameter override")
+        if "color" in entry:
+            if not _argb8(entry["color"]):
+                raise AEXCompatSessionError("color must contain four ARGB8 channels")
+            seen.add(entry["slot"])
+            continue
         if isinstance(entry["value"], str):
             try:
                 entry["value"] = float(entry["value"])
@@ -452,6 +480,7 @@ class AEXCompatScalarParameter(bpy.types.PropertyGroup):
     minimum_text: StringProperty(name="Minimum")
     maximum_text: StringProperty(name="Maximum")
     value_text: StringProperty(name="Default")
+    color_argb: IntVectorProperty(name="ARGB8 default", size=4, min=0, max=255, default=(255, 0, 0, 0))
 
 
 class AEXCompatChosenParameter(bpy.types.PropertyGroup):
@@ -460,6 +489,7 @@ class AEXCompatChosenParameter(bpy.types.PropertyGroup):
     kind: StringProperty(name="Kind")
     integer_value: IntProperty(name="Integer value")
     value_text: StringProperty(name="Decimal value")
+    color_argb: IntVectorProperty(name="ARGB8 color", size=4, min=0, max=255, default=(255, 0, 0, 0))
 
 
 class AEXCOMPAT_UL_scalar_parameters(bpy.types.UIList):
@@ -471,7 +501,10 @@ class AEXCOMPAT_UL_chosen_parameters(bpy.types.UIList):
     def draw_item(self, _context: Any, layout: Any, _data: Any, item: Any, _icon: Any, _active_data: Any, _active_propname: Any, _index: int) -> None:
         row = layout.row(align=True)
         row.label(text=f"{item.name} (#{item.slot})")
-        row.prop(item, "integer_value" if item.kind == "integer" else "value_text", text="")
+        if item.kind == "color":
+            row.label(text=f"ARGB {list(item.color_argb)}")
+        else:
+            row.prop(item, "integer_value" if item.kind == "integer" else "value_text", text="")
 
 
 class AEXCompatCompositorNode(bpy.types.CompositorNode):
@@ -530,7 +563,10 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
                 )
                 index = min(self.selected_parameter_index, len(self.parameter_items) - 1)
                 selected = self.parameter_items[index]
-                layout.label(text=f"Range {selected.minimum_text} .. {selected.maximum_text}; default {selected.value_text}")
+                if selected.kind == "color":
+                    layout.label(text=f"ARGB8 default {list(selected.color_argb)}")
+                else:
+                    layout.label(text=f"Range {selected.minimum_text} .. {selected.maximum_text}; default {selected.value_text}")
                 choose = layout.operator("aexcompat.choose_parameter", text="Add/update selected parameter")
                 _configure_node_locator(self, choose)
             if self.selected_parameter_items:
@@ -538,6 +574,9 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
                     "AEXCOMPAT_UL_chosen_parameters", "", self, "selected_parameter_items",
                     self, "selected_override_index", rows=4,
                 )
+                chosen = self.selected_parameter_items[min(self.selected_override_index, len(self.selected_parameter_items) - 1)]
+                if chosen.kind == "color":
+                    layout.prop(chosen, "color_argb", text="ARGB8 (A, R, G, B)")
                 remove = layout.operator("aexcompat.remove_parameter", text="Remove selected override")
                 _configure_node_locator(self, remove)
             else:
@@ -638,12 +677,15 @@ class AEXCompatRefreshParametersOperator(bpy.types.Operator):
             item.slot = record["slot"]
             item.name = record["name"]
             item.kind = record["kind"]
-            item.minimum_text = str(record["minimum"])
-            item.maximum_text = str(record["maximum"])
-            item.value_text = str(int(record["value"])) if record["kind"] == "integer" else str(record["value"])
+            if record["kind"] == "color":
+                item.color_argb = record["color"]
+            else:
+                item.minimum_text = str(record["minimum"])
+                item.maximum_text = str(record["maximum"])
+                item.value_text = str(int(record["value"])) if record["kind"] == "integer" else str(record["value"])
         node.description_source = node.plugin_source
         node.description_plugin_sha = response["description_identity"]["description_plugin_sha256"]
-        self.report({"INFO"}, f"Found {len(node.parameter_items)} scalar parameters")
+        self.report({"INFO"}, f"Found {len(node.parameter_items)} editable parameters")
         return {"FINISHED"}
 
 
@@ -671,7 +713,7 @@ class AEXCompatChooseParameterOperator(bpy.types.Operator):
             node.parameter_kind = item.kind
             if item.kind == "integer":
                 node.parameter_integer_value = int(item.value_text)
-            else:
+            elif item.kind != "color":
                 node.parameter_value_text = item.value_text
         existing = next((selected for selected in node.selected_parameter_items if selected.slot == item.slot), None)
         if existing is None:
@@ -682,7 +724,9 @@ class AEXCompatChooseParameterOperator(bpy.types.Operator):
         existing.slot = item.slot
         existing.name = item.name
         existing.kind = item.kind
-        if item.kind == "integer":
+        if item.kind == "color":
+            existing.color_argb = item.color_argb
+        elif item.kind == "integer":
             existing.integer_value = int(item.value_text)
         else:
             existing.value_text = item.value_text

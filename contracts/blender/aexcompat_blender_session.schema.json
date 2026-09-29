@@ -26,12 +26,15 @@
       "type": "array",
       "minItems": 1,
       "maxItems": 16,
-      "items": {"$ref": "#/properties/parameter_override"}
+      "items": {"oneOf": [
+        {"$ref": "#/properties/parameter_override"},
+        {"$ref": "#/$defs/color_override"}
+      ]}
     },
     "parameter_catalog": {
       "type": "array",
       "maxItems": 256,
-      "items": {
+      "items": {"oneOf": [{
         "type": "object",
         "required": ["slot", "name", "kind", "minimum", "maximum", "value"],
         "properties": {
@@ -43,7 +46,17 @@
           "value": {"type": "number"}
         },
         "additionalProperties": false
-      }
+      }, {
+        "type": "object",
+        "required": ["slot", "name", "kind", "color"],
+        "properties": {
+          "slot": {"type": "integer", "minimum": 1},
+          "name": {"type": "string"},
+          "kind": {"const": "color"},
+          "color": {"$ref": "#/$defs/argb8"}
+        },
+        "additionalProperties": false
+      }]}
     },
     "description_identity": {
       "type": "object",
@@ -179,6 +192,24 @@
     }
   ],
   "$defs": {
+    "argb8": {
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "items": {"type": "integer", "minimum": 0, "maximum": 255}
+    },
+    "color_override": {
+      "type": "object",
+      "required": ["slot", "kind", "color", "description_sha256", "description_plugin_sha256", "description_files_unchanged", "description_matches_render_plugin"],
+      "properties": {
+        "slot": {"type": "integer", "minimum": 1},
+        "kind": {"const": "color"},
+        "color": {"$ref": "#/$defs/argb8"},
+        "description_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_plugin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_files_unchanged": {"type": ["boolean", "null"]},
+        "description_matches_render_plugin": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "artifact": {
       "type": "object",
       "required": ["sha256", "bytes"],
