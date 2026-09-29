@@ -110,6 +110,7 @@ using aexcompat::pf_world_transform::blend_world;
 using aexcompat::pf_world_transform::composite_rect8;
 using aexcompat::pf_world_transform::convolve_world;
 using aexcompat::pf_world_transform::copy_world8;
+using aexcompat::pf_world_transform::private_copy_world_area8;
 using aexcompat::pf_world_transform::copy_world_hq;
 using aexcompat::pf_world_transform::fill_world8;
 using aexcompat::pf_world_transform::fill_world16;

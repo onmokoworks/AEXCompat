@@ -977,6 +977,87 @@ int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
   return 0;
 }
 
+// AE's private id-9 q1/m1 COPY resamples a full ARGB8 world when the output
+// is smaller (#1262/#1681). The public World Transform copy and every other
+// private quality/mode keep their established rectangle/overlap contract.
+int32_t __cdecl private_copy_world_area8(void* effect_ref, void* source_world,
+                                         void* destination_world,
+                                         const LegacyRect* source_rect,
+                                         const LegacyRect* destination_rect) {
+  if (source_rect || destination_rect)
+    return copy_world8(effect_ref, source_world, destination_world,
+                       source_rect, destination_rect);
+  DispatchWorldFormat source_info{}, destination_info{};
+  if (!resolve_operand_worlds(source_world, destination_world, source_info,
+                              destination_info))
+    return copy_denied("unresolved_world");
+  if (source_info.pixel_format != kPixelFormatArgb32 ||
+      destination_info.pixel_format != kPixelFormatArgb32 ||
+      source_info.width <= 0 || source_info.height <= 0 ||
+      destination_info.width <= 0 || destination_info.height <= 0 ||
+      destination_info.width > source_info.width ||
+      destination_info.height > source_info.height ||
+      (destination_info.width == source_info.width &&
+       destination_info.height == source_info.height))
+    return copy_world8(effect_ref, source_world, destination_world, nullptr, nullptr);
+  constexpr std::size_t kBytesPerPixel = 4;
+  if (source_info.width > 4096 || source_info.height > 4096 ||
+      destination_info.width > 4096 || destination_info.height > 4096 ||
+      source_info.rowbytes < static_cast<int64_t>(source_info.width) * kBytesPerPixel ||
+      destination_info.rowbytes < static_cast<int64_t>(destination_info.width) * kBytesPerPixel)
+    return copy_denied("world_bounds");
+
+  // Snapshot before writing: a plug-in may pass aliased source/destination
+  // buffers. Dimensions are bounded above, so this is at most 64 MiB.
+  const auto source_width = static_cast<std::size_t>(source_info.width);
+  const auto source_height = static_cast<std::size_t>(source_info.height);
+  std::vector<unsigned char> source_pixels;
+  try {
+    if (g_fail_next_allocation_for_self_test.exchange(false)) throw std::bad_alloc();
+    source_pixels.resize(source_width * source_height * kBytesPerPixel);
+  } catch (const std::bad_alloc&) {
+    return 4;
+  }
+  const auto* source = static_cast<const unsigned char*>(source_info.data);
+  auto* destination = static_cast<unsigned char*>(destination_info.data);
+  const std::size_t packed_row = source_width * kBytesPerPixel;
+  for (int32_t y = 0; y < source_info.height; ++y)
+    std::memcpy(source_pixels.data() + static_cast<std::size_t>(y) * packed_row,
+                source + static_cast<std::size_t>(y) * source_info.rowbytes, packed_row);
+
+  const int64_t sw = source_info.width, sh = source_info.height;
+  const int64_t dw = destination_info.width, dh = destination_info.height;
+  const uint64_t area = static_cast<uint64_t>(sw) * static_cast<uint64_t>(sh);
+  for (int64_t dy = 0; dy < dh; ++dy) {
+    auto* destination_row = destination + static_cast<std::size_t>(dy) *
+                                          destination_info.rowbytes;
+    const int64_t sy_begin = dy * sh / dh;
+    const int64_t sy_end = ((dy + 1) * sh + dh - 1) / dh;
+    for (int64_t dx = 0; dx < dw; ++dx) {
+      const int64_t sx_begin = dx * sw / dw;
+      const int64_t sx_end = ((dx + 1) * sw + dw - 1) / dw;
+      std::array<uint64_t, 4> sums{};
+      for (int64_t sy = sy_begin; sy < sy_end; ++sy) {
+        const int64_t overlap_y = (std::min)((sy + 1) * dh, (dy + 1) * sh) -
+                                  (std::max)(sy * dh, dy * sh);
+        for (int64_t sx = sx_begin; sx < sx_end; ++sx) {
+          const int64_t overlap_x = (std::min)((sx + 1) * dw, (dx + 1) * sw) -
+                                    (std::max)(sx * dw, dx * sw);
+          const auto weight = static_cast<uint64_t>(overlap_x * overlap_y);
+          const auto index = (static_cast<std::size_t>(sy) * source_width +
+                              static_cast<std::size_t>(sx)) * kBytesPerPixel;
+          for (std::size_t channel = 0; channel < 4; ++channel)
+            sums[channel] += weight * source_pixels[index + channel];
+        }
+      }
+      auto* pixel = destination_row + static_cast<std::size_t>(dx) * kBytesPerPixel;
+      for (std::size_t channel = 0; channel < 4; ++channel)
+        pixel[channel] = static_cast<unsigned char>((sums[channel] + area / 2) / area);
+    }
+  }
+  return 0;
+}
+
 bool verify_bad_callback_param_contract() {
   if (fill_world8(nullptr, nullptr, nullptr, nullptr) != kPfErrBadCallbackParam ||
       blend_world(nullptr, nullptr, nullptr, -1, nullptr) != kPfErrBadCallbackParam ||

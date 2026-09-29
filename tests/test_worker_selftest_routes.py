@@ -275,8 +275,10 @@ def test_pf_private_callbacks_answer_like_ae_on_all_workers() -> None:
     Frida capture of the live dispatcher); the route checks the curve values,
     the 8-bit impulse responses of both kernels and both alpha treatments
     against those captures, that an unread private id stays refused, and that
-    malformed blur calls fail closed with the world untouched. The verdict is
-    what is asserted here.
+    malformed blur calls fail closed with the world untouched. For id 9 q1/m1,
+    the route also checks 2x2 and noninteger-ratio ARGB8 area pixels, while
+    q0, explicit rectangles and same-size copies keep their overlap contract.
+    The verdict is what is asserted here.
     """
     for _ in _all_workers("--self-test-pf-private-callbacks", "pf_private_callbacks"):
         pass
