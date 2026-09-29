@@ -12,6 +12,10 @@ CLASSIC_FAILURE_EVIDENCE_NODE = (
     "tests/test_classic_failure_stage_evidence.py::"
     "test_refresh_replays_three_classic_failures_before_updating_evidence"
 )
+PERFORMANCE_DIAGNOSTICS_NODE = (
+    "tests/test_performance_diagnostics.py::"
+    "test_native_performance_modes_separate_scaling_and_live_memory"
+)
 SDK_BACKWARDS_BUILD_NODE = (
     "tests/test_sdk_backwards_fixture_build.py::"
     "test_official_sdk_backwards_builds_unchanged_and_records_hash"
@@ -37,6 +41,7 @@ def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
             raise ValueError("classic evidence requires trusted built artifacts")
         return common + [
             CLASSIC_FAILURE_EVIDENCE_NODE,
+            PERFORMANCE_DIAGNOSTICS_NODE,
             "--run-built-artifact-tests",
         ]
     if partition not in ("early", "main"):
@@ -59,6 +64,8 @@ def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
             "--run-built-artifact-tests",
             "--deselect",
             CLASSIC_FAILURE_EVIDENCE_NODE,
+            "--deselect",
+            PERFORMANCE_DIAGNOSTICS_NODE,
             "--deselect",
             SDK_BACKWARDS_BUILD_NODE,
             "--deselect",
