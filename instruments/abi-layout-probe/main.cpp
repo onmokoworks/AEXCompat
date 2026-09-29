@@ -183,6 +183,9 @@ static_assert(offsetof(PF_UtilCallbacks, composite_rect) == 40);
 // it out, so the host wired iterate at 0x58 and left 0x50 null; Inner/Outer
 // Key's RENDER builds its 1D blur kernel through it and jumped to address 0.
 static_assert(offsetof(PF_UtilCallbacks, gaussian_kernel) == 80);
+static_assert(offsetof(PF_UtilCallbacks, iterate_lut) == 136);
+static_assert(offsetof(PF_UtilCallbacks, iterate_origin16) == 512);
+static_assert(offsetof(PF_UtilCallbacks, iterate_origin_non_clip_src16) == 520);
 
 template <typename T>
 void field(const char* name, std::size_t offset, bool& first) {
@@ -376,6 +379,9 @@ int main() {
   // emitted contract, so the host never wired it and Inner/Outer Key's RENDER
   // (once its mask checkout succeeded) jumped to address 0 (issue #1253).
   field<decltype(PF_UtilCallbacks::gaussian_kernel)>("utils.gaussian_kernel", offsetof(PF_UtilCallbacks, gaussian_kernel), first);
+  field<decltype(PF_UtilCallbacks::iterate_lut)>("utils.iterate_lut", offsetof(PF_UtilCallbacks, iterate_lut), first);
+  field<decltype(PF_UtilCallbacks::iterate_origin16)>("utils.iterate_origin16", offsetof(PF_UtilCallbacks, iterate_origin16), first);
+  field<decltype(PF_UtilCallbacks::iterate_origin_non_clip_src16)>("utils.iterate_origin_non_clip_src16", offsetof(PF_UtilCallbacks, iterate_origin_non_clip_src16), first);
   field<decltype(PF_UtilCallbacks::blend)>("utils.blend", offsetof(PF_UtilCallbacks, blend), first);
   field<decltype(PF_UtilCallbacks::convolve)>("utils.convolve", offsetof(PF_UtilCallbacks, convolve), first);
   field<decltype(PF_UtilCallbacks::copy)>("utils.copy", offsetof(PF_UtilCallbacks, copy), first);

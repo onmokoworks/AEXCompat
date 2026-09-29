@@ -29,6 +29,9 @@ struct Sources {
   void* iterate16{};
   void* iterate{};
   void* iterate_origin{};
+  void* iterate_lut{};
+  void* iterate_origin16{};
+  void* iterate_origin_non_clip_src16{};
   void* new_world{};
   void* dispose_world{};
   void* transfer_rect{};
@@ -72,7 +75,7 @@ struct Binding {
   void* Sources::*source;
 };
 
-inline constexpr std::array<Binding, 55> BINDINGS{{
+inline constexpr std::array<Binding, 58> BINDINGS{{
     {contract::UTILS_BEGIN_SAMPLING_OFFSET, &Sources::begin_sampling},
     {contract::UTILS_SUBPIXEL_SAMPLE_OFFSET, &Sources::subpixel_sample},
     {contract::UTILS_AREA_SAMPLE_OFFSET, &Sources::area_sample},
@@ -92,6 +95,10 @@ inline constexpr std::array<Binding, 55> BINDINGS{{
     {contract::UTILS_ITERATE16_OFFSET, &Sources::iterate16},
     {contract::UTILS_ITERATE_OFFSET, &Sources::iterate},
     {contract::UTILS_ITERATE_ORIGIN_OFFSET, &Sources::iterate_origin},
+    {contract::UTILS_ITERATE_LUT_OFFSET, &Sources::iterate_lut},
+    {contract::UTILS_ITERATE_ORIGIN16_OFFSET, &Sources::iterate_origin16},
+    {contract::UTILS_ITERATE_ORIGIN_NON_CLIP_SRC16_OFFSET,
+     &Sources::iterate_origin_non_clip_src16},
     {contract::UTILS_NEW_WORLD_OFFSET, &Sources::new_world},
     {contract::UTILS_DISPOSE_WORLD_OFFSET, &Sources::dispose_world},
     {contract::UTILS_TRANSFER_RECT_OFFSET, &Sources::transfer_rect},

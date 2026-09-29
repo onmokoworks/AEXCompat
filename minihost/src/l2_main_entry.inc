@@ -757,6 +757,10 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
   sources.iterate16 = reinterpret_cast<void*>(&iterate_world16);
   sources.iterate = reinterpret_cast<void*>(&iterate_world8);
   sources.iterate_origin = reinterpret_cast<void*>(&iterate_origin8);
+  sources.iterate_lut = reinterpret_cast<void*>(&iterate_lut8);
+  sources.iterate_origin16 = reinterpret_cast<void*>(&iterate_origin16);
+  sources.iterate_origin_non_clip_src16 =
+      reinterpret_cast<void*>(&iterate_origin_non_clip16);
   sources.new_world = reinterpret_cast<void*>(&diag_new_world);
   sources.dispose_world = reinterpret_cast<void*>(&diag_dispose_world);
   sources.transfer_rect = reinterpret_cast<void*>(&diag_transfer_rect);
@@ -848,6 +852,108 @@ bool verify_production_utility_callback_table() {
     std::cerr << "utility_callback_table: unwired block=" << slot.block
               << " offset=" << slot.offset << "\n" << std::flush;
   return unwired.empty();
+}
+
+// Exercise the three formerly omitted utility slots through the installed
+// in_data->utils pointer, not the PF Iterate suite's direct function pointers.
+bool verify_production_iterate_utility_callbacks() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  using Lut = decltype(&iterate_lut8);
+  using Origin = decltype(&iterate_origin16);
+  const auto fail = [](const char* stage) {
+    std::cerr << "utils_iterate_slots: " << stage << "\n" << std::flush;
+    return false;
+  };
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  void* utils{};
+  std::memcpy(&utils, state.input.data() + contract::IN_UTILS_OFFSET, sizeof(utils));
+  if (utils != state.utils.data()) return fail("in_data->utils pointer");
+  auto read_slot = [&](std::size_t offset) {
+    void* callback{};
+    std::memcpy(&callback, static_cast<const std::byte*>(utils) + offset, sizeof(callback));
+    return callback;
+  };
+  const auto lut = reinterpret_cast<Lut>(read_slot(contract::UTILS_ITERATE_LUT_OFFSET));
+  const auto origin16 = reinterpret_cast<Origin>(read_slot(contract::UTILS_ITERATE_ORIGIN16_OFFSET));
+  const auto non_clip16 = reinterpret_cast<Origin>(
+      read_slot(contract::UTILS_ITERATE_ORIGIN_NON_CLIP_SRC16_OFFSET));
+  if (!lut || !origin16 || !non_clip16) {
+    std::cerr << "utils_iterate_slots: null callback"
+              << " lut=" << (lut != nullptr)
+              << " origin16=" << (origin16 != nullptr)
+              << " non_clip16=" << (non_clip16 != nullptr) << "\n" << std::flush;
+    return false;
+  }
+  DispatchWorldFormatScope worlds;
+  auto make_world = [&](std::array<std::byte, aexcompat::world_safety::kEffectWorldSize>& world,
+                        unsigned char* pixels, int32_t width, int32_t format) {
+    world.fill(std::byte{});
+    const int32_t rowbytes = width * (format == kPixelFormatArgb64 ? 8 : 4);
+    const int32_t height = 1;
+    const int32_t flags = format == kPixelFormatArgb64 ? 1 : 0;
+    std::memcpy(world.data() + contract::LAYER_WORLD_FLAGS_OFFSET, &flags, sizeof(flags));
+    std::memcpy(world.data() + contract::LAYER_DATA_OFFSET, &pixels, sizeof(pixels));
+    std::memcpy(world.data() + contract::LAYER_ROWBYTES_OFFSET, &rowbytes, sizeof(rowbytes));
+    std::memcpy(world.data() + contract::LAYER_WIDTH_OFFSET, &width, sizeof(width));
+    std::memcpy(world.data() + contract::LAYER_HEIGHT_OFFSET, &height, sizeof(height));
+    return worlds.register_world(world.data(), format);
+  };
+  std::array<unsigned char, 8> src8{10, 20, 30, 40, 50, 60, 70, 80}, dst8{};
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> src8_world{}, dst8_world{};
+  if (!make_world(src8_world, src8.data(), 2, kPixelFormatArgb32) ||
+      !make_world(dst8_world, dst8.data(), 2, kPixelFormatArgb32)) return fail("argb8 registration");
+  std::array<unsigned char, 256> invert{};
+  for (std::size_t index = 0; index < invert.size(); ++index)
+    invert[index] = static_cast<unsigned char>(255 - index);
+  if (lut(nullptr, 0, 1, src8_world.data(), nullptr, nullptr, invert.data(), nullptr,
+          nullptr, dst8_world.data()) != 0 ||
+      dst8 != std::array<unsigned char, 8>{10, 235, 30, 40, 50, 195, 70, 80})
+    return fail("lut pixel transform");
+  dst8.fill(0x5a);
+  if (lut(nullptr, 0, 1, src8_world.data(), nullptr, nullptr, invert.data(), nullptr,
+          nullptr, nullptr) == 0 ||
+      dst8 != std::array<unsigned char, 8>{0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a})
+    return fail("lut bad argument");
+
+  std::array<unsigned char, 8> src16{1, 2, 3, 4, 5, 6, 7, 8};
+  std::array<unsigned char, 16> dst16{};
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> src16_world{}, dst16_world{};
+  if (!make_world(src16_world, src16.data(), 1, kPixelFormatArgb64) ||
+      !make_world(dst16_world, dst16.data(), 2, kPixelFormatArgb64)) return fail("argb16 registration");
+  struct Calls { int count{}; bool saw_zero{}; } calls{};
+  const auto pixel = [](void* opaque, int32_t, int32_t, void* input, void* output) -> int32_t {
+    auto& seen = *static_cast<Calls*>(opaque);
+    const auto* bytes = static_cast<const unsigned char*>(input);
+    seen.saw_zero = seen.saw_zero || std::all_of(bytes, bytes + 8,
+                                                 [](unsigned char value) { return value == 0; });
+    std::memcpy(output, input, 8);
+    ++seen.count;
+    return 0;
+  };
+  const std::array<int16_t, 2> origin{{0, 0}};
+  const int32_t clipped_result = origin16(nullptr, 0, 1, src16_world.data(), nullptr,
+                                          origin.data(), &calls, pixel, dst16_world.data());
+  if (clipped_result != 0 || calls.count != 1 || calls.saw_zero ||
+      !std::equal(src16.begin(), src16.end(), dst16.begin())) {
+    std::cerr << "utils_iterate_slots: clipped_result=" << clipped_result
+              << " calls=" << calls.count << " saw_zero=" << calls.saw_zero << "\n";
+    return fail("origin16 clipped walk");
+  }
+  calls = {};
+  dst16.fill(0xff);
+  if (non_clip16(nullptr, 0, 1, src16_world.data(), nullptr, origin.data(), &calls,
+                 pixel, dst16_world.data()) != 0 || calls.count != 2 || !calls.saw_zero ||
+      !std::equal(src16.begin(), src16.end(), dst16.begin()) ||
+      !std::all_of(dst16.begin() + 8, dst16.end(),
+                   [](unsigned char value) { return value == 0; })) return fail("origin16 non-clipped walk");
+  dst16.fill(0x5a);
+  if (non_clip16(nullptr, 0, 1, src16_world.data(), nullptr, nullptr, &calls,
+                 pixel, dst16_world.data()) == 0 ||
+      !std::all_of(dst16.begin(), dst16.end(),
+                   [](unsigned char value) { return value == 0x5a; })) return fail("origin16 bad argument");
+  return true;
 }
 
 // PF_UtilCallbacks.composite_rect reached the way a plug-in reaches it: read

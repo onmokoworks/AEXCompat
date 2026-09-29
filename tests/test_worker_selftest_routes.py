@@ -206,6 +206,17 @@ def test_utility_callback_table_has_no_unwired_slot_on_all_workers() -> None:
         pass
 
 
+def test_pf_utils_iterate_slots_are_callable_through_in_data_utils() -> None:
+    """The installed LUT and two 16-bit origin slots transform known pixels,
+    distinguish clipped from non-clipped source walks, and refuse bad args.
+    The worker reads them from its production in_data->utils block.
+    """
+    for _ in _all_workers(
+        "--self-test-pf-utils-iterate-slots", "pf_utils_iterate_slots"
+    ):
+        pass
+
+
 def test_pf_utils_composite_rect_is_reachable_through_in_data_utils() -> None:
     """`PF_UtilCallbacks.composite_rect` on every worker, called the way a
     plug-in calls it: the pointer is read back out of the installed

@@ -49,6 +49,7 @@ struct SimpleHooks {
   bool (*aegp_layer_render_options_suite2)(){};
   bool (*pf_utils_handle_callbacks)(){};
   bool (*utility_callback_table)(){};
+  bool (*pf_utils_iterate_slots)(){};
   bool (*pf_utils_composite_rect)(){};
   bool (*pf_utils_gaussian_kernel)(){};
   bool (*checkout_param_beyond_table)(){};
