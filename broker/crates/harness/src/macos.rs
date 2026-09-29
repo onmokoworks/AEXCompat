@@ -2,6 +2,7 @@ use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -478,7 +479,7 @@ impl MacHarnessApp {
                 return;
             }
             match discover_parameters(&self.repository, &path) {
-                Ok((parameters, parameter_defaults, report)) => {
+                Ok((parameters, parameter_defaults, report, _)) => {
                     self.status = format!(
                         "Selected AEX with {} editable parameters: {}",
                         parameters.len(),
@@ -2945,10 +2946,101 @@ fn start_resident_session(
     })
 }
 
+fn description_packet(
+    staged_sha_before: &str,
+    staged_sha_after: Option<&str>,
+    mut parameters: Vec<InteractiveParameter>,
+    mut defaults: Vec<InteractiveParameter>,
+) -> Result<Value, &'static str> {
+    if parameters.len() != defaults.len() {
+        return Err("invalid_parameter_descriptor");
+    }
+    let mut slots = HashSet::new();
+    for (parameter, default) in parameters.iter().zip(&defaults) {
+        if parameter.slot == 0
+            || parameter.slot != default.slot
+            || parameter.kind != default.kind
+            || parameter.layer_path.is_some()
+            || default.layer_path.is_some()
+            || contains_absolute_path(&parameter.name)
+            || contains_absolute_path(&default.name)
+            || parameter
+                .choices
+                .iter()
+                .any(|choice| contains_absolute_path(choice))
+            || default
+                .choices
+                .iter()
+                .any(|choice| contains_absolute_path(choice))
+            || !slots.insert(parameter.slot)
+        {
+            return Err("invalid_parameter_descriptor");
+        }
+    }
+    for parameter in parameters.iter_mut().chain(defaults.iter_mut()) {
+        parameter.debug_summary = None;
+    }
+    Ok(json!({
+        "schema": "aexcompat.macos_aex_description",
+        "schema_version": 1,
+        "plugin_identity": {
+            "sha256": staged_sha_before,
+            "post_setup_sha256": staged_sha_after,
+            "files_unchanged": staged_sha_after.map(|after| staged_sha_before == after),
+        },
+        "parameters": parameters,
+        "defaults": defaults,
+    }))
+}
+
+fn contains_absolute_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        let previous = index.checked_sub(1).map(|previous| bytes[previous]);
+        let boundary = previous.is_none_or(|previous| {
+            !previous.is_ascii_alphanumeric()
+                && !matches!(previous, b'_' | b'.' | b'-' | b'/' | b'\\')
+        });
+        (*byte == b'/'
+            && boundary
+            && bytes
+                .get(index + 1)
+                .is_some_and(|next| !next.is_ascii_whitespace()))
+            || (*byte == b'\\' && bytes.get(index + 1) == Some(&b'\\') && boundary)
+            || (byte.is_ascii_alphabetic()
+                && bytes.get(index + 1) == Some(&b':')
+                && matches!(bytes.get(index + 2), Some(b'/') | Some(b'\\'))
+                && boundary)
+    })
+}
+
+pub fn describe_aex_headless(repository: &Path, aex: &Path) -> Result<Value, &'static str> {
+    if !aex.is_file() {
+        return Err("plugin_missing");
+    }
+    let (parameters, defaults, _, staged_identity) =
+        discover_parameters(repository, aex).map_err(|_| "description_failed")?;
+    let staged_sha = staged_identity.0.ok_or("identity_unavailable")?;
+    description_packet(
+        &staged_sha,
+        staged_identity.1.as_deref(),
+        parameters,
+        defaults,
+    )
+}
+
 fn discover_parameters(
     repository: &Path,
     aex: &Path,
-) -> Result<(Vec<InteractiveParameter>, Vec<InteractiveParameter>, String), String> {
+) -> Result<
+    (
+        Vec<InteractiveParameter>,
+        Vec<InteractiveParameter>,
+        String,
+        (Option<String>, Option<String>),
+    ),
+    String,
+> {
     let workers = guest_worker_candidates(repository)?;
     let mut failures = Vec::new();
     let mut process = None;
@@ -2960,7 +3052,7 @@ fn discover_parameters(
             RESIDENT_RENDER_DEADLINE
         };
         match run_staged_setup(&candidate.path, aex, candidate.security_tier(), deadline) {
-            Ok(output) if output.status.success() => {
+            Ok(output) if output.output.status.success() => {
                 process = Some(output);
                 selected_tier = Some(candidate.security_tier());
                 break;
@@ -2969,9 +3061,9 @@ fn discover_parameters(
                 "{} [{}] exited {}: {}; worker stdout: {}",
                 candidate.path.display(),
                 candidate.security_tier().as_str(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim(),
-                String::from_utf8_lossy(&output.stdout).trim(),
+                output.output.status,
+                String::from_utf8_lossy(&output.output.stderr).trim(),
+                String::from_utf8_lossy(&output.output.stdout).trim(),
             )),
             Err(error) => failures.push(format!(
                 "{} [{}]: {error}",
@@ -2982,7 +3074,8 @@ fn discover_parameters(
     }
     let process = process
         .ok_or_else(|| format!("all staged setup workers failed: {}", failures.join(" | ")))?;
-    let report = String::from_utf8(process.stdout)
+    let staged_identity = (process.staged_plugin_sha256, process.post_setup_sha256);
+    let report = String::from_utf8(process.output.stdout)
         .map_err(|error| format!("worker setup report is not UTF-8: {error}"))?;
     let mut value: serde_json::Value =
         serde_json::from_str(&report).map_err(|error| format!("parse setup report: {error}"))?;
@@ -3002,7 +3095,7 @@ fn discover_parameters(
     let report = serde_json::to_string_pretty(&value)
         .map_err(|error| format!("serialize macOS setup report: {error}"))?;
     let (parameters, defaults) = crate::shared_descriptor::parameters_from_guest_setup(&value)?;
-    Ok((parameters, defaults, report))
+    Ok((parameters, defaults, report, staged_identity))
 }
 
 #[derive(Clone, Debug)]
@@ -3762,6 +3855,84 @@ mod tests {
         assert_eq!(
             parameter_payload(&parameters).unwrap(),
             "v2|param_1@1:f64=50.25;param_2@2:i32=1"
+        );
+    }
+
+    #[test]
+    fn headless_description_preserves_canonical_records_and_rejects_ambiguous_slots() {
+        let mut current = fixture_parameter(2, "float", 75.0);
+        current.debug_summary = Some("/private/arbitrary-state".into());
+        let default = fixture_parameter(2, "float", 50.0);
+        let report = description_packet(
+            &"a".repeat(64),
+            Some(&"b".repeat(64)),
+            vec![current.clone()],
+            vec![default.clone()],
+        )
+        .unwrap();
+        assert_eq!(report["schema"], "aexcompat.macos_aex_description");
+        assert_eq!(report["plugin_identity"]["files_unchanged"], false);
+        assert_eq!(report["parameters"][0]["value"], 75.0);
+        assert_eq!(report["defaults"][0]["value"], 50.0);
+        assert_eq!(report["parameters"][0]["slot"], 2);
+        assert_eq!(report["parameters"][0]["layer_path"], Value::Null);
+        assert_eq!(report["parameters"][0]["debug_summary"], Value::Null);
+        assert!(
+            description_packet(
+                &"a".repeat(64),
+                Some(&"a".repeat(64)),
+                vec![current.clone(), current],
+                vec![default.clone(), default],
+            )
+            .is_err()
+        );
+        let mut leaking_name = fixture_parameter(4, "float", 1.0);
+        leaking_name.name = "Cache: /Users/private/plugin.aex".into();
+        assert!(
+            description_packet(
+                &"a".repeat(64),
+                None,
+                vec![leaking_name.clone()],
+                vec![leaking_name],
+            )
+            .is_err()
+        );
+        let mut leaking_choice = fixture_parameter(5, "integer", 0.0);
+        leaking_choice.choices = vec!["C:\\Users\\private\\plugin.aex".into()];
+        assert!(
+            description_packet(
+                &"a".repeat(64),
+                None,
+                vec![leaking_choice.clone()],
+                vec![leaking_choice],
+            )
+            .is_err()
+        );
+        assert!(contains_absolute_path("\\\\server\\share"));
+        assert!(contains_absolute_path("Cache;/Users/private/plugin.aex"));
+        assert!(!contains_absolute_path("Red/Green"));
+        assert!(!contains_absolute_path("Input / Output"));
+        let unknown_identity = description_packet(
+            &"a".repeat(64),
+            None,
+            vec![fixture_parameter(6, "float", 1.0)],
+            vec![fixture_parameter(6, "float", 1.0)],
+        )
+        .unwrap();
+        assert_eq!(
+            unknown_identity["plugin_identity"]["files_unchanged"],
+            Value::Null
+        );
+        let mut path_parameter = fixture_parameter(3, "layer", 0.0);
+        path_parameter.layer_path = Some(PathBuf::from("/private/other-layer.png"));
+        assert!(
+            description_packet(
+                &"a".repeat(64),
+                Some(&"a".repeat(64)),
+                vec![path_parameter.clone()],
+                vec![path_parameter],
+            )
+            .is_err()
         );
     }
 

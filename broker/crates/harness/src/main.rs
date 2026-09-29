@@ -21,6 +21,29 @@ include!("windows.rs");
 fn main() -> eframe::Result<()> {
     let mut args = std::env::args().collect::<Vec<_>>();
     args.retain(|argument| argument != "--headless");
+    if args
+        .get(1)
+        .is_some_and(|argument| argument == "--describe-aex")
+    {
+        if args.len() != 3 {
+            eprintln!("aexcompat_description_error: expected exactly one AEX path");
+            std::process::exit(64);
+        }
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("harness lives beneath the repository");
+        match macos::describe_aex_headless(repository, std::path::Path::new(&args[2])) {
+            Ok(description) => {
+                println!("{}", serde_json::to_string_pretty(&description).unwrap());
+                return Ok(());
+            }
+            Err(classification) => {
+                eprintln!("aexcompat_description_error: {classification}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.len() == 5 && args[1] == "--render-fixture" {
         let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()

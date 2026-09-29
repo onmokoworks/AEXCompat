@@ -46,7 +46,7 @@ INDEPENDENT_BROKER_TARGETS = {
     "session_dependency_manifest",
     "trusted_worker_stage",
 }
-INDEPENDENT_HARNESS_TARGETS = {"render_fixture_cli"}
+INDEPENDENT_HARNESS_TARGETS = {"description_cli", "render_fixture_cli"}
 NATIVE_LIB_TEST = "image_render::tests::worker_callback_addr_denial_round_trips_through_broker_diagnostics"
 SILENT_SKIP_PREREQUISITES = (
     # One binary serves every route since #1495, so naming it once covers what

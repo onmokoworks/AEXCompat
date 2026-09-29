@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/blender/aexcompat_macos_aex_description.schema.json",
+  "title": "AEXCompat macOS AEX parameter description",
+  "type": "object",
+  "required": ["schema", "schema_version", "plugin_identity", "parameters", "defaults"],
+  "properties": {
+    "schema": {"const": "aexcompat.macos_aex_description"},
+    "schema_version": {"const": 1},
+    "plugin_identity": {
+      "type": "object",
+      "required": ["sha256", "post_setup_sha256", "files_unchanged"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "post_setup_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "files_unchanged": {"type": ["boolean", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "parameters": {"type": "array", "items": {"$ref": "#/$defs/parameter"}},
+    "defaults": {"type": "array", "items": {"$ref": "#/$defs/parameter"}}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "parameter": {
+      "type": "object",
+      "required": ["slot", "name", "kind", "minimum", "maximum", "value", "choices", "color", "components", "component_count", "layer_path", "enabled", "visible", "supervised", "debug_summary", "custom_ui_events", "control_size"],
+      "properties": {
+        "slot": {"type": "integer", "minimum": 1},
+        "name": {"type": "string"},
+        "kind": {"enum": ["layer", "integer", "float", "angle", "color", "point", "custom", "no_data", "arbitrary_data", "path", "group_start", "group_end", "button", "point3d"]},
+        "minimum": {"type": "number"},
+        "maximum": {"type": "number"},
+        "value": {"type": "number"},
+        "choices": {"type": "array", "items": {"type": "string"}},
+        "color": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+        "components": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}},
+        "component_count": {"type": "integer", "minimum": 0, "maximum": 3},
+        "layer_path": {"type": "null"},
+        "enabled": {"type": "boolean"},
+        "visible": {"type": "boolean"},
+        "supervised": {"type": "boolean"},
+        "debug_summary": {"type": "null"},
+        "custom_ui_events": {"type": "integer", "minimum": 0},
+        "control_size": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 0, "maximum": 65535}}
+      },
+      "additionalProperties": false
+    }
+  }
+}
