@@ -52,11 +52,42 @@ def initial(output: Path) -> None:
         descriptor.plugin_source = "OLMToonDilate.aex"
         descriptor.transport_mode = "render_aex"
         descriptor.render_path = "smart"
-        descriptor.parameter_slot = 1
-        descriptor.parameter_value = 80.0
+        if set(bpy.ops.aexcompat.refresh_parameters(tree_name=tree.name, node_name=descriptor.name)) != {"FINISHED"}:
+            raise RuntimeError("AEX parameter list refresh failed")
+        if (
+            len(descriptor.parameter_items) != 1
+            or descriptor.parameter_items[0].name != "Search Radius"
+            or descriptor.parameter_items[0].kind != "float"
+            or (descriptor.parameter_items[0].minimum_text, descriptor.parameter_items[0].maximum_text, descriptor.parameter_items[0].value_text) != ("0.0", "100.0", "2.0")
+        ):
+            raise RuntimeError("AEX parameter list omitted the real scalar description")
+        described = module.describe_aex(descriptor.plugin_source)
+        real_run_session = module._run_session
+        try:
+            for corrupt in ("missing", "invalid_sha"):
+                packet = dict(described)
+                if corrupt == "missing":
+                    packet.pop("worker_identity")
+                else:
+                    packet["worker_identity"] = {**packet["worker_identity"], "source_sha256": "bad"}
+                module._run_session = lambda *_args, packet=packet, **_kwargs: packet
+                try:
+                    module.describe_aex(descriptor.plugin_source)
+                except module.AEXCompatSessionError as exc:
+                    if str(exc) != "worker_protocol_error":
+                        raise RuntimeError("invalid worker identity got a misleading error") from exc
+                else:
+                    raise RuntimeError("invalid worker identity entered the parameter picker")
+        finally:
+            module._run_session = real_run_session
+        if set(bpy.ops.aexcompat.choose_parameter(tree_name=tree.name, node_name=descriptor.name)) != {"FINISHED"}:
+            raise RuntimeError("named AEX parameter selection failed")
+        if (descriptor.parameter_slot, descriptor.parameter_kind, descriptor.parameter_value_text) != (1, "float", "2.0"):
+            raise RuntimeError("named selection did not apply the declared default")
+        descriptor.parameter_value_text = "80.0"
         button = SimpleNamespace()
         module._configure_bake_button(descriptor, button)
-        if (button.render_path, button.parameter_slot, button.parameter_value) != ("smart", 1, 80.0):
+        if (button.render_path, button.parameter_slot, button.parameter_kind, button.parameter_value_text) != ("smart", 1, "float", "80.0"):
             raise RuntimeError("node parameter controls did not reach the bake operator")
 
         default_name = "AEXCompat Default Baked"
@@ -70,7 +101,8 @@ def initial(output: Path) -> None:
             source_image_name=button.source_image_name, output_image_name=button.output_image_name,
             plugin_source=button.plugin_source, mode=button.mode,
             render_path=button.render_path, parameter_slot=button.parameter_slot,
-            parameter_value=button.parameter_value, connect_native=True,
+            parameter_kind=button.parameter_kind, parameter_value_text=button.parameter_value_text,
+            connect_native=True,
         )
         if set(default_result) != {"FINISHED"} or set(changed_result) != {"FINISHED"}:
             raise RuntimeError("parameterized AEX bake did not finish")
@@ -116,6 +148,11 @@ def initial(output: Path) -> None:
             "plugin_identity": response["plugin_identity"],
             "render_identity": response["render_identity"],
             "parameter_override": response["parameter_override"],
+            "parameter_catalog": [
+                {"slot": item.slot, "name": item.name, "kind": item.kind,
+                 "minimum_text": item.minimum_text, "maximum_text": item.maximum_text, "value_text": item.value_text}
+                for item in descriptor.parameter_items
+            ],
             "render_path": response["render_path"],
             "input_sha256": sha(observed_source),
             "default_output_sha256": sha(default_raw),
@@ -129,6 +166,82 @@ def initial(output: Path) -> None:
         (output / "blender-parameter-smoke.json").write_text(
             json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8",
         )
+        descriptor.plugin_source = "another-plugin.aex"
+        if descriptor.parameter_items or descriptor.parameter_slot != 0 or descriptor.description_source:
+            raise RuntimeError("changing the plugin did not clear the named parameter selection")
+        rejection = []
+        stale_button = SimpleNamespace(
+            tree_name=tree.name, node_name=descriptor.name,
+            owner_type="GROUP", owner_name=tree.name,
+            report=lambda level, message: rejection.append((level, message)),
+        )
+        if module.AEXCompatChooseParameterOperator.execute(stale_button, None) != {"CANCELLED"}:
+            raise RuntimeError("stale parameter selection was accepted")
+        if rejection != [({"ERROR"}, "refresh AEX parameters before selection")]:
+            raise RuntimeError("stale selection lacked an explicit error")
+        color_key_node = tree.nodes.new("AEXCompatCompositorNode")
+        color_key_node.plugin_source = "OLMColorKey.aex"
+        color_key_node.transport_mode = "render_aex"
+        if set(bpy.ops.aexcompat.refresh_parameters(tree_name=tree.name, node_name=color_key_node.name)) != {"FINISHED"}:
+            raise RuntimeError("second license-free AEX parameter list refresh failed")
+        threshold_index = next(
+            (index for index, item in enumerate(color_key_node.parameter_items)
+             if item.name == "Threshold" and item.kind == "float"), None,
+        )
+        if len(color_key_node.parameter_items) < 100 or threshold_index is None:
+            raise RuntimeError("large AEX parameter list was truncated or lost")
+        color_key_node.selected_parameter_index = threshold_index
+        if set(bpy.ops.aexcompat.choose_parameter(tree_name=tree.name, node_name=color_key_node.name)) != {"FINISHED"}:
+            raise RuntimeError("second AEX named selection failed")
+        if color_key_node.parameter_slot != color_key_node.parameter_items[threshold_index].slot:
+            raise RuntimeError("second AEX selection used the wrong slot")
+        precise = tree.nodes.new("AEXCompatCompositorNode")
+        precise.plugin_source = "precision.aex"
+        precise.transport_mode = "render_aex"
+        precise.description_source = precise.plugin_source
+        item = precise.parameter_items.add()
+        item.slot, item.name, item.kind = 1, "Exact integer", "integer"
+        item.minimum_text, item.maximum_text, item.value_text = "0", "2147483647", "16777217"
+        if set(bpy.ops.aexcompat.choose_parameter(tree_name=tree.name, node_name=precise.name)) != {"FINISHED"}:
+            raise RuntimeError("large integer selection failed")
+        button = SimpleNamespace()
+        module._configure_bake_button(precise, button)
+        if (precise.parameter_integer_value, button.parameter_integer_value) != (16777217, 16777217):
+            raise RuntimeError("Blender rounded a valid i32 default")
+        if module._parameter_override(button.parameter_slot, button.parameter_kind,
+                                      button.parameter_integer_value, button.parameter_value_text,
+                                      button.parameter_value) != {"slot": 1, "value": 16777217}:
+            raise RuntimeError("integer bake changed the selected value")
+        item.kind, item.name, item.value_text = "float", "Exact decimal", "0.1"
+        if set(bpy.ops.aexcompat.choose_parameter(tree_name=tree.name, node_name=precise.name)) != {"FINISHED"}:
+            raise RuntimeError("decimal selection failed")
+        if module._parameter_override(precise.parameter_slot, precise.parameter_kind,
+                                      precise.parameter_integer_value, precise.parameter_value_text,
+                                      precise.parameter_value) != {"slot": 1, "value": 0.1}:
+            raise RuntimeError("Blender rounded a valid decimal default")
+        scene = bpy.context.scene
+        scene.use_nodes = True
+        scene_tree = scene.node_tree
+        group = bpy.data.node_groups.new(scene_tree.name, "CompositorNodeTree")
+        scene_node = scene_tree.nodes.new("AEXCompatCompositorNode")
+        group_node = group.nodes.new("AEXCompatCompositorNode")
+        scene_node.plugin_source = "OLMToonDilate.aex"
+        group_node.plugin_source = "different.aex"
+        scene_node.transport_mode = group_node.transport_mode = "render_aex"
+        scene_button = SimpleNamespace()
+        module._configure_node_locator(scene_node, scene_button)
+        if scene_button.owner_type != "SCENE" or scene_button.owner_name != scene.name:
+            raise RuntimeError("scene locator did not identify the scene")
+        if set(bpy.ops.aexcompat.refresh_parameters(
+            owner_type=scene_button.owner_type, owner_name=scene_button.owner_name,
+            tree_name=scene_button.tree_name, node_name=scene_button.node_name,
+        )) != {"FINISHED"} or len(scene_node.parameter_items) != 1 or group_node.parameter_items:
+            raise RuntimeError("same-name scene/group refresh targeted the wrong node")
+        if set(bpy.ops.aexcompat.choose_parameter(
+            owner_type=scene_button.owner_type, owner_name=scene_button.owner_name,
+            tree_name=scene_button.tree_name, node_name=scene_button.node_name,
+        )) != {"FINISHED"} or scene_node.parameter_slot != 1 or group_node.parameter_slot:
+            raise RuntimeError("same-name scene/group selection targeted the wrong node")
         print(json.dumps(evidence, sort_keys=True))
     finally:
         module.unregister()
@@ -152,8 +265,15 @@ def reload(output: Path) -> None:
                 raise RuntimeError("packed image changed after reload")
         tree = bpy.data.node_groups.get("AEXCompat Parameter Smoke")
         descriptor = next((node for node in tree.nodes if node.bl_idname == "AEXCompatCompositorNode"), None) if tree else None
-        if not descriptor or (descriptor.render_path, descriptor.parameter_slot, descriptor.parameter_value) != ("smart", 1, 80.0):
+        if not descriptor or (descriptor.render_path, descriptor.parameter_slot, descriptor.parameter_kind, descriptor.parameter_value_text) != ("smart", 1, "float", "80.0"):
             raise RuntimeError("parameter controls changed after reload")
+        if (
+            [{"slot": item.slot, "name": item.name, "kind": item.kind,
+              "minimum_text": item.minimum_text, "maximum_text": item.maximum_text, "value_text": item.value_text}
+             for item in descriptor.parameter_items] != evidence["parameter_catalog"]
+            or descriptor.description_source != descriptor.plugin_source
+        ):
+            raise RuntimeError("named parameter list changed after reload")
         print(json.dumps({"reload": "passed", "changed_output_sha256": evidence["changed_output_sha256"]}))
     finally:
         module.unregister()

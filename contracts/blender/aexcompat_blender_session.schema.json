@@ -22,7 +22,41 @@
       },
       "additionalProperties": false
     },
-    "status": {"enum": ["identity_only", "fixture_transform", "rendered", "unsupported", "error"]},
+    "parameter_catalog": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "required": ["slot", "name", "kind", "minimum", "maximum", "value"],
+        "properties": {
+          "slot": {"type": "integer", "minimum": 1},
+          "name": {"type": "string"},
+          "kind": {"enum": ["integer", "float", "angle"]},
+          "minimum": {"type": "number"},
+          "maximum": {"type": "number"},
+          "value": {"type": "number"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "description_identity": {
+      "type": "object",
+      "required": ["description_sha256", "description_plugin_sha256", "description_files_unchanged", "description_matches_source", "source_sha256_after", "harness_sha256", "harness_sha256_after", "guest_worker_sha256", "guest_worker_sha256_after", "files_unchanged"],
+      "properties": {
+        "description_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_plugin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_files_unchanged": {"type": ["boolean", "null"]},
+        "description_matches_source": {"type": "boolean"},
+        "source_sha256_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "harness_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "harness_sha256_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "guest_worker_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "guest_worker_sha256_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "files_unchanged": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "status": {"enum": ["identity_only", "fixture_transform", "rendered", "described", "unsupported", "error"]},
     "failure_class": {"enum": ["none", "aex_not_loaded", "request_validation_error", "empty_input", "unsupported_platform", "worker_unavailable", "worker_crash", "worker_failure", "session_timeout", "artifact_mismatch", "parameter_description_error"]},
     "aex_render_performed": {"type": "boolean"},
     "host_success": {"type": "boolean"},
@@ -101,9 +135,35 @@
           }
         }
       },
-      "else": {
+      "else": {"properties": {"aex_render_performed": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "described"}}, "required": ["status"]},
+      "then": {
+        "required": ["parameter_catalog", "description_identity"],
+        "not": {"anyOf": [
+          {"required": ["frame"]}, {"required": ["input"]}, {"required": ["output"]},
+          {"required": ["diff"]}, {"required": ["render_identity"]},
+          {"required": ["parameter_override"]}
+        ]},
         "properties": {
+          "failure_class": {"const": "none"},
           "aex_render_performed": {"const": false},
+          "host_success": {"const": true},
+          "plugin_identity": {
+            "properties": {
+              "state": {"const": "loaded"},
+              "source_relative_path": {"type": "string"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"enum": ["identity_only", "fixture_transform", "unsupported", "error"]}}, "required": ["status"]},
+      "then": {
+        "properties": {
           "host_success": {"const": false},
           "plugin_identity": {"properties": {"state": {"const": "not_loaded"}}}
         }

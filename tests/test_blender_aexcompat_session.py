@@ -312,6 +312,139 @@ def _fake_description(plugin_sha, *, kind="float", maximum=255.0):
     }
 
 
+def description_request() -> dict:
+    return {
+        "schema_version": 1, "request_kind": "aexcompat_blender_session",
+        "mode": "describe_aex", "plugin": {"source_relative_path": "effect.aex"},
+    }
+
+
+def test_description_lists_scalar_names_bounds_without_render(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    description["parameters"].append({**description["parameters"][0], "slot": 2, "name": "Color", "kind": "color"})
+    calls = []
+
+    def harness(args, *_unused, **_kwargs):
+        calls.append(args)
+        assert "--describe-aex" in args and "--render-fixture" not in args
+        assert _unused[1] is None
+        return json.dumps(description).encode()
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert result["status"] == "described" and not result["aex_render_performed"]
+    assert result["parameter_catalog"] == [{
+        "slot": 1, "name": "Echo", "kind": "float", "minimum": 0.0,
+        "maximum": 255.0, "value": 5.0,
+    }]
+    assert result["description_identity"]["description_matches_source"] is True
+    assert result["description_identity"]["files_unchanged"] is True
+    assert len(calls) == 1
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({**result, "output": {"sha256": plugin_sha, "bytes": 0}}, SCHEMA)
+
+
+def test_description_hides_unavailable_scalar_records(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    description["parameters"].append({**description["parameters"][0], "slot": 2, "name": "Hidden", "visible": False})
+    description["parameters"].append({**description["parameters"][0], "slot": 3, "name": "Disabled", "enabled": False})
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    assert [entry["name"] for entry in result["parameter_catalog"]] == ["Echo"]
+
+
+@pytest.mark.parametrize("bad", ["duplicate_slot", "hidden_duplicate_slot", "out_of_range_default", "nonintegral_integer"])
+def test_description_rejects_ambiguous_or_unusable_scalar(fake_render_environment, monkeypatch, bad):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    if bad == "duplicate_slot":
+        description["parameters"].append({**description["parameters"][0], "name": "Second"})
+    elif bad == "hidden_duplicate_slot":
+        description["parameters"].append({**description["parameters"][0], "name": "Hidden", "visible": False})
+    elif bad == "out_of_range_default":
+        description["parameters"][0]["value"] = 999.0
+    else:
+        description["parameters"][0]["kind"] = "integer"
+        description["parameters"][0]["value"] = 4.5
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    with pytest.raises(SESSION.SessionRequestError) as error:
+        SESSION.build_response(description_request())
+    assert error.value.failure_class == "parameter_description_error"
+
+
+def test_description_records_identity_mismatch_without_refusing_load(fake_render_environment, monkeypatch):
+    monkeypatch.setattr(
+        SESSION, "_invoke_harness",
+        lambda *_args, **_kwargs: json.dumps(_fake_description("0" * 64)).encode(),
+    )
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert result["status"] == "described"
+    assert result["description_identity"]["description_matches_source"] is False
+
+
+@pytest.mark.parametrize("mutate", ["bad_json", "missing_defaults", "duplicate", "exit"])
+def test_description_errors_do_not_become_success(fake_render_environment, monkeypatch, mutate):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    if mutate == "missing_defaults":
+        del description["defaults"]
+
+    def harness(*_args, **_kwargs):
+        if mutate == "exit":
+            raise SESSION.SessionRequestError("harness failed", "parameter_description_error")
+        if mutate == "bad_json":
+            return b"{"
+        if mutate == "duplicate":
+            return b'{"schema":1,"schema":2}'
+        return json.dumps(description).encode()
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    with pytest.raises(SESSION.SessionRequestError) as error:
+        SESSION.build_response(description_request())
+    assert error.value.failure_class == "parameter_description_error"
+
+
+def test_description_rejects_extra_render_fields_before_load(fake_render_environment, monkeypatch):
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: pytest.fail("loaded AEX"))
+    payload = description_request()
+    payload["frame"] = request()["frame"]
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+
+
+def test_description_rejects_deadline_before_load(fake_render_environment, monkeypatch):
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: pytest.fail("loaded AEX"))
+    payload = description_request()
+    payload["timeout_ms"] = 1000
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
+@pytest.mark.parametrize("behavior,failure_class", [
+    ("bad_stdout", "parameter_description_error"),
+    ("nonzero_exit", "parameter_description_error"),
+    ("oversized_stdout", "parameter_description_error"),
+])
+def test_description_subprocess_failure_is_explicit(fake_render_environment, behavior, failure_class):
+    harness = Path(SESSION.os.environ["AEXCOMPAT_HARNESS"])
+    if behavior == "bad_stdout":
+        body = "printf '{bad json'\n"
+    elif behavior == "nonzero_exit":
+        body = "exit 3\n"
+    elif behavior == "oversized_stdout":
+        body = f"{sys.executable} -c 'import sys; sys.stdout.write(\"x\" * {SESSION.MAX_RENDER_METADATA_BYTES + 1})'\n"
+    harness.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    harness.chmod(0o755)
+    with pytest.raises(SESSION.SessionRequestError) as error:
+        SESSION.build_response(description_request())
+    assert error.value.failure_class == failure_class
+
+
 def test_scalar_override_uses_single_canonical_record_and_smart_fixture(fake_render_environment, monkeypatch):
     plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
     description = _fake_description(plugin_sha)

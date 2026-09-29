@@ -190,7 +190,7 @@ def _argb_to_rgba(argb: bytes) -> bytes:
 
 
 def _invoke_harness(
-    command: list[str], environment: dict[str, str], timeout_ms: int,
+    command: list[str], environment: dict[str, str], timeout_ms: int | None,
     failure_class: str = "worker_failure",
 ) -> bytes:
     global _ACTIVE_HARNESS_PID
@@ -204,7 +204,7 @@ def _invoke_harness(
             raise SessionRequestError("harness could not start", "worker_crash") from exc
         _ACTIVE_HARNESS_PID = process.pid
         try:
-            process.wait(timeout=timeout_ms / 1000)
+            process.wait(timeout=timeout_ms / 1000 if timeout_ms is not None else None)
         except subprocess.TimeoutExpired as exc:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -355,23 +355,7 @@ def _resolve_parameter_override(
         raise SessionRequestError("parameter_override.value must be finite") from exc
     if not math.isfinite(value):
         raise SessionRequestError("parameter_override.value must be finite")
-    environment = os.environ.copy()
-    environment["AEXCOMPAT_GUEST_WORKER"] = str(worker)
-    try:
-        raw = _invoke_harness(
-            [str(harness), "--headless", "--describe-aex", str(plugin)],
-            environment, timeout_ms, "parameter_description_error",
-        )
-    except SessionRequestError as exc:
-        if exc.failure_class == "artifact_mismatch":
-            raise SessionRequestError("AEX parameter description exceeds bounded size", "parameter_description_error") from exc
-        raise
-    try:
-        description = _strict_json(raw)
-    except SessionRequestError as exc:
-        raise SessionRequestError("invalid AEX parameter description", "parameter_description_error") from exc
-    if not _valid_description(description):
-        raise SessionRequestError("invalid AEX parameter description", "parameter_description_error")
+    raw, description = _read_description(harness, plugin, worker, timeout_ms)
     identity = description["plugin_identity"]
     parameters = description["parameters"]
     staged_sha = identity["sha256"]
@@ -418,6 +402,97 @@ def _resolve_parameter_override(
         "description_matches_render_plugin": staged_sha == plugin_sha,
     }
     return [parameter], record
+
+
+def _read_description(
+    harness: Path, plugin: Path, worker: Path, timeout_ms: int | None,
+) -> tuple[bytes, dict[str, Any]]:
+    environment = os.environ.copy()
+    environment["AEXCOMPAT_GUEST_WORKER"] = str(worker)
+    try:
+        raw = _invoke_harness(
+            [str(harness), "--headless", "--describe-aex", str(plugin)],
+            environment, timeout_ms, "parameter_description_error",
+        )
+    except SessionRequestError as exc:
+        if exc.failure_class == "artifact_mismatch":
+            raise SessionRequestError("AEX parameter description exceeds bounded size", "parameter_description_error") from exc
+        raise
+    try:
+        description = _strict_json(raw)
+    except SessionRequestError as exc:
+        raise SessionRequestError("invalid AEX parameter description", "parameter_description_error") from exc
+    if not _valid_description(description):
+        raise SessionRequestError("invalid AEX parameter description", "parameter_description_error")
+    return raw, description
+
+
+def _describe_aex(request: dict[str, Any], source_relative_path: str | None) -> dict[str, Any]:
+    if sys.platform != "darwin":
+        raise SessionRequestError("describe_aex requires macOS", "unsupported_platform")
+    if source_relative_path is None:
+        raise SessionRequestError("plugin.source_relative_path is required", "aex_not_loaded")
+    harness = _require_file("AEXCOMPAT_HARNESS", "worker_unavailable")
+    worker = _require_file("AEXCOMPAT_GUEST_WORKER", "worker_unavailable")
+    root_value = os.environ.get("AEXCOMPAT_PLUGIN_ROOT")
+    if not root_value:
+        raise SessionRequestError("AEXCOMPAT_PLUGIN_ROOT is required", "aex_not_loaded")
+    root = Path(root_value).expanduser().resolve()
+    if not root.is_dir():
+        raise SessionRequestError("AEXCOMPAT_PLUGIN_ROOT is not a directory", "aex_not_loaded")
+    plugin = (root / source_relative_path).resolve()
+    if not plugin.is_relative_to(root) or not plugin.is_file():
+        raise SessionRequestError("AEX is missing or escapes the configured root", "aex_not_loaded")
+    source_sha_before = _sha256_file(plugin)
+    harness_sha_before = _sha256_file(harness)
+    worker_sha_before = _sha256_file(worker)
+    raw, description = _read_description(harness, plugin, worker, None)
+    parameters = []
+    slots: set[int] = set()
+    for record in description["parameters"]:
+        if record["slot"] in slots:
+            raise SessionRequestError("ambiguous parameter slot", "parameter_description_error")
+        slots.add(record["slot"])
+        kind = record["kind"]
+        if kind not in {"integer", "float", "angle"} or not record["enabled"] or not record["visible"]:
+            continue
+        minimum, maximum = (
+            (-32768.0, 32768.0) if kind == "angle"
+            else (float(record["minimum"]), float(record["maximum"]))
+        )
+        if minimum > maximum or (kind == "angle" and record["component_count"] != 1):
+            raise SessionRequestError("invalid scalar parameter bounds", "parameter_description_error")
+        value = float(record["components"][0] if kind == "angle" else record["value"])
+        if not minimum <= value <= maximum or kind == "integer" and (
+            not value.is_integer() or not -(2**31) <= value < 2**31
+        ):
+            raise SessionRequestError("invalid scalar parameter default", "parameter_description_error")
+        parameters.append({
+            "slot": record["slot"], "name": record["name"], "kind": kind,
+            "minimum": minimum, "maximum": maximum, "value": value,
+        })
+    source_sha_after = _sha256_file(plugin)
+    harness_sha_after = _sha256_file(harness)
+    worker_sha_after = _sha256_file(worker)
+    return {
+        "schema_version": SCHEMA_VERSION, "response_kind": "aexcompat_blender_session_result",
+        "status": "described", "failure_class": "none", "aex_render_performed": False,
+        "host_success": True, "worker_identity": _worker_identity(),
+        "plugin_identity": {"state": "loaded", "source_relative_path": source_relative_path, "sha256": source_sha_before},
+        "parameter_catalog": parameters,
+        "description_identity": {
+            "description_sha256": _sha256(raw),
+            "description_plugin_sha256": description["plugin_identity"]["sha256"],
+            "description_files_unchanged": description["plugin_identity"]["files_unchanged"],
+            "description_matches_source": description["plugin_identity"]["sha256"] == source_sha_before,
+            "source_sha256_after": source_sha_after,
+            "harness_sha256": harness_sha_before,
+            "harness_sha256_after": harness_sha_after,
+            "guest_worker_sha256": worker_sha_before,
+            "guest_worker_sha256_after": worker_sha_after,
+            "files_unchanged": source_sha_before == source_sha_after and harness_sha_before == harness_sha_after and worker_sha_before == worker_sha_after,
+        },
+    }
 
 
 def _render_aex(
@@ -590,8 +665,12 @@ def build_response(request: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(plugin, dict):
         raise SessionRequestError("plugin must be an object")
     source_relative_path = _validate_relative_plugin_path(plugin.get("source_relative_path"))
-    pixels, frame = _decode_rgba8(request)
     mode = request.get("mode", "identity_no_aex")
+    if mode == "describe_aex":
+        if any(key in request for key in ("frame", "input", "output", "parameter_override", "render_path", "timeout_ms")):
+            raise SessionRequestError("describe_aex accepts only plugin")
+        return _describe_aex(request, source_relative_path)
+    pixels, frame = _decode_rgba8(request)
     if mode == "render_aex":
         return _render_aex(request, pixels, frame, source_relative_path)
     if "parameter_override" in request or "render_path" in request:
