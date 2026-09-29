@@ -13190,9 +13190,21 @@ fn cvtsi2ss_exact_integer_range_preserves_mxcsr_and_upper_lanes() {
     // int32_to_float32 helper, including the exact-integer fast path.
     let mut engine = test_engine(&[0xf3, 0x0f, 0x2a, 0xc1, 0xc3]);
     let mut values = vec![
-        0, 1, -1, 255, -255, 65_535, -65_535, 8_388_607,
-        -8_388_607, 8_388_608, -8_388_608, 16_777_215,
-        -16_777_215, 16_777_216, -16_777_216,
+        0,
+        1,
+        -1,
+        255,
+        -255,
+        65_535,
+        -65_535,
+        8_388_607,
+        -8_388_607,
+        8_388_608,
+        -8_388_608,
+        16_777_215,
+        -16_777_215,
+        16_777_216,
+        -16_777_216,
     ];
     for bit in 1..=24 {
         let power = 1i32 << bit;
@@ -13208,7 +13220,9 @@ fn cvtsi2ss_exact_integer_range_preserves_mxcsr_and_upper_lanes() {
                 .reg_write_long(RegisterX86::XMM0, &before)
                 .unwrap();
             engine.unicorn.reg_write(RegisterX86::MXCSR, mxcsr).unwrap();
-            engine.call_win64(TEST_CODE, [value as u32 as u64, 0, 0, 0, 0, 0]).unwrap();
+            engine
+                .call_win64(TEST_CODE, [value as u32 as u64, 0, 0, 0, 0, 0])
+                .unwrap();
             let after = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
             assert_eq!(
                 u32::from_le_bytes(after[..4].try_into().unwrap()),
@@ -13232,10 +13246,15 @@ fn cvtsi2ss_just_outside_exact_range_uses_guest_rounding_mode() {
     ] {
         for (value, expected) in [(16_777_217i32, positive), (-16_777_217, negative)] {
             engine.unicorn.reg_write(RegisterX86::MXCSR, mxcsr).unwrap();
-            engine.call_win64(TEST_CODE, [value as u32 as u64, 0, 0, 0, 0, 0]).unwrap();
+            engine
+                .call_win64(TEST_CODE, [value as u32 as u64, 0, 0, 0, 0, 0])
+                .unwrap();
             let xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
             assert_eq!(u32::from_le_bytes(xmm0[..4].try_into().unwrap()), expected);
-            assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap() & 0x6000, mxcsr & 0x6000);
+            assert_eq!(
+                engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap() & 0x6000,
+                mxcsr & 0x6000
+            );
         }
     }
 }
