@@ -177,8 +177,62 @@ pub fn ae_support_files_for_plugin(plugin: &Path) -> Option<&Path> {
 pub fn in_place_dependency_search_dirs(plugin: &Path) -> Vec<PathBuf> {
     let support_files = ae_support_files_for_plugin(plugin)
         .map(Path::to_path_buf)
-        .or_else(latest_after_effects_support_files);
+        .or_else(|| {
+            let system_dir = std::env::var_os("SystemRoot")
+                .map(PathBuf::from)
+                .map(|root| root.join("System32"));
+            adobe_root().and_then(|adobe| {
+                best_vendor_support_files_under(&adobe, plugin, system_dir.as_deref())
+            })
+        });
     search_dirs_with(plugin, support_files)
+}
+
+fn best_vendor_support_files_under(
+    adobe: &Path,
+    plugin: &Path,
+    system_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let newest = newest_support_files_under(adobe)?;
+    let imports = match crate::plugin_dependency_closure::direct_normal_import_names(plugin) {
+        Ok(imports) => imports,
+        Err(_) => return Some(newest),
+    };
+    let plugin_dir = plugin.parent();
+    let required: Vec<_> = imports
+        .iter()
+        .filter(|name| {
+            !plugin_dir.is_some_and(|dir| dir.join(name).is_file())
+                && !system_dir.is_some_and(|dir| dir.join(name).is_file())
+        })
+        .collect();
+    if required.is_empty() || required.iter().all(|name| newest.join(name).is_file()) {
+        return Some(newest);
+    }
+
+    // Only installed AE versions are candidates, and only their direct Support
+    // Files children. Never search arbitrary older runtime folders on the host.
+    let Ok(installs) = std::fs::read_dir(adobe) else {
+        return Some(newest);
+    };
+    let mut candidates = installs
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let version = name.strip_prefix("Adobe After Effects ")?;
+            let support = entry.path().join("Support Files");
+            (support.join("Plug-ins").is_dir() && transportable_search_dir(&support))
+                .then(|| (version_key(version), support))
+        })
+        .collect::<Vec<_>>();
+    candidates
+        .sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    candidates
+        .into_iter()
+        .map(|(_, path)| path)
+        .find(|root| required.iter().all(|name| root.join(name).is_file()))
+        .or(Some(newest))
 }
 
 fn search_dirs_with(plugin: &Path, support_files: Option<PathBuf>) -> Vec<PathBuf> {
@@ -325,6 +379,91 @@ mod tests {
         assert_eq!(
             search_dirs_with(&resident, Some(support.clone())),
             vec![support]
+        );
+    }
+
+    #[test]
+    fn vendor_plugin_prefers_newest_ae_runtime_that_supplies_its_direct_imports() {
+        let root = temp_root("vendor-imports");
+        let support_2025 = after_effects_tree(&root.0, "2025");
+        let support_2026 = after_effects_tree(&root.0, "2026");
+        std::fs::write(support_2025.join("libmmd.dll"), b"runtime").unwrap();
+        let vendor = root.0.join("Vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        let plugin = vendor.join("effect.aex");
+        std::fs::write(&plugin, crate::test_pe::pe64_importing(&["libmmd.dll"])).unwrap();
+
+        assert_eq!(
+            best_vendor_support_files_under(&root.0.join("Adobe"), &plugin, None),
+            Some(support_2025.clone())
+        );
+
+        std::fs::write(support_2026.join("libmmd.dll"), b"newer runtime").unwrap();
+        assert_eq!(
+            best_vendor_support_files_under(&root.0.join("Adobe"), &plugin, None),
+            Some(support_2026)
+        );
+    }
+
+    #[test]
+    fn plugin_inside_ae_keeps_its_own_runtime_even_when_an_older_one_has_an_import() {
+        let root = temp_root("owner-imports");
+        let support_2025 = after_effects_tree(&root.0, "2025");
+        let support_2026 = after_effects_tree(&root.0, "2026");
+        std::fs::write(support_2025.join("libmmd.dll"), b"runtime").unwrap();
+        let plugin_dir = support_2026.join("Plug-ins").join("Effects");
+        let plugin = plugin_dir.join("effect.aex");
+        std::fs::write(&plugin, crate::test_pe::pe64_importing(&["libmmd.dll"])).unwrap();
+
+        assert_eq!(
+            in_place_dependency_search_dirs(&plugin),
+            vec![plugin_dir, support_2026]
+        );
+    }
+
+    #[test]
+    fn vendor_plugin_does_not_switch_runtimes_for_local_or_system_imports() {
+        let root = temp_root("local-system-imports");
+        let support_2025 = after_effects_tree(&root.0, "2025");
+        let support_2026 = after_effects_tree(&root.0, "2026");
+        std::fs::write(support_2025.join("system.dll"), b"older copy").unwrap();
+        let system_dir = root.0.join("System32");
+        std::fs::create_dir_all(&system_dir).unwrap();
+        std::fs::write(system_dir.join("system.dll"), b"system copy").unwrap();
+        let vendor = root.0.join("Vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(vendor.join("local.dll"), b"local copy").unwrap();
+        let plugin = vendor.join("effect.aex");
+        std::fs::write(
+            &plugin,
+            crate::test_pe::pe64_importing(&["local.dll", "system.dll"]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            best_vendor_support_files_under(&root.0.join("Adobe"), &plugin, Some(&system_dir)),
+            Some(support_2026)
+        );
+    }
+
+    #[test]
+    fn vendor_runtime_selection_ignores_broken_optional_delay_imports() {
+        let root = temp_root("broken-delay");
+        let support_2025 = after_effects_tree(&root.0, "2025");
+        let _support_2026 = after_effects_tree(&root.0, "2026");
+        std::fs::write(support_2025.join("runtime.dll"), b"runtime").unwrap();
+        let vendor = root.0.join("Vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        let plugin = vendor.join("effect.aex");
+        std::fs::write(
+            &plugin,
+            crate::test_pe::pe64_with_broken_delay_import_directory(&["runtime.dll"]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            best_vendor_support_files_under(&root.0.join("Adobe"), &plugin, None),
+            Some(support_2025)
         );
     }
 }

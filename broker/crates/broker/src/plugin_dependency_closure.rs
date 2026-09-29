@@ -1199,6 +1199,27 @@ fn dependency_names_from_bytes(bytes: &[u8]) -> io::Result<ImageDependencyNames>
     })
 }
 
+/// Direct, eager DLL imports only. Runtime-root selection needs to distinguish
+/// a DLL the Windows loader requires before EffectMain from optional literals
+/// and delay-load imports; it does not need to walk or seal the closure.
+pub(crate) fn direct_normal_import_names(image: &Path) -> io::Result<Vec<String>> {
+    let bytes = read_bounded(image)?;
+    let (normal, _) = match PeFile64::parse(bytes.as_slice()) {
+        Ok(pe) => import_names_from_with_delay(&pe, false)?,
+        Err(_) => match PeFile32::parse(bytes.as_slice()) {
+            Ok(pe) => import_names_from_with_delay(&pe, false)?,
+            Err(_) => return Ok(Vec::new()),
+        },
+    };
+    if normal.iter().any(|name| !windows_safe_basename(name)) {
+        return Err(invalid("plug-in import name is not a DLL basename"));
+    }
+    Ok(normal
+        .into_iter()
+        .filter(|name| !is_api_set_name(name))
+        .collect())
+}
+
 /// Conservative runtime loader candidates found in image data.
 ///
 /// Import-table names are byte strings too, so they are removed before the
@@ -1271,6 +1292,13 @@ fn runtime_dll_literal_names(bytes: &[u8], imported: &HashSet<String>) -> io::Re
 fn import_names_from<Nt: ImageNtHeaders>(
     pe: &object::read::pe::PeFile<'_, Nt>,
 ) -> io::Result<(Vec<String>, Vec<String>)> {
+    import_names_from_with_delay(pe, true)
+}
+
+fn import_names_from_with_delay<Nt: ImageNtHeaders>(
+    pe: &object::read::pe::PeFile<'_, Nt>,
+    include_delay: bool,
+) -> io::Result<(Vec<String>, Vec<String>)> {
     let mut normal_names = Vec::new();
     let mut delay_names = Vec::new();
     // The ceiling counts descriptors walked, not names kept: a hostile import
@@ -1318,10 +1346,14 @@ fn import_names_from<Nt: ImageNtHeaders>(
             )?;
         }
     }
-    if let Some(table) = pe
-        .data_directories()
-        .delay_load_import_table(pe.data(), &pe.section_table())
-        .map_err(|_| invalid("plug-in delay-load import table is unreadable"))?
+    if let Some(table) = include_delay
+        .then(|| {
+            pe.data_directories()
+                .delay_load_import_table(pe.data(), &pe.section_table())
+                .map_err(|_| invalid("plug-in delay-load import table is unreadable"))
+        })
+        .transpose()?
+        .flatten()
     {
         let mut descriptors = table
             .descriptors()
