@@ -152,52 +152,24 @@ fn build_with_cmake() {
 }
 
 fn watch_source_files() {
-    let current_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let project_root = std::path::Path::new(&current_dir)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
+    let project_root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
-    println!(
-        "cargo:rerun-if-changed={}",
-        project_root.join("uc.c").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        project_root.join("list.c").display()
-    );
-
-    // Directories to watch for changes
-    let watch_dirs = vec!["qemu", "include", "bindings", "glib_compat"];
-
-    let watch_extensions = vec![".c", ".h"];
-
-    for dir in watch_dirs {
-        let dir_path = project_root.join(dir);
-        if dir_path.exists() {
-            register_dir_files(&dir_path, &watch_extensions);
-        }
-    }
-}
-
-fn register_dir_files(dir: &std::path::Path, extensions: &[&str]) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                register_dir_files(&path, extensions);
-            } else if let Some(ext) = path.extension() {
-                if extensions
-                    .iter()
-                    .any(|&e| e == format!(".{}", ext.to_string_lossy()))
-                {
-                    println!("cargo:rerun-if-changed={}", path.display());
-                }
-            }
-        }
+    // Cargo watches directories recursively, including newly added C sources.
+    for source in [
+        "uc.c",
+        "list.c",
+        "CMakeLists.txt",
+        "cmake",
+        "qemu",
+        "include",
+        "bindings",
+        "glib_compat",
+        "msvc",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            project_root.join(source).display()
+        );
     }
 }
 
