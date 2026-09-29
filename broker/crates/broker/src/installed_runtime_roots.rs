@@ -5,9 +5,10 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-const MAX_INSTALL_ROOTS: usize = 256;
+const MAX_INSTALL_ROOTS: usize = 1024;
 const MAX_INSTALL_ROOT_OBSERVATIONS: usize = 4 * 2048;
 const MAX_VISITED_DIRS: usize = 4096;
+const MAX_TOTAL_VISITED_DIRS: usize = 65_536;
 const MAX_DEPTH: usize = 3;
 const MAX_MATCHES: usize = 15;
 const MAX_INDEXED_FILES: usize = 262_144;
@@ -57,6 +58,7 @@ impl RegisteredRuntimeIndex {
             MAX_INSTALL_ROOT_OBSERVATIONS,
             MAX_INSTALL_ROOTS,
             MAX_VISITED_DIRS,
+            MAX_TOTAL_VISITED_DIRS,
             MAX_INDEXED_FILES,
             MAX_INDEX_METADATA_BYTES,
         )
@@ -67,6 +69,7 @@ impl RegisteredRuntimeIndex {
         max_install_root_observations: usize,
         max_install_roots: usize,
         max_visited_dirs: usize,
+        max_total_visited_dirs: usize,
         max_indexed_files: usize,
         max_metadata_bytes: usize,
     ) -> Self {
@@ -106,7 +109,9 @@ impl RegisteredRuntimeIndex {
             let mut queue = VecDeque::from([(root.clone(), 0usize)]);
             let mut visited_for_root = 0usize;
             while let Some((directory, depth)) = queue.pop_front() {
-                if visited_for_root == max_visited_dirs {
+                if visited_for_root == max_visited_dirs
+                    || visited_directories == max_total_visited_dirs
+                {
                     truncated = true;
                     break;
                 }
@@ -777,6 +782,7 @@ mod tests {
             MAX_INSTALL_ROOT_OBSERVATIONS,
             MAX_INSTALL_ROOTS,
             MAX_VISITED_DIRS,
+            MAX_TOTAL_VISITED_DIRS,
             1,
             MAX_INDEX_METADATA_BYTES,
         );
@@ -844,6 +850,7 @@ mod tests {
         let second = parent.join("second");
         std::fs::create_dir_all(&child).unwrap();
         std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("first.dll"), b"first").unwrap();
         std::fs::write(child.join("nested.dll"), b"nested").unwrap();
         std::fs::write(second.join("second.dll"), b"second").unwrap();
 
@@ -852,6 +859,7 @@ mod tests {
             MAX_INSTALL_ROOT_OBSERVATIONS,
             MAX_INSTALL_ROOTS,
             1,
+            MAX_TOTAL_VISITED_DIRS,
             MAX_INDEXED_FILES,
             MAX_INDEX_METADATA_BYTES,
         );
@@ -860,16 +868,58 @@ mod tests {
             RegisteredRuntimeLookup::IndexTruncated
         );
         let roots_capped = RegisteredRuntimeIndex::from_install_roots_with_limits(
-            [first.clone(), second],
+            [first.clone(), second.clone()],
             MAX_INSTALL_ROOT_OBSERVATIONS,
             1,
             MAX_VISITED_DIRS,
+            MAX_TOTAL_VISITED_DIRS,
             MAX_INDEXED_FILES,
             MAX_INDEX_METADATA_BYTES,
         );
         assert_eq!(
             roots_capped.matching_roots_by_basename(&["nested.dll".into()], &[first]),
             RegisteredRuntimeLookup::IndexTruncated
+        );
+        let total_capped = RegisteredRuntimeIndex::from_install_roots_with_limits(
+            [parent.join("first"), second],
+            MAX_INSTALL_ROOT_OBSERVATIONS,
+            MAX_INSTALL_ROOTS,
+            MAX_VISITED_DIRS,
+            2,
+            MAX_INDEXED_FILES,
+            MAX_INDEX_METADATA_BYTES,
+        );
+        assert_eq!(
+            total_capped.matching_roots_by_basename(&["first.dll".into()], &[parent.join("first")]),
+            RegisteredRuntimeLookup::IndexTruncated,
+            "a complete first root must not make a partial forest admissible"
+        );
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn more_than_256_registered_roots_can_find_the_last_install() {
+        let parent = std::env::temp_dir().join(format!(
+            "aexcompat-runtime-many-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let roots: Vec<PathBuf> = (0..257)
+            .map(|index| {
+                let root = parent.join(format!("install-{index:03}"));
+                std::fs::create_dir_all(&root).unwrap();
+                root
+            })
+            .collect();
+        let last = roots.last().unwrap().canonicalize().unwrap();
+        std::fs::write(last.join("needed.dll"), b"runtime").unwrap();
+        let index = RegisteredRuntimeIndex::from_install_roots(roots);
+        assert_eq!(
+            index.matching_roots_by_basename(&["needed.dll".into()], &[last.clone()]),
+            RegisteredRuntimeLookup::Found(BTreeMap::from([("needed.dll".into(), vec![last])]))
         );
         std::fs::remove_dir_all(parent).unwrap();
     }
@@ -896,6 +946,7 @@ mod tests {
             MAX_INSTALL_ROOT_OBSERVATIONS,
             2,
             MAX_VISITED_DIRS,
+            MAX_TOTAL_VISITED_DIRS,
             MAX_INDEXED_FILES,
             MAX_INDEX_METADATA_BYTES,
         );
@@ -932,6 +983,7 @@ mod tests {
             3,
             2,
             MAX_VISITED_DIRS,
+            MAX_TOTAL_VISITED_DIRS,
             MAX_INDEXED_FILES,
             MAX_INDEX_METADATA_BYTES,
         );
