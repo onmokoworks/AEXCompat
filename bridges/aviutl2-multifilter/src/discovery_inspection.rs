@@ -2002,15 +2002,6 @@ fn companion_demand_probe_targets(completed: &HashMap<String, CacheEntry>) -> Ve
         .collect()
 }
 
-/// A numerically-comparable key for a version token ("25.0" > "7.0", unlike a
-/// lexical compare), falling back to 0 for non-numeric components.
-fn version_key(version: &str) -> Vec<u64> {
-    version
-        .split(['.', ' '])
-        .map(|part| part.parse::<u64>().unwrap_or(0))
-        .collect()
-}
-
 /// The AviUtl2 filter name for each plug-in, in the same order.
 ///
 /// AviUtl2 refuses a filter registered under a name it already holds, and says so

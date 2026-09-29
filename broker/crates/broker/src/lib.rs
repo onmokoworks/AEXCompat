@@ -1,3 +1,4 @@
+pub mod after_effects_install;
 pub mod cli_operation;
 pub mod cluster_manifest;
 pub mod companion_manifest;

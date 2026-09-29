@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aexcompat_broker::after_effects_install::newest_versioned;
 
     const META: Option<((u64, u32), u64)> = Some(((5, 0), 64));
     /// The AEX could not be stat'd this pass (transient: AV scanner, replacement).
