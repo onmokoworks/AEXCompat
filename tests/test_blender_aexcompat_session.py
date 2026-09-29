@@ -465,7 +465,7 @@ def test_non_aex_mode_rejects_override_without_invoking_harness(monkeypatch):
         SESSION.build_response(payload)
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS subprocess behavior")
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
 @pytest.mark.parametrize("behavior", ["invalid_stdout", "nonzero_exit", "oversized_stdout"])
 def test_parameter_description_subprocess_failure_does_not_render(fake_render_environment, behavior):
     harness = Path(SESSION.os.environ["AEXCOMPAT_HARNESS"])
