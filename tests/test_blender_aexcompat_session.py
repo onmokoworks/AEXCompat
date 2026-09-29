@@ -325,7 +325,7 @@ def description_request() -> dict:
     }
 
 
-def test_description_lists_scalar_names_bounds_without_render(fake_render_environment, monkeypatch):
+def test_description_lists_scalar_and_color_names_without_render(fake_render_environment, monkeypatch):
     plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
     description = _fake_description(plugin_sha)
     description["parameters"].append({**description["parameters"][0], "slot": 2, "name": "Color", "kind": "color"})
@@ -344,7 +344,7 @@ def test_description_lists_scalar_names_bounds_without_render(fake_render_enviro
     assert result["parameter_catalog"] == [{
         "slot": 1, "name": "Echo", "kind": "float", "minimum": 0.0,
         "maximum": 255.0, "value": 5.0,
-    }]
+    }, {"slot": 2, "name": "Color", "kind": "color", "color": [255, 0, 0, 0]}]
     assert result["description_identity"]["description_matches_source"] is True
     assert result["description_identity"]["files_unchanged"] is True
     assert len(calls) == 1
@@ -530,6 +530,99 @@ def test_multiple_scalar_overrides_use_one_description_and_one_render(fake_rende
     assert result["parameter_overrides"][1]["value"] == 16777217
     assert observed == [[{**description["parameters"][0], "value": 80.0}, {**second, "value": 16777217}]]
     assert len(calls) == 2 and "--describe-aex" in calls[0] and "--render-fixture" in calls[1]
+
+
+@pytest.mark.parametrize("render_path", ["classic", "smart"])
+def test_color_and_scalar_overrides_share_one_description_and_frame(fake_render_environment, monkeypatch, render_path):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    color = {**description["parameters"][0], "slot": 2, "name": "Tint", "kind": "color"}
+    description["parameters"].append(color)
+    description["defaults"].append(dict(color))
+    calls = []
+    observed = []
+
+    def harness(args, *unused, **kwargs):
+        calls.append(args)
+        if "--describe-aex" in args:
+            return json.dumps(description).encode()
+        observed.append(json.loads(Path(args[4]).read_text())["parameters"])
+        return _fake_harness(args, *unused, **kwargs)
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["render_path"] = render_path
+    payload["parameter_overrides"] = [{"slot": 1, "value": 80.0}, {"slot": 2, "color": [255, 17, 34, 51]}]
+    result = SESSION.build_response(payload)
+    jsonschema.validate(result, SCHEMA)
+    assert observed == [[{**description["parameters"][0], "value": 80.0}, {**color, "color": [255, 17, 34, 51]}]]
+    assert len(calls) == 2 and "--describe-aex" in calls[0] and "--render-fixture" in calls[1]
+    assert result["parameter_overrides"][1]["color"] == [255, 17, 34, 51]
+    assert "value" not in result["parameter_overrides"][1]
+    broken = json.loads(json.dumps(result))
+    broken["parameter_overrides"][1]["color"] = [255, 17, 34, 256]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(broken, SCHEMA)
+
+
+@pytest.mark.parametrize("color", [
+    [255, 0, 0], [255, 0, 0, 256], [255, 0, -1, 0], [255, True, 0, 0],
+    [255, 0.5, 0, 0], "255,0,0,0",
+])
+def test_color_override_rejects_invalid_channels_before_description(fake_render_environment, monkeypatch, color):
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: pytest.fail("AEX described"))
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_overrides"] = [{"slot": 1, "color": color}]
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+
+
+def test_legacy_single_override_rejects_color_before_description(fake_render_environment, monkeypatch):
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: pytest.fail("AEX described"))
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_override"] = {"slot": 1, "color": [255, 1, 2, 3]}
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+
+
+@pytest.mark.parametrize("invalid", ["scalar_slot", "color_with_value", "hidden", "duplicate", "duplicate_catalog", "both_fields"])
+def test_color_override_rejects_wrong_kind_or_slot_before_render(fake_render_environment, monkeypatch, invalid):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    color = {**description["parameters"][0], "slot": 2, "kind": "color"}
+    description["parameters"].append(color)
+    description["defaults"].append(dict(color))
+    overrides = [{"slot": 2, "color": [255, 17, 34, 51]}]
+    if invalid == "scalar_slot":
+        overrides[0]["slot"] = 1
+    elif invalid == "color_with_value":
+        overrides[0] = {"slot": 2, "value": 17}
+    elif invalid == "hidden":
+        color["visible"] = False
+    elif invalid == "duplicate":
+        overrides.append({"slot": 2, "value": 17})
+    elif invalid == "duplicate_catalog":
+        description["parameters"].append({**color, "name": "Ambiguous color"})
+        description["defaults"].append({**color, "name": "Ambiguous color"})
+    else:
+        overrides[0]["value"] = 17
+    calls = []
+
+    def harness(args, *_unused, **_kwargs):
+        calls.append(args)
+        assert "--describe-aex" in args
+        return json.dumps(description).encode()
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_overrides"] = overrides
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+    assert len(calls) <= 1
 
 
 @pytest.mark.parametrize("case", [

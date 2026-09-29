@@ -343,6 +343,8 @@ def _resolve_parameter_override(
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     if override is None:
         return [], None
+    if not isinstance(override, dict) or set(override) != {"slot", "value"}:
+        raise SessionRequestError("legacy parameter_override requires slot and scalar value")
     parameters, records = _resolve_parameter_overrides(
         [override], harness, plugin, worker, plugin_sha, timeout_ms, require_visible=False,
     )
@@ -356,14 +358,20 @@ def _resolve_parameter_overrides(
     if not isinstance(overrides, list) or not 1 <= len(overrides) <= 16:
         raise SessionRequestError("parameter_overrides requires 1..16 entries")
     seen: set[int] = set()
-    checked: list[tuple[int, float]] = []
+    checked: list[tuple[int, float | list[int]]] = []
     for override in overrides:
-        if not isinstance(override, dict) or set(override) != {"slot", "value"}:
-            raise SessionRequestError("parameter_override requires slot and value")
+        if not isinstance(override, dict) or set(override) not in ({"slot", "value"}, {"slot", "color"}):
+            raise SessionRequestError("parameter override requires slot and one typed value")
         slot = _require_int(override["slot"], "parameter_override.slot")
         if slot in seen:
             raise SessionRequestError("parameter_overrides has duplicate slots")
         seen.add(slot)
+        if "color" in override:
+            color = override["color"]
+            if not isinstance(color, list) or len(color) != 4 or any(type(channel) is not int or not 0 <= channel <= 255 for channel in color):
+                raise SessionRequestError("parameter_override.color must be four ARGB8 channels")
+            checked.append((slot, color))
+            continue
         value = override["value"]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise SessionRequestError("parameter_override.value must be finite")
@@ -386,11 +394,17 @@ def _resolve_parameter_overrides(
             raise SessionRequestError("parameter_override.slot is not uniquely editable")
         parameter = dict(matches[0])
         kind = parameter["kind"]
-        if kind not in {"integer", "float", "angle"} or require_visible and (
+        if kind not in {"integer", "float", "angle", "color"} or require_visible and (
             not parameter["enabled"] or not parameter["visible"]
         ):
             raise SessionRequestError("parameter_override.kind is not editable")
-        if kind == "angle":
+        if isinstance(value, list):
+            if kind != "color":
+                raise SessionRequestError("parameter_override.color requires color parameter")
+            parameter["color"] = value
+        elif kind == "color":
+            raise SessionRequestError("parameter_override.value requires scalar parameter")
+        elif kind == "angle":
             if not -32768 <= value <= 32768 or parameter["component_count"] != 1:
                 raise SessionRequestError("parameter_override.angle is outside the supported range")
             parameter["components"] = [float(value), *parameter["components"][1:]]
@@ -405,7 +419,8 @@ def _resolve_parameter_overrides(
             parameter["value"] = int(value) if kind == "integer" else float(value)
         parameters.append(parameter)
         records.append({
-            "slot": slot, "kind": kind, "value": float(value),
+            "slot": slot, "kind": kind,
+            **({"color": value} if isinstance(value, list) else {"value": float(value)}),
             "description_sha256": _sha256(raw),
             "description_plugin_sha256": staged_sha,
             "description_files_unchanged": identity["files_unchanged"],
@@ -464,7 +479,13 @@ def _describe_aex(request: dict[str, Any], source_relative_path: str | None) -> 
             raise SessionRequestError("ambiguous parameter slot", "parameter_description_error")
         slots.add(record["slot"])
         kind = record["kind"]
-        if kind not in {"integer", "float", "angle"} or not record["enabled"] or not record["visible"]:
+        if kind not in {"integer", "float", "angle", "color"} or not record["enabled"] or not record["visible"]:
+            continue
+        if kind == "color":
+            parameters.append({
+                "slot": record["slot"], "name": record["name"], "kind": kind,
+                "color": record["color"],
+            })
             continue
         minimum, maximum = (
             (-32768.0, 32768.0) if kind == "angle"
