@@ -1929,6 +1929,7 @@ fn install_win64_import(
                     )?;
                 }
                 LegacyWin64Import::Memset => {
+                    uc("write memset return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
                         "install memset import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
