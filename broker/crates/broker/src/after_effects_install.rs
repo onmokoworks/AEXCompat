@@ -182,12 +182,23 @@ pub fn in_place_dependency_search_dirs(plugin: &Path) -> Vec<PathBuf> {
 }
 
 fn search_dirs_with(plugin: &Path, support_files: Option<PathBuf>) -> Vec<PathBuf> {
-    plugin
-        .parent()
-        .map(Path::to_path_buf)
-        .into_iter()
-        .chain(support_files.filter(|dir| transportable_search_dir(dir)))
-        .collect()
+    let parent = plugin.parent().map(Path::to_path_buf);
+    // A plug-in sitting directly in `Support Files` already has it as its own
+    // folder. Listing it twice would be harmless to the DLL search, which
+    // dedupes, but the per-launch kernel staging walks every listed root and
+    // would stage the same relative path twice, which the stage rejects.
+    let same_as_parent = |dir: &PathBuf| {
+        parent.as_ref().is_some_and(|parent| {
+            matches!(
+                (std::fs::canonicalize(parent), std::fs::canonicalize(dir)),
+                (Ok(left), Ok(right)) if left == right
+            )
+        })
+    };
+    let support_files = support_files
+        .filter(|dir| transportable_search_dir(dir))
+        .filter(|dir| !same_as_parent(dir));
+    parent.into_iter().chain(support_files).collect()
 }
 
 fn transportable_search_dir(dir: &Path) -> bool {
@@ -295,7 +306,7 @@ mod tests {
         let plugin = plugin_dir.join("effect.aex");
         assert_eq!(
             search_dirs_with(&plugin, Some(support.clone())),
-            vec![plugin_dir.clone(), support]
+            vec![plugin_dir.clone(), support.clone()]
         );
         assert_eq!(search_dirs_with(&plugin, None), vec![plugin_dir.clone()]);
 
@@ -308,5 +319,12 @@ mod tests {
         let separator = root.0.join("a;b");
         std::fs::create_dir_all(&separator).unwrap();
         assert_eq!(search_dirs_with(&plugin, Some(separator)), vec![plugin_dir]);
+
+        // A plug-in directly in Support Files lists that folder once.
+        let resident = support.join("resident.aex");
+        assert_eq!(
+            search_dirs_with(&resident, Some(support.clone())),
+            vec![support]
+        );
     }
 }

@@ -619,7 +619,8 @@ pub fn run_native_differential(request: DifferentialRequest<'_>) -> io::Result<V
         "gpu_backend":"cpu",
     });
     // One root set for every variant, so an AE install changing mid-run
-    // cannot give the variants of one comparison different runtimes.
+    // cannot give the variants of one comparison different runtimes; a root
+    // that disappears mid-run fails the later variants at session open.
     let dependency_search_dirs =
         crate::after_effects_install::in_place_dependency_search_dirs(request.plugin_path);
     let baseline = match render_variant(
