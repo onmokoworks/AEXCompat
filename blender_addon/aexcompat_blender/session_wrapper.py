@@ -343,65 +343,75 @@ def _resolve_parameter_override(
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     if override is None:
         return [], None
-    if not isinstance(override, dict) or set(override) != {"slot", "value"}:
-        raise SessionRequestError("parameter_override requires slot and value")
-    slot = _require_int(override["slot"], "parameter_override.slot")
-    value = override["value"]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SessionRequestError("parameter_override.value must be finite")
-    try:
-        value = float(value)
-    except OverflowError as exc:
-        raise SessionRequestError("parameter_override.value must be finite") from exc
-    if not math.isfinite(value):
-        raise SessionRequestError("parameter_override.value must be finite")
+    parameters, records = _resolve_parameter_overrides(
+        [override], harness, plugin, worker, plugin_sha, timeout_ms, require_visible=False,
+    )
+    return parameters, records[0]
+
+
+def _resolve_parameter_overrides(
+    overrides: Any, harness: Path, plugin: Path, worker: Path,
+    plugin_sha: str, timeout_ms: int, *, require_visible: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not isinstance(overrides, list) or not 1 <= len(overrides) <= 16:
+        raise SessionRequestError("parameter_overrides requires 1..16 entries")
+    seen: set[int] = set()
+    checked: list[tuple[int, float]] = []
+    for override in overrides:
+        if not isinstance(override, dict) or set(override) != {"slot", "value"}:
+            raise SessionRequestError("parameter_override requires slot and value")
+        slot = _require_int(override["slot"], "parameter_override.slot")
+        if slot in seen:
+            raise SessionRequestError("parameter_overrides has duplicate slots")
+        seen.add(slot)
+        value = override["value"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SessionRequestError("parameter_override.value must be finite")
+        try:
+            value = float(value)
+        except OverflowError as exc:
+            raise SessionRequestError("parameter_override.value must be finite") from exc
+        if not math.isfinite(value):
+            raise SessionRequestError("parameter_override.value must be finite")
+        checked.append((slot, value))
     raw, description = _read_description(harness, plugin, worker, timeout_ms)
     identity = description["plugin_identity"]
-    parameters = description["parameters"]
+    catalog = description["parameters"]
     staged_sha = identity["sha256"]
-    matches = [
-        parameter for parameter in parameters
-        if isinstance(parameter, dict) and type(parameter.get("slot")) is int and parameter["slot"] == slot
-    ]
-    if len(matches) != 1:
-        raise SessionRequestError("parameter_override.slot is not uniquely editable")
-    parameter = dict(matches[0])
-    kind = parameter.get("kind")
-    if kind not in {"integer", "float", "angle"}:
-        raise SessionRequestError("parameter_override.kind is not scalar")
-    if kind == "angle":
-        if not -32768 <= value <= 32768 or parameter.get("component_count") != 1:
-            raise SessionRequestError("parameter_override.angle is outside the supported range")
-        components = parameter.get("components")
-        if (
-            not isinstance(components, list) or len(components) != 3
-            or any(not _finite_number(component) for component in components)
+    parameters: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    for slot, value in checked:
+        matches = [parameter for parameter in catalog if parameter["slot"] == slot]
+        if len(matches) != 1:
+            raise SessionRequestError("parameter_override.slot is not uniquely editable")
+        parameter = dict(matches[0])
+        kind = parameter["kind"]
+        if kind not in {"integer", "float", "angle"} or require_visible and (
+            not parameter["enabled"] or not parameter["visible"]
         ):
-            raise SessionRequestError("invalid angle descriptor", "parameter_description_error")
-        parameter["components"] = [float(value), *components[1:]]
-    else:
-        minimum, maximum = parameter.get("minimum"), parameter.get("maximum")
-        if (
-            not _finite_number(minimum) or not _finite_number(maximum)
-        ):
-            raise SessionRequestError("invalid scalar descriptor", "parameter_description_error")
-        minimum, maximum = float(minimum), float(maximum)
-        if minimum > maximum:
-            raise SessionRequestError("invalid scalar descriptor", "parameter_description_error")
-        if (
-            not minimum <= value <= maximum
-            or (kind == "integer" and (not value.is_integer() or not -(2**31) <= value < 2**31))
-        ):
-            raise SessionRequestError("parameter_override.value is outside the declared range")
-        parameter["value"] = int(value) if kind == "integer" else float(value)
-    record = {
-        "slot": slot, "kind": kind, "value": float(value),
-        "description_sha256": _sha256(raw),
-        "description_plugin_sha256": staged_sha,
-        "description_files_unchanged": identity["files_unchanged"],
-        "description_matches_render_plugin": staged_sha == plugin_sha,
-    }
-    return [parameter], record
+            raise SessionRequestError("parameter_override.kind is not editable")
+        if kind == "angle":
+            if not -32768 <= value <= 32768 or parameter["component_count"] != 1:
+                raise SessionRequestError("parameter_override.angle is outside the supported range")
+            parameter["components"] = [float(value), *parameter["components"][1:]]
+        else:
+            minimum, maximum = float(parameter["minimum"]), float(parameter["maximum"])
+            if minimum > maximum:
+                raise SessionRequestError("invalid scalar descriptor", "parameter_description_error")
+            if not minimum <= value <= maximum or (kind == "integer" and (
+                not value.is_integer() or not -(2**31) <= value < 2**31
+            )):
+                raise SessionRequestError("parameter_override.value is outside the declared range")
+            parameter["value"] = int(value) if kind == "integer" else float(value)
+        parameters.append(parameter)
+        records.append({
+            "slot": slot, "kind": kind, "value": float(value),
+            "description_sha256": _sha256(raw),
+            "description_plugin_sha256": staged_sha,
+            "description_files_unchanged": identity["files_unchanged"],
+            "description_matches_render_plugin": staged_sha == plugin_sha,
+        })
+    return parameters, records
 
 
 def _read_description(
@@ -533,9 +543,18 @@ def _render_aex(
     plugin_sha = _sha256_file(plugin)
     harness_sha_before = _sha256_file(harness)
     worker_sha_before = _sha256_file(worker)
-    parameters, applied_override = _resolve_parameter_override(
-        request.get("parameter_override"), harness, plugin, worker, plugin_sha, timeout_ms,
-    )
+    if "parameter_override" in request and "parameter_overrides" in request:
+        raise SessionRequestError("choose one parameter override form")
+    applied_overrides = None
+    if "parameter_overrides" in request:
+        parameters, applied_overrides = _resolve_parameter_overrides(
+            request["parameter_overrides"], harness, plugin, worker, plugin_sha, timeout_ms,
+        )
+        applied_override = None
+    else:
+        parameters, applied_override = _resolve_parameter_override(
+            request.get("parameter_override"), harness, plugin, worker, plugin_sha, timeout_ms,
+        )
     artifact_render_path = "smartfx" if render_path == "smart" else "classic"
     fixture = {
         "schema": "aexcompat.render_fixture", "schema_version": 2,
@@ -653,6 +672,8 @@ def _render_aex(
     }
     if applied_override is not None:
         response["parameter_override"] = applied_override
+    if applied_overrides is not None:
+        response["parameter_overrides"] = applied_overrides
     return response
 
 
@@ -667,13 +688,13 @@ def build_response(request: dict[str, Any]) -> dict[str, Any]:
     source_relative_path = _validate_relative_plugin_path(plugin.get("source_relative_path"))
     mode = request.get("mode", "identity_no_aex")
     if mode == "describe_aex":
-        if any(key in request for key in ("frame", "input", "output", "parameter_override", "render_path", "timeout_ms")):
+        if any(key in request for key in ("frame", "input", "output", "parameter_override", "parameter_overrides", "render_path", "timeout_ms")):
             raise SessionRequestError("describe_aex accepts only plugin")
         return _describe_aex(request, source_relative_path)
     pixels, frame = _decode_rgba8(request)
     if mode == "render_aex":
         return _render_aex(request, pixels, frame, source_relative_path)
-    if "parameter_override" in request or "render_path" in request:
+    if "parameter_override" in request or "parameter_overrides" in request or "render_path" in request:
         raise SessionRequestError("AEX parameters and render_path require render_aex")
     if mode not in {"identity_no_aex", "fixture_invert_no_aex"}:
         return {

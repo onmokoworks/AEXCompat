@@ -215,9 +215,7 @@ def initial(output: Path) -> None:
         item.kind, item.name, item.value_text = "float", "Exact decimal", "0.1"
         if set(bpy.ops.aexcompat.choose_parameter(tree_name=tree.name, node_name=precise.name)) != {"FINISHED"}:
             raise RuntimeError("decimal selection failed")
-        if module._parameter_override(precise.parameter_slot, precise.parameter_kind,
-                                      precise.parameter_integer_value, precise.parameter_value_text,
-                                      precise.parameter_value) != {"slot": 1, "value": 0.1}:
+        if module._named_parameter_overrides(precise) != [{"slot": 1, "value": 0.1}]:
             raise RuntimeError("Blender rounded a valid decimal default")
         scene = bpy.context.scene
         scene.use_nodes = True

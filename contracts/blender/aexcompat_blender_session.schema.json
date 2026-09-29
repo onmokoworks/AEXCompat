@@ -22,6 +22,12 @@
       },
       "additionalProperties": false
     },
+    "parameter_overrides": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"$ref": "#/properties/parameter_override"}
+    },
     "parameter_catalog": {
       "type": "array",
       "maxItems": 256,
@@ -122,6 +128,7 @@
       "if": {"properties": {"status": {"const": "rendered"}}, "required": ["status"]},
       "then": {
         "required": ["render_identity", "frame", "input", "output", "diff"],
+        "not": {"required": ["parameter_override", "parameter_overrides"]},
         "properties": {
           "failure_class": {"const": "none"},
           "aex_render_performed": {"const": true},
@@ -144,7 +151,7 @@
         "not": {"anyOf": [
           {"required": ["frame"]}, {"required": ["input"]}, {"required": ["output"]},
           {"required": ["diff"]}, {"required": ["render_identity"]},
-          {"required": ["parameter_override"]}
+          {"required": ["parameter_override"]}, {"required": ["parameter_overrides"]}
         ]},
         "properties": {
           "failure_class": {"const": "none"},
@@ -163,6 +170,7 @@
     {
       "if": {"properties": {"status": {"enum": ["identity_only", "fixture_transform", "unsupported", "error"]}}, "required": ["status"]},
       "then": {
+        "not": {"required": ["parameter_overrides"]},
         "properties": {
           "host_success": {"const": false},
           "plugin_identity": {"properties": {"state": {"const": "not_loaded"}}}
