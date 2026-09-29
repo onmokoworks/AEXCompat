@@ -2219,6 +2219,29 @@ fn stdio_vsnprintf_s_truncates_with_nul_and_negative_one() {
 }
 
 #[test]
+fn strncpy_import_returns_after_copying_and_zero_padding() {
+    const STRNCPY: u64 = STUB_BASE + 0x220;
+    let source = DATA_BASE + 0x100;
+    let destination = DATA_BASE + 0x200;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, STRNCPY, "ucrtbase.dll", "strncpy").unwrap();
+    assert_eq!(engine.unicorn.mem_read_as_vec(STRNCPY, 1).unwrap(), [0xc3]);
+    engine.unicorn.mem_write(source, b"AB\0Z").unwrap();
+    engine.unicorn.mem_write(destination, &[0xaa; 5]).unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64(STRNCPY, [destination, source, 5, 0, 0, 0])
+            .unwrap(),
+        destination
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(destination, 5).unwrap(),
+        b"AB\0\0\0"
+    );
+}
+
+#[test]
 fn strncpy_s_is_string_library_scoped_and_ucrtbase_compatible() {
     assert_eq!(
         dispatch_win64_import("api-ms-win-crt-string-l1-1-0.dll", "strncpy_s"),
