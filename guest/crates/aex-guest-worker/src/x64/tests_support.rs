@@ -12641,6 +12641,16 @@ fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
         dispatch_win64_import("fixture.dll", "log"),
         Win64ImportDispatch::UnsupportedLegacyImport
     );
+    for library in [crt_math, "ucrtbase.dll"] {
+        assert_eq!(
+            dispatch_win64_import(library, "log2f"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Log2F)
+        );
+    }
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "log2f"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
     assert_eq!(
         dispatch_win64_import(crt_math, "cos"),
         Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Cos)
@@ -12676,6 +12686,54 @@ fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
     assert_eq!(
         dispatch_win64_import("fixture.dll", "fmodf"),
         Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn win64_crt_log2f_uses_scalar_xmm_abi_and_preserves_special_values() {
+    const LOG2F_IMPORT: u64 = STUB_BASE + 0x1e8;
+
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.mem_write(LOG2F_IMPORT, &[0xc3]).unwrap();
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            LOG2F_IMPORT,
+            "api-ms-win-crt-math-l1-1-0.dll",
+            "log2f",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Log2F)
+    );
+
+    let call_log2f = |engine: &mut GuestEngine<'static>, value: f32| {
+        let mut xmm0 = [0xa5; 16];
+        xmm0[..4].copy_from_slice(&value.to_le_bytes());
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &xmm0)
+            .unwrap();
+        engine.call_win64(LOG2F_IMPORT, [0; 6]).unwrap();
+        let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        assert_eq!(&result[4..], &xmm0[4..]);
+        f32::from_le_bytes(result[..4].try_into().unwrap())
+    };
+
+    for (input, expected) in [(0.5, -1.0f32), (1.0, 0.0), (2.0, 1.0), (8.0, 3.0)] {
+        assert_eq!(call_log2f(&mut engine, input).to_bits(), expected.to_bits());
+    }
+    assert_eq!(call_log2f(&mut engine, 0.0), f32::NEG_INFINITY);
+    assert_eq!(call_log2f(&mut engine, -0.0), f32::NEG_INFINITY);
+    assert_eq!(call_log2f(&mut engine, f32::INFINITY), f32::INFINITY);
+    assert!(call_log2f(&mut engine, -1.0).is_nan());
+    assert!(call_log2f(&mut engine, f32::NAN).is_nan());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .math_calls
+            .iter()
+            .any(|call| call.starts_with("log2f("))
     );
 }
 
