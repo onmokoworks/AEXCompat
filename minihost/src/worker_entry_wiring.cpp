@@ -193,6 +193,7 @@ bool is_render_worker();
 // callback null. Defined beside it in l2_main so the answer comes from the
 // assignment list that ships, not from one a test wrote (issue #981).
 bool verify_production_utility_callback_table();
+bool verify_production_iterate_utility_callbacks();
 // Calls the production composite_rect slot through in_data->utils (issue #1252).
 bool verify_production_composite_rect_callback();
 // Calls the production gaussian_kernel slot through in_data->utils (issue #1253).
@@ -674,6 +675,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_aegp_layer_render_options_suite2,
         &verify_utils_handle_callbacks_wired,
         &verify_production_utility_callback_table,
+        &verify_production_iterate_utility_callbacks,
         &verify_production_composite_rect_callback,
         &verify_production_gaussian_kernel_callback,
         &verify_checkout_param_beyond_table,
