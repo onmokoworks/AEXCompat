@@ -13539,7 +13539,9 @@ fn import_trace_records_twelve_total_win64_arguments() {
 #[test]
 fn suite_name_reader_stops_at_nul_and_preserves_page_boundaries() {
     let mut engine = test_engine(&[0xc3]);
-    engine.write(DATA_BASE + 0x100, b"PF Iterate8 Suite\0ignored").unwrap();
+    engine
+        .write(DATA_BASE + 0x100, b"PF Iterate8 Suite\0ignored")
+        .unwrap();
     assert_eq!(
         read_suite_name(&engine.unicorn, DATA_BASE + 0x100),
         b"PF Iterate8 Suite"
@@ -13559,7 +13561,10 @@ fn suite_name_reader_stops_at_nul_and_preserves_page_boundaries() {
     engine.write(DATA_BASE + PAGE_SIZE, b"DEF\0").unwrap();
     assert_eq!(read_suite_name(&engine.unicorn, end_of_page), b"ABCDEF");
     engine.write(DATA_BASE + 0x200, &[b'X'; 256]).unwrap();
-    assert_eq!(read_suite_name(&engine.unicorn, DATA_BASE + 0x200).len(), 256);
+    assert_eq!(
+        read_suite_name(&engine.unicorn, DATA_BASE + 0x200).len(),
+        256
+    );
 }
 
 #[test]
