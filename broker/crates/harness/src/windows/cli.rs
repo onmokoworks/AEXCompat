@@ -579,8 +579,7 @@ fn cli_runtime_candidates_for_plugin(
     candidates
         .into_iter()
         .filter(|root| {
-            canonical_runtime_dependency_root(root)
-                .is_ok_and(|root| plugin.starts_with(&root))
+            canonical_runtime_dependency_root(root).is_ok_and(|root| plugin.starts_with(&root))
         })
         .collect()
 }
@@ -590,17 +589,19 @@ fn unique_cli_runtime_candidate(
     candidates: Vec<PathBuf>,
 ) -> Result<Option<PathBuf>, String> {
     if candidates.len() > 1 {
-        return Err(format!("Ambiguous registered runtime dependency: {basename}"));
+        return Err(format!(
+            "Ambiguous registered runtime dependency: {basename}"
+        ));
     }
     let Some(candidate) = candidates.into_iter().next() else {
         return Ok(None);
     };
     let root = canonical_runtime_dependency_root(&candidate)?;
     let path = root.join(basename);
-    if !fs::metadata(&path)
-        .is_ok_and(|metadata| metadata.is_file())
-    {
-        return Err(format!("Registered runtime candidate disappeared: {basename}"));
+    if !fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(format!(
+            "Registered runtime candidate disappeared: {basename}"
+        ));
     }
     Ok(Some(root))
 }
@@ -1963,18 +1964,14 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
         };
-        let parameters = match inspected_plugin_parameters_with_roots(
-            &repository,
-            plugin,
-            &hash,
-            roots,
-        ) {
-            Ok(parameters) => parameters,
-            Err(error) => {
-                eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
-                std::process::exit(1);
-            }
-        };
+        let parameters =
+            match inspected_plugin_parameters_with_roots(&repository, plugin, &hash, roots) {
+                Ok(parameters) => parameters,
+                Err(error) => {
+                    eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
+                    std::process::exit(1);
+                }
+            };
         println!("{}", serde_json::to_string_pretty(&parameters).unwrap());
         return Ok(());
     }

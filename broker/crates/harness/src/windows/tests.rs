@@ -2122,26 +2122,18 @@ mod tests {
         let mut found = std::collections::BTreeMap::new();
         found.insert("helper.dll".to_owned(), vec![first.clone(), second.clone()]);
         assert_eq!(
-            admit_cli_runtime_roots(
-                &nested_plugin,
-                &["helper.dll".to_owned()],
-                &found,
-                true,
-            )
-            .unwrap(),
+            admit_cli_runtime_roots(&nested_plugin, &["helper.dll".to_owned()], &found, true,)
+                .unwrap(),
             vec![
                 nested_plugin.parent().unwrap().to_path_buf(),
                 canonical_runtime_dependency_root(&first).unwrap(),
             ]
         );
-        assert!(admit_cli_runtime_roots(
-            &nested_plugin,
-            &["helper.dll".to_owned()],
-            &found,
-            false,
-        )
-        .unwrap_err()
-        .contains("Ambiguous"));
+        assert!(
+            admit_cli_runtime_roots(&nested_plugin, &["helper.dll".to_owned()], &found, false,)
+                .unwrap_err()
+                .contains("Ambiguous")
+        );
         assert_eq!(
             cli_runtime_candidates_for_plugin(
                 &nested_plugin,
@@ -2164,18 +2156,27 @@ mod tests {
             unique_cli_runtime_candidate("helper.dll", vec![first.clone()]).unwrap(),
             Some(canonical_runtime_dependency_root(&first).unwrap())
         );
-        assert_eq!(unique_cli_runtime_candidate("helper.dll", vec![]).unwrap(), None);
-        assert!(unique_cli_runtime_candidate("helper.dll", vec![first.clone(), second.clone()])
-            .unwrap_err()
-            .contains("Ambiguous"));
+        assert_eq!(
+            unique_cli_runtime_candidate("helper.dll", vec![]).unwrap(),
+            None
+        );
+        assert!(
+            unique_cli_runtime_candidate("helper.dll", vec![first.clone(), second.clone()])
+                .unwrap_err()
+                .contains("Ambiguous")
+        );
         fs::remove_file(first.join("helper.dll")).unwrap();
-        assert!(unique_cli_runtime_candidate("helper.dll", vec![first.clone()])
-            .unwrap_err()
-            .contains("disappeared"));
+        assert!(
+            unique_cli_runtime_candidate("helper.dll", vec![first.clone()])
+                .unwrap_err()
+                .contains("disappeared")
+        );
         fs::create_dir(first.join("helper.dll")).unwrap();
-        assert!(unique_cli_runtime_candidate("helper.dll", vec![first])
-            .unwrap_err()
-            .contains("disappeared"));
+        assert!(
+            unique_cli_runtime_candidate("helper.dll", vec![first])
+                .unwrap_err()
+                .contains("disappeared")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
