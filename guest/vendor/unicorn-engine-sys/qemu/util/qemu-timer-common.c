@@ -44,15 +44,25 @@ void init_get_clock(void)
 
 #else
 
-int use_rt_clock;
+#include <pthread.h>
 
-void init_get_clock(void)
+int use_rt_clock;
+/* Engines initialize concurrently; timeout threads must see one clock source. */
+static pthread_once_t clock_init_once = PTHREAD_ONCE_INIT;
+
+static void init_get_clock_once(void)
 {
     struct timespec ts;
 
-    use_rt_clock = 0;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
         use_rt_clock = 1;
+    }
+}
+
+void init_get_clock(void)
+{
+    if (pthread_once(&clock_init_once, init_get_clock_once) != 0) {
+        abort();
     }
 }
 #endif

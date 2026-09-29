@@ -26115,3 +26115,38 @@ fn printf_float_general_fixed_exponential_and_padding() {
         );
     }
 }
+
+#[cfg(not(windows))]
+#[test]
+fn concurrent_unicorn_initialization_does_not_expire_active_guest_calls() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .add_code_hook(TEST_CODE, TEST_CODE, |_, _, _| {
+            std::thread::sleep(Duration::from_millis(1));
+        })
+        .unwrap();
+    let finished = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let initialize = scope.spawn(|| {
+            for _ in 0..1_000 {
+                let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+                unicorn.mem_map(0x1000, 0x1000, Prot::ALL).unwrap();
+            }
+            finished.store(true, Ordering::Release);
+        });
+        let mut calls = 0;
+        while !finished.load(Ordering::Acquire) || calls < 64 {
+            assert!(
+                calls < 4_096,
+                "concurrent engine initialization did not finish"
+            );
+            let result = engine.call_win64(TEST_CODE, [0; 6]);
+            assert!(result.is_ok(), "guest call {calls} stopped: {result:?}");
+            calls += 1;
+        }
+        initialize.join().unwrap();
+    });
+}
