@@ -220,6 +220,8 @@ def _fake_harness(args, *_unused, corruption=None, **_kwargs):
     fixture_path, output_dir = Path(args[4]), Path(args[5])
     fixture_bytes = fixture_path.read_bytes()
     fixture = json.loads(fixture_bytes)
+    render_path = fixture["render_path"]
+    artifact_render_path = "smartfx" if render_path == "smart" else "classic"
     rgba = _png_rgba(fixture_path.parent / fixture["primary_layer"])
     width, height = len(rgba) // 8, 2
     assert (width, height) == (2, 2)
@@ -228,7 +230,7 @@ def _fake_harness(args, *_unused, corruption=None, **_kwargs):
     case_sha = "a" * 64
     identity = {
         "sha256": case_sha, "plugin_sha256": plugin_sha, "fixture_sha256": fixture_sha,
-        "case_index": 0, "pixel_format": "argb8", "render_path": "classic",
+        "case_index": 0, "pixel_format": "argb8", "render_path": render_path,
     }
     to_argb = lambda data: b"".join(data[i + 3 : i + 4] + data[i : i + 3] for i in range(0, len(data), 4))
     input_argb = to_argb(rgba)
@@ -250,7 +252,7 @@ def _fake_harness(args, *_unused, corruption=None, **_kwargs):
             "premultiplication": "straight",
             "comparison_identity": {
                 "plugin_sha256": plugin_sha, "fixture_case": identity, "pixel_format": "argb8",
-                "render_path": "classic", "input_sha256": hashlib.sha256(input_argb).hexdigest(),
+                "render_path": artifact_render_path, "input_sha256": hashlib.sha256(input_argb).hexdigest(),
                 "world_sha256": hashlib.sha256(raw).hexdigest(),
                 "timing": fixture["timing"],
             },
@@ -282,13 +284,205 @@ def _fake_harness(args, *_unused, corruption=None, **_kwargs):
             "case_identity": identity, "artifact_directory": "cases/" + identity["sha256"],
             "report": {
                 "schema": "aexcompat.render_fixture_report", "schema_version": 1,
-                "pixel_format": "argb8", "render_path": "classic",
+                "pixel_format": "argb8", "render_path": render_path,
                 "final_artifact": metadata_by_stage["final"],
                 "checkpoints": {"input": metadata_by_stage["checkpoints/input"]},
             },
         }],
     }
     return json.dumps(report)
+
+
+def _fake_description(plugin_sha, *, kind="float", maximum=255.0):
+    parameter = {
+        "slot": 1, "name": "Echo", "kind": kind, "minimum": 0.0,
+        "maximum": maximum, "value": 5.0, "choices": [],
+        "color": [255, 0, 0, 0], "components": [0.0, 0.0, 0.0],
+        "component_count": 0, "layer_path": None, "enabled": True,
+        "visible": True, "supervised": False, "debug_summary": None,
+        "custom_ui_events": 0, "control_size": [0, 0],
+    }
+    return {
+        "schema": "aexcompat.macos_aex_description", "schema_version": 1,
+        "plugin_identity": {
+            "sha256": plugin_sha, "post_setup_sha256": plugin_sha,
+            "files_unchanged": True,
+        },
+        "parameters": [parameter], "defaults": [json.loads(json.dumps(parameter))],
+    }
+
+
+def test_scalar_override_uses_single_canonical_record_and_smart_fixture(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    observed = []
+
+    def harness(args, *unused, **kwargs):
+        if "--describe-aex" in args:
+            return json.dumps(description).encode()
+        fixture = json.loads(Path(args[4]).read_text())
+        observed.append(fixture)
+        return _fake_harness(args, *unused, **kwargs)
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["render_path"] = "smart"
+    payload["parameter_override"] = {"slot": 1, "value": 80.0}
+    result = SESSION.build_response(payload)
+    jsonschema.validate(result, SCHEMA)
+    assert result["status"] == "rendered"
+    assert result["render_path"] == "smart"
+    assert observed[0]["checkpoints"] == [{"id": "input", "stage": "smart-input"}]
+    assert observed[0]["parameters"] == [{**description["parameters"][0], "value": 80.0}]
+    assert result["parameter_override"]["description_matches_render_plugin"] is True
+    assert result["parameter_override"]["value"] == 80.0
+
+
+@pytest.mark.parametrize("slot,value,kind", [(2, 4.0, "float"), (1, 256.0, "float"), (1, 4.5, "integer"), (1, 4.0, "color")])
+def test_scalar_override_rejects_unknown_out_of_range_or_non_scalar(fake_render_environment, monkeypatch, slot, value, kind):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind=kind)
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda args, *_unused, **_kwargs: json.dumps(description).encode())
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_override"] = {"slot": slot, "value": value}
+    with pytest.raises(SESSION.SessionRequestError) as error:
+        SESSION.build_response(payload)
+    assert error.value.failure_class == "request_validation_error"
+
+
+def test_scalar_override_rejects_failed_description_without_render(fake_render_environment, monkeypatch):
+    calls = []
+
+    def harness(args, *_unused, **_kwargs):
+        calls.append(args)
+        raise SESSION.SessionRequestError("description failed", "parameter_description_error")
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_override"] = {"slot": 1, "value": 80.0}
+    with pytest.raises(SESSION.SessionRequestError) as error:
+        SESSION.build_response(payload)
+    assert error.value.failure_class == "parameter_description_error"
+    assert len(calls) == 1 and "--describe-aex" in calls[0]
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["invalid_json", "duplicate_key", "missing_identity_field", "missing_defaults",
+     "missing_post_setup", "extra_record_key", "bad_default", "nonfinite", "huge_bound", "oversize"],
+)
+def test_scalar_override_rejects_malformed_description_before_render(fake_render_environment, monkeypatch, corruption):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    if corruption == "missing_identity_field":
+        del description["plugin_identity"]["files_unchanged"]
+    if corruption == "missing_defaults":
+        del description["defaults"]
+    if corruption == "missing_post_setup":
+        del description["plugin_identity"]["post_setup_sha256"]
+    if corruption == "extra_record_key":
+        description["parameters"][0]["unexpected"] = 1
+    if corruption == "bad_default":
+        description["defaults"][0]["color"] = [1, 2]
+    if corruption == "nonfinite":
+        description["parameters"][0]["value"] = float("nan")
+    if corruption == "huge_bound":
+        description["parameters"][0]["maximum"] = 10**400
+    calls = []
+
+    def harness(args, *_unused, **_kwargs):
+        calls.append(args)
+        assert "--describe-aex" in args
+        if corruption == "invalid_json":
+            return b"{"
+        if corruption == "duplicate_key":
+            return b'{"schema":1,"schema":2}'
+        if corruption == "oversize":
+            raise SESSION.SessionRequestError("too large", "artifact_mismatch")
+        return json.dumps(description).encode()
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_override"] = {"slot": 1, "value": 80.0}
+    with pytest.raises(SESSION.SessionRequestError) as error:
+        SESSION.build_response(payload)
+    assert error.value.failure_class == "parameter_description_error"
+    assert len(calls) == 1
+
+
+def test_scalar_override_records_description_identity_change_without_launch_gate(fake_render_environment, monkeypatch):
+    description = _fake_description("0" * 64)
+    observed = []
+
+    def harness(args, *unused, **kwargs):
+        if "--describe-aex" in args:
+            return json.dumps(description).encode()
+        observed.append(json.loads(Path(args[4]).read_text())["parameters"])
+        return _fake_harness(args, *unused, **kwargs)
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_override"] = {"slot": 1, "value": 80.0}
+    result = SESSION.build_response(payload)
+    jsonschema.validate(result, SCHEMA)
+    assert result["status"] == "rendered"
+    assert result["parameter_override"]["description_matches_render_plugin"] is False
+    assert observed == [[{**description["parameters"][0], "value": 80.0}]]
+
+
+def test_angle_override_changes_only_first_component(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind="angle")
+    description["parameters"][0]["component_count"] = 1
+    description["parameters"][0]["components"] = [2.0, 7.0, 9.0]
+    observed = []
+
+    def harness(args, *unused, **kwargs):
+        if "--describe-aex" in args:
+            return json.dumps(description).encode()
+        observed.append(json.loads(Path(args[4]).read_text())["parameters"])
+        return _fake_harness(args, *unused, **kwargs)
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_override"] = {"slot": 1, "value": 45.0}
+    result = SESSION.build_response(payload)
+    assert result["status"] == "rendered"
+    assert observed[0] == [{**description["parameters"][0], "components": [45.0, 7.0, 9.0]}]
+
+
+def test_non_aex_mode_rejects_override_without_invoking_harness(monkeypatch):
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: pytest.fail("harness was invoked"))
+    payload = request("identity_no_aex")
+    payload["parameter_override"] = {"slot": 1, "value": 5.0}
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
+@pytest.mark.parametrize("behavior", ["invalid_stdout", "nonzero_exit", "oversized_stdout"])
+def test_parameter_description_subprocess_failure_does_not_render(fake_render_environment, behavior):
+    harness = Path(SESSION.os.environ["AEXCOMPAT_HARNESS"])
+    if behavior == "invalid_stdout":
+        body = "printf '{bad json'\n"
+    elif behavior == "nonzero_exit":
+        body = "exit 3\n"
+    else:
+        body = f"{sys.executable} -c 'import sys; sys.stdout.write(\"x\" * {SESSION.MAX_RENDER_METADATA_BYTES + 1})'\n"
+    harness.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    harness.chmod(0o755)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_override"] = {"slot": 1, "value": 80.0}
+    with pytest.raises(SESSION.SessionRequestError) as error:
+        SESSION.build_response(payload)
+    assert error.value.failure_class == "parameter_description_error"
 
 
 def test_real_render_mode_checks_pixels_and_identity(fake_render_environment, monkeypatch):

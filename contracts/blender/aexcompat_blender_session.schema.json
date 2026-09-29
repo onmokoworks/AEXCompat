@@ -7,8 +7,23 @@
   "properties": {
     "schema_version": {"const": 1},
     "response_kind": {"const": "aexcompat_blender_session_result"},
+    "render_path": {"enum": ["classic", "smart"]},
+    "parameter_override": {
+      "type": "object",
+      "required": ["slot", "kind", "value", "description_sha256", "description_plugin_sha256", "description_files_unchanged", "description_matches_render_plugin"],
+      "properties": {
+        "slot": {"type": "integer", "minimum": 1},
+        "kind": {"enum": ["integer", "float", "angle"]},
+        "value": {"type": "number"},
+        "description_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_plugin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_files_unchanged": {"type": ["boolean", "null"]},
+        "description_matches_render_plugin": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "status": {"enum": ["identity_only", "fixture_transform", "rendered", "unsupported", "error"]},
-    "failure_class": {"enum": ["none", "aex_not_loaded", "request_validation_error", "empty_input", "unsupported_platform", "worker_unavailable", "worker_crash", "worker_failure", "session_timeout", "artifact_mismatch"]},
+    "failure_class": {"enum": ["none", "aex_not_loaded", "request_validation_error", "empty_input", "unsupported_platform", "worker_unavailable", "worker_crash", "worker_failure", "session_timeout", "artifact_mismatch", "parameter_description_error"]},
     "aex_render_performed": {"type": "boolean"},
     "host_success": {"type": "boolean"},
     "worker_identity": {
