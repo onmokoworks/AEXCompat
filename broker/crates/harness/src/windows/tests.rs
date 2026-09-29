@@ -2096,6 +2096,92 @@ mod tests {
     }
 
     #[test]
+    fn cli_runtime_roots_require_unambiguous_live_dll() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-cli-runtime-candidate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("helper.dll"), b"same DLL bytes").unwrap();
+        fs::write(second.join("helper.dll"), b"same DLL bytes").unwrap();
+
+        let nested_plugin = first.join("Plug-ins").join("effect.aex");
+        fs::create_dir_all(nested_plugin.parent().unwrap()).unwrap();
+        fs::write(&nested_plugin, b"fixture AEX").unwrap();
+        let nested_plugin = canonical_deverbatim(&nested_plugin).unwrap();
+        assert_eq!(
+            registered_cli_runtime_roots_for_unresolved(&nested_plugin, &[]).unwrap(),
+            vec![nested_plugin.parent().unwrap().to_path_buf()]
+        );
+        let mut found = std::collections::BTreeMap::new();
+        found.insert("helper.dll".to_owned(), vec![first.clone(), second.clone()]);
+        assert_eq!(
+            admit_cli_runtime_roots(&nested_plugin, &["helper.dll".to_owned()], &found, true,)
+                .unwrap(),
+            vec![
+                nested_plugin.parent().unwrap().to_path_buf(),
+                canonical_runtime_dependency_root(&first).unwrap(),
+            ]
+        );
+        assert!(
+            admit_cli_runtime_roots(&nested_plugin, &["helper.dll".to_owned()], &found, false,)
+                .unwrap_err()
+                .contains("Ambiguous")
+        );
+        assert_eq!(
+            cli_runtime_candidates_for_plugin(
+                &nested_plugin,
+                vec![first.clone(), second.clone()],
+                true
+            ),
+            vec![first.clone()]
+        );
+        assert_eq!(
+            cli_runtime_candidates_for_plugin(
+                &nested_plugin,
+                vec![first.clone(), second.clone()],
+                false
+            )
+            .len(),
+            2
+        );
+
+        assert_eq!(
+            unique_cli_runtime_candidate("helper.dll", vec![first.clone()]).unwrap(),
+            Some(canonical_runtime_dependency_root(&first).unwrap())
+        );
+        assert_eq!(
+            unique_cli_runtime_candidate("helper.dll", vec![]).unwrap(),
+            None
+        );
+        assert!(
+            unique_cli_runtime_candidate("helper.dll", vec![first.clone(), second.clone()])
+                .unwrap_err()
+                .contains("Ambiguous")
+        );
+        fs::remove_file(first.join("helper.dll")).unwrap();
+        assert!(
+            unique_cli_runtime_candidate("helper.dll", vec![first.clone()])
+                .unwrap_err()
+                .contains("disappeared")
+        );
+        fs::create_dir(first.join("helper.dll")).unwrap();
+        assert!(
+            unique_cli_runtime_candidate("helper.dll", vec![first])
+                .unwrap_err()
+                .contains("disappeared")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn delay_import_table_is_bounded_terminated_and_basename_only() {
         let mut bytes = vec![0u8; 96];
         bytes[0..4].copy_from_slice(&1u32.to_le_bytes());
