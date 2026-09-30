@@ -63,9 +63,12 @@ def test_resolve_ofx_contract_is_machine_checkable_and_fail_closed():
     assert len(contract["identity"]["source_sha256"]) == 64
     assert len(contract["identity"]["binary_sha256"]) == 64
     assert contract["identity"]["binary_sha256"] == contract["macos_host_evidence"]["binary_sha256"]
-    assert hashlib.sha256(
-        (ROOT / "bridges" / "resolve-ofx" / "src" / "resolve_ofx_plugin.cpp").read_bytes()
-    ).hexdigest().upper() == contract["identity"]["source_sha256"]
+    # Git may expand LF to CRLF in a Windows checkout; this records the
+    # canonical source content rather than that checkout's line endings.
+    source_bytes = (
+        ROOT / "bridges" / "resolve-ofx" / "src" / "resolve_ofx_plugin.cpp"
+    ).read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(source_bytes).hexdigest().upper() == contract["identity"]["source_sha256"]
     assert hashlib.sha256(
         (ROOT / "bridges" / "resolve-ofx" / "fixtures" / "control-input.png").read_bytes()
     ).hexdigest().upper() == contract["macos_host_evidence"]["control_input_sha256"]
