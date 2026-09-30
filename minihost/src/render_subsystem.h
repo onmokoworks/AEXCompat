@@ -328,6 +328,10 @@ struct RenderContextState {
   SpatialRatio pixel_aspect_ratio;
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
+  // Actual input frame extent for classic sessions, whose SmartFX extent is
+  // otherwise unavailable to scene callbacks when no spatial trailer exists.
+  int32_t frame_width{};
+  int32_t frame_height{};
   int32_t pre_effect_source_origin_x{};
   int32_t pre_effect_source_origin_y{};
   int32_t render_quality{1};

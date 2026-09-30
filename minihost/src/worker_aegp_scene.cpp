@@ -12,6 +12,7 @@
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_suite_registry.hpp"
 #include "worker_pf_suites_internal.hpp"
+#include "render_subsystem.h"
 
 #include <algorithm>
 #include <climits>
@@ -381,6 +382,16 @@ auto& g_aegp_effect = state().effect;
 #define bump_render_project_timestamp() scene_context()->hooks.bump_project_timestamp()
 #define make_utf16_handle(...) scene_context()->hooks.make_utf16_handle(__VA_ARGS__)
 #define free_aegp_mem_handle(...) scene_context()->hooks.free_mem_handle(__VA_ARGS__)
+
+int32_t scene_frame_width() {
+  const int32_t frame_width = aexcompat::render::render_context_state().frame_width;
+  return frame_width > 0 ? frame_width : g_smart_width;
+}
+
+int32_t scene_frame_height() {
+  const int32_t frame_height = aexcompat::render::render_context_state().frame_height;
+  return frame_height > 0 ? frame_height : g_smart_height;
+}
 
 aexcompat::scene_model::Registry& scene_registry() noexcept {
   return aexcompat::scene_model::registry();
@@ -1006,9 +1017,9 @@ int32_t __cdecl aegp_get_item_dimensions(
       resolved.item_kind != ItemKind::composition)
     return 4;
   const int32_t result_width = g_full_resolution_width > 0
-      ? g_full_resolution_width : g_smart_width;
+      ? g_full_resolution_width : scene_frame_width();
   const int32_t result_height = g_full_resolution_height > 0
-      ? g_full_resolution_height : g_smart_height;
+      ? g_full_resolution_height : scene_frame_height();
   if (result_width <= 0 || result_height <= 0 ||
       result_width > 32768 || result_height > 32768) return 4;
   *width = result_width;
@@ -1066,9 +1077,9 @@ int32_t __cdecl aegp_get_layer_masked_bounds(
   // would refuse valid layer times.
   if (time->scale == 0) return 4;
   const int32_t width = g_full_resolution_width > 0
-      ? g_full_resolution_width : g_smart_width;
+      ? g_full_resolution_width : scene_frame_width();
   const int32_t height = g_full_resolution_height > 0
-      ? g_full_resolution_height : g_smart_height;
+      ? g_full_resolution_height : scene_frame_height();
   if (width <= 0 || height <= 0 || width > 32768 || height > 32768) return 4;
   *bounds = AegpFloatRect{0.0, 0.0, static_cast<double>(width),
                           static_cast<double>(height)};
@@ -1152,7 +1163,7 @@ int32_t __cdecl aegp_get_layer_stream_value_v2(void* layer, int32_t which_stream
       !time || !value || !valid_comp_time(*time) ||
       !layer_active_at_time(static_cast<std::size_t>(index), *time)) return 4;
   const int32_t width = g_full_resolution_width > 0
-      ? g_full_resolution_width : g_smart_width;
+      ? g_full_resolution_width : scene_frame_width();
   if (width <= 0 || width > INT16_MAX) return 4;
   double zoom = 0.0;
   if (!resolve_layer_camera_zoom(static_cast<std::size_t>(index), *time,
@@ -1487,8 +1498,10 @@ int32_t __cdecl aegp_get_layer_transfer_mode(
 int32_t __cdecl aegp_get_layer_object_type(void* layer, int32_t* type) {
   ObjectSnapshot resolved{};
   if (!type || !resolve_scene_layer(layer, resolved)) return 4;
-  *type = state().dynamic_camera_live &&
-      resolved.identity == state().dynamic_camera_identity ? 2 : 0;
+  *type = (state().dynamic_camera_live &&
+      resolved.identity == state().dynamic_camera_identity) ||
+      (state().authored_camera_live &&
+       resolved.identity == state().authored_camera_identity) ? 2 : 0;
   ++g_aegp_layer_attribute_calls;
   return 0;
 }

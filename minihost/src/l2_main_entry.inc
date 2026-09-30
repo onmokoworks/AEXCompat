@@ -2798,7 +2798,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
         capture_l2_companion_manifest, capture_l2_dependency_search_dirs,
         capture_plugin_data_selector, parse_l2_render_diagnostic_layout,
-        parse_l2_world_capture},
+        parse_l2_world_capture,
+        +[](void*, const wchar_t* value) { return parse_active_camera_payload(value); }},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -2814,7 +2815,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
         capture_l2_companion_manifest, capture_l2_dependency_search_dirs,
         capture_plugin_data_selector, parse_l2_render_diagnostic_layout,
-        parse_l2_world_capture},
+        parse_l2_world_capture,
+        +[](void*, const wchar_t* value) { return parse_active_camera_payload(value); }},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -2879,7 +2881,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return run_discovery_session(invocation.cluster_manifest_path, runtime_hooks);
   }
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
-  if (is_rendering_worker()) aexcompat::mask_runtime::set_model_enabled(true);
+  if (is_rendering_worker()) {
+    aexcompat::mask_runtime::set_model_enabled(true);
+    auto& render_context = aexcompat::render::render_context_state();
+    render_context.frame_width = invocation.external_width;
+    render_context.frame_height = invocation.external_height;
+  }
   RuntimeAdmissionRequest runtime_request;
   // A GPU render carries the AEXRMA1 manifest as a `--runtime-module-authorization-v1`
   // trailer (captured above during request parsing); the render/smart worker must

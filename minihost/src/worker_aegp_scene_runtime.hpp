@@ -218,6 +218,10 @@ struct SceneRuntimeState {
   std::array<std::array<AegpCameraZoomKeyframe, 2>, 3> layer_camera_zoom_keyframes{};
   std::array<int32_t, 3> layer_parent_indices{{-1, -1, -1}};
   int32_t active_camera_layer_index{-1};
+  // Set only by a validated shipping scene snapshot. Self-tests may set the
+  // index directly without claiming an authored camera identity.
+  scene_model::Identity authored_camera_identity{};
+  bool authored_camera_live{};
   AegpSelectionCollection selection{};
 
   SceneRuntimeState() noexcept;

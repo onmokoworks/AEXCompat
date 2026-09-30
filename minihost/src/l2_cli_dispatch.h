@@ -34,6 +34,7 @@ struct AuxiliaryOptionHooks {
   // Optional, render-session-only world transform diagnostic (#1593).
   bool (*parse_render_diagnostic_layout)(void* context, const wchar_t* value){};
   bool (*parse_world_capture_target)(void* context, const wchar_t* value){};
+  bool (*parse_scene_camera)(void* context, const wchar_t* value){};
 };
 
 struct AuxiliaryOptionResult {

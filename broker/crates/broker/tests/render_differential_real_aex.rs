@@ -47,6 +47,7 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],

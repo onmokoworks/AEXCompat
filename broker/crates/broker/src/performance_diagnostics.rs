@@ -385,6 +385,7 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],

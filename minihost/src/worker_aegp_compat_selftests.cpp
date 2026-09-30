@@ -36,6 +36,7 @@
 namespace aexcompat::l2_detail {
 bool configure_mask_scene(const std::string&);
 bool prepare_scene_staged_item(void*);
+bool parse_active_camera_payload(const wchar_t*);
 namespace { AegpCompatSelftestHooks g_hooks; }
 
 namespace {
@@ -771,12 +772,113 @@ bool verify_matrix_case(bool smart_case) {
   return ok;
 }
 
+bool verify_authored_camera_transport_case() {
+  if (!g_hooks.get_camera || !g_hooks.get_camera_matrix || !g_hooks.layer_at ||
+      !g_hooks.get_dimensions || !g_hooks.set_dimensions) return false;
+  auto& scene = scene_runtime_state();
+  const auto saved_index = scene.active_camera_layer_index;
+  const auto saved_identity = scene.authored_camera_identity;
+  const auto saved_camera_live = scene.authored_camera_live;
+  const auto saved_in_points = scene.layer_in_points;
+  const auto saved_durations = scene.layer_durations;
+  const auto saved_transforms = scene.layer_transforms;
+  const auto saved_zooms = scene.layer_camera_zoom;
+  const bool saved_effect_live = pf_state_runtime::effect_is_live();
+  int32_t saved_width = 0, saved_height = 0;
+  g_hooks.get_dimensions(&saved_width, &saved_height);
+  const auto saved_spatial = aexcompat::render::render_context_state();
+
+  scene.active_camera_layer_index = -1;
+  scene.authored_camera_identity = {};
+  scene.authored_camera_live = false;
+  pf_state_runtime::reset_effect_lifetime(true);
+  g_hooks.set_dimensions(640, 480);
+  auto& spatial = aexcompat::render::render_context_state();
+  spatial.downsample_x = {1, 1};
+  spatial.downsample_y = {1, 1};
+  spatial.pixel_aspect_ratio = {1, 1};
+  const suite_abi::AegpTime active{45, 30};
+  void* camera = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  bool ok = g_hooks.get_camera(g_hooks.effect, &active, &camera) == 0 && !camera;
+
+  scene_model::Identity layer{};
+  ok = ok && scene_model::registry().identity_for_legacy(
+      &scene.layers[2], scene_model::ObjectKind::layer, layer);
+  const auto bits = [](double value) {
+    uint64_t result{};
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
+  };
+  std::array<uint64_t, 21> fields{{
+      layer.project_id, layer.object_id, layer.generation, 2,
+      30, 30, 60, 30, bits(800.0),
+      bits(0.0), bits(0.0), bits(0.0),
+      bits(10.0), bits(20.0), bits(30.0),
+      bits(100.0), bits(100.0), bits(100.0),
+      bits(0.0), bits(0.0), bits(0.0)}};
+  const auto payload = [](const std::array<uint64_t, 21>& values) {
+    std::wstring result = L"scene-camera:v1|";
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      if (index != 0) result.push_back(L',');
+      result += std::to_wstring(values[index]);
+    }
+    return result;
+  };
+  auto stale = fields;
+  stale[2] += 1;
+  ok = ok && !parse_active_camera_payload(payload(stale).c_str()) &&
+      !scene.authored_camera_live && scene.active_camera_layer_index == -1;
+  auto singular = fields;
+  singular[15] = bits(0.0);
+  ok = ok && !parse_active_camera_payload(payload(singular).c_str()) &&
+      !scene.authored_camera_live && scene.active_camera_layer_index == -1;
+  auto near_singular = fields;
+  near_singular[15] = bits(0.01);
+  near_singular[16] = bits(0.01);
+  near_singular[17] = bits(0.01);
+  ok = ok && !parse_active_camera_payload(payload(near_singular).c_str()) &&
+      !scene.authored_camera_live && scene.active_camera_layer_index == -1;
+  const bool accepted = parse_active_camera_payload(payload(fields).c_str());
+  ok = ok && accepted;
+  camera = nullptr;
+  int32_t object_type = -1;
+  AegpMatrix4 matrix{};
+  double zoom = -1.0;
+  int16_t width = -1, height = -1;
+  const bool observed = scene.authored_camera_identity == layer &&
+      g_hooks.get_camera(g_hooks.effect, &active, &camera) == 0 &&
+      camera == g_hooks.layer_at(2) &&
+      aegp_get_layer_object_type(camera, &object_type) == 0 && object_type == 2 &&
+      g_hooks.get_camera_matrix(g_hooks.effect, &active, &matrix, &zoom,
+          &width, &height) == 0 &&
+      zoom == 800.0 && width == 640 && height == 480 &&
+      matrix.mat[0][3] == -10.0 && matrix.mat[1][3] == -20.0 &&
+      matrix.mat[2][3] == -30.0;
+  ok = ok && observed;
+  const suite_abi::AegpTime before{29, 30};
+  camera = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && g_hooks.get_camera(g_hooks.effect, &before, &camera) == 0 && !camera;
+
+  scene.active_camera_layer_index = saved_index;
+  scene.authored_camera_identity = saved_identity;
+  scene.authored_camera_live = saved_camera_live;
+  scene.layer_in_points = saved_in_points;
+  scene.layer_durations = saved_durations;
+  scene.layer_transforms = saved_transforms;
+  scene.layer_camera_zoom = saved_zooms;
+  spatial = saved_spatial;
+  g_hooks.set_dimensions(saved_width, saved_height);
+  pf_state_runtime::reset_effect_lifetime(saved_effect_live);
+  return ok;
+}
+
 bool verify_aegp_get_effect_camera() {
   if (!g_hooks.acquire_suite || !g_hooks.release_suite) return false;
   const void* suite = nullptr;
   bool ok = g_hooks.acquire_suite("AEGP PF Interface Suite", 1, &suite) == 0 &&
       suite == g_hooks.interface_suite && verify_camera_case(false) &&
-      verify_camera_case(true) && verify_matrix_case(false) && verify_matrix_case(true);
+      verify_camera_case(true) && verify_matrix_case(false) &&
+      verify_matrix_case(true) && verify_authored_camera_transport_case();
   ok = g_hooks.release_suite("AEGP PF Interface Suite", 1) == 0 && ok;
   return ok && (!g_hooks.suite_leases_balanced || g_hooks.suite_leases_balanced());
 }

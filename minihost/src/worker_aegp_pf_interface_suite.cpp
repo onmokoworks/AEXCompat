@@ -47,6 +47,16 @@ bool valid_camera_spatial_context() {
       valid_spatial_ratio(g_render_context_state.downsample_y) &&
       valid_spatial_ratio(g_render_context_state.pixel_aspect_ratio);
 }
+
+int32_t scene_frame_width() {
+  return g_render_context_state.frame_width > 0
+      ? g_render_context_state.frame_width : smart_state().width;
+}
+
+int32_t scene_frame_height() {
+  return g_render_context_state.frame_height > 0
+      ? g_render_context_state.frame_height : smart_state().height;
+}
 }  // namespace
 
 int32_t __cdecl get_effect_layer(void* effect, void** layer) {
@@ -59,9 +69,9 @@ int32_t __cdecl get_effect_layer(void* effect, void** layer) {
   namespace bee = aexcompat::worker_runtime::bee_facade;
   bee::SceneValues values{};
   values.comp_width = g_full_resolution_width > 0
-      ? g_full_resolution_width : smart_state().width;
+      ? g_full_resolution_width : scene_frame_width();
   values.comp_height = g_full_resolution_height > 0
-      ? g_full_resolution_height : smart_state().height;
+      ? g_full_resolution_height : scene_frame_height();
   if (!bee::prepare_effect_layer(g_layer, values)) return 4;
   *layer = &g_layer;
   return 0;
@@ -159,6 +169,13 @@ int32_t __cdecl get_effect_camera(
   if (g_aegp_active_camera_layer_index >= 0) {
     const auto index = static_cast<std::size_t>(g_aegp_active_camera_layer_index);
     if (index >= g_aegp_layers.size()) return 4;
+    if (scene_runtime_state().authored_camera_live) {
+      scene_model::Identity current{};
+      if (!scene_model::registry().identity_for_legacy(
+              &g_aegp_layers[index], scene_model::ObjectKind::layer, current) ||
+          current != scene_runtime_state().authored_camera_identity)
+        return 4;
+    }
     if (layer_active_at_time(index, *comp_time)) result = &g_aegp_layers[index];
   }
   *camera_layer = result;
@@ -173,9 +190,9 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
       !image_plane_height || !valid_comp_time(*comp_time)) return 4;
   if (!valid_camera_spatial_context()) return 4;
   const int32_t width = g_full_resolution_width > 0
-      ? g_full_resolution_width : smart_state().width;
+      ? g_full_resolution_width : scene_frame_width();
   const int32_t height = g_full_resolution_height > 0
-      ? g_full_resolution_height : smart_state().height;
+      ? g_full_resolution_height : scene_frame_height();
   if (width <= 0 || height <= 0 || width > INT16_MAX || height > INT16_MAX)
     return 4;
 
