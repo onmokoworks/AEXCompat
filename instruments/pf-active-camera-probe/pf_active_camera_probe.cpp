@@ -58,6 +58,36 @@ PF_Err render(PF_InData* in, PF_LayerDef* output) {
         !std::isfinite(matrix.mat[2][3]))) err = PF_Err_BAD_CALLBACK_PARAM;
   }
 
+  A_long layer_ids[3]{};
+  AEGP_LayerFlags layer_flags = 0;
+  A_Matrix4 layer_world{};
+  if (!err && output->height >= 2) {
+    if (!layer_suite) {
+      err = static_cast<PF_Err>(in->pica_basicP->AcquireSuite(
+          kAEGPLayerSuite, kAEGPLayerSuiteVersion9,
+          reinterpret_cast<const void**>(&layer_suite)));
+    }
+    AEGP_LayerH layer = nullptr;
+    if (!err && (!layer_suite || !interface_suite->AEGP_GetEffectLayer ||
+        !layer_suite->AEGP_GetLayerParent || !layer_suite->AEGP_GetLayerID ||
+        !layer_suite->AEGP_GetLayerToWorldXform || !layer_suite->AEGP_GetLayerFlags))
+      err = PF_Err_INVALID_CALLBACK;
+    if (!err) err = static_cast<PF_Err>(
+        interface_suite->AEGP_GetEffectLayer(in->effect_ref, &layer));
+    if (!err && !layer) err = PF_Err_BAD_CALLBACK_PARAM;
+    if (!err) err = static_cast<PF_Err>(layer_suite->AEGP_GetLayerFlags(layer, &layer_flags));
+    if (!err) err = static_cast<PF_Err>(
+        layer_suite->AEGP_GetLayerToWorldXform(layer, &time, &layer_world));
+    for (std::size_t depth = 0; !err && layer && depth < 3; ++depth) {
+      err = static_cast<PF_Err>(layer_suite->AEGP_GetLayerID(layer, &layer_ids[depth]));
+      AEGP_LayerH parent = nullptr;
+      if (!err) err = static_cast<PF_Err>(layer_suite->AEGP_GetLayerParent(layer, &parent));
+      layer = parent;
+    }
+    for (std::size_t component = 0; !err && component < 3; ++component)
+      if (!std::isfinite(layer_world.mat[component][3])) err = PF_Err_BAD_CALLBACK_PARAM;
+  }
+
   if (!err) {
     std::memset(output->data, 0,
         static_cast<size_t>(output->rowbytes) * output->height);
@@ -77,6 +107,21 @@ PF_Err render(PF_InData* in, PF_LayerDef* output) {
       row[2].red = static_cast<A_u_char>(std::lround(std::abs(matrix.mat[0][0]) * 100.0));
       row[2].green = static_cast<A_u_char>(std::lround(std::abs(matrix.mat[0][1]) * 100.0));
       row[2].blue = static_cast<A_u_char>(std::lround(std::abs(matrix.mat[1][0]) * 100.0));
+    }
+    if (output->height >= 2) {
+      auto* row = reinterpret_cast<PF_Pixel8*>(
+          reinterpret_cast<A_u_char*>(output->data) + output->rowbytes);
+      row[0].red = static_cast<A_u_char>(layer_ids[0] & 0xff);
+      row[0].green = static_cast<A_u_char>(layer_ids[1] & 0xff);
+      row[0].blue = static_cast<A_u_char>(layer_ids[2] & 0xff);
+      row[1].red = static_cast<A_u_char>(std::lround(layer_world.mat[0][3] + 128.0));
+      row[1].green = static_cast<A_u_char>(std::lround(layer_world.mat[1][3] + 128.0));
+      row[1].blue = static_cast<A_u_char>(std::lround(layer_world.mat[2][3] + 128.0));
+      row[2].red = static_cast<A_u_char>(std::lround(std::abs(layer_world.mat[0][0]) * 10.0));
+      row[2].green = static_cast<A_u_char>(std::lround(std::abs(layer_world.mat[0][1]) * 10.0));
+      row[2].blue = static_cast<A_u_char>(std::lround(std::abs(layer_world.mat[1][0]) * 10.0));
+      if (output->width >= 4)
+        row[3].red = (layer_flags & AEGP_LayerFlag_LAYER_IS_3D) != 0 ? 1 : 0;
     }
   }
   if (layer_suite) {

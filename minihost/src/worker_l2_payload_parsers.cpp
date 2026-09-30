@@ -2,6 +2,7 @@
 
 #include "render_subsystem.h"
 #include "worker_aegp_scene_runtime.hpp"
+#include "worker_aegp_scene_transaction.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_parameter_runtime.hpp"
@@ -185,14 +186,15 @@ bool parse_spatial_context_payload(const wchar_t* text) {
   return true;
 }
 
-bool parse_active_camera_payload(const wchar_t* text) {
+bool decode_active_camera_payload(const wchar_t* text,
+    std::array<uint64_t, 51>& fields, std::array<double, 13>& values,
+    std::array<std::array<double, 13>, 2>& keyframe_values, bool& animated) {
   if (!text) return false;
   const std::wstring encoded(text);
   constexpr wchar_t kPrefix[] = L"scene-camera:v1|";
-  const bool animated = encoded.compare(0, 16, L"scene-camera:v2|") == 0;
+  animated = encoded.compare(0, 16, L"scene-camera:v2|") == 0;
   if ((!animated && encoded.compare(0, std::size(kPrefix) - 1, kPrefix) != 0) ||
       encoded.size() > (animated ? 1536u : 512u)) return false;
-  std::array<uint64_t, 51> fields{};
   const std::size_t field_count = animated ? 51 : 21;
   const std::wstring payload = encoded.substr(std::size(kPrefix) - 1);
   std::size_t start = 0;
@@ -225,8 +227,6 @@ bool parse_active_camera_payload(const wchar_t* text) {
       fields[4] * fields[7] + fields[6] * fields[5] >
           10 * fields[5] * fields[7]) return false;
 
-  std::array<double, 13> values{};
-  std::array<std::array<double, 13>, 2> keyframe_values{};
   static_assert(sizeof(double) == sizeof(uint64_t));
   const auto decode = [&](std::size_t offset, auto& destination) {
     for (std::size_t index = 0; index < destination.size(); ++index) {
@@ -255,8 +255,23 @@ bool parse_active_camera_payload(const wchar_t* text) {
     if (fields[21] * fields[37] >= fields[36] * fields[22]) return false;
   }
 
+  return true;
+}
+
+bool parse_authored_layer_graph(const wchar_t* text);
+
+bool parse_active_camera_payload(const wchar_t* text) {
+  if (text && std::wstring(text).compare(0, 15, L"scene-graph:v1|") == 0)
+    return parse_authored_layer_graph(text);
+  std::array<uint64_t, 51> fields{};
+  std::array<double, 13> values{};
+  std::array<std::array<double, 13>, 2> keyframe_values{};
+  bool animated = false;
+  if (!decode_active_camera_payload(text, fields, values, keyframe_values, animated))
+    return false;
   auto& state = aexcompat::scene_runtime::scene_runtime_state();
-  if (!state.scene_registry_initialized || state.authored_camera_live)
+  if (!state.scene_registry_initialized || state.authored_camera_live ||
+      state.authored_layer_graph_live)
     return false;
   const std::size_t index = static_cast<std::size_t>(fields[3]);
   scene_model::Identity identity{};
@@ -301,6 +316,196 @@ bool parse_active_camera_payload(const wchar_t* text) {
   state.authored_camera_identity = identity;
   state.authored_camera_live = true;
   state.active_camera_layer_index = static_cast<int32_t>(index);
+  return true;
+}
+
+bool parse_authored_layer_graph(const wchar_t* text) {
+  using scene_model::Identity;
+  using scene_model::ObjectKind;
+  using aexcompat::scene_runtime::AegpLayerTransform;
+  if (!text) return false;
+  const std::wstring encoded(text);
+  if (encoded.size() > 4096 || encoded.compare(0, 15, L"scene-graph:v1|") != 0)
+    return false;
+  const auto separator = encoded.find(L'!', 15);
+  if (separator == std::wstring::npos || encoded.find(L'!', separator + 1) != std::wstring::npos)
+    return false;
+  const std::wstring camera_text = encoded.substr(15, separator - 15);
+  std::array<uint64_t, 51> camera_fields{};
+  std::array<double, 13> camera_values{};
+  std::array<std::array<double, 13>, 2> camera_keys{};
+  bool animated = false;
+  const bool has_camera = !camera_text.empty();
+  if (has_camera && !decode_active_camera_payload(camera_text.c_str(),
+          camera_fields, camera_values, camera_keys, animated)) return false;
+  std::array<Identity, 3> authored{};
+  std::array<Identity, 3> current{};
+  std::array<Identity, 3> parents{};
+  std::array<std::size_t, 3> slots{};
+  std::array<std::size_t, 3> encoded_parent_slots{};
+  std::array<AegpLayerTransform, 3> transforms{};
+  std::array<bool, 3> occupied{};
+  std::size_t count = 0;
+  std::size_t start = separator + 1;
+  const auto transform_from = [](const auto& snapshot, bool is_3d) {
+    AegpLayerTransform result{};
+    for (std::size_t component = 0; component < 3; ++component) {
+      result.anchor[component] = snapshot[1 + component];
+      result.position[component] = snapshot[4 + component];
+      result.scale[component] = snapshot[7 + component];
+      result.rotation_degrees[component] = snapshot[10 + component];
+    }
+    result.is_3d = is_3d;
+    return result;
+  };
+  while (start < encoded.size()) {
+    if (count >= 3 - static_cast<std::size_t>(has_camera)) return false;
+    const auto delimiter = encoded.find(L';', start);
+    const auto end = delimiter == std::wstring::npos ? encoded.size() : delimiter;
+    const std::wstring record = encoded.substr(start, end - start);
+    std::array<uint64_t, 21> fields{};
+    std::size_t offset = 0;
+    for (std::size_t field = 0; field < fields.size(); ++field) {
+      const auto comma = record.find(L',', offset);
+      const bool final = field + 1 == fields.size();
+      if ((final && comma != std::wstring::npos) ||
+          (!final && comma == std::wstring::npos)) return false;
+      const auto field_end = final ? record.size() : comma;
+      if (field_end == offset) return false;
+      uint64_t value = 0;
+      for (std::size_t cursor = offset; cursor < field_end; ++cursor) {
+        const wchar_t digit = record[cursor];
+        if (digit < L'0' || digit > L'9') return false;
+        const uint64_t decimal = static_cast<uint64_t>(digit - L'0');
+        if (value > (UINT64_MAX - decimal) / 10) return false;
+        value = value * 10 + decimal;
+      }
+      fields[field] = value;
+      offset = field_end + 1;
+    }
+    if (fields[0] == 0 || fields[0] > INT32_MAX ||
+        fields[1] == 0 || fields[1] > INT32_MAX ||
+        fields[2] == 0 || fields[2] > UINT32_MAX || fields[3] >= 3 ||
+        fields[4] > INT32_MAX || fields[5] > INT32_MAX ||
+        fields[6] > UINT32_MAX || fields[7] >= 3 || fields[8] > 1)
+      return false;
+    const bool no_parent = fields[4] == 0 && fields[5] == 0 &&
+        fields[6] == 0 && fields[7] == 0;
+    if (!no_parent && (fields[4] == 0 || fields[5] == 0 || fields[6] == 0))
+      return false;
+    const auto slot = static_cast<std::size_t>(fields[3]);
+    if (occupied[slot]) return false;
+    occupied[slot] = true;
+    slots[count] = slot;
+    encoded_parent_slots[count] = static_cast<std::size_t>(fields[7]);
+    authored[count] = {fields[0], fields[1], static_cast<uint32_t>(fields[2]),
+        ObjectKind::layer, {}};
+    if (!no_parent) parents[count] = {fields[4], fields[5],
+        static_cast<uint32_t>(fields[6]), ObjectKind::layer, {}};
+    std::array<double, 13> values{};
+    values[0] = 1.0;
+    for (std::size_t component = 1; component < values.size(); ++component) {
+      std::memcpy(&values[component], &fields[8 + component], sizeof(double));
+      const double limit = component >= 10 ? 36'000.0 :
+          component >= 7 ? 10'000.0 : 1'000'000.0;
+      if (!std::isfinite(values[component]) || std::abs(values[component]) > limit)
+        return false;
+    }
+    for (std::size_t component = 7; component < 10; ++component)
+      if (values[component] < 0.01) return false;
+    const double local_determinant = values[7] * values[8] * values[9] / 1'000'000.0;
+    if (!std::isfinite(local_determinant) || local_determinant <= 1.001e-12)
+      return false;
+    if (!fields[8] && (values[3] != 0.0 || values[6] != 0.0 ||
+        values[9] != 100.0 || values[10] != 0.0 || values[11] != 0.0))
+      return false;
+    transforms[count] = transform_from(values, fields[8] != 0);
+    ++count;
+    if (delimiter == std::wstring::npos) break;
+    start = delimiter + 1;
+    if (start == encoded.size()) return false;
+  }
+  if (count == 0) return false;
+  const std::size_t ordinary_count = count;
+  // Resolve parent slot AND full identity; an index alone is not ownership.
+  std::array<int32_t, 3> parent_slots{{-1, -1, -1}};
+  for (std::size_t index = 0; index < count; ++index) {
+    if (parents[index].kind == ObjectKind::none) continue;
+    std::size_t parent = 0;
+    while (parent < count && authored[parent] != parents[index]) ++parent;
+    if (parent == count) return false;
+    if (encoded_parent_slots[index] != slots[parent]) return false;
+    parent_slots[index] = static_cast<int32_t>(slots[parent]);
+  }
+  for (std::size_t index = 0; index < count; ++index) {
+    std::array<bool, 3> visited{};
+    std::size_t cursor = index;
+    double determinant = 1.0;
+    for (;;) {
+      if (visited[cursor]) return false;
+      visited[cursor] = true;
+      const auto& scale = transforms[cursor].scale;
+      determinant *= scale[0] * scale[1] * scale[2] / 1'000'000.0;
+      if (parent_slots[cursor] < 0) break;
+      std::size_t parent = 0;
+      while (parent < count && slots[parent] != static_cast<std::size_t>(parent_slots[cursor]))
+        ++parent;
+      if (parent == count) return false;
+      cursor = parent;
+    }
+    if (!std::isfinite(determinant) || determinant <= 1.001e-12) return false;
+  }
+  if (has_camera) {
+    const auto slot = static_cast<std::size_t>(camera_fields[3]);
+    if (occupied[slot]) return false;
+    slots[count] = slot;
+    authored[count] = {camera_fields[0], camera_fields[1],
+        static_cast<uint32_t>(camera_fields[2]), ObjectKind::layer, {}};
+    transforms[count] = transform_from(camera_values, true);
+    ++count;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  auto& state = aexcompat::scene_runtime::scene_runtime_state();
+  auto& registry = scene_model::registry();
+  if (!state.scene_registry_initialized || state.authored_camera_live ||
+      state.authored_layer_graph_live) return false;
+  for (std::size_t index = 0; index < count; ++index)
+    if (!registry.identity_for_legacy(&state.layers[slots[index]],
+            ObjectKind::layer, current[index])) return false;
+  if (!registry.bind_authored_layer_graph(current, authored, parents, count))
+    return false;
+  for (std::size_t index = 0; index < count; ++index) {
+    const auto slot = slots[index];
+    state.layer_transforms[slot] = transforms[index];
+    constexpr uint32_t kLayerIs3d = 0x00000800u;
+    state.layer_flags[slot] = (state.layer_flags[slot] & ~kLayerIs3d) |
+        (transforms[index].is_3d ? kLayerIs3d : 0u);
+    state.layer_transform_keyframes[slot] = {};
+    state.layer_parent_indices[slot] = parent_slots[index];
+  }
+  if (has_camera) {
+    const auto slot = slots[ordinary_count];
+    if (animated) {
+      for (std::size_t key = 0; key < 2; ++key) {
+        const auto offset = 21 + key * 15;
+        const aexcompat::suite_abi::AegpTime time{
+            static_cast<int32_t>(camera_fields[offset]),
+            static_cast<uint32_t>(camera_fields[offset + 1])};
+        state.layer_transform_keyframes[slot][key] = {
+            time, transform_from(camera_keys[key], true), true};
+        state.layer_camera_zoom_keyframes[slot][key] = {time, camera_keys[key][0], true};
+      }
+    }
+    state.layer_in_points[slot] = {static_cast<int32_t>(camera_fields[4]),
+        static_cast<uint32_t>(camera_fields[5])};
+    state.layer_durations[slot] = {static_cast<int32_t>(camera_fields[6]),
+        static_cast<uint32_t>(camera_fields[7])};
+    state.layer_camera_zoom[slot] = camera_values[0];
+    state.authored_camera_identity = authored[ordinary_count];
+    state.authored_camera_live = true;
+    state.active_camera_layer_index = static_cast<int32_t>(slot);
+  }
+  state.authored_layer_graph_live = true;
   return true;
 }
 

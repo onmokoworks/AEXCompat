@@ -32,6 +32,35 @@ then evaluated by both PF Interface and AEGP from the same scene state.
 
 ## Identity and ownership
 
+### Shipping ordinary-layer snapshots
+
+Single-frame `host_context.scene_layers` and resident-batch root `scene_layers`
+accept at most three static ordinary-layer records, using the existing native
+slots. Each record contains a typed `layer` identity including `index`, optional
+typed `parent`, `anchor`, `position`, percent `scale`, `rotation_degrees`, and
+`is_3d`. Every parent must resolve to a record in this same graph, including its
+generation and index; cycles and duplicate slots/IDs are rejected. Omission
+retains existing scene defaults. No orientation, easing, or ordinary-layer
+keyframes are inferred from unsupported fields.
+
+Transforms retain the camera's finite positive-scale bounds. A 2D record must
+have zero out-of-plane anchor/position/XY rotation and Z scale 100, rather than
+silently discarding authored components. A composed near-singular scale is
+rejected before publication. Native composition uses the existing local order
+`T(position) * Rz * Ry * Rx * S * T(-anchor)`, with each parent's matrix on the
+left. This is the deterministic host contract, not established AE parity.
+
+An optional static/animated camera may coexist in a separate free slot, with a
+distinct ID in the same project; ordinary layers cannot name that camera as a
+parent. A combined `scene-graph:v1` envelope carries camera and ordinary graph
+through the existing scene auxiliary carrier. Both are validated before one
+registry bind and non-failing scene publication; a late invalid identity does
+not invalidate earlier handles or leave a partially rebound graph. Camera-only
+input retains its existing v1/v2 payload and camera-less input stays explicit.
+Both PF Interface effect-layer lookup and AEGP traversal/world matrices read
+the same bound records. These inputs do not create a general renderer or expand
+the native three-slot scene capacity.
+
 - Projects, items, compositions, folders, footage, layers, effects, streams,
   values, and keyframes have registry-owned typed identities:
   `(project_id, object_id, generation, kind)`.

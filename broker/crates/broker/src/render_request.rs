@@ -41,6 +41,8 @@ pub struct HostContext {
     #[serde(default)]
     pub active_camera: Option<ActiveCamera>,
     #[serde(default)]
+    pub scene_layers: Vec<SceneLayer>,
+    #[serde(default)]
     pub render_environment: Option<RenderEnvironment>,
     #[serde(default)]
     pub aux_channels: Vec<AuxChannel>,
@@ -48,6 +50,12 @@ pub struct HostContext {
     /// No other auxiliary plane is inferred from RGBA pixels.
     #[serde(default)]
     pub alpha_as_coverage_params: Vec<u32>,
+}
+
+impl HostContext {
+    pub fn has_authored_scene(&self) -> bool {
+        self.active_camera.is_some() || !self.scene_layers.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -77,13 +85,26 @@ pub struct CameraKeyframe {
     pub zoom: f64,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CameraLayerIdentity {
     pub project_id: u64,
     pub object_id: u64,
     pub generation: u32,
     pub index: u8,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SceneLayer {
+    pub layer: CameraLayerIdentity,
+    #[serde(default)]
+    pub parent: Option<CameraLayerIdentity>,
+    pub anchor: [f64; 3],
+    pub position: [f64; 3],
+    pub scale: [f64; 3],
+    pub rotation_degrees: [f64; 3],
+    pub is_3d: bool,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -471,11 +492,112 @@ pub(crate) fn encode_spatial_context(context: &HostContext) -> io::Result<Option
 }
 
 pub(crate) fn encode_active_camera(context: &HostContext) -> io::Result<Option<String>> {
-    context
-        .active_camera
-        .as_ref()
-        .map(encode_camera)
-        .transpose()
+    encode_scene_snapshot(&context.scene_layers, context.active_camera.as_ref())
+}
+
+pub(crate) fn encode_scene_snapshot(
+    layers: &[SceneLayer],
+    camera: Option<&ActiveCamera>,
+) -> io::Result<Option<String>> {
+    let encoded_camera = camera.map(encode_camera).transpose()?;
+    if layers.is_empty() {
+        return Ok(encoded_camera);
+    }
+    if layers.len() > 3 {
+        return Err(invalid("scene requires at most three authored layers"));
+    }
+    let mut records = Vec::with_capacity(layers.len());
+    for (index, layer) in layers.iter().enumerate() {
+        if layers[..index].iter().any(|previous| {
+            previous.layer.index == layer.layer.index
+                || previous.layer.object_id == layer.layer.object_id
+        }) || layer.layer.project_id != layers[0].layer.project_id
+            || camera.is_some_and(|camera| {
+                camera.layer.project_id != layer.layer.project_id
+                    || camera.layer.index == layer.layer.index
+                    || camera.layer.object_id == layer.layer.object_id
+            })
+        {
+            return Err(invalid("scene layer identity collision or foreign project"));
+        }
+        // Apply the same bounded transform contract as the existing camera path.
+        let validated = encode_camera(&ActiveCamera {
+            layer: layer.layer,
+            anchor: layer.anchor,
+            position: layer.position,
+            scale: layer.scale,
+            rotation_degrees: layer.rotation_degrees,
+            zoom: 1.0,
+            in_point: CameraTime { value: 0, scale: 1 },
+            duration: CameraTime {
+                value: 10,
+                scale: 1,
+            },
+            keyframes: None,
+        })?;
+        if !layer.is_3d
+            && (layer.position[2] != 0.0
+                || layer.anchor[2] != 0.0
+                || layer.rotation_degrees[0] != 0.0
+                || layer.rotation_degrees[1] != 0.0
+                || layer.scale[2] != 100.0)
+        {
+            return Err(invalid("2D layer has unsupported out-of-plane transform"));
+        }
+        let parent = layer.parent.unwrap_or(CameraLayerIdentity {
+            project_id: 0,
+            object_id: 0,
+            generation: 0,
+            index: 0,
+        });
+        let mut fields = vec![
+            layer.layer.project_id.to_string(),
+            layer.layer.object_id.to_string(),
+            layer.layer.generation.to_string(),
+            layer.layer.index.to_string(),
+            parent.project_id.to_string(),
+            parent.object_id.to_string(),
+            parent.generation.to_string(),
+            parent.index.to_string(),
+            u8::from(layer.is_3d).to_string(),
+        ];
+        fields.extend(
+            validated
+                .split_once('|')
+                .unwrap()
+                .1
+                .split(',')
+                .skip(9)
+                .map(str::to_owned),
+        );
+        records.push(fields.join(","));
+    }
+    for layer in layers {
+        let mut cursor = Some(layer.layer);
+        let mut visited = [false; 3];
+        let mut determinant = 1.0;
+        while let Some(identity) = cursor {
+            let current = layers
+                .iter()
+                .find(|candidate| candidate.layer == identity)
+                .ok_or_else(|| invalid("scene parent is absent, foreign or stale"))?;
+            let index = usize::from(current.layer.index);
+            if visited[index] {
+                return Err(invalid("scene parent cycle"));
+            }
+            visited[index] = true;
+            determinant *= current.scale.iter().product::<f64>() / 1_000_000.0;
+            cursor = current.parent;
+        }
+        if !determinant.is_finite() || determinant <= 1.001e-12 {
+            return Err(invalid("scene composed transform is singular"));
+        }
+    }
+    Ok(Some(format!(
+        "scene-graph:v1|{}!{}",
+        encoded_camera.unwrap_or_default(),
+        records.join(";")
+    )))
 }
 
 pub(crate) fn encode_camera(camera: &ActiveCamera) -> io::Result<String> {
@@ -997,7 +1119,7 @@ pub fn execute_smart(
     if request
         .host_context
         .as_ref()
-        .is_some_and(|context| context.active_camera.is_some())
+        .is_some_and(|context| context.active_camera.is_some() || !context.scene_layers.is_empty())
     {
         return Err(invalid(
             "active camera is not supported by the fixture SmartFX render route",
@@ -2148,6 +2270,56 @@ mod tests {
     }
 
     #[test]
+    fn request_v4_retains_authored_layer_parent_graph() {
+        let input = json!({
+            "mask_scene": {"masks": []},
+            "scene_layers": [
+                {
+                    "layer": {"project_id": 1, "object_id": 2801, "generation": 1, "index": 0},
+                    "parent": {"project_id": 1, "object_id": 2802, "generation": 1, "index": 1},
+                    "anchor": [0, 0, 0], "position": [10, 20, 30],
+                    "scale": [100, 100, 100], "rotation_degrees": [0, 0, 0], "is_3d": true
+                },
+                {
+                    "layer": {"project_id": 1, "object_id": 2802, "generation": 1, "index": 1},
+                    "parent": null,
+                    "anchor": [0, 0, 0], "position": [40, 50, 60],
+                    "scale": [100, 100, 100], "rotation_degrees": [0, 0, 0], "is_3d": true
+                }
+            ]
+        });
+        let context: HostContext = serde_json::from_value(input).unwrap();
+        let encoded = encode_active_camera(&context).unwrap().unwrap();
+        assert!(context.has_authored_scene());
+        let mut cleared = context.clone();
+        cleared.scene_layers.clear();
+        assert!(!cleared.has_authored_scene());
+        assert!(encoded.starts_with("scene-graph:v1|!"));
+        let records: Vec<_> = encoded.split_once('!').unwrap().1.split(';').collect();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| record.split(',').count() == 21));
+        let mut invalid = context.clone();
+        invalid.scene_layers[0].parent.as_mut().unwrap().generation = 2;
+        assert!(encode_active_camera(&invalid).is_err());
+        invalid = context.clone();
+        invalid.scene_layers[1].parent = Some(invalid.scene_layers[0].layer);
+        assert!(encode_active_camera(&invalid).is_err());
+        invalid = context.clone();
+        invalid.scene_layers[0].scale[0] = f64::NAN;
+        assert!(encode_active_camera(&invalid).is_err());
+        invalid = context.clone();
+        invalid.scene_layers[1].layer.index = 0;
+        assert!(encode_active_camera(&invalid).is_err());
+        invalid = context.clone();
+        invalid.scene_layers[0].is_3d = false;
+        assert!(encode_active_camera(&invalid).is_err());
+        let serialized = serde_json::to_value(context).unwrap();
+        assert_eq!(serialized["scene_layers"][0]["position"][0], 10.0);
+        assert_eq!(serialized["scene_layers"][0]["parent"]["object_id"], 2802);
+        assert_eq!(serialized["scene_layers"][1]["layer"]["object_id"], 2802);
+    }
+
+    #[test]
     fn request_v4_accepts_an_authored_active_camera_snapshot() {
         let request: Request = serde_json::from_str(
             r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[]},"active_camera":{"layer":{"project_id":1,"object_id":2807,"generation":1,"index":2},"anchor":[0.0,0.0,0.0],"position":[10.0,20.0,30.0],"scale":[100.0,100.0,100.0],"rotation_degrees":[0.0,0.0,0.0],"zoom":800.0,"in_point":{"value":0,"scale":30},"duration":{"value":300,"scale":30}}}}"#,
@@ -2359,6 +2531,7 @@ mod tests {
             },
             spatial: None,
             active_camera: None,
+            scene_layers: Vec::new(),
             render_environment: None,
             aux_channels: Vec::new(),
             alpha_as_coverage_params: Vec::new(),
