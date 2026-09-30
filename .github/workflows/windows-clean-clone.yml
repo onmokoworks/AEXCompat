@@ -1015,6 +1015,8 @@ jobs:
           version: v0.17.0
       - name: Build shipping macOS harness
         run: cargo build --release --locked --manifest-path broker/Cargo.toml -p aexcompat-harness
+      - name: Test macOS harness Release binary
+        run: cargo test --release --locked --manifest-path broker/Cargo.toml -p aexcompat-harness --bin aexcompat-harness -- --test-threads=1
       - name: Show sccache stats
         run: sccache --show-stats
       - name: Package harness binary with executable mode and checksum
