@@ -56,6 +56,26 @@ def _point2(value: Any) -> bool:
     )
 
 
+def _valid_group_path(value: Any) -> bool:
+    return isinstance(value, list) and 1 <= len(value) <= 8 and all(
+        isinstance(label, str) and 1 <= len(label) <= 128
+        and label == label.strip() and "\x00" not in label
+        for label in value
+    )
+
+
+def _stored_group_path(value: str) -> list[str]:
+    try:
+        path = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return path if _valid_group_path(path) else []
+
+
+def _parameter_label(item: Any) -> str:
+    return " / ".join([*_stored_group_path(item.group_path_json), item.name])
+
+
 def _point_text_values(x: str, y: str) -> list[float]:
     try:
         components = [float(x), float(y)]
@@ -239,18 +259,21 @@ def describe_aex(plugin_source: str) -> dict[str, Any]:
         raise AEXCompatSessionError("worker_protocol_error")
     seen: set[int] = set()
     for entry in catalog:
+        group_path = entry.get("group_path") if isinstance(entry, dict) else None
+        keys = set(entry) - {"group_path"} if isinstance(entry, dict) else set()
         if not isinstance(entry, dict) or (
             type(entry.get("slot")) is not int or entry["slot"] < 1 or entry["slot"] in seen
             or not isinstance(entry.get("name"), str)
             or not isinstance(entry.get("kind"), str)
+            or ("group_path" in entry and not _valid_group_path(group_path))
             or (entry.get("kind") == "color" and (
-                set(entry) != {"slot", "name", "kind", "color"} or not _argb8(entry.get("color"))
+                keys != {"slot", "name", "kind", "color"} or not _argb8(entry.get("color"))
             ))
             or (entry.get("kind") == "point" and (
-                set(entry) != {"slot", "name", "kind", "components"} or not _point2(entry.get("components"))
+                keys != {"slot", "name", "kind", "components"} or not _point2(entry.get("components"))
             ))
             or (entry.get("kind") not in {"color", "point"} and (
-                set(entry) not in (
+                keys not in (
                     {"slot", "name", "kind", "minimum", "maximum", "value"},
                     {"slot", "name", "kind", "minimum", "maximum", "value", "choices"},
                 )
@@ -560,6 +583,7 @@ class AEXCompatScalarParameter(bpy.types.PropertyGroup):
     slot: IntProperty(name="Slot")
     name: StringProperty(name="Name")
     kind: StringProperty(name="Kind")
+    group_path_json: StringProperty(name="Group path", default="")
     minimum_text: StringProperty(name="Minimum")
     maximum_text: StringProperty(name="Maximum")
     value_text: StringProperty(name="Default")
@@ -573,6 +597,7 @@ class AEXCompatChosenParameter(bpy.types.PropertyGroup):
     slot: IntProperty(name="Slot")
     name: StringProperty(name="Name")
     kind: StringProperty(name="Kind")
+    group_path_json: StringProperty(name="Group path", default="")
     integer_value: IntProperty(name="Integer value")
     value_text: StringProperty(name="Decimal value")
     choices_json: StringProperty(name="Named integer choices", default="")
@@ -583,13 +608,13 @@ class AEXCompatChosenParameter(bpy.types.PropertyGroup):
 
 class AEXCOMPAT_UL_scalar_parameters(bpy.types.UIList):
     def draw_item(self, _context: Any, layout: Any, _data: Any, item: Any, _icon: Any, _active_data: Any, _active_propname: Any, _index: int) -> None:
-        layout.label(text=f"{item.name} (#{item.slot}, {item.kind})")
+        layout.label(text=f"{_parameter_label(item)} (#{item.slot}, {item.kind})")
 
 
 class AEXCOMPAT_UL_chosen_parameters(bpy.types.UIList):
     def draw_item(self, _context: Any, layout: Any, _data: Any, item: Any, _icon: Any, _active_data: Any, _active_propname: Any, _index: int) -> None:
         row = layout.row(align=True)
-        row.label(text=f"{item.name} (#{item.slot})")
+        row.label(text=f"{_parameter_label(item)} (#{item.slot})")
         if item.kind == "color":
             row.label(text=f"ARGB {list(item.color_argb)}")
         elif item.kind == "point":
@@ -658,6 +683,8 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
                 )
                 index = min(self.selected_parameter_index, len(self.parameter_items) - 1)
                 selected = self.parameter_items[index]
+                if group := _stored_group_path(selected.group_path_json):
+                    layout.label(text="Group: " + " / ".join(group))
                 if selected.kind == "color":
                     layout.label(text=f"ARGB8 default {list(selected.color_argb)}")
                 elif selected.kind == "point":
@@ -789,6 +816,7 @@ class AEXCompatRefreshParametersOperator(bpy.types.Operator):
             item.slot = record["slot"]
             item.name = record["name"]
             item.kind = record["kind"]
+            item.group_path_json = json.dumps(record["group_path"], ensure_ascii=False) if "group_path" in record else ""
             if record["kind"] == "color":
                 item.color_argb = record["color"]
             elif record["kind"] == "point":
@@ -840,6 +868,7 @@ class AEXCompatChooseParameterOperator(bpy.types.Operator):
         existing.slot = item.slot
         existing.name = item.name
         existing.kind = item.kind
+        existing.group_path_json = item.group_path_json
         existing.choices_json = item.choices_json
         if item.kind == "color":
             existing.color_argb = item.color_argb

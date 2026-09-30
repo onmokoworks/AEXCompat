@@ -468,6 +468,26 @@ def _popup_choices(parameter: dict[str, Any]) -> list[dict[str, int | str]]:
     return [{"value": int(minimum) + index, "label": label} for index, label in enumerate(labels)]
 
 
+def _description_group_paths(records: list[dict[str, Any]]) -> dict[int, list[str]]:
+    """Use group labels only when the whole descriptor has a bounded, balanced tree."""
+    stack: list[str] = []
+    paths: dict[int, list[str]] = {}
+    for record in records:
+        kind = record["kind"]
+        if kind == "group_start":
+            name = record["name"]
+            if not name or name != name.strip() or "\x00" in name or len(name) > 128 or len(stack) == 8:
+                return {}
+            stack.append(name)
+        elif kind == "group_end":
+            if not stack:
+                return {}
+            stack.pop()
+        elif stack:
+            paths[record["slot"]] = stack.copy()
+    return paths if not stack else {}
+
+
 def _read_description(
     harness: Path, plugin: Path, worker: Path, timeout_ms: int | None,
 ) -> tuple[bytes, dict[str, Any]]:
@@ -513,6 +533,7 @@ def _describe_aex(request: dict[str, Any], source_relative_path: str | None) -> 
     raw, description = _read_description(harness, plugin, worker, None)
     parameters = []
     slots: set[int] = set()
+    group_paths = _description_group_paths(description["parameters"])
     for record in description["parameters"]:
         if record["slot"] in slots:
             raise SessionRequestError("ambiguous parameter slot", "parameter_description_error")
@@ -520,10 +541,11 @@ def _describe_aex(request: dict[str, Any], source_relative_path: str | None) -> 
         kind = record["kind"]
         if kind not in {"integer", "float", "angle", "color", "point"} or not record["enabled"] or not record["visible"]:
             continue
+        group = {"group_path": group_paths[record["slot"]]} if record["slot"] in group_paths else {}
         if kind == "color":
             parameters.append({
                 "slot": record["slot"], "name": record["name"], "kind": kind,
-                "color": record["color"],
+                "color": record["color"], **group,
             })
             continue
         if kind == "point":
@@ -532,7 +554,7 @@ def _describe_aex(request: dict[str, Any], source_relative_path: str | None) -> 
                 raise SessionRequestError("invalid point parameter default", "parameter_description_error")
             parameters.append({
                 "slot": record["slot"], "name": record["name"], "kind": kind,
-                "components": components,
+                "components": components, **group,
             })
             continue
         minimum, maximum = (
@@ -548,7 +570,7 @@ def _describe_aex(request: dict[str, Any], source_relative_path: str | None) -> 
             raise SessionRequestError("invalid scalar parameter default", "parameter_description_error")
         entry = {
             "slot": record["slot"], "name": record["name"], "kind": kind,
-            "minimum": minimum, "maximum": maximum, "value": value,
+            "minimum": minimum, "maximum": maximum, "value": value, **group,
         }
         choices = _popup_choices(record)
         if choices:
