@@ -996,8 +996,9 @@ bool verify_authored_camera_transport_case() {
       bits(100.0), bits(100.0), bits(100.0),
       bits(0.0), bits(0.0), bits(0.0)}};
   const auto payload = [](const auto& values) {
-    std::wstring result = values.size() == 21 ?
-        L"scene-camera:v1|" : L"scene-camera:v2|";
+    std::wstring result = values.size() == 21 ? L"scene-camera:v1|" :
+        values.size() == 24 ? L"scene-camera:v3|" :
+        values.size() == 60 ? L"scene-camera:v4|" : L"scene-camera:v2|";
     for (std::size_t index = 0; index < values.size(); ++index) {
       if (index != 0) result.push_back(L',');
       result += std::to_wstring(values[index]);
@@ -1072,6 +1073,87 @@ bool verify_authored_camera_transport_case() {
           &width, &height) == 0 && zoom == 1000.0 &&
       matrix.mat[0][3] == -20.0 && matrix.mat[1][3] == -30.0 &&
       matrix.mat[2][3] == -40.0;
+
+  // Noncommuting Rz(rotation) * Rx(orientation). Check every inverse element,
+  // including translation, rather than only the positive pixel magnitudes.
+  scene.authored_camera_live = false;
+  scene.active_camera_layer_index = -1;
+  scene.layer_transform_keyframes[2] = {};
+  scene.layer_camera_zoom_keyframes[2] = {};
+  std::array<uint64_t, 24> oriented{};
+  std::copy(fields.begin(), fields.end(), oriented.begin());
+  oriented[20] = bits(90.0);
+  oriented[21] = bits(90.0);
+  auto invalid_orientation = oriented;
+  invalid_orientation[21] = bits(std::numeric_limits<double>::infinity());
+  auto bounded_orientation = oriented;
+  bounded_orientation[23] = bits(36001.0);
+  auto& registry = scene_model::registry();
+  void* borrowed_orientation = registry.borrow_unique(layer, 1714);
+  const auto registry_before_orientation = registry.fingerprint();
+  const auto handles_before_orientation = registry.handle_table_fingerprint();
+  const auto state_before_orientation = scene;
+  const auto unchanged_orientation = [&]() {
+    scene_model::ObjectSnapshot snapshot{};
+    return registry.fingerprint() == registry_before_orientation &&
+        registry.handle_table_fingerprint() == handles_before_orientation &&
+        registry.resolve_possessed(borrowed_orientation, scene_model::ObjectKind::layer,
+            1714, snapshot) && snapshot.identity == layer &&
+        std::memcmp(&scene.layer_transforms, &state_before_orientation.layer_transforms,
+            sizeof(scene.layer_transforms)) == 0 &&
+        std::memcmp(&scene.layer_transform_keyframes,
+            &state_before_orientation.layer_transform_keyframes,
+            sizeof(scene.layer_transform_keyframes)) == 0 &&
+        scene.authored_camera_live == state_before_orientation.authored_camera_live &&
+        scene.active_camera_layer_index == state_before_orientation.active_camera_layer_index;
+  };
+  const auto prior_transform = scene.layer_transforms[2];
+  ok = ok && borrowed_orientation &&
+      !parse_active_camera_payload(payload(invalid_orientation).c_str()) && unchanged_orientation() &&
+      !parse_active_camera_payload(payload(bounded_orientation).c_str()) &&
+      unchanged_orientation() &&
+      !scene.authored_camera_live && scene.active_camera_layer_index == -1 &&
+      scene.layer_transforms[2].position == prior_transform.position &&
+      scene.layer_transforms[2].orientation_degrees == prior_transform.orientation_degrees;
+  const bool released_orientation = registry.release(borrowed_orientation,
+      scene_model::ObjectKind::layer, 1714, true);
+  ok = ok && released_orientation;
+  const auto check_inverse = [&](double angle, const suite_abi::AegpTime& time) {
+    const double c = std::cos(angle), s = std::sin(angle);
+    const double expected[4][4] = {
+        {0, 1, 0, -20}, {-c, 0, s, 10 * c - 30 * s},
+        {s, 0, c, -10 * s - 30 * c}, {0, 0, 0, 1}};
+    if (g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &zoom,
+            &width, &height) != 0 || zoom != 800.0 ||
+        scene.authored_camera_identity != layer) return false;
+    for (std::size_t row = 0; row < 4; ++row)
+      for (std::size_t column = 0; column < 4; ++column)
+        if (!std::isfinite(matrix.mat[row][column]) ||
+            std::abs(matrix.mat[row][column] - expected[row][column]) > 1e-9)
+          return false;
+    return true;
+  };
+  constexpr double pi = 3.14159265358979323846;
+  ok = ok && parse_active_camera_payload(payload(oriented).c_str()) &&
+      check_inverse(pi / 2, active);
+  scene.authored_camera_live = false;
+  scene.active_camera_layer_index = -1;
+  std::array<uint64_t, 60> oriented_keys{};
+  std::copy(oriented.begin(), oriented.end(), oriented_keys.begin());
+  oriented_keys[24] = 2;
+  oriented_keys[25] = 2;
+  oriented_keys[42] = 4;
+  oriented_keys[43] = 2;
+  std::copy(oriented.begin() + 8, oriented.end(), oriented_keys.begin() + 26);
+  std::copy(oriented.begin() + 8, oriented.end(), oriented_keys.begin() + 44);
+  oriented_keys[39] = bits(0.0);
+  auto invalid_key_orientation = oriented_keys;
+  invalid_key_orientation[57] = bits(std::numeric_limits<double>::quiet_NaN());
+  ok = ok && !parse_active_camera_payload(payload(invalid_key_orientation).c_str()) &&
+      !scene.authored_camera_live && !scene.layer_transform_keyframes[2][0].valid &&
+      parse_active_camera_payload(payload(oriented_keys).c_str()) &&
+      check_inverse(0, {30, 30}) && check_inverse(pi / 4, active) &&
+      check_inverse(pi / 2, {60, 30});
 
   scene.active_camera_layer_index = saved_index;
   scene.authored_camera_identity = saved_identity;

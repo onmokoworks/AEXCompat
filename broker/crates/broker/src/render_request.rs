@@ -66,6 +66,8 @@ pub struct ActiveCamera {
     pub position: [f64; 3],
     pub scale: [f64; 3],
     pub rotation_degrees: [f64; 3],
+    #[serde(default)]
+    pub orientation_degrees: [f64; 3],
     pub zoom: f64,
     pub in_point: CameraTime,
     pub duration: CameraTime,
@@ -82,6 +84,8 @@ pub struct CameraKeyframe {
     pub position: [f64; 3],
     pub scale: [f64; 3],
     pub rotation_degrees: [f64; 3],
+    #[serde(default)]
+    pub orientation_degrees: [f64; 3],
     pub zoom: f64,
 }
 
@@ -549,6 +553,7 @@ pub(crate) fn encode_scene_snapshot(
             position: layer.position,
             scale: layer.scale,
             rotation_degrees: layer.rotation_degrees,
+            orientation_degrees: [0.0; 3],
             zoom: 1.0,
             in_point: CameraTime { value: 0, scale: 1 },
             duration: CameraTime {
@@ -763,9 +768,13 @@ pub(crate) fn encode_camera(camera: &ActiveCamera) -> io::Result<String> {
     if !scale_determinant.is_finite() || scale_determinant <= 1.001e-12 {
         return Err(invalid("active camera scale is singular or out of range"));
     }
-    for value in camera.rotation_degrees {
+    for value in camera
+        .rotation_degrees
+        .into_iter()
+        .chain(camera.orientation_degrees)
+    {
         if !value.is_finite() || value.abs() > 36_000.0 {
-            return Err(invalid("active camera rotation is invalid"));
+            return Err(invalid("active camera rotation or orientation is invalid"));
         }
     }
     let mut fields = vec![
@@ -787,6 +796,17 @@ pub(crate) fn encode_camera(camera: &ActiveCamera) -> io::Result<String> {
     {
         fields.push(value.to_bits().to_string());
     }
+    let oriented = camera.orientation_degrees != [0.0; 3]
+        || camera
+            .keyframes
+            .is_some_and(|keys| keys.iter().any(|key| key.orientation_degrees != [0.0; 3]));
+    if oriented {
+        fields.extend(
+            camera
+                .orientation_degrees
+                .map(|value| value.to_bits().to_string()),
+        );
+    }
     let version = if let Some(keyframes) = camera.keyframes {
         let [first, second] = keyframes.map(|keyframe| keyframe.time);
         if [first, second].into_iter().any(|time| {
@@ -805,6 +825,7 @@ pub(crate) fn encode_camera(camera: &ActiveCamera) -> io::Result<String> {
                 position: keyframe.position,
                 scale: keyframe.scale,
                 rotation_degrees: keyframe.rotation_degrees,
+                orientation_degrees: keyframe.orientation_degrees,
                 zoom: keyframe.zoom,
                 keyframes: None,
                 ..camera
@@ -822,12 +843,20 @@ pub(crate) fn encode_camera(camera: &ActiveCamera) -> io::Result<String> {
                     .expect("camera fields")
                     .split(',')
                     .skip(8)
+                    .take(13)
                     .map(str::to_owned),
             );
+            if oriented {
+                fields.extend(
+                    keyframe
+                        .orientation_degrees
+                        .map(|value| value.to_bits().to_string()),
+                );
+            }
         }
-        "v2"
+        if oriented { "v4" } else { "v2" }
     } else {
-        "v1"
+        if oriented { "v3" } else { "v1" }
     };
     Ok(format!("scene-camera:{version}|{}", fields.join(",")))
 }
@@ -2561,6 +2590,54 @@ mod tests {
     }
 
     #[test]
+    fn camera_orientation_json_retains_static_and_animated_components() {
+        let mut camera = json!({"layer":{"project_id":1,"object_id":2807,"generation":1,"index":2},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"orientation_degrees":[0,0,90],"zoom":800,
+            "in_point":{"value":0,"scale":1},"duration":{"value":10,"scale":1}});
+        let parsed: ActiveCamera = serde_json::from_value(camera.clone()).unwrap();
+        let encoded = encode_camera(&parsed).unwrap();
+        assert!(encoded.starts_with("scene-camera:v3|"));
+        let fields: Vec<u64> = encoded
+            .split_once('|')
+            .unwrap()
+            .1
+            .split(',')
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 24);
+        assert_eq!(f64::from_bits(fields[23]), 90.0);
+        let key = |value, orientation| {
+            json!({"time":{"value":value,"scale":2},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"orientation_degrees":orientation,"zoom":800})
+        };
+        camera["orientation_degrees"] = json!([0, 0, 0]);
+        camera["keyframes"] = json!([key(2, [0, 0, 0]), key(4, [0, 0, 90])]);
+        let parsed: ActiveCamera = serde_json::from_value(camera.clone()).unwrap();
+        let encoded = encode_camera(&parsed).unwrap();
+        assert!(encoded.starts_with("scene-camera:v4|"));
+        let fields: Vec<u64> = encoded
+            .split_once('|')
+            .unwrap()
+            .1
+            .split(',')
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 60);
+        assert_eq!(&fields[24..26], &[2, 2]);
+        assert_eq!(&fields[42..44], &[4, 2]);
+        assert_eq!(f64::from_bits(fields[59]), 90.0);
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["keyframes"][1]["orientation_degrees"][2],
+            90.0
+        );
+        camera["keyframes"][1]["orientation_degrees"][0] = json!(36001);
+        let invalid: ActiveCamera = serde_json::from_value(camera).unwrap();
+        assert!(encode_camera(&invalid).is_err());
+    }
+
+    #[test]
     fn request_v4_accepts_an_authored_active_camera_snapshot() {
         let request: Request = serde_json::from_str(
             r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[]},"active_camera":{"layer":{"project_id":1,"object_id":2807,"generation":1,"index":2},"anchor":[0.0,0.0,0.0],"position":[10.0,20.0,30.0],"scale":[100.0,100.0,100.0],"rotation_degrees":[0.0,0.0,0.0],"zoom":800.0,"in_point":{"value":0,"scale":30},"duration":{"value":300,"scale":30}}}}"#,
@@ -2596,6 +2673,7 @@ mod tests {
             position: camera.position,
             scale: camera.scale,
             rotation_degrees: camera.rotation_degrees,
+            orientation_degrees: camera.orientation_degrees,
             zoom: camera.zoom,
         };
         let second = CameraKeyframe {

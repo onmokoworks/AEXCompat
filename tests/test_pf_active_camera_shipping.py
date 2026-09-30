@@ -127,6 +127,105 @@ def test_shipping_camera_scale_and_rotation_affect_matrix(probe, tmp_path):
     assert Image.open(output).convert("RGBA").getpixel((2, 0)) == (0, 50, 100, 255)
 
 
+def oriented_camera_context(animated=False, graph=False):
+    context = camera_context()
+    camera = context["active_camera"]
+    camera["position"] = [0, 20, 30]
+    camera["rotation_degrees"] = [0, 0, 90]
+    camera["orientation_degrees"] = [90, 0, 0]
+    camera["in_point"] = {"value": 0, "scale": 1}
+    camera["duration"] = {"value": 10, "scale": 1}
+    if animated:
+        camera["keyframes"] = []
+        for value, orientation in [(2, 0), (4, 90)]:
+            camera["keyframes"].append({
+                "time": {"value": value, "scale": 2},
+                **{key: copy.deepcopy(camera[key]) for key in
+                   ("anchor", "position", "scale", "rotation_degrees", "zoom")},
+                "orientation_degrees": [orientation, 0, 0],
+            })
+    if graph:
+        context["scene_layers"] = layer_context()["scene_layers"]
+    return context
+
+
+@pytest.mark.parametrize("animated", [False, True])
+@pytest.mark.parametrize("graph", [False, True])
+def test_shipping_camera_separate_orientation(probe, tmp_path, animated, graph):
+    observations = [(45, (20, 30, 0, 255), (0, 100, 0, 255))]
+    if animated:
+        observations = [(30, (20, 0, 30, 255), (0, 100, 100, 255)),
+                        (45, (20, 21, 21, 255), (0, 100, 71, 255)),
+                        (60, (20, 30, 0, 255), (0, 100, 0, 255))]
+    for frame, translation, basis in observations:
+        result, output = render(probe, tmp_path, f"orientation-{frame}", frame,
+                                oriented_camera_context(animated, graph))
+        assert result.returncode == 0, failure_summary(result)
+        report = json.loads(result.stdout)
+        assert report["passed"] is True and report["suite_leases_balanced"] is True
+        with Image.open(output) as image:
+            pixels = image.convert("RGBA")
+        assert pixels.size == (4, 4)
+        assert pixels.getpixel((0, 0)) == (2, 247, 80, 255)
+        assert pixels.getpixel((1, 0)) == translation
+        assert pixels.getpixel((2, 0)) == basis
+        if graph:
+            assert pixels.getpixel((0, 1)) == (241, 0, 0, 255)
+            assert pixels.getpixel((1, 1)) == (138, 148, 158, 255)
+
+
+@pytest.mark.parametrize("animated", [False, True])
+@pytest.mark.parametrize("value", [36001.0, float("inf"), float("nan")])
+def test_shipping_camera_invalid_orientation_no_output(probe, tmp_path, animated, value):
+    context = oriented_camera_context(animated, True)
+    target = context["active_camera"]
+    if animated:
+        target = target["keyframes"][1]
+    target["orientation_degrees"][0] = value
+    result, output = render(probe, tmp_path, "invalid-orientation", 45, context)
+    assert result.returncode != 0
+    assert not output.exists()
+
+
+def test_shipping_camera_orientation_in_one_resident_batch(probe, tmp_path):
+    input_path = tmp_path / "input.png"
+    Image.new("RGBA", (4, 4), (50, 60, 70, 255)).save(input_path)
+    request_path, report_path = tmp_path / "batch.json", tmp_path / "report.json"
+    output_dir = tmp_path / "frames"
+    context = oriented_camera_context(True, True)
+    request_path.write_text(json.dumps({
+        "schema_version": 1, "plugin": str(probe),
+        "input_frames": [str(input_path)] * 6, "output_directory": str(output_dir),
+        "time_scale": 2, "time_step": 1,
+        "active_camera": context["active_camera"], "scene_layers": context["scene_layers"],
+    }), encoding="utf-8")
+    result = subprocess.run(
+        [str(BROKER), "render-video-batch", str(request_path), str(report_path)],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=60,
+    )
+    assert result.returncode == 0, failure_summary(result)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["passed"] is True and report["frames_ok"] == 6
+    assert report["session"]["session_clean"] is True
+    assert report["session"]["invalidated"] is False
+    for index, (translation, basis) in enumerate([
+        ((20, 0, 30, 255), (0, 100, 100, 255)),
+        ((20, 0, 30, 255), (0, 100, 100, 255)),
+        ((20, 0, 30, 255), (0, 100, 100, 255)),
+        ((20, 21, 21, 255), (0, 100, 71, 255)),
+        ((20, 30, 0, 255), (0, 100, 0, 255)),
+        ((20, 30, 0, 255), (0, 100, 0, 255)),
+    ]):
+        assert report["frames"][index]["status"] == "ok"
+        with Image.open(output_dir / f"frame-{index:06}.png") as image:
+            pixels = image.convert("RGBA")
+        assert pixels.getpixel((0, 0)) == (2, 247, 80, 255)
+        assert pixels.getpixel((1, 0)) == translation
+        assert pixels.getpixel((2, 0)) == basis
+        assert pixels.getpixel((0, 1)) == (241, 0, 0, 255)
+
+
 def animated_camera_context():
     context = camera_context()
     camera = context["active_camera"]
