@@ -646,26 +646,36 @@ mod tests {
             .arg(&physical_target)
             .output()
             .unwrap();
-        assert!(linked.status.success(), "mklink /J failed: {}", String::from_utf8_lossy(&linked.stderr));
+        assert!(
+            linked.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
 
         let transport_root = repository.join("target/image-transport");
         fs::create_dir_all(&transport_root).unwrap();
         let mut channel = aux_fixture(&physical_target, "depth.f32", &[0.0, 0.5]);
         channel.channel.samples[0].path = repository.join("target/depth.f32");
-        let transport = prepare_aux_transport(&repository, &[channel.clone()], &transport_root, nonce)
-            .expect("target junction is an owned source root")
-            .expect("manifest produced");
+        let transport =
+            prepare_aux_transport(&repository, &[channel.clone()], &transport_root, nonce)
+                .expect("target junction is an owned source root")
+                .expect("manifest produced");
         assert!(transport.manifest_path.is_file());
         drop(transport);
 
         let mut external = aux_fixture(&outside, "outside.f32", &[0.0, 0.5]);
         external.channel.samples[0].path = outside.join("outside.f32");
-        assert!(prepare_aux_transport(&repository, &[external], &transport_root, nonce + 1).is_err());
+        assert!(
+            prepare_aux_transport(&repository, &[external], &transport_root, nonce + 1).is_err()
+        );
         let mut alias = channel.clone();
         alias.channel.channel_type = i32::from_be_bytes(*b"GEN1");
         alias.channel.name = "generic-alias".into();
         alias.channel.samples[0].interpretation = crate::render_request::AuxInterpretation::Generic;
-        assert!(prepare_aux_transport(&repository, &[channel, alias], &transport_root, nonce + 2).is_err());
+        assert!(
+            prepare_aux_transport(&repository, &[channel, alias], &transport_root, nonce + 2)
+                .is_err()
+        );
 
         fs::remove_dir(repository.join("target")).unwrap();
         fs::remove_dir_all(repository).unwrap();
