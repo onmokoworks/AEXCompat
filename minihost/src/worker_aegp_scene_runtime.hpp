@@ -222,6 +222,7 @@ struct SceneRuntimeState {
   // index directly without claiming an authored camera identity.
   scene_model::Identity authored_camera_identity{};
   bool authored_camera_live{};
+  bool authored_layer_graph_live{};
   AegpSelectionCollection selection{};
 
   SceneRuntimeState() noexcept;

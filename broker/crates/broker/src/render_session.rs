@@ -4037,6 +4037,8 @@ struct VideoBatchRequest {
     #[serde(default)]
     active_camera: Option<crate::render_request::ActiveCamera>,
     #[serde(default)]
+    scene_layers: Vec<crate::render_request::SceneLayer>,
+    #[serde(default)]
     pixel_format: RenderPixelFormat,
     #[serde(default = "default_time_scale")]
     time_scale: u32,
@@ -4114,11 +4116,10 @@ pub fn run_video_batch(
         return Err(invalid("batch requires 1..=10000 input frames"));
     }
     let frame_count = request.input_frames.len();
-    let camera_trailer = request
-        .active_camera
-        .as_ref()
-        .map(crate::render_request::encode_camera)
-        .transpose()?;
+    let camera_trailer = crate::render_request::encode_scene_snapshot(
+        &request.scene_layers,
+        request.active_camera.as_ref(),
+    )?;
     let total_time = i32::try_from(frame_count)
         .ok()
         .and_then(|count| count.checked_mul(request.time_step))

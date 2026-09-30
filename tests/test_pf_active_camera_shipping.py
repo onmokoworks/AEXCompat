@@ -263,3 +263,107 @@ def test_shipping_camera_rejects_invalid_context_without_output(probe, tmp_path,
     assert result.returncode != 0
     assert not output.exists()
     assert "frame reported error" not in result.stderr
+
+
+def layer_context(chain=False):
+    layers = [{
+        "layer": {"project_id": 1, "object_id": 2801 + index, "generation": 1, "index": index},
+        "parent": None, "anchor": [0, 0, 0], "position": [10, 20, 30],
+        "scale": [100, 100, 100], "rotation_degrees": [0, 0, 0], "is_3d": True,
+    } for index in range(3 if chain else 1)]
+    if chain:
+        layers[0]["parent"] = copy.deepcopy(layers[1]["layer"])
+        layers[1]["parent"] = copy.deepcopy(layers[2]["layer"])
+        layers[1]["position"] = [4, 5, 6]
+        layers[1]["scale"] = [200, 300, 100]
+        layers[2]["position"] = [7, 8, 9]
+        layers[2]["rotation_degrees"] = [0, 0, 90]
+    return {"mask_scene": {"masks": []}, "scene_layers": layers}
+
+
+@pytest.mark.parametrize("chain", [False, True])
+def test_shipping_authored_layer_parent_matrix(probe, tmp_path, chain):
+    result, output = render(probe, tmp_path, f"layer-{chain}", 45, layer_context(chain))
+    assert result.returncode == 0, failure_summary(result)
+    assert json.loads(result.stdout)["suite_leases_balanced"] is True
+    pixels = Image.open(output).convert("RGBA")
+    assert pixels.getpixel((0, 1)) == ((241, 242, 243, 255) if chain else (241, 0, 0, 255))
+    assert pixels.getpixel((1, 1)) == ((70, 160, 173, 255) if chain else (138, 148, 158, 255))
+    assert pixels.getpixel((2, 1)) == ((0, 30, 20, 255) if chain else (10, 0, 0, 255))
+    assert pixels.getpixel((3, 1)) == (1, 0, 0, 255)
+
+
+def test_shipping_authored_2d_layer_flags_and_transform(probe, tmp_path):
+    context = layer_context()
+    context["scene_layers"][0]["is_3d"] = False
+    context["scene_layers"][0]["position"][2] = 0
+    result, output = render(probe, tmp_path, "layer-2d", 45, context)
+    assert result.returncode == 0, failure_summary(result)
+    pixels = Image.open(output).convert("RGBA")
+    assert pixels.getpixel((1, 1)) == (138, 148, 128, 255)
+    assert pixels.getpixel((3, 1)) == (0, 0, 0, 255)
+
+
+def test_shipping_authored_layers_in_one_resident_batch(probe, tmp_path):
+    input_path = tmp_path / "input.png"
+    Image.new("RGBA", (4, 4), (50, 60, 70, 255)).save(input_path)
+    output_dir = tmp_path / "frames"
+    request_path = tmp_path / "batch.json"
+    report_path = tmp_path / "report.json"
+    request_path.write_text(json.dumps({
+        "schema_version": 1, "plugin": str(probe), "input_frames": [str(input_path)] * 3,
+        "output_directory": str(output_dir), "time_scale": 30, "time_step": 1,
+        "scene_layers": layer_context(True)["scene_layers"],
+    }), encoding="utf-8")
+    result = subprocess.run([str(BROKER), "render-video-batch", str(request_path), str(report_path)],
+                            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert result.returncode == 0, failure_summary(result)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["passed"] is True
+    assert report["frames_ok"] == 3
+    assert report["session"]["session_clean"] is True
+    assert report["session"]["invalidated"] is False
+    for index in range(3):
+        pixels = Image.open(output_dir / f"frame-{index:06}.png").convert("RGBA")
+        assert pixels.getpixel((0, 1)) == (241, 242, 243, 255)
+        assert pixels.getpixel((1, 1)) == (70, 160, 173, 255)
+
+
+def test_shipping_authored_layer_and_animated_camera(probe, tmp_path):
+    context = layer_context()
+    context["active_camera"] = animated_camera_context()["active_camera"]
+    result, output = render(probe, tmp_path, "layer-camera", 45, context)
+    assert result.returncode == 0, failure_summary(result)
+    pixels = Image.open(output).convert("RGBA")
+    assert pixels.getpixel((0, 0)) == (2, 247, 100, 255)
+    assert pixels.getpixel((1, 0)) == (20, 30, 40, 255)
+    assert pixels.getpixel((0, 1)) == (241, 0, 0, 255)
+    assert pixels.getpixel((1, 1)) == (138, 148, 158, 255)
+
+
+@pytest.mark.parametrize("corruption", ["cycle", "stale", "foreign", "parent_index", "duplicate",
+                                        "singular", "nonfinite", "camera_collision"])
+def test_shipping_authored_layer_graph_rejects_without_output(probe, tmp_path, corruption):
+    context = layer_context(True)
+    layers = context["scene_layers"]
+    if corruption == "cycle":
+        layers[2]["parent"] = copy.deepcopy(layers[0]["layer"])
+    elif corruption == "stale":
+        layers[2]["layer"]["generation"] = 2
+        layers[1]["parent"]["generation"] = 2
+    elif corruption == "foreign":
+        layers[2]["layer"]["project_id"] = 2
+    elif corruption == "parent_index":
+        layers[0]["parent"]["index"] = 2
+    elif corruption == "duplicate":
+        layers[2]["layer"]["object_id"] = 2801
+    elif corruption == "singular":
+        layers[2]["scale"][0] = 0
+    elif corruption == "nonfinite":
+        layers[2]["position"][0] = float("nan")
+    else:
+        context["active_camera"] = camera_context()["active_camera"]
+    result, output = render(probe, tmp_path, corruption, 45, context)
+    assert result.returncode != 0
+    assert not output.exists()
+    assert "frame reported error" not in result.stderr

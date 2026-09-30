@@ -165,6 +165,9 @@ class Registry {
                            ObjectKind expected, Identity& output) const noexcept;
   bool bind_authored_layer_identity(Identity current, Identity authored,
                                     Identity& output) noexcept;
+  bool bind_authored_layer_graph(const std::array<Identity, 3>& current,
+      const std::array<Identity, 3>& authored,
+      const std::array<Identity, 3>& parents, std::size_t count) noexcept;
 
   bool can_create_child(Identity owner) const noexcept;
   bool can_create_children(Identity owner, std::size_t object_count,

@@ -772,6 +772,96 @@ bool verify_matrix_case(bool smart_case) {
   return ok;
 }
 
+bool verify_authored_graph_registry_case() {
+  scene_model::Registry registry;
+  int item = 0, comp = 0;
+  std::array<int, 3> layers{};
+  std::array<void*, 3> legacy{{&layers[0], &layers[1], &layers[2]}};
+  if (!registry.initialize_fixture(&item, &comp, legacy.data(), legacy.size()))
+    return false;
+  std::array<scene_model::Identity, 3> current{}, authored{}, parents{};
+  for (std::size_t index = 0; index < current.size(); ++index) {
+    if (!registry.identity_for_legacy(legacy[index], scene_model::ObjectKind::layer,
+            current[index])) return false;
+    authored[index] = current[index];
+    authored[index].object_id = 2801 + index;
+  }
+  parents[0] = authored[1];
+  parents[1] = authored[2];
+  void* borrowed = registry.borrow(current[0]);
+  if (!borrowed) return false;
+  const auto fingerprint = registry.fingerprint();
+  const auto handles = registry.handle_table_fingerprint();
+  auto invalid = authored;
+  ++invalid[2].generation;
+  bool ok = !registry.bind_authored_layer_graph(current, invalid, parents, 3) &&
+      registry.fingerprint() == fingerprint && registry.handle_table_fingerprint() == handles;
+  auto cycle = parents;
+  cycle[2] = authored[0];
+  ok = ok && !registry.bind_authored_layer_graph(current, authored, cycle, 3) &&
+      registry.fingerprint() == fingerprint && registry.handle_table_fingerprint() == handles;
+  scene_model::ObjectSnapshot snapshot{};
+  ok = ok && registry.resolve(borrowed, scene_model::ObjectKind::layer, snapshot) &&
+      snapshot.identity == current[0];
+  ok = ok && registry.bind_authored_layer_graph(current, authored, parents, 3) &&
+      !registry.resolve(borrowed, scene_model::ObjectKind::layer, snapshot);
+  for (std::size_t index = 0; index < current.size(); ++index)
+    ok = ok && registry.snapshot(authored[index], snapshot) &&
+        snapshot.parent_layer == parents[index];
+  return ok;
+}
+
+bool verify_authored_graph_decoder_case() {
+  auto& scene = scene_runtime_state();
+  auto& registry = scene_model::registry();
+  scene_model::Identity identity{};
+  if (!registry.identity_for_legacy(&scene.layers[0], scene_model::ObjectKind::layer,
+          identity)) return false;
+  void* borrowed = registry.borrow_unique(identity, 1708);
+  if (!borrowed) return false;
+  const auto fingerprint = registry.fingerprint();
+  const auto handles = registry.handle_table_fingerprint();
+  const auto saved = scene;
+  const auto record = [](uint64_t object, uint64_t generation, uint64_t slot,
+      uint64_t parent, uint64_t parent_generation, uint64_t parent_slot, double scale) {
+    std::array<uint64_t, 21> fields{{1, object, generation, slot,
+        parent ? 1u : 0u, parent, parent_generation, parent_slot, 1}};
+    const std::array<double, 12> values{{0,0,0,10,20,30,scale,scale,scale,0,0,0}};
+    for (std::size_t index = 0; index < values.size(); ++index)
+      std::memcpy(&fields[9 + index], &values[index], sizeof(double));
+    std::wstring output;
+    for (const auto field : fields) {
+      if (!output.empty()) output += L',';
+      output += std::to_wstring(field);
+    }
+    return output;
+  };
+  const auto unchanged = [&]() {
+    scene_model::ObjectSnapshot resolved{};
+    return registry.fingerprint() == fingerprint &&
+        registry.handle_table_fingerprint() == handles &&
+        registry.resolve_possessed(borrowed, scene_model::ObjectKind::layer, 1708, resolved) &&
+        resolved.identity == identity &&
+        std::memcmp(&scene.layer_transforms, &saved.layer_transforms, sizeof(scene.layer_transforms)) == 0 &&
+        std::memcmp(&scene.layer_transform_keyframes, &saved.layer_transform_keyframes,
+            sizeof(scene.layer_transform_keyframes)) == 0 &&
+        scene.layer_flags == saved.layer_flags &&
+        scene.layer_parent_indices == saved.layer_parent_indices &&
+        scene.authored_layer_graph_live == saved.authored_layer_graph_live &&
+        scene.authored_camera_live == saved.authored_camera_live;
+  };
+  const auto rejected = [&](const std::wstring& child, const std::wstring& parent) {
+    return !parse_active_camera_payload((L"scene-graph:v1|!" + child + L';' + parent).c_str()) &&
+        unchanged();
+  };
+  const bool ok = rejected(record(2801,1,0,2802,1,1,0.01), record(2802,1,1,0,0,0,200)) &&
+      rejected(record(2801,1,0,2802,2,1,100), record(2802,2,1,0,0,0,100)) &&
+      rejected(record(2801,1,0,2802,1,2,100), record(2802,1,1,0,0,0,100)) &&
+      rejected(record(2801,1,0,2802,1,1,100), record(2802,1,1,2801,1,0,100));
+  const bool released = registry.release(borrowed, scene_model::ObjectKind::layer, 1708, true);
+  return ok && released;
+}
+
 bool verify_authored_camera_transport_case() {
   if (!g_hooks.get_camera || !g_hooks.get_camera_matrix || !g_hooks.layer_at ||
       !g_hooks.get_dimensions || !g_hooks.set_dimensions) return false;
@@ -919,7 +1009,8 @@ bool verify_aegp_get_effect_camera() {
   bool ok = g_hooks.acquire_suite("AEGP PF Interface Suite", 1, &suite) == 0 &&
       suite == g_hooks.interface_suite && verify_camera_case(false) &&
       verify_camera_case(true) && verify_matrix_case(false) &&
-      verify_matrix_case(true) && verify_authored_camera_transport_case();
+      verify_matrix_case(true) && verify_authored_camera_transport_case() &&
+      verify_authored_graph_registry_case() && verify_authored_graph_decoder_case();
   ok = g_hooks.release_suite("AEGP PF Interface Suite", 1) == 0 && ok;
   return ok && (!g_hooks.suite_leases_balanced || g_hooks.suite_leases_balanced());
 }
