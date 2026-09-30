@@ -362,6 +362,129 @@ def test_description_hides_unavailable_scalar_records(fake_render_environment, m
     assert [entry["name"] for entry in result["parameter_catalog"]] == ["Echo"]
 
 
+def test_description_preserves_nested_groups_only_on_editable_parameters(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    base = description["parameters"][0]
+
+    def record(slot, name, kind="float", **changes):
+        return {**base, "slot": slot, "name": name, "kind": kind, **changes}
+
+    description["parameters"] = [
+        record(1, "Flat"),
+        record(2, "Outer", "group_start", enabled=False),
+        record(3, "Strength"),
+        record(4, "Nested", "group_start"),
+        record(5, "Strength", "color"),
+        record(6, "Hidden", visible=False),
+        record(7, "", "group_end"),
+        record(8, "Center", "point", components=[25.0, 75.0, 0.0], component_count=2),
+        record(9, "", "group_end"),
+        record(10, "After"),
+    ]
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert [(entry["slot"], entry.get("group_path")) for entry in result["parameter_catalog"]] == [
+        (1, None), (3, ["Outer"]), (5, ["Outer", "Nested"]),
+        (8, ["Outer"]), (10, None),
+    ]
+    assert [entry["name"] for entry in result["parameter_catalog"]] == [
+        "Flat", "Strength", "Strength", "Center", "After",
+    ]
+    for invalid_path in (["Outer", ""], [" Outer "], ["Outer\n"]):
+        broken = json.loads(json.dumps(result))
+        broken["parameter_catalog"][1]["group_path"] = invalid_path
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, SCHEMA)
+
+
+@pytest.mark.parametrize("markers", [
+    [(2, "", "group_end")],
+    [(2, "Outer", "group_start")],
+    [(2, "", "group_start"), (4, "", "group_end")],
+    [(index, f"Level {index}", "group_start") for index in range(2, 11)]
+    + [(index, "", "group_end") for index in range(12, 21)],
+])
+def test_unbalanced_or_unbounded_group_metadata_falls_back_to_flat_catalog(
+    fake_render_environment, monkeypatch, markers,
+):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    base = description["parameters"][0]
+    description["parameters"] = [base] + [
+        {**base, "slot": slot, "name": name, "kind": kind}
+        for slot, name, kind in markers
+    ] + [{**base, "slot": 11, "name": "Still editable"}]
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert [(entry["slot"], entry["name"], entry.get("group_path"))
+            for entry in result["parameter_catalog"]] == [
+        (1, "Echo", None), (11, "Still editable", None),
+    ]
+
+
+def test_description_exposes_two_component_point_without_render(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind="point")
+    description["parameters"][0].update(name="Center", components=[50.0, 25.0, 0.0], component_count=2)
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert result["parameter_catalog"] == [{
+        "slot": 1, "name": "Center", "kind": "point", "components": [50.0, 25.0],
+    }]
+
+
+@pytest.mark.parametrize("components,component_count", [
+    ([32769.0, 25.0, 0.0], 2), ([50.0, 25.0, 0.0], 1),
+])
+def test_description_rejects_unusable_point_default(fake_render_environment, monkeypatch, components, component_count):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind="point")
+    description["parameters"][0].update(components=components, component_count=component_count)
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    with pytest.raises(SESSION.SessionRequestError) as error:
+        SESSION.build_response(description_request())
+    assert error.value.failure_class == "parameter_description_error"
+
+
+@pytest.mark.parametrize("choices, maximum, expected", [
+    (["Inside", "Outside", "Both"], 3.0, [
+        {"value": 1, "label": "Inside"},
+        {"value": 2, "label": "Outside"},
+        {"value": 3, "label": "Both"},
+    ]),
+    (["Inside", "Outside"], 3.0, None),
+    (["Inside", "Inside", "Both"], 3.0, None),
+    (["Inside", " Outside", "Both"], 3.0, None),
+])
+def test_description_labels_only_unambiguous_integer_popup(
+    fake_render_environment, monkeypatch, choices, maximum, expected,
+):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind="integer", maximum=maximum)
+    parameter = description["parameters"][0]
+    parameter.update(minimum=1.0, value=1.0, choices=choices)
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    entry = result["parameter_catalog"][0]
+    assert entry.get("choices") == expected
+    assert entry["value"] == 1.0
+
+
+def test_description_does_not_label_non_integer_choices(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind="float", maximum=3.0)
+    description["parameters"][0].update(minimum=1.0, value=1.0, choices=["Inside", "Outside", "Both"])
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert "choices" not in result["parameter_catalog"][0]
+
+
 @pytest.mark.parametrize("bad", ["duplicate_slot", "hidden_duplicate_slot", "out_of_range_default", "nonintegral_integer"])
 def test_description_rejects_ambiguous_or_unusable_scalar(fake_render_environment, monkeypatch, bad):
     plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
@@ -564,6 +687,74 @@ def test_color_and_scalar_overrides_share_one_description_and_frame(fake_render_
     broken["parameter_overrides"][1]["color"] = [255, 17, 34, 256]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(broken, SCHEMA)
+
+
+def test_point_and_scalar_overrides_share_one_description_and_frame(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    point = {**description["parameters"][0], "slot": 2, "name": "Center", "kind": "point",
+             "components": [50.0, 50.0, 0.0], "component_count": 2}
+    description["parameters"].append(point)
+    description["defaults"].append(dict(point))
+    calls, observed = [], []
+
+    def harness(args, *unused, **kwargs):
+        calls.append(args)
+        if "--describe-aex" in args:
+            return json.dumps(description).encode()
+        observed.append(json.loads(Path(args[4]).read_text())["parameters"])
+        return _fake_harness(args, *unused, **kwargs)
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_overrides"] = [{"slot": 1, "value": 80.0}, {"slot": 2, "components": [20.0, 80.0]}]
+    result = SESSION.build_response(payload)
+    jsonschema.validate(result, SCHEMA)
+    assert observed == [[{**description["parameters"][0], "value": 80.0},
+                         {**point, "components": [20.0, 80.0, 0.0]}]]
+    assert len(calls) == 2
+    assert result["parameter_overrides"][1]["components"] == [20.0, 80.0]
+    assert "value" not in result["parameter_overrides"][1]
+    forged = json.loads(json.dumps(result))
+    forged["parameter_overrides"][1]["components"] = [20.0]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(forged, SCHEMA)
+
+
+@pytest.mark.parametrize("components", [
+    [1.0], [1.0, 2.0, 3.0], [True, 2.0], [float("nan"), 2.0],
+    [32769.0, 0.0], "1,2",
+])
+def test_point_override_rejects_bad_components_before_description(fake_render_environment, monkeypatch, components):
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: pytest.fail("AEX described"))
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_overrides"] = [{"slot": 1, "components": components}]
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+
+
+@pytest.mark.parametrize("kind", ["float", "point"])
+def test_point_override_rejects_wrong_parameter_shape_before_render(fake_render_environment, monkeypatch, kind):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind=kind)
+    if kind == "point":
+        description["parameters"][0].update(component_count=1, components=[50.0, 50.0, 0.0])
+    calls = []
+
+    def harness(args, *_unused, **_kwargs):
+        calls.append(args)
+        assert "--describe-aex" in args
+        return json.dumps(description).encode()
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_overrides"] = [{"slot": 1, "components": [20.0, 80.0]}]
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("color", [

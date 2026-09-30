@@ -73,6 +73,15 @@ def _finite_number(value: Any) -> bool:
         return False
 
 
+def _point_components(value: Any) -> list[float] | None:
+    if not isinstance(value, list) or len(value) != 2 or any(
+        not _finite_number(component) or not -32768 <= float(component) <= 32768
+        for component in value
+    ):
+        return None
+    return [float(component) for component in value]
+
+
 def _validate_relative_plugin_path(value: Any) -> str | None:
     """Return a canonical relative path or reject ambiguous root traversal."""
 
@@ -358,9 +367,11 @@ def _resolve_parameter_overrides(
     if not isinstance(overrides, list) or not 1 <= len(overrides) <= 16:
         raise SessionRequestError("parameter_overrides requires 1..16 entries")
     seen: set[int] = set()
-    checked: list[tuple[int, float | list[int]]] = []
+    checked: list[tuple[int, str, float | list[int] | list[float]]] = []
     for override in overrides:
-        if not isinstance(override, dict) or set(override) not in ({"slot", "value"}, {"slot", "color"}):
+        if not isinstance(override, dict) or set(override) not in (
+            {"slot", "value"}, {"slot", "color"}, {"slot", "components"},
+        ):
             raise SessionRequestError("parameter override requires slot and one typed value")
         slot = _require_int(override["slot"], "parameter_override.slot")
         if slot in seen:
@@ -370,7 +381,13 @@ def _resolve_parameter_overrides(
             color = override["color"]
             if not isinstance(color, list) or len(color) != 4 or any(type(channel) is not int or not 0 <= channel <= 255 for channel in color):
                 raise SessionRequestError("parameter_override.color must be four ARGB8 channels")
-            checked.append((slot, color))
+            checked.append((slot, "color", color))
+            continue
+        if "components" in override:
+            components = _point_components(override["components"])
+            if components is None:
+                raise SessionRequestError("parameter_override.components requires two bounded finite coordinates")
+            checked.append((slot, "components", components))
             continue
         value = override["value"]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -381,28 +398,32 @@ def _resolve_parameter_overrides(
             raise SessionRequestError("parameter_override.value must be finite") from exc
         if not math.isfinite(value):
             raise SessionRequestError("parameter_override.value must be finite")
-        checked.append((slot, value))
+        checked.append((slot, "value", value))
     raw, description = _read_description(harness, plugin, worker, timeout_ms)
     identity = description["plugin_identity"]
     catalog = description["parameters"]
     staged_sha = identity["sha256"]
     parameters: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
-    for slot, value in checked:
+    for slot, field, value in checked:
         matches = [parameter for parameter in catalog if parameter["slot"] == slot]
         if len(matches) != 1:
             raise SessionRequestError("parameter_override.slot is not uniquely editable")
         parameter = dict(matches[0])
         kind = parameter["kind"]
-        if kind not in {"integer", "float", "angle", "color"} or require_visible and (
+        if kind not in {"integer", "float", "angle", "color", "point"} or require_visible and (
             not parameter["enabled"] or not parameter["visible"]
         ):
             raise SessionRequestError("parameter_override.kind is not editable")
-        if isinstance(value, list):
+        if field == "color":
             if kind != "color":
                 raise SessionRequestError("parameter_override.color requires color parameter")
             parameter["color"] = value
-        elif kind == "color":
+        elif field == "components":
+            if kind != "point" or parameter["component_count"] != 2:
+                raise SessionRequestError("parameter_override.components requires two-component point parameter")
+            parameter["components"] = [*value, parameter["components"][2]]
+        elif kind in {"color", "point"}:
             raise SessionRequestError("parameter_override.value requires scalar parameter")
         elif kind == "angle":
             if not -32768 <= value <= 32768 or parameter["component_count"] != 1:
@@ -420,13 +441,51 @@ def _resolve_parameter_overrides(
         parameters.append(parameter)
         records.append({
             "slot": slot, "kind": kind,
-            **({"color": value} if isinstance(value, list) else {"value": float(value)}),
+            **({field: value} if field != "value" else {"value": float(value)}),
             "description_sha256": _sha256(raw),
             "description_plugin_sha256": staged_sha,
             "description_files_unchanged": identity["files_unchanged"],
             "description_matches_render_plugin": staged_sha == plugin_sha,
         })
     return parameters, records
+
+
+def _popup_choices(parameter: dict[str, Any]) -> list[dict[str, int | str]]:
+    """Only label a popup when its declared integer range matches every choice."""
+    if parameter["kind"] != "integer":
+        return []
+    labels = parameter["choices"]
+    minimum, maximum = parameter["minimum"], parameter["maximum"]
+    if (
+        not 2 <= len(labels) <= 16
+        or not float(minimum).is_integer() or not float(maximum).is_integer()
+        or not -(2**31) <= minimum <= maximum < 2**31
+        or maximum - minimum + 1 != len(labels)
+        or any(not label or label != label.strip() or "\x00" in label for label in labels)
+        or len(set(labels)) != len(labels)
+    ):
+        return []
+    return [{"value": int(minimum) + index, "label": label} for index, label in enumerate(labels)]
+
+
+def _description_group_paths(records: list[dict[str, Any]]) -> dict[int, list[str]]:
+    """Use group labels only when the whole descriptor has a bounded, balanced tree."""
+    stack: list[str] = []
+    paths: dict[int, list[str]] = {}
+    for record in records:
+        kind = record["kind"]
+        if kind == "group_start":
+            name = record["name"]
+            if not name or name != name.strip() or "\x00" in name or len(name) > 128 or len(stack) == 8:
+                return {}
+            stack.append(name)
+        elif kind == "group_end":
+            if not stack:
+                return {}
+            stack.pop()
+        elif stack:
+            paths[record["slot"]] = stack.copy()
+    return paths if not stack else {}
 
 
 def _read_description(
@@ -474,17 +533,28 @@ def _describe_aex(request: dict[str, Any], source_relative_path: str | None) -> 
     raw, description = _read_description(harness, plugin, worker, None)
     parameters = []
     slots: set[int] = set()
+    group_paths = _description_group_paths(description["parameters"])
     for record in description["parameters"]:
         if record["slot"] in slots:
             raise SessionRequestError("ambiguous parameter slot", "parameter_description_error")
         slots.add(record["slot"])
         kind = record["kind"]
-        if kind not in {"integer", "float", "angle", "color"} or not record["enabled"] or not record["visible"]:
+        if kind not in {"integer", "float", "angle", "color", "point"} or not record["enabled"] or not record["visible"]:
             continue
+        group = {"group_path": group_paths[record["slot"]]} if record["slot"] in group_paths else {}
         if kind == "color":
             parameters.append({
                 "slot": record["slot"], "name": record["name"], "kind": kind,
-                "color": record["color"],
+                "color": record["color"], **group,
+            })
+            continue
+        if kind == "point":
+            components = _point_components(record["components"][:2]) if record["component_count"] == 2 else None
+            if components is None:
+                raise SessionRequestError("invalid point parameter default", "parameter_description_error")
+            parameters.append({
+                "slot": record["slot"], "name": record["name"], "kind": kind,
+                "components": components, **group,
             })
             continue
         minimum, maximum = (
@@ -498,10 +568,14 @@ def _describe_aex(request: dict[str, Any], source_relative_path: str | None) -> 
             not value.is_integer() or not -(2**31) <= value < 2**31
         ):
             raise SessionRequestError("invalid scalar parameter default", "parameter_description_error")
-        parameters.append({
+        entry = {
             "slot": record["slot"], "name": record["name"], "kind": kind,
-            "minimum": minimum, "maximum": maximum, "value": value,
-        })
+            "minimum": minimum, "maximum": maximum, "value": value, **group,
+        }
+        choices = _popup_choices(record)
+        if choices:
+            entry["choices"] = choices
+        parameters.append(entry)
     source_sha_after = _sha256_file(plugin)
     harness_sha_after = _sha256_file(harness)
     worker_sha_after = _sha256_file(worker)

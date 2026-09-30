@@ -49,6 +49,77 @@ def _argb8(value: Any) -> bool:
     )
 
 
+def _point2(value: Any) -> bool:
+    return isinstance(value, list) and len(value) == 2 and all(
+        _finite_scalar(component) and -32768 <= float(component) <= 32768
+        for component in value
+    )
+
+
+def _valid_group_path(value: Any) -> bool:
+    return isinstance(value, list) and 1 <= len(value) <= 8 and all(
+        isinstance(label, str) and 1 <= len(label) <= 128
+        and label == label.strip() and "\x00" not in label
+        for label in value
+    )
+
+
+def _stored_group_path(value: str) -> list[str]:
+    try:
+        path = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return path if _valid_group_path(path) else []
+
+
+def _parameter_label(item: Any) -> str:
+    return " / ".join([*_stored_group_path(item.group_path_json), item.name])
+
+
+def _point_text_values(x: str, y: str) -> list[float]:
+    try:
+        components = [float(x), float(y)]
+    except (ValueError, OverflowError) as exc:
+        raise AEXCompatSessionError("point must contain two bounded finite coordinates") from exc
+    if not _point2(components):
+        raise AEXCompatSessionError("point must contain two bounded finite coordinates")
+    return components
+
+
+def _valid_choice_mapping(choices: Any, minimum: Any, maximum: Any) -> bool:
+    if (
+        not isinstance(choices, list) or not 2 <= len(choices) <= 16
+        or not _finite_scalar(minimum) or not _finite_scalar(maximum)
+        or not float(minimum).is_integer() or not float(maximum).is_integer()
+        or not -(2**31) <= minimum <= maximum < 2**31
+        or maximum - minimum + 1 != len(choices)
+    ):
+        return False
+    labels: list[str] = []
+    for index, choice in enumerate(choices):
+        if (
+            not isinstance(choice, dict) or set(choice) != {"value", "label"}
+            or type(choice["value"]) is not int or choice["value"] != int(minimum) + index
+            or not isinstance(choice["label"], str) or not choice["label"]
+            or choice["label"] != choice["label"].strip() or "\x00" in choice["label"]
+        ):
+            return False
+        labels.append(choice["label"])
+    return len(set(labels)) == len(labels)
+
+
+def _stored_choices(raw: str) -> list[dict[str, Any]]:
+    try:
+        choices = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(choices, list) or not choices:
+        return []
+    minimum = choices[0].get("value") if isinstance(choices[0], dict) else None
+    maximum = choices[-1].get("value") if isinstance(choices[-1], dict) else None
+    return choices if _valid_choice_mapping(choices, minimum, maximum) else []
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -188,19 +259,33 @@ def describe_aex(plugin_source: str) -> dict[str, Any]:
         raise AEXCompatSessionError("worker_protocol_error")
     seen: set[int] = set()
     for entry in catalog:
+        group_path = entry.get("group_path") if isinstance(entry, dict) else None
+        keys = set(entry) - {"group_path"} if isinstance(entry, dict) else set()
         if not isinstance(entry, dict) or (
             type(entry.get("slot")) is not int or entry["slot"] < 1 or entry["slot"] in seen
             or not isinstance(entry.get("name"), str)
             or not isinstance(entry.get("kind"), str)
+            or ("group_path" in entry and not _valid_group_path(group_path))
             or (entry.get("kind") == "color" and (
-                set(entry) != {"slot", "name", "kind", "color"} or not _argb8(entry.get("color"))
+                keys != {"slot", "name", "kind", "color"} or not _argb8(entry.get("color"))
             ))
-            or (entry.get("kind") != "color" and (
-                set(entry) != {"slot", "name", "kind", "minimum", "maximum", "value"}
+            or (entry.get("kind") == "point" and (
+                keys != {"slot", "name", "kind", "components"} or not _point2(entry.get("components"))
+            ))
+            or (entry.get("kind") not in {"color", "point"} and (
+                keys not in (
+                    {"slot", "name", "kind", "minimum", "maximum", "value"},
+                    {"slot", "name", "kind", "minimum", "maximum", "value", "choices"},
+                )
                 or entry.get("kind") not in {"integer", "float", "angle"}
                 or any(not _finite_scalar(entry[key]) for key in ("minimum", "maximum", "value"))
                 or not entry["minimum"] <= entry["value"] <= entry["maximum"]
                 or (entry["kind"] == "integer" and not float(entry["value"]).is_integer())
+                or ("choices" in entry and (
+                    entry["kind"] != "integer" or not _valid_choice_mapping(
+                        entry["choices"], entry["minimum"], entry["maximum"],
+                    )
+                ))
             ))
         ):
             raise AEXCompatSessionError("worker_protocol_error")
@@ -329,13 +414,18 @@ def evaluate_rgba8(
             shared_description = None
             for requested, recorded in zip(parameter_overrides, applied_many):
                 color_requested = isinstance(requested, dict) and "color" in requested
+                point_requested = isinstance(requested, dict) and "components" in requested
                 typed_value_valid = (
                     _argb8(recorded.get("color")) and recorded.get("color") == requested.get("color")
-                    and recorded.get("kind") == "color" and "value" not in recorded
+                    and recorded.get("kind") == "color" and "value" not in recorded and "components" not in recorded
                 ) if color_requested and isinstance(recorded, dict) else (
+                    _point2(recorded.get("components")) and recorded.get("components") == requested.get("components")
+                    and recorded.get("kind") == "point" and "value" not in recorded and "color" not in recorded
+                ) if point_requested and isinstance(recorded, dict) else (
                     _finite_scalar(recorded.get("value")) and recorded.get("value") == requested.get("value")
                     and isinstance(recorded.get("kind"), str)
-                    and recorded["kind"] in {"integer", "float", "angle"} and "color" not in recorded
+                    and recorded["kind"] in {"integer", "float", "angle"}
+                    and "color" not in recorded and "components" not in recorded
                 ) if isinstance(requested, dict) and isinstance(recorded, dict) else False
                 if (
                     not isinstance(recorded, dict)
@@ -387,7 +477,8 @@ def _configure_bake_button(node: Any, button: Any) -> None:
     button.parameter_integer_value = node.parameter_integer_value
     button.parameter_value_text = node.parameter_value_text
     button.parameter_overrides_json = json.dumps([
-        {"slot": item.slot, **({"color": list(item.color_argb)} if item.kind == "color" else {
+        {"slot": item.slot, **({"color": list(item.color_argb)} if item.kind == "color" else
+            {"components": [item.point_x_text, item.point_y_text]} if item.kind == "point" else {
             "value": item.integer_value if item.kind == "integer" else item.value_text,
         })}
         for item in node.selected_parameter_items
@@ -413,6 +504,7 @@ def _parameter_override(slot: int, kind: str, integer_value: int, value_text: st
 def _named_parameter_overrides(node: Any) -> list[dict[str, Any]]:
     return [
         {"slot": item.slot, "color": list(item.color_argb)} if item.kind == "color" else
+        {"slot": item.slot, "components": _point_text_values(item.point_x_text, item.point_y_text)} if item.kind == "point" else
         _parameter_override(item.slot, item.kind, item.integer_value, item.value_text, 0.0)
         for item in node.selected_parameter_items
     ]
@@ -438,13 +530,27 @@ def _parse_parameter_overrides(value: str) -> list[dict[str, Any]]:
     seen: set[int] = set()
     for entry in parsed:
         if (
-            not isinstance(entry, dict) or set(entry) not in ({"slot", "value"}, {"slot", "color"})
+            not isinstance(entry, dict) or set(entry) not in (
+                {"slot", "value"}, {"slot", "color"}, {"slot", "components"},
+            )
             or type(entry["slot"]) is not int or entry["slot"] < 1 or entry["slot"] in seen
         ):
             raise AEXCompatSessionError("invalid or duplicate parameter override")
         if "color" in entry:
             if not _argb8(entry["color"]):
                 raise AEXCompatSessionError("color must contain four ARGB8 channels")
+            seen.add(entry["slot"])
+            continue
+        if "components" in entry:
+            if isinstance(entry["components"], list):
+                for index, component in enumerate(entry["components"]):
+                    if isinstance(component, str):
+                        try:
+                            entry["components"][index] = float(component)
+                        except (ValueError, OverflowError) as exc:
+                            raise AEXCompatSessionError("point must contain two bounded finite coordinates") from exc
+            if not _point2(entry["components"]):
+                raise AEXCompatSessionError("point must contain two bounded finite coordinates")
             seen.add(entry["slot"])
             continue
         if isinstance(entry["value"], str):
@@ -477,32 +583,46 @@ class AEXCompatScalarParameter(bpy.types.PropertyGroup):
     slot: IntProperty(name="Slot")
     name: StringProperty(name="Name")
     kind: StringProperty(name="Kind")
+    group_path_json: StringProperty(name="Group path", default="")
     minimum_text: StringProperty(name="Minimum")
     maximum_text: StringProperty(name="Maximum")
     value_text: StringProperty(name="Default")
+    choices_json: StringProperty(name="Named integer choices", default="")
     color_argb: IntVectorProperty(name="ARGB8 default", size=4, min=0, max=255, default=(255, 0, 0, 0))
+    point_x_text: StringProperty(name="Default X", default="")
+    point_y_text: StringProperty(name="Default Y", default="")
 
 
 class AEXCompatChosenParameter(bpy.types.PropertyGroup):
     slot: IntProperty(name="Slot")
     name: StringProperty(name="Name")
     kind: StringProperty(name="Kind")
+    group_path_json: StringProperty(name="Group path", default="")
     integer_value: IntProperty(name="Integer value")
     value_text: StringProperty(name="Decimal value")
+    choices_json: StringProperty(name="Named integer choices", default="")
     color_argb: IntVectorProperty(name="ARGB8 color", size=4, min=0, max=255, default=(255, 0, 0, 0))
+    point_x_text: StringProperty(name="Point X", default="")
+    point_y_text: StringProperty(name="Point Y", default="")
 
 
 class AEXCOMPAT_UL_scalar_parameters(bpy.types.UIList):
     def draw_item(self, _context: Any, layout: Any, _data: Any, item: Any, _icon: Any, _active_data: Any, _active_propname: Any, _index: int) -> None:
-        layout.label(text=f"{item.name} (#{item.slot}, {item.kind})")
+        layout.label(text=f"{_parameter_label(item)} (#{item.slot}, {item.kind})")
 
 
 class AEXCOMPAT_UL_chosen_parameters(bpy.types.UIList):
     def draw_item(self, _context: Any, layout: Any, _data: Any, item: Any, _icon: Any, _active_data: Any, _active_propname: Any, _index: int) -> None:
         row = layout.row(align=True)
-        row.label(text=f"{item.name} (#{item.slot})")
+        row.label(text=f"{_parameter_label(item)} (#{item.slot})")
         if item.kind == "color":
             row.label(text=f"ARGB {list(item.color_argb)}")
+        elif item.kind == "point":
+            row.prop(item, "point_x_text", text="X")
+            row.prop(item, "point_y_text", text="Y")
+        elif choices := _stored_choices(item.choices_json):
+            selected = next((choice["label"] for choice in choices if choice["value"] == item.integer_value), str(item.integer_value))
+            row.label(text=selected)
         else:
             row.prop(item, "integer_value" if item.kind == "integer" else "value_text", text="")
 
@@ -563,10 +683,16 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
                 )
                 index = min(self.selected_parameter_index, len(self.parameter_items) - 1)
                 selected = self.parameter_items[index]
+                if group := _stored_group_path(selected.group_path_json):
+                    layout.label(text="Group: " + " / ".join(group))
                 if selected.kind == "color":
                     layout.label(text=f"ARGB8 default {list(selected.color_argb)}")
+                elif selected.kind == "point":
+                    layout.label(text=f"Default X/Y ({selected.point_x_text}, {selected.point_y_text})")
                 else:
                     layout.label(text=f"Range {selected.minimum_text} .. {selected.maximum_text}; default {selected.value_text}")
+                    if choices := _stored_choices(selected.choices_json):
+                        layout.label(text="Choices: " + ", ".join(choice["label"] for choice in choices))
                 choose = layout.operator("aexcompat.choose_parameter", text="Add/update selected parameter")
                 _configure_node_locator(self, choose)
             if self.selected_parameter_items:
@@ -577,6 +703,19 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
                 chosen = self.selected_parameter_items[min(self.selected_override_index, len(self.selected_parameter_items) - 1)]
                 if chosen.kind == "color":
                     layout.prop(chosen, "color_argb", text="ARGB8 (A, R, G, B)")
+                elif chosen.kind == "point":
+                    row = layout.row(align=True)
+                    row.prop(chosen, "point_x_text", text="X")
+                    row.prop(chosen, "point_y_text", text="Y")
+                elif choices := _stored_choices(chosen.choices_json):
+                    for choice in choices:
+                        button = layout.operator(
+                            "aexcompat.set_popup_choice", text=choice["label"],
+                            icon="RADIOBUT_ON" if chosen.integer_value == choice["value"] else "RADIOBUT_OFF",
+                        )
+                        _configure_node_locator(self, button)
+                        button.slot = chosen.slot
+                        button.value = choice["value"]
                 remove = layout.operator("aexcompat.remove_parameter", text="Remove selected override")
                 _configure_node_locator(self, remove)
             else:
@@ -677,12 +816,17 @@ class AEXCompatRefreshParametersOperator(bpy.types.Operator):
             item.slot = record["slot"]
             item.name = record["name"]
             item.kind = record["kind"]
+            item.group_path_json = json.dumps(record["group_path"], ensure_ascii=False) if "group_path" in record else ""
             if record["kind"] == "color":
                 item.color_argb = record["color"]
+            elif record["kind"] == "point":
+                item.point_x_text = str(record["components"][0])
+                item.point_y_text = str(record["components"][1])
             else:
                 item.minimum_text = str(record["minimum"])
                 item.maximum_text = str(record["maximum"])
                 item.value_text = str(int(record["value"])) if record["kind"] == "integer" else str(record["value"])
+                item.choices_json = json.dumps(record["choices"], ensure_ascii=False) if "choices" in record else ""
         node.description_source = node.plugin_source
         node.description_plugin_sha = response["description_identity"]["description_plugin_sha256"]
         self.report({"INFO"}, f"Found {len(node.parameter_items)} editable parameters")
@@ -724,12 +868,43 @@ class AEXCompatChooseParameterOperator(bpy.types.Operator):
         existing.slot = item.slot
         existing.name = item.name
         existing.kind = item.kind
+        existing.group_path_json = item.group_path_json
+        existing.choices_json = item.choices_json
         if item.kind == "color":
             existing.color_argb = item.color_argb
+        elif item.kind == "point":
+            existing.point_x_text = item.point_x_text
+            existing.point_y_text = item.point_y_text
         elif item.kind == "integer":
             existing.integer_value = int(item.value_text)
         else:
             existing.value_text = item.value_text
+        return {"FINISHED"}
+
+
+class AEXCompatSetPopupChoiceOperator(bpy.types.Operator):
+    bl_idname = "aexcompat.set_popup_choice"
+    bl_label = "Set AEX popup choice"
+
+    tree_name: StringProperty()
+    node_name: StringProperty()
+    owner_type: StringProperty(default="GROUP")
+    owner_name: StringProperty(default="")
+    slot: IntProperty()
+    value: IntProperty()
+
+    def execute(self, _context: Any):
+        node = _find_descriptor_node(self.owner_type, self.owner_name or self.tree_name, self.tree_name, self.node_name)
+        if node is None or node.transport_mode != "render_aex" or node.description_source != node.plugin_source:
+            self.report({"ERROR"}, "refresh AEX parameters before selection")
+            return {"CANCELLED"}
+        chosen = next((item for item in node.selected_parameter_items if item.slot == self.slot), None)
+        if chosen is None or chosen.kind != "integer" or not any(
+            choice["value"] == self.value for choice in _stored_choices(chosen.choices_json)
+        ):
+            self.report({"ERROR"}, "popup choice is not declared for this parameter")
+            return {"CANCELLED"}
+        chosen.integer_value = self.value
         return {"FINISHED"}
 
 
@@ -865,7 +1040,8 @@ class AEXCompatBakeImageOperator(bpy.types.Operator):
 _CLASSES = (
     AEXCompatScalarParameter, AEXCompatChosenParameter,
     AEXCOMPAT_UL_scalar_parameters, AEXCOMPAT_UL_chosen_parameters, AEXCompatCompositorNode,
-    AEXCompatRefreshParametersOperator, AEXCompatChooseParameterOperator, AEXCompatRemoveParameterOperator,
+    AEXCompatRefreshParametersOperator, AEXCompatChooseParameterOperator, AEXCompatSetPopupChoiceOperator,
+    AEXCompatRemoveParameterOperator,
     AEXCompatBakeImageOperator,
 )
 _MENU = None
