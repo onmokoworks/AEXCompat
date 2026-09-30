@@ -187,15 +187,21 @@ bool parse_spatial_context_payload(const wchar_t* text) {
 }
 
 bool decode_active_camera_payload(const wchar_t* text,
-    std::array<uint64_t, 51>& fields, std::array<double, 13>& values,
-    std::array<std::array<double, 13>, 2>& keyframe_values, bool& animated) {
+    std::array<uint64_t, 60>& fields, std::array<double, 16>& values,
+    std::array<std::array<double, 16>, 2>& keyframe_values, bool& animated,
+    bool& oriented) {
   if (!text) return false;
   const std::wstring encoded(text);
   constexpr wchar_t kPrefix[] = L"scene-camera:v1|";
-  animated = encoded.compare(0, 16, L"scene-camera:v2|") == 0;
-  if ((!animated && encoded.compare(0, std::size(kPrefix) - 1, kPrefix) != 0) ||
+  animated = encoded.compare(0, 16, L"scene-camera:v2|") == 0 ||
+      encoded.compare(0, 16, L"scene-camera:v4|") == 0;
+  oriented = encoded.compare(0, 16, L"scene-camera:v3|") == 0 ||
+      encoded.compare(0, 16, L"scene-camera:v4|") == 0;
+  if ((!animated && !oriented && encoded.compare(0, std::size(kPrefix) - 1, kPrefix) != 0) ||
       encoded.size() > (animated ? 1536u : 512u)) return false;
-  const std::size_t field_count = animated ? 51 : 21;
+  const std::size_t base_count = oriented ? 24 : 21;
+  const std::size_t key_stride = oriented ? 18 : 15;
+  const std::size_t field_count = base_count + (animated ? 2 * key_stride : 0);
   const std::wstring payload = encoded.substr(std::size(kPrefix) - 1);
   std::size_t start = 0;
   for (std::size_t index = 0; index < field_count; ++index) {
@@ -229,7 +235,8 @@ bool decode_active_camera_payload(const wchar_t* text,
 
   static_assert(sizeof(double) == sizeof(uint64_t));
   const auto decode = [&](std::size_t offset, auto& destination) {
-    for (std::size_t index = 0; index < destination.size(); ++index) {
+    destination.fill(0.0);
+    for (std::size_t index = 0; index < (oriented ? 16u : 13u); ++index) {
       std::memcpy(&destination[index], &fields[index + offset], sizeof(double));
       const double bound = index == 0 ? 1'000'000'000.0 :
           index >= 10 ? 36'000.0 :
@@ -247,12 +254,13 @@ bool decode_active_camera_payload(const wchar_t* text,
   if (!decode(8, values)) return false;
   if (animated) {
     for (std::size_t key = 0; key < 2; ++key) {
-      const std::size_t offset = 21 + key * 15;
+      const std::size_t offset = base_count + key * key_stride;
       if (fields[offset + 1] == 0 || fields[offset + 1] > 1'000'000 ||
           fields[offset] >= 10 * fields[offset + 1] ||
           !decode(offset + 2, keyframe_values[key])) return false;
     }
-    if (fields[21] * fields[37] >= fields[36] * fields[22]) return false;
+    if (fields[base_count] * fields[base_count + key_stride + 1] >=
+        fields[base_count + key_stride] * fields[base_count + 1]) return false;
   }
 
   return true;
@@ -265,11 +273,12 @@ bool parse_active_camera_payload(const wchar_t* text) {
       std::wstring(text).compare(0, 15, L"scene-graph:v2|") == 0 ||
       std::wstring(text).compare(0, 15, L"scene-graph:v3|") == 0))
     return parse_authored_layer_graph(text);
-  std::array<uint64_t, 51> fields{};
-  std::array<double, 13> values{};
-  std::array<std::array<double, 13>, 2> keyframe_values{};
+  std::array<uint64_t, 60> fields{};
+  std::array<double, 16> values{};
+  std::array<std::array<double, 16>, 2> keyframe_values{};
   bool animated = false;
-  if (!decode_active_camera_payload(text, fields, values, keyframe_values, animated))
+  bool oriented = false;
+  if (!decode_active_camera_payload(text, fields, values, keyframe_values, animated, oriented))
     return false;
   auto& state = aexcompat::scene_runtime::scene_runtime_state();
   if (!state.scene_registry_initialized || state.authored_camera_live ||
@@ -293,6 +302,7 @@ bool parse_active_camera_payload(const wchar_t* text) {
       transform.position[component] = snapshot[4 + component];
       transform.scale[component] = snapshot[7 + component];
       transform.rotation_degrees[component] = snapshot[10 + component];
+      transform.orientation_degrees[component] = snapshot[13 + component];
     }
     transform.is_3d = true;
     return transform;
@@ -300,7 +310,7 @@ bool parse_active_camera_payload(const wchar_t* text) {
   state.layer_transforms[index] = transform_from(values);
   if (animated) {
     for (std::size_t key = 0; key < 2; ++key) {
-      const std::size_t offset = 21 + key * 15;
+      const std::size_t offset = (oriented ? 24 : 21) + key * (oriented ? 18 : 15);
       const aexcompat::suite_abi::AegpTime time{
           static_cast<int32_t>(fields[offset]),
           static_cast<uint32_t>(fields[offset + 1])};
@@ -335,13 +345,14 @@ bool parse_authored_layer_graph(const wchar_t* text) {
   if (separator == std::wstring::npos || encoded.find(L'!', separator + 1) != std::wstring::npos)
     return false;
   const std::wstring camera_text = encoded.substr(15, separator - 15);
-  std::array<uint64_t, 51> camera_fields{};
-  std::array<double, 13> camera_values{};
-  std::array<std::array<double, 13>, 2> camera_keys{};
+  std::array<uint64_t, 60> camera_fields{};
+  std::array<double, 16> camera_values{};
+  std::array<std::array<double, 16>, 2> camera_keys{};
   bool animated = false;
+  bool camera_oriented = false;
   const bool has_camera = !camera_text.empty();
   if (has_camera && !decode_active_camera_payload(camera_text.c_str(),
-          camera_fields, camera_values, camera_keys, animated)) return false;
+          camera_fields, camera_values, camera_keys, animated, camera_oriented)) return false;
   std::array<Identity, 3> authored{};
   std::array<Identity, 3> current{};
   std::array<Identity, 3> parents{};
@@ -516,6 +527,8 @@ bool parse_authored_layer_graph(const wchar_t* text) {
     authored[count] = {camera_fields[0], camera_fields[1],
         static_cast<uint32_t>(camera_fields[2]), ObjectKind::layer, {}};
     transforms[count] = transform_from(camera_values, true);
+    for (std::size_t component = 0; component < 3; ++component)
+      transforms[count].orientation_degrees[component] = camera_values[13 + component];
     ++count;
   }
   aexcompat::scene_transaction::MutationLock mutation_lock;
@@ -541,12 +554,15 @@ bool parse_authored_layer_graph(const wchar_t* text) {
     const auto slot = slots[ordinary_count];
     if (animated) {
       for (std::size_t key = 0; key < 2; ++key) {
-        const auto offset = 21 + key * 15;
+        const auto offset = (camera_oriented ? 24 : 21) + key * (camera_oriented ? 18 : 15);
         const aexcompat::suite_abi::AegpTime time{
             static_cast<int32_t>(camera_fields[offset]),
             static_cast<uint32_t>(camera_fields[offset + 1])};
         state.layer_transform_keyframes[slot][key] = {
             time, transform_from(camera_keys[key], true), true};
+        for (std::size_t component = 0; component < 3; ++component)
+          state.layer_transform_keyframes[slot][key].transform.orientation_degrees[component] =
+              camera_keys[key][13 + component];
         state.layer_camera_zoom_keyframes[slot][key] = {time, camera_keys[key][0], true};
       }
     }

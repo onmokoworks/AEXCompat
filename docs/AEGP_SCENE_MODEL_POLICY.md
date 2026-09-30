@@ -11,11 +11,13 @@ GUI/CLI render requests accept an optional `host_context.active_camera`.
 `render-video-batch` accepts the same camera object as `active_camera` at the
 request root. Omission explicitly selects the camera-less deterministic policy.
 The camera has one typed `layer` identity (project/object/generation/index),
-static `anchor`, `position`, `scale` (percent), `rotation_degrees`, `zoom`, and
+static `anchor`, `position`, `scale` (percent), `rotation_degrees`, optional
+`orientation_degrees` (default zero), `zoom`, and
 rational `in_point`/`duration`. Its identity cannot change between frames.
 
 Optional `keyframes` contains exactly two objects, each with rational `time`
-(`value`/`scale`), `anchor`, `position`, `scale`, `rotation_degrees`, and `zoom`.
+(`value`/`scale`), `anchor`, `position`, `scale`, `rotation_degrees`, optional
+`orientation_degrees` (default zero), and `zoom`.
 Both snapshots use the camera's single identity. Times are strictly increasing
 by rational comparison and lie within 0 inclusive to 10 exclusive seconds; denominators are positive
 and at most 1,000,000. Transform and zoom values retain the static input bounds
@@ -27,7 +29,15 @@ keyframe interval and linearly interpolates transform components and zoom
 inside it at composition rational time. This is a deterministic host policy,
 not verified AE easing, orientation, or pixel equivalence. Active time range
 still governs whether PF Interface returns a camera. Static inputs keep the
-v1 transport; animated inputs use v2 and are installed once at session open,
+v1 transport when orientation is zero; animated inputs with zero orientation
+use v2. Nonzero static or key orientation selects v3 (24 fields) or v4
+(60 fields: 24 static fields and two 18-field time/transform snapshots).
+The three orientation IEEE-f64 bit fields follow the rotation fields in each
+snapshot. Orientation components are finite and bounded to +/-36,000 degrees.
+Local composition is `T(position) * Rz * Ry * Rx * Oz * Oy * Ox * S * T(-anchor)`;
+PF Interface returns its inverse. Rotation and orientation remain separate,
+and each is component-linearly interpolated, without shortest-angle wrapping.
+Snapshots are installed once at session open,
 then evaluated by both PF Interface and AEGP from the same scene state.
 
 ## Identity and ownership
@@ -73,7 +83,8 @@ parent. A combined `scene-graph:v1` envelope (21 fields per ordinary record) car
 through the existing scene auxiliary carrier. Both are validated before one
 registry bind and non-failing scene publication; a late invalid identity does
 not invalidate earlier handles or leave a partially rebound graph. Camera-only
-input retains its existing v1/v2 payload and camera-less input stays explicit.
+input retains its v1/v2 payload for zero orientation, or uses the camera v3/v4
+payload described above; camera-less input stays explicit.
 Nonzero orientation selects `scene-graph:v2`, appending three IEEE-f64 bit fields
 to every ordinary record (24 fields). Native decoding retains v1 as zero
 orientation; malformed v2 orientation is rejected before binding any identity.
