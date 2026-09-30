@@ -3461,7 +3461,7 @@ impl eframe::App for HarnessApp {
                                 } else if let Some(context) = &mut self.host_context {
                                     context.spatial = None;
                                     if context.mask_scene.masks.is_empty()
-                                        && context.active_camera.is_none()
+                                        && !context.has_authored_scene()
                                         && context.render_environment.is_none()
                                     {
                                         self.host_context = None;
@@ -3638,7 +3638,7 @@ impl eframe::App for HarnessApp {
                                 context.render_environment = None;
                                 if context.mask_scene.masks.is_empty()
                                     && context.spatial.is_none()
-                                    && context.active_camera.is_none()
+                                    && !context.has_authored_scene()
                                 { self.host_context = None; }
                             }
                         }
@@ -3740,7 +3740,7 @@ impl eframe::App for HarnessApp {
                                     if let Some(context) = &mut self.host_context {
                                         context.mask_scene.masks.clear();
                                         if context.spatial.is_none()
-                                            && context.active_camera.is_none()
+                                            && !context.has_authored_scene()
                                             && context.render_environment.is_none()
                                         {
                                             self.host_context = None;

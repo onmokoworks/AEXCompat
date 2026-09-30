@@ -52,6 +52,12 @@ pub struct HostContext {
     pub alpha_as_coverage_params: Vec<u32>,
 }
 
+impl HostContext {
+    pub fn has_authored_scene(&self) -> bool {
+        self.active_camera.is_some() || !self.scene_layers.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActiveCamera {
@@ -2284,6 +2290,10 @@ mod tests {
         });
         let context: HostContext = serde_json::from_value(input).unwrap();
         let encoded = encode_active_camera(&context).unwrap().unwrap();
+        assert!(context.has_authored_scene());
+        let mut cleared = context.clone();
+        cleared.scene_layers.clear();
+        assert!(!cleared.has_authored_scene());
         assert!(encoded.starts_with("scene-graph:v1|!"));
         let records: Vec<_> = encoded.split_once('!').unwrap().1.split(';').collect();
         assert_eq!(records.len(), 2);
