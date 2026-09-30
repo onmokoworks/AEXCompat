@@ -2,6 +2,7 @@
 
 #include "runtime_module_audit.hpp"
 #include "strict_json.hpp"
+#include "transport_path_identity.hpp"
 
 #include <algorithm>
 #include <array>
@@ -176,7 +177,9 @@ bool load_manifest(const std::filesystem::path& path, Manifest& result) {
   if (!canonical_of(argument, canonical)) return false;
   std::error_code error;
   const std::filesystem::path absolute = std::filesystem::absolute(argument, error);
-  if (error || absolute.lexically_normal() != canonical) return false;
+  if (error || !aexcompat::transport_path::parent_alias_only(
+                   argument, canonical, absolute))
+    return false;
   const uint64_t size = std::filesystem::file_size(canonical, error);
   if (error || size == 0 || size > kMaxManifestBytes) return false;
   std::ifstream input(canonical, std::ios::binary);
