@@ -8,7 +8,8 @@
   "package": {
     "bundle_suffix": ".ofx.bundle",
     "binary_suffix": ".ofx",
-    "windows_architecture": "Win64"
+    "windows_architecture": "Win64",
+    "macos_architecture": "MacOS/arm64"
   },
   "lifecycle": {
     "exports": ["OfxGetNumberOfPlugins", "OfxGetPlugin", "OfxSetHost", "OfxPluginMain"],
@@ -16,17 +17,18 @@
   },
   "pixel_contract": {
     "components": "RGBA",
-    "depth": "8-bit",
+    "depths": ["8-bit", "32-bit float"],
     "channel_order": "RGBA",
     "alpha": "premultiplied",
-    "stride": "host-provided rowbytes; never assumed width * 4",
+    "stride": "host-provided positive rowbytes; negative rowbytes rejected",
     "frame_time": "OfxTime double",
     "render_window": "host-provided OfxRectI render window"
   },
   "identity": {
     "plugin_identifier": "com.aexcompat.resolve.ofx",
-    "source_sha256": "047BA904757D17F4130E3768C93BB5ADF1E18E906D55AE3CEA90DFB6C77A61FC",
-    "binary_sha256": "B0A8D2806559A5912F384C409E5A05E8C6AF0A180811A98F0F5BB84CBCB3A092",
+    "source_sha256": "1E248FB70A5F08B9FD39918677ACA91556F5CD3AE83551645CB0AAE95BCB20EE",
+    "binary_sha256": "7CC6EA5C1C888F1B9026891B06AD23CCA44314DCA622F250DB188DCA163E9D3D",
+    "binary_platform": "macos-arm64",
     "worker_identity": "not_claimed_until_shared_RenderSession_gate",
     "input_sha256": null,
     "output_sha256": null,
@@ -54,6 +56,23 @@
     "alpha_preserved": true,
     "padding_preserved": true
   },
+  "float_control_render": {
+    "state": "verified_local_fixture",
+    "status": "kOfxStatOK",
+    "width": 3,
+    "height": 2,
+    "render_window": [1, 0, 3, 2],
+    "source_rowbytes": 64,
+    "output_rowbytes": 80,
+    "frame_time": 7.0,
+    "parameter_value": 0.25,
+    "input_sha256": "B33DD8D0B613964684C9867D8FD46DA8399764D4F167EAACBBA84D52ED2CAE69",
+    "output_sha256": "B2F761244F09B161285E645A4E940E74DDA4DF287D89DA1A51AF18A88739DA90",
+    "changed_rgb_values": 12,
+    "alpha_preserved": true,
+    "padding_preserved": true,
+    "mismatched_depth_rejected": true
+  },
   "aex_render_gate": {
     "state": "blocked",
     "success_status": "not_claimed",
@@ -65,7 +84,27 @@
     "resolve_exe_sha256": "16010AFE62C44284FEE083F645BD72D910C4462A8D8573E8BEB4BD44C4568CE0",
     "ofxloader_exe_sha256": "ADEE38644103E1DAA9504BB0D2EF854B24915D02B668A8B592D9674F80176EB4",
     "internal_openfx_plugin_sha256": "AA9CBA05F617D6AE51228A806E7640DB1299405F4C429A751EEEFBB9A95DAFC7",
+    "historical_windows_plugin_binary_sha256": "B0A8D2806559A5912F384C409E5A05E8C6AF0A180811A98F0F5BB84CBCB3A092",
     "standard_external_path_entries": 0,
     "real_resolve_smoke": "blocked_external_path_empty"
+  },
+  "macos_host_evidence": {
+    "resolve_version": "21.0.4.0005",
+    "discovery": "verified",
+    "control_render": "verified_effect_toggle_and_png_export",
+    "bundle_path": "AEXCompatResolve.ofx.bundle/Contents/MacOS/AEXCompatResolve.ofx",
+    "binary_architecture": "Mach-O arm64 bundle",
+    "binary_sha256": "7CC6EA5C1C888F1B9026891B06AD23CCA44314DCA622F250DB188DCA163E9D3D",
+    "host_pixel_depth": "32-bit float",
+    "host_rowbytes": 30720,
+    "exported_frame_format": "PNG RGB",
+    "control_input_sha256": "9C40EF69EF886C75D9DF6F7769EA0797B16497AD3D43B55E0C57C21FA7CFB24F",
+    "exported_frame_width": 1920,
+    "exported_frame_height": 1080,
+    "effect_strength": 0.5,
+    "effect_off_png_sha256": "EBA3E27F90A424C9227A6C09078377E1CB7FFFD50021031969B763BD3BEF25DA",
+    "effect_on_png_sha256": "3CE482990140C338F1E0AAB17B8FF1C8DDD56918D4B29533412606C1B53A25C4",
+    "changed_exported_pixels": 1166400,
+    "changed_bbox": [420, 0, 1500, 1080]
   }
 }

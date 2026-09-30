@@ -63,6 +63,8 @@ enum {
 
 #define kOfxImageEffectContextFilter "OfxImageEffectContextFilter"
 #define kOfxImageEffectPropSupportedContexts "OfxImageEffectPropSupportedContexts"
+#define kOfxImageEffectPropSupportedPixelDepths "OfxImageEffectPropSupportedPixelDepths"
+#define kOfxImageEffectPropSupportedComponents "OfxImageEffectPropSupportedComponents"
 #define kOfxImageEffectPropContext "OfxImageEffectPropContext"
 #define kOfxImageEffectPropPixelDepth "OfxImageEffectPropPixelDepth"
 #define kOfxImageEffectPropComponents "OfxImageEffectPropComponents"
@@ -76,6 +78,7 @@ enum {
 #define kOfxImageEffectOutputClipName "Output"
 #define kOfxImageComponentRGBA "OfxImageComponentRGBA"
 #define kOfxBitDepthByte "OfxBitDepthByte"
+#define kOfxBitDepthFloat "OfxBitDepthFloat"
 #define kOfxImagePropData "OfxImagePropData"
 #define kOfxImagePropBounds "OfxImagePropBounds"
 #define kOfxImagePropRowBytes "OfxImagePropRowBytes"
@@ -124,6 +127,10 @@ typedef struct OfxPropertySuiteV1 {
                                void *const *);
   OfxStatus (*propSetStringN)(OfxPropertySetHandle, const char *, int,
                               const char *const *);
+  OfxStatus (*propSetDoubleN)(OfxPropertySetHandle, const char *, int,
+                              const double *);
+  OfxStatus (*propSetIntN)(OfxPropertySetHandle, const char *, int,
+                           const int *);
   OfxStatus (*propGetPointer)(OfxPropertySetHandle, const char *, int, void **);
   OfxStatus (*propGetString)(OfxPropertySetHandle, const char *, int, char **);
   OfxStatus (*propGetDouble)(OfxPropertySetHandle, const char *, int, double *);

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 #include <new>
 #include <string>
 
@@ -13,7 +14,8 @@ const OfxPropertySuiteV1 *g_properties = nullptr;
 const OfxImageEffectSuiteV1 *g_image_effect = nullptr;
 const OfxParameterSuiteV1 *g_parameters = nullptr;
 
-constexpr std::uint64_t kBytesPerPixel = 4;
+constexpr std::uint64_t kRgba8BytesPerPixel = 4;
+constexpr std::uint64_t kRgbaFloatBytesPerPixel = 16;
 constexpr std::uint64_t kMaxImageDimension = 16384;
 constexpr std::uint64_t kMaxRenderPixels = 64ull * 1024 * 1024;
 constexpr std::uint64_t kMaxImageSpan = 512ull * 1024 * 1024;
@@ -23,6 +25,7 @@ struct ImageGeometry {
   std::uint64_t height = 0;
   std::uint64_t row_bytes = 0;
   std::uint64_t span = 0;
+  std::uint64_t bytes_per_pixel = 0;
 };
 
 bool checked_add(std::uint64_t left, std::uint64_t right,
@@ -40,8 +43,11 @@ bool checked_multiply(std::uint64_t left, std::uint64_t right,
 }
 
 bool image_geometry(const OfxRectI &bounds, int row_bytes,
+                    std::uint64_t bytes_per_pixel,
                     ImageGeometry *geometry) {
-  if (!geometry || row_bytes <= 0) return false;
+  if (!geometry || row_bytes <= 0 ||
+      (bytes_per_pixel != kRgba8BytesPerPixel &&
+       bytes_per_pixel != kRgbaFloatBytesPerPixel)) return false;
 
   const auto width = static_cast<std::int64_t>(bounds.x2) -
                      static_cast<std::int64_t>(bounds.x1);
@@ -57,11 +63,11 @@ bool image_geometry(const OfxRectI &bounds, int row_bytes,
   std::uint64_t pixel_count = 0;
   std::uint64_t pixel_span = 0;
   std::uint64_t span = 0;
-  if (!checked_multiply(static_cast<std::uint64_t>(width), kBytesPerPixel,
+  if (!checked_multiply(static_cast<std::uint64_t>(width), bytes_per_pixel,
                         &minimum_row_bytes) ||
       !checked_multiply(static_cast<std::uint64_t>(width),
                         static_cast<std::uint64_t>(height), &pixel_count) ||
-      !checked_multiply(pixel_count, kBytesPerPixel, &pixel_span) ||
+      !checked_multiply(pixel_count, bytes_per_pixel, &pixel_span) ||
       pixel_span > kMaxImageSpan ||
       static_cast<std::uint64_t>(row_bytes) < minimum_row_bytes ||
       !checked_multiply(static_cast<std::uint64_t>(row_bytes),
@@ -74,6 +80,7 @@ bool image_geometry(const OfxRectI &bounds, int row_bytes,
   geometry->height = static_cast<std::uint64_t>(height);
   geometry->row_bytes = static_cast<std::uint64_t>(row_bytes);
   geometry->span = span;
+  geometry->bytes_per_pixel = bytes_per_pixel;
   return true;
 }
 
@@ -124,9 +131,9 @@ bool checked_last_pixel_end(const ImageGeometry &geometry,
       !checked_add(first_column, render_width - 1, &last_column) ||
       last_row >= geometry.height || last_column >= geometry.width ||
       !checked_multiply(last_row, geometry.row_bytes, &row_offset) ||
-      !checked_multiply(last_column, kBytesPerPixel, &pixel_offset) ||
+      !checked_multiply(last_column, geometry.bytes_per_pixel, &pixel_offset) ||
       !checked_add(row_offset, pixel_offset, &pixel_end) ||
-      !checked_add(pixel_end, kBytesPerPixel, &pixel_end)) {
+      !checked_add(pixel_end, geometry.bytes_per_pixel, &pixel_end)) {
     return false;
   }
   return pixel_end <= geometry.span;
@@ -162,15 +169,20 @@ const char *property_string(OfxPropertySetHandle properties, const char *name) {
 }
 
 bool set_string(OfxPropertySetHandle properties, const char *name,
-                const char *value) {
+                const char *value, int index = 0) {
   return g_properties && g_properties->propSetString && properties &&
-         g_properties->propSetString(properties, name, 0, value) == kOfxStatOK;
+         g_properties->propSetString(properties, name, index, value) == kOfxStatOK;
 }
 
 bool set_double(OfxPropertySetHandle properties, const char *name,
                 double value) {
   return g_properties && g_properties->propSetDouble && properties &&
          g_properties->propSetDouble(properties, name, 0, value) == kOfxStatOK;
+}
+
+bool set_int(OfxPropertySetHandle properties, const char *name, int value) {
+  return g_properties && g_properties->propSetInt && properties &&
+         g_properties->propSetInt(properties, name, 0, value) == kOfxStatOK;
 }
 
 bool set_pointer(OfxPropertySetHandle properties, const char *name,
@@ -195,6 +207,11 @@ OfxStatus describe(OfxImageEffectHandle descriptor) {
   const auto properties = property_set(descriptor);
   if (!properties || !set_string(properties, kOfxImageEffectPropSupportedContexts,
                                  kOfxImageEffectContextFilter) ||
+      !set_string(properties, kOfxImageEffectPropSupportedPixelDepths,
+                  kOfxBitDepthByte) ||
+      !set_string(properties, kOfxImageEffectPropSupportedPixelDepths,
+                  kOfxBitDepthFloat, 1) ||
+      !set_int(properties, kOfxImageEffectPropSupportsTiles, 0) ||
       !set_string(properties, kOfxPropLabel, "AEXCompat Resolve OFX")) {
     return kOfxStatErrMissingHostFeature;
   }
@@ -211,44 +228,48 @@ OfxStatus describe_in_context(OfxImageEffectHandle descriptor,
 
   OfxPropertySetHandle source = nullptr;
   OfxPropertySetHandle output = nullptr;
-  if (g_image_effect->clipDefine(descriptor, kOfxImageEffectSimpleSourceClipName,
-                                  &source) != kOfxStatOK ||
-      g_image_effect->clipDefine(descriptor, kOfxImageEffectOutputClipName,
-                                  &output) != kOfxStatOK ||
-      !set_string(source, kOfxImageEffectPropComponents, kOfxImageComponentRGBA) ||
-      !set_string(source, kOfxImageEffectPropPixelDepth, kOfxBitDepthByte) ||
-      !set_string(output, kOfxImageEffectPropComponents, kOfxImageComponentRGBA) ||
-      !set_string(output, kOfxImageEffectPropPixelDepth, kOfxBitDepthByte) ||
-      !set_string(output, kOfxImageEffectPropSupportsTiles, "false") ||
-      !set_string(output, kOfxImageEffectPropPreMultiplication,
-                  kOfxImagePreMultiplied)) {
+  const auto source_status = g_image_effect->clipDefine(
+      descriptor, kOfxImageEffectSimpleSourceClipName, &source);
+  const auto output_status = source_status == kOfxStatOK
+                                 ? g_image_effect->clipDefine(
+                                       descriptor, kOfxImageEffectOutputClipName,
+                                       &output)
+                                 : kOfxStatErrMissingHostFeature;
+  if (source_status != kOfxStatOK || output_status != kOfxStatOK ||
+      !set_string(source, kOfxImageEffectPropSupportedComponents,
+                  kOfxImageComponentRGBA) ||
+      !set_string(output, kOfxImageEffectPropSupportedComponents,
+                  kOfxImageComponentRGBA) ||
+      !set_int(source, kOfxImageEffectPropSupportsTiles, 0) ||
+      !set_int(output, kOfxImageEffectPropSupportsTiles, 0)) {
     return kOfxStatErrMissingHostFeature;
   }
 
   // This bounded control effect exposes a standard double parameter. The
   // instance reads it with paramGetValueAtTime during render and keeps that
   // path separate from the AEX RenderSession gate below.
-  if (g_parameters && g_image_effect->getParamSet && g_parameters->paramDefine) {
-    OfxParamSetHandle param_set = nullptr;
-    OfxPropertySetHandle param_properties = nullptr;
-    if (g_image_effect->getParamSet(descriptor, &param_set) == kOfxStatOK &&
-        g_parameters->paramDefine(param_set, kOfxParamTypeDouble, "strength",
-                                   &param_properties) == kOfxStatOK) {
-      set_string(param_properties, kOfxPropLabel, "Strength");
-      set_double(param_properties, kOfxParamPropDefault, 0.5);
-      set_double(param_properties, kOfxParamPropDisplayMin, 0.0);
-      set_double(param_properties, kOfxParamPropDisplayMax, 1.0);
-    }
+  OfxParamSetHandle param_set = nullptr;
+  OfxPropertySetHandle param_properties = nullptr;
+  if (!g_parameters || !g_image_effect->getParamSet ||
+      !g_parameters->paramDefine ||
+      g_image_effect->getParamSet(descriptor, &param_set) != kOfxStatOK ||
+      g_parameters->paramDefine(param_set, kOfxParamTypeDouble, "strength",
+                                &param_properties) != kOfxStatOK ||
+      !set_string(param_properties, kOfxPropLabel, "Strength") ||
+      !set_double(param_properties, kOfxParamPropDefault, 0.5) ||
+      !set_double(param_properties, kOfxParamPropDisplayMin, 0.0) ||
+      !set_double(param_properties, kOfxParamPropDisplayMax, 1.0)) {
+    return kOfxStatErrMissingHostFeature;
   }
   return kOfxStatOK;
 }
 
 OfxStatus create_instance(OfxImageEffectHandle instance) {
   auto *state = new (std::nothrow) InstanceState();
-  if (!state || !g_image_effect || !g_image_effect->clipGetHandle ||
-      !set_pointer(property_set(instance), kOfxPropInstanceData, state)) {
+  if (!state) return kOfxStatErrMemory;
+  if (!g_image_effect || !g_image_effect->clipGetHandle) {
     delete state;
-    return kOfxStatErrMemory;
+    return kOfxStatErrMissingHostFeature;
   }
   OfxPropertySetHandle source_properties = nullptr;
   OfxPropertySetHandle output_properties = nullptr;
@@ -258,7 +279,6 @@ OfxStatus create_instance(OfxImageEffectHandle instance) {
       g_image_effect->clipGetHandle(instance, kOfxImageEffectOutputClipName,
                                     &state->output_clip, &output_properties) !=
           kOfxStatOK) {
-    set_pointer(property_set(instance), kOfxPropInstanceData, nullptr);
     delete state;
     return kOfxStatErrMissingHostFeature;
   }
@@ -268,7 +288,10 @@ OfxStatus create_instance(OfxImageEffectHandle instance) {
       g_image_effect->getParamSet(instance, &param_set) != kOfxStatOK ||
       g_parameters->paramGetHandle(param_set, "strength", &state->strength_param,
                                    nullptr) != kOfxStatOK) {
-    set_pointer(property_set(instance), kOfxPropInstanceData, nullptr);
+    delete state;
+    return kOfxStatErrMissingHostFeature;
+  }
+  if (!set_pointer(property_set(instance), kOfxPropInstanceData, state)) {
     delete state;
     return kOfxStatErrMissingHostFeature;
   }
@@ -285,8 +308,11 @@ OfxStatus destroy_instance(OfxImageEffectHandle instance) {
       kOfxStatOK) {
     return kOfxStatErrBadHandle;
   }
+  if (!raw) return kOfxStatErrBadHandle;
+  if (!set_pointer(properties, kOfxPropInstanceData, nullptr)) {
+    return kOfxStatErrMissingHostFeature;
+  }
   delete static_cast<InstanceState *>(raw);
-  set_pointer(properties, kOfxPropInstanceData, nullptr);
   return kOfxStatOK;
 }
 
@@ -318,11 +344,11 @@ OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle in_args) {
   }
 
   OfxRectI render_window{};
-  for (int index = 0; index < 4; ++index) {
-    if (!get_int(in_args, kOfxImageEffectPropRenderWindow, index,
-                 &((&render_window.x1)[index]))) {
-      return kOfxStatErrMissingHostFeature;
-    }
+  if (!get_int(in_args, kOfxImageEffectPropRenderWindow, 0, &render_window.x1) ||
+      !get_int(in_args, kOfxImageEffectPropRenderWindow, 1, &render_window.y1) ||
+      !get_int(in_args, kOfxImageEffectPropRenderWindow, 2, &render_window.x2) ||
+      !get_int(in_args, kOfxImageEffectPropRenderWindow, 3, &render_window.y2)) {
+    return kOfxStatErrMissingHostFeature;
   }
   if (render_window.x2 <= render_window.x1 ||
       render_window.y2 <= render_window.y1 || !state->source_clip ||
@@ -366,11 +392,33 @@ OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle in_args) {
       source_data && output_data;
   ImageGeometry source_geometry{};
   ImageGeometry output_geometry{};
-  if (!image_properties_ok || source_bounds.x1 != output_bounds.x1 ||
+  const char *source_depth = property_string(
+      source_image, kOfxImageEffectPropPixelDepth);
+  const char *output_depth = property_string(
+      output_image, kOfxImageEffectPropPixelDepth);
+  const char *source_components = property_string(
+      source_image, kOfxImageEffectPropComponents);
+  const char *output_components = property_string(
+      output_image, kOfxImageEffectPropComponents);
+  const bool rgba_components = source_components && output_components &&
+      std::strcmp(source_components, kOfxImageComponentRGBA) == 0 &&
+      std::strcmp(output_components, kOfxImageComponentRGBA) == 0;
+  const bool rgba8 = source_depth && output_depth &&
+      std::strcmp(source_depth, kOfxBitDepthByte) == 0 &&
+      std::strcmp(output_depth, kOfxBitDepthByte) == 0;
+  const bool rgba_float = source_depth && output_depth &&
+      std::strcmp(source_depth, kOfxBitDepthFloat) == 0 &&
+      std::strcmp(output_depth, kOfxBitDepthFloat) == 0;
+  const auto bytes_per_pixel = rgba_float ? kRgbaFloatBytesPerPixel
+                                          : kRgba8BytesPerPixel;
+  if (!image_properties_ok || !rgba_components || (!rgba8 && !rgba_float) ||
+      source_bounds.x1 != output_bounds.x1 ||
       source_bounds.y1 != output_bounds.y1 || source_bounds.x2 != output_bounds.x2 ||
       source_bounds.y2 != output_bounds.y2 ||
-      !image_geometry(source_bounds, source_row_bytes, &source_geometry) ||
-      !image_geometry(output_bounds, output_row_bytes, &output_geometry)) {
+      !image_geometry(source_bounds, source_row_bytes, bytes_per_pixel,
+                      &source_geometry) ||
+      !image_geometry(output_bounds, output_row_bytes, bytes_per_pixel,
+                      &output_geometry)) {
     g_image_effect->clipReleaseImage(source_image);
     g_image_effect->clipReleaseImage(output_image);
     return kOfxStatErrFormat;
@@ -399,9 +447,8 @@ OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle in_args) {
     return kOfxStatErrFormat;
   }
 
-  // Bounded, deterministic control effect: darken premultiplied RGB by the
-  // time-evaluated strength parameter, preserve alpha, and honor host rowbytes.
-  // This is an actual OFX pixel render, but it is not an AEX render claim.
+  // Bounded control effect: darken RGB by the time-evaluated strength, preserve
+  // alpha, and honor host rowbytes. This is not an AEX render claim.
   for (std::uint64_t row = 0; row < render_height; ++row) {
     const auto source_row_offset = (first_row + row) * source_geometry.row_bytes;
     const auto output_row_offset = (first_row + row) * output_geometry.row_bytes;
@@ -411,17 +458,31 @@ OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle in_args) {
                        static_cast<size_t>(output_row_offset);
     for (std::uint64_t column = 0; column < render_width; ++column) {
       const auto source_offset = static_cast<size_t>(first_column + column) *
-                                 static_cast<size_t>(kBytesPerPixel);
+                                 static_cast<size_t>(bytes_per_pixel);
       const auto output_offset = static_cast<size_t>(first_column + column) *
-                                 static_cast<size_t>(kBytesPerPixel);
-      const auto attenuation = 1.0 - strength;
-      output_row[output_offset + 0] = static_cast<unsigned char>(
-          source_row[source_offset + 0] * attenuation + 0.5);
-      output_row[output_offset + 1] = static_cast<unsigned char>(
-          source_row[source_offset + 1] * attenuation + 0.5);
-      output_row[output_offset + 2] = static_cast<unsigned char>(
-          source_row[source_offset + 2] * attenuation + 0.5);
-      output_row[output_offset + 3] = source_row[source_offset + 3];
+                                 static_cast<size_t>(bytes_per_pixel);
+      if (rgba8) {
+        const auto attenuation = 1.0 - strength;
+        for (int channel = 0; channel < 3; ++channel) {
+          output_row[output_offset + channel] = static_cast<unsigned char>(
+              source_row[source_offset + channel] * attenuation + 0.5);
+        }
+        output_row[output_offset + 3] = source_row[source_offset + 3];
+      } else {
+        const float attenuation = static_cast<float>(1.0 - strength);
+        for (int channel = 0; channel < 3; ++channel) {
+          float source_value = 0.0f;
+          std::memcpy(&source_value,
+                      source_row + source_offset + channel * sizeof(float),
+                      sizeof(float));
+          const float output_value = source_value * attenuation;
+          std::memcpy(output_row + output_offset + channel * sizeof(float),
+                      &output_value, sizeof(float));
+        }
+        std::memcpy(output_row + output_offset + 3 * sizeof(float),
+                    source_row + source_offset + 3 * sizeof(float),
+                    sizeof(float));
+      }
     }
   }
   g_image_effect->clipReleaseImage(source_image);
