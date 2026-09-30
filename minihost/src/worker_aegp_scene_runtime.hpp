@@ -128,6 +128,11 @@ struct AegpLayerTransformKeyframe {
   bool valid{};
 };
 
+// Pure sampling shared by pre-publication graph validation and scene queries.
+bool sample_layer_transform(const AegpLayerTransform& fallback,
+    const std::array<AegpLayerTransformKeyframe, 2>& keys,
+    const aexcompat::suite_abi::AegpTime& time, AegpLayerTransform& output) noexcept;
+
 struct AegpCameraZoomKeyframe {
   aexcompat::suite_abi::AegpTime time{};
   double zoom{};

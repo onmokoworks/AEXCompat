@@ -107,6 +107,20 @@ pub struct SceneLayer {
     #[serde(default)]
     pub orientation_degrees: [f64; 3],
     pub is_3d: bool,
+    #[serde(default)]
+    pub keyframes: Option<[SceneLayerKeyframe; 2]>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SceneLayerKeyframe {
+    pub time: CameraTime,
+    pub anchor: [f64; 3],
+    pub position: [f64; 3],
+    pub scale: [f64; 3],
+    pub rotation_degrees: [f64; 3],
+    #[serde(default)]
+    pub orientation_degrees: [f64; 3],
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -509,9 +523,12 @@ pub(crate) fn encode_scene_snapshot(
         return Err(invalid("scene requires at most three authored layers"));
     }
     let mut records = Vec::with_capacity(layers.len());
-    let oriented = layers
-        .iter()
-        .any(|layer| layer.orientation_degrees != [0.0; 3]);
+    let animated = layers.iter().any(|layer| layer.keyframes.is_some());
+    let mut breakpoints = vec![CameraTime { value: 0, scale: 1 }];
+    let oriented = animated
+        || layers
+            .iter()
+            .any(|layer| layer.orientation_degrees != [0.0; 3]);
     for (index, layer) in layers.iter().enumerate() {
         if layers[..index].iter().any(|previous| {
             previous.layer.index == layer.layer.index
@@ -590,35 +607,116 @@ pub(crate) fn encode_scene_snapshot(
                     .map(|value| value.to_bits().to_string()),
             );
         }
+        if animated {
+            fields.push(u8::from(layer.keyframes.is_some()).to_string());
+            if let Some(keys) = layer.keyframes {
+                let [first, second] = keys.map(|key| key.time);
+                if [first, second].into_iter().any(|time| {
+                    time.value < 0
+                        || time.scale == 0
+                        || time.scale > 1_000_000
+                        || i64::from(time.value) >= 10 * i64::from(time.scale)
+                }) || i64::from(first.value) * i64::from(second.scale)
+                    >= i64::from(second.value) * i64::from(first.scale)
+                {
+                    return Err(invalid("scene layer keyframe times are invalid"));
+                }
+                for key in keys {
+                    // Validate each snapshot through exactly the static contract;
+                    // recursion terminates with keyframes=None and no parent.
+                    let mut snapshot = layer.clone();
+                    snapshot.parent = None;
+                    snapshot.keyframes = None;
+                    snapshot.anchor = key.anchor;
+                    snapshot.position = key.position;
+                    snapshot.scale = key.scale;
+                    snapshot.rotation_degrees = key.rotation_degrees;
+                    snapshot.orientation_degrees = key.orientation_degrees;
+                    let encoded = encode_scene_snapshot(&[snapshot], None)?.unwrap();
+                    fields.extend([key.time.value.to_string(), key.time.scale.to_string()]);
+                    fields.extend(
+                        encoded
+                            .split_once('!')
+                            .unwrap()
+                            .1
+                            .split(',')
+                            .skip(9)
+                            .take(12)
+                            .map(str::to_owned),
+                    );
+                    fields.extend(
+                        key.orientation_degrees
+                            .map(|value| value.to_bits().to_string()),
+                    );
+                    breakpoints.push(key.time);
+                }
+            } else {
+                fields.extend((0..34).map(|_| "0".to_owned()));
+            }
+        }
         records.push(fields.join(","));
     }
     for layer in layers {
-        let mut cursor = Some(layer.layer);
-        let mut visited = [false; 3];
-        let mut determinant = 1.0;
-        while let Some(identity) = cursor {
-            let current = layers
-                .iter()
-                .find(|candidate| candidate.layer == identity)
-                .ok_or_else(|| invalid("scene parent is absent, foreign or stale"))?;
-            let index = usize::from(current.layer.index);
-            if visited[index] {
-                return Err(invalid("scene parent cycle"));
+        for time in &breakpoints {
+            let mut cursor = Some(layer.layer);
+            let mut visited = [false; 3];
+            let mut determinant = 1.0;
+            while let Some(identity) = cursor {
+                let current = layers
+                    .iter()
+                    .find(|candidate| candidate.layer == identity)
+                    .ok_or_else(|| invalid("scene parent is absent, foreign or stale"))?;
+                let index = usize::from(current.layer.index);
+                if visited[index] {
+                    return Err(invalid("scene parent cycle"));
+                }
+                visited[index] = true;
+                let scale = scene_layer_scale_at(current, *time);
+                determinant *= scale.iter().product::<f64>() / 1_000_000.0;
+                cursor = current.parent;
             }
-            visited[index] = true;
-            determinant *= current.scale.iter().product::<f64>() / 1_000_000.0;
-            cursor = current.parent;
-        }
-        if !determinant.is_finite() || determinant <= 1.001e-12 {
-            return Err(invalid("scene composed transform is singular"));
+            if !determinant.is_finite() || determinant <= 1.001e-12 {
+                return Err(invalid("scene composed transform is singular"));
+            }
         }
     }
-    Ok(Some(format!(
+    let encoded = format!(
         "scene-graph:{}|{}!{}",
-        if oriented { "v2" } else { "v1" },
+        if animated {
+            "v3"
+        } else if oriented {
+            "v2"
+        } else {
+            "v1"
+        },
         encoded_camera.unwrap_or_default(),
         records.join(";")
-    )))
+    );
+    if encoded.len() > 4096 {
+        return Err(invalid("scene graph payload exceeds native bound"));
+    }
+    Ok(Some(encoded))
+}
+
+fn scene_layer_scale_at(layer: &SceneLayer, time: CameraTime) -> [f64; 3] {
+    let Some([first, second]) = layer.keyframes else {
+        return layer.scale;
+    };
+    let before = i64::from(time.value) * i64::from(first.time.scale);
+    let start = i64::from(first.time.value) * i64::from(time.scale);
+    if before <= start {
+        return first.scale;
+    }
+    if i64::from(time.value) * i64::from(second.time.scale)
+        >= i64::from(second.time.value) * i64::from(time.scale)
+    {
+        return second.scale;
+    }
+    let span = i64::from(second.time.value) * i64::from(first.time.scale)
+        - i64::from(first.time.value) * i64::from(second.time.scale);
+    let alpha = (before - start) as f64 / span as f64
+        * (f64::from(second.time.scale) / f64::from(time.scale));
+    std::array::from_fn(|axis| first.scale[axis] + alpha * (second.scale[axis] - first.scale[axis]))
 }
 
 pub(crate) fn encode_camera(camera: &ActiveCamera) -> io::Result<String> {
@@ -2379,6 +2477,87 @@ mod tests {
         input["scene_layers"][0]["is_3d"] = json!(false);
         let context: HostContext = serde_json::from_value(input).unwrap();
         assert!(encode_active_camera(&context).is_err());
+    }
+
+    #[test]
+    fn authored_layer_keyframes_retain_rational_time_and_transform() {
+        let first = json!({"time":{"value":2,"scale":2},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"orientation_degrees":[0,0,0]});
+        let mut second = first.clone();
+        second["time"] = json!({"value":4,"scale":2});
+        second["position"] = json!([30, 40, 50]);
+        second["orientation_degrees"] = json!([0, 0, 90]);
+        let mut input = json!({"mask_scene":{"masks":[]},"scene_layers":[{
+            "layer":{"project_id":1,"object_id":2801,"generation":1,"index":0},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"is_3d":true,"keyframes":[first,second]
+        }]});
+        let context: HostContext = serde_json::from_value(input.clone()).unwrap();
+        let encoded = encode_active_camera(&context).unwrap().unwrap();
+        assert!(encoded.starts_with("scene-graph:v3|!"));
+        let fields: Vec<u64> = encoded
+            .split_once('!')
+            .unwrap()
+            .1
+            .split(',')
+            .map(|field| field.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 59);
+        assert_eq!(&fields[24..27], &[1, 2, 2]);
+        assert_eq!(&fields[42..44], &[4, 2]);
+        assert_eq!(f64::from_bits(fields[47]), 30.0);
+        assert_eq!(f64::from_bits(fields[58]), 90.0);
+        let serialized = serde_json::to_value(context).unwrap();
+        assert_eq!(
+            serialized["scene_layers"][0]["keyframes"][0]["time"]["scale"],
+            2
+        );
+        for time in [
+            json!({"value":1,"scale":1}),
+            json!({"value":-1,"scale":2}),
+            json!({"value":20,"scale":2}),
+            json!({"value":4,"scale":0}),
+        ] {
+            input["scene_layers"][0]["keyframes"][1]["time"] = time;
+            assert!(
+                serde_json::from_value::<HostContext>(input.clone())
+                    .and_then(
+                        |context| encode_active_camera(&context).map_err(serde::de::Error::custom)
+                    )
+                    .is_err()
+            );
+        }
+        input["scene_layers"][0]["keyframes"] = json!([first]);
+        assert!(serde_json::from_value::<HostContext>(input).is_err());
+    }
+
+    #[test]
+    fn animated_parent_scale_is_validated_at_every_key_breakpoint() {
+        let layer = json!({"layer":{"project_id":1,"object_id":2801,"generation":1,"index":0},
+            "anchor":[0,0,0],"position":[0,0,0],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"is_3d":true});
+        let key = |value, scale| {
+            json!({"time":{"value":value,"scale":1},
+            "anchor":[0,0,0],"position":[0,0,0],"scale":scale,"rotation_degrees":[0,0,0]})
+        };
+        let mut child = layer.clone();
+        let mut parent = layer;
+        parent["layer"]["object_id"] = json!(2802);
+        parent["layer"]["index"] = json!(1);
+        child["parent"] = parent["layer"].clone();
+        child["keyframes"] = json!([key(1, [100.0; 3]), key(3, [0.02; 3])]);
+        parent["keyframes"] = json!([key(2, [0.02; 3]), key(4, [100.0; 3])]);
+        let input = json!({"mask_scene":{"masks":[]},"scene_layers":[child,parent]});
+        let context: HostContext = serde_json::from_value(input).unwrap();
+        // The global first/last times are safe, but 2s and 3s are singular.
+        assert!(encode_active_camera(&context).is_err());
+        let mut valid = context.scene_layers[0].clone();
+        valid.parent = None;
+        valid.keyframes.as_mut().unwrap()[0].scale = [0.01, 0.01, 10_000.0];
+        valid.keyframes.as_mut().unwrap()[1].scale = [10_000.0, 10_000.0, 0.01];
+        // Independent component minima would falsely reject this safe curve.
+        assert!(encode_scene_snapshot(&[valid], None).is_ok());
     }
 
     #[test]
