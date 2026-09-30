@@ -26,13 +26,13 @@
   },
   "identity": {
     "plugin_identifier": "com.aexcompat.resolve.ofx",
-    "source_sha256": "1E248FB70A5F08B9FD39918677ACA91556F5CD3AE83551645CB0AAE95BCB20EE",
-    "binary_sha256": "7CC6EA5C1C888F1B9026891B06AD23CCA44314DCA622F250DB188DCA163E9D3D",
+    "source_sha256": "3FA355CB5F130521AD5B0E884E581F1E2C05870E8CB4D526DD515F0A9A6709D8",
+    "binary_sha256": "5A3AE0B4941948DF184483B7521B55D6BF5FA459F103D0172C34538F7B583573",
     "binary_platform": "macos-arm64",
-    "worker_identity": "not_claimed_until_shared_RenderSession_gate",
-    "input_sha256": null,
-    "output_sha256": null,
-    "pixel_diff": null
+    "worker_identity": "ce7d358f81f0d6fdc5fa0322c9e772cbb282a42a7f053e13e3dd3a695fa13087",
+    "input_sha256": "5703DD607685DF69C7D73A4002CB0C2E381E7CDCC79B011ADCAF52E693FBFED3",
+    "output_sha256": "F337FC673099D7A18549D9E838B45682D83186B8DB1DC5D26E667932F5C473C7",
+    "pixel_diff": "9157 changed RGB float values in native OFX fixture"
   },
   "control_render": {
     "state": "verified_local_fixture",
@@ -74,10 +74,30 @@
     "mismatched_depth_rejected": true
   },
   "aex_render_gate": {
-    "state": "blocked",
-    "success_status": "not_claimed",
+    "state": "verified_mac_native_fixture",
+    "success_status": "kOfxStatOK",
     "blocked_status": "kOfxStatErrUnsupported",
-    "reason": "approved bounded AEX RenderSession dependency is not available on this branch"
+    "reason": "real Resolve AEX render pending; Windows host unverified"
+  },
+  "aex_native_render": {
+    "state": "verified_mac_native_fixture",
+    "width": 64,
+    "height": 64,
+    "source_rowbytes": 1040,
+    "output_rowbytes": 1056,
+    "time_ms": 250,
+    "ofx_frame": 6.0,
+    "frame_rate": 24.0,
+    "changed_rgb_values": 9157,
+    "alpha_and_padding_ok": true,
+    "failure_preserved_output": true,
+    "invalid_rate_preserved_output": true,
+    "host_input_sha256": "5703DD607685DF69C7D73A4002CB0C2E381E7CDCC79B011ADCAF52E693FBFED3",
+    "host_output_sha256": "F337FC673099D7A18549D9E838B45682D83186B8DB1DC5D26E667932F5C473C7",
+    "worker_input_sha256": "73a75a7d71ddb69661492961396eeacc86ff3e138e7e24e6de9ed2c9b2e344f1",
+    "worker_output_sha256": "8f79e067b7aebed8c1ad9c0b09c8ea6a1d37c14e6b6e285cee21c20522301dea",
+    "aex_sha256": "a1d317c0e18371494bc9c9933684593ca903eb6f3fe262ec06d5147b4c0bcbae",
+    "worker_sha256": "ce7d358f81f0d6fdc5fa0322c9e772cbb282a42a7f053e13e3dd3a695fa13087"
   },
   "host_evidence": {
     "resolve_version": "18.6.6.7",

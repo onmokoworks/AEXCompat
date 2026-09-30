@@ -661,12 +661,130 @@ int main(int argc, char **argv) {
       failed_create_instance.properties.values.count(kOfxPropInstanceData) == 0;
   FakeImageObject instance;
   initialize_fixture(instance);
+  prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&instance.properties),
+                  kOfxImageEffectPropFrameRate, 0, 24.0);
   const auto create_status = plugin->mainEntry(
       kOfxActionCreateInstance, &instance, nullptr, nullptr);
   FakePropertySet render_args;
   prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&render_args),
                   kOfxPropTime, 0, 7.0);
   set_render_window(render_args, 1, 0, 3, 2);
+#ifdef __APPLE__
+  if (const char *source = std::getenv("AEXCOMPAT_RESOLVE_AEX_PATH");
+      source && *source) {
+    constexpr int width = 64;
+    constexpr int height = 64;
+    constexpr int source_rowbytes = width * 16 + 16;
+    constexpr int output_rowbytes = width * 16 + 32;
+    instance.source_pixels.assign(height * source_rowbytes, 0xEE);
+    instance.output_pixels.assign(height * output_rowbytes, 0xCD);
+    for (int y = 0; y < height; ++y) {
+      for (int x = 0; x < width; ++x) {
+        const float alpha = x % 4 == 0 ? 0.0f : (x % 4 == 1 ? 0.5f : 1.0f);
+        const float pixel[] = {
+            static_cast<float>((x * 17 + y * 3) % 256) / 255.0f * alpha,
+            static_cast<float>((x * 11 + y * 7) % 256) / 255.0f * alpha,
+            static_cast<float>((x * 5 + y * 13) % 256) / 255.0f * alpha, alpha};
+        std::memcpy(instance.source_pixels.data() + y * source_rowbytes + x * 16,
+                    pixel, sizeof(pixel));
+      }
+    }
+    set_image_property(instance.source_image, kOfxImagePropData,
+                       instance.source_pixels.data(), source_rowbytes,
+                       kOfxBitDepthFloat);
+    set_image_property(instance.output_image, kOfxImagePropData,
+                       instance.output_pixels.data(), output_rowbytes,
+                       kOfxBitDepthFloat);
+    set_image_bounds(instance.source_image, 0, 0, width, height);
+    set_image_bounds(instance.output_image, 0, 0, width, height);
+    set_render_window(render_args, 0, 0, width, height);
+    prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&render_args),
+                    kOfxPropTime, 0, 6.0);
+    const auto input_hash = sha256(instance.source_pixels);
+    const auto aex_status = plugin->mainEntry(
+        kOfxImageEffectActionRender, &instance,
+        reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+    int changed = 0;
+    bool alpha_and_padding_ok = true;
+    for (int y = 0; y < height; ++y) {
+      const auto *input = instance.source_pixels.data() + y * source_rowbytes;
+      const auto *output = instance.output_pixels.data() + y * output_rowbytes;
+      for (int x = 0; x < width; ++x) {
+        for (int channel = 0; channel < 3; ++channel) {
+          float before = 0.0f, after = 0.0f;
+          std::memcpy(&before, input + x * 16 + channel * 4, 4);
+          std::memcpy(&after, output + x * 16 + channel * 4, 4);
+          if (std::fabs(after - before) > 1.0f / 255.0f) ++changed;
+        }
+        float alpha = 0.0f;
+        std::memcpy(&alpha, output + x * 16 + 12, 4);
+        const float expected_alpha = x % 4 == 0 ? 0.0f :
+            (x % 4 == 1 ? 128.0f / 255.0f : 1.0f);
+        if (std::fabs(alpha - expected_alpha) > 1.0f / 255.0f) {
+          alpha_and_padding_ok = false;
+        }
+        for (int channel = 0; channel < 3; ++channel) {
+          float value = 0.0f;
+          std::memcpy(&value, output + x * 16 + channel * 4, 4);
+          if (!std::isfinite(value) || value < 0.0f || value > alpha + 1.0f / 255.0f) {
+            alpha_and_padding_ok = false;
+          }
+        }
+      }
+      for (int offset = width * 16; offset < output_rowbytes; ++offset) {
+        if (output[offset] != 0xCD) alpha_and_padding_ok = false;
+      }
+    }
+    const auto output_hash = sha256(instance.output_pixels);
+    const auto saved_output = instance.output_pixels;
+    prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&instance.properties),
+                    kOfxImageEffectPropFrameRate, 0, 0.0);
+    const auto invalid_rate_status = plugin->mainEntry(
+        kOfxImageEffectActionRender, &instance,
+        reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+    const bool invalid_rate_preserved_output =
+        invalid_rate_status == kOfxStatErrFormat &&
+        instance.output_pixels == saved_output;
+    prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&instance.properties),
+                    kOfxImageEffectPropFrameRate, 0, 24.0);
+    const char *runner = std::getenv("AEXCOMPAT_RESOLVE_RUNNER");
+    const std::string saved_runner = runner ? runner : "";
+    setenv("AEXCOMPAT_RESOLVE_RUNNER", "/missing/aexcompat-runner.py", 1);
+    const auto rejected_status = plugin->mainEntry(
+        kOfxImageEffectActionRender, &instance,
+        reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+    if (runner) setenv("AEXCOMPAT_RESOLVE_RUNNER", saved_runner.c_str(), 1);
+    else unsetenv("AEXCOMPAT_RESOLVE_RUNNER");
+    const bool failure_preserved_output =
+        rejected_status == kOfxStatErrUnsupported &&
+        instance.output_pixels == saved_output;
+    const auto destroy_status = plugin->mainEntry(
+        kOfxActionDestroyInstance, &instance, nullptr, nullptr);
+    const auto unload_status = plugin->mainEntry(kOfxActionUnload, nullptr, nullptr, nullptr);
+    const bool verified = load_status == kOfxStatOK &&
+        describe_status == kOfxStatOK && context_status == kOfxStatOK &&
+        create_status == kOfxStatOK && aex_status == kOfxStatOK &&
+        changed > 0 && alpha_and_padding_ok && invalid_rate_preserved_output &&
+        failure_preserved_output &&
+        destroy_status == kOfxStatOK && unload_status == kOfxStatOK;
+    std::cout << "{\"aex_render_claim\":\""
+              << (verified ? "verified_mac_native_fixture" : "failed")
+              << "\",\"render\":" << aex_status
+              << ",\"changed_rgb_values\":" << changed
+              << ",\"alpha_and_padding_ok\":"
+              << (alpha_and_padding_ok ? "true" : "false")
+              << ",\"failure_preserved_output\":"
+              << (failure_preserved_output ? "true" : "false")
+              << ",\"invalid_rate_preserved_output\":"
+              << (invalid_rate_preserved_output ? "true" : "false")
+              << ",\"ofx_frame\":6.0,\"frame_rate\":24.0,\"time_ms\":250"
+              << ",\"input_sha256\":\"" << input_hash
+              << "\",\"output_sha256\":\"" << output_hash << "\"}"
+              << std::endl;
+    close_module(module);
+    return verified ? 0 : 7;
+  }
+#endif
   const auto render_status = plugin->mainEntry(
       kOfxImageEffectActionRender, &instance,
       reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);

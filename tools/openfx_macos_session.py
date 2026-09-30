@@ -84,6 +84,7 @@ def render_macos_frame(
     time_scale: int = 1000,
     alpha_mode: str = "straight",
     render_path: str = "classic",
+    timeout_ms: int = 30_000,
 ) -> dict[str, Any]:
     """Return a verified bridge packet for one real AEX frame.
 
@@ -98,7 +99,7 @@ def render_macos_frame(
     if relative_path is None or len(relative_path) > 260:
         raise ValueError("AEX relative path must fit the OpenFX contract")
     if any(isinstance(value, bool) or not isinstance(value, int) for value in (
-        width, height, rowbytes, frame_index, current_time, time_step, total_time, time_scale,
+        width, height, rowbytes, frame_index, current_time, time_step, total_time, time_scale, timeout_ms,
     )):
         raise ValueError("OpenFX geometry and time must be integers")
     if not (1 <= width <= MAX_DIMENSION and 1 <= height <= MAX_DIMENSION):
@@ -115,6 +116,8 @@ def render_macos_frame(
         raise ValueError("OpenFX frame time is outside the fixture range")
     if alpha_mode != "straight" or render_path not in {"classic", "smart"}:
         raise ValueError("unsupported OpenFX alpha mode or AEX render path")
+    if not 1000 <= timeout_ms <= 30_000:
+        raise ValueError("OpenFX worker deadline is outside the bounded range")
 
     plugin, harness, worker = _runtime_files(relative_path)
     plugin_sha = _file_sha256(plugin)
@@ -141,6 +144,7 @@ def render_macos_frame(
         "request_kind": "aexcompat_blender_session",
         "mode": "render_aex",
         "render_path": render_path,
+        "timeout_ms": timeout_ms,
         "plugin": {"source_relative_path": relative_path},
         "frame": {
             "width": width, "height": height, "stride": width * 4,
@@ -250,7 +254,7 @@ def process_request(request: Any) -> dict[str, Any]:
     """Decode one host request and return its fully checked bridge packet."""
 
     required = {"plugin_relative_path", "width", "height", "rowbytes", "pixels_base64"}
-    optional = {"frame_index", "current_time", "time_step", "total_time", "time_scale", "alpha_mode", "render_path"}
+    optional = {"frame_index", "current_time", "time_step", "total_time", "time_scale", "alpha_mode", "render_path", "timeout_ms"}
     if not isinstance(request, dict) or not required <= request.keys() or request.keys() - required - optional:
         raise ValueError("invalid OpenFX host request fields")
     encoded = request["pixels_base64"]

@@ -57,12 +57,20 @@ def test_resolve_ofx_contract_is_machine_checkable_and_fail_closed():
     assert contract["control_render"]["pixel_diff"] == 12
     assert contract["float_control_render"]["changed_rgb_values"] == 12
     assert contract["float_control_render"]["mismatched_depth_rejected"] is True
-    assert contract["aex_render_gate"]["state"] == "blocked"
-    assert contract["aex_render_gate"]["success_status"] == "not_claimed"
+    assert contract["aex_render_gate"]["state"] == "verified_mac_native_fixture"
+    assert contract["aex_render_gate"]["success_status"] == "kOfxStatOK"
     assert contract["aex_render_gate"]["blocked_status"] == "kOfxStatErrUnsupported"
+    assert contract["aex_native_render"]["changed_rgb_values"] > 0
+    assert contract["aex_native_render"]["alpha_and_padding_ok"] is True
+    assert contract["aex_native_render"]["failure_preserved_output"] is True
+    assert contract["identity"]["worker_identity"] == contract["aex_native_render"]["worker_sha256"]
+    assert contract["identity"]["input_sha256"] == contract["aex_native_render"]["host_input_sha256"]
+    assert contract["identity"]["output_sha256"] == contract["aex_native_render"]["host_output_sha256"]
     assert len(contract["identity"]["source_sha256"]) == 64
     assert len(contract["identity"]["binary_sha256"]) == 64
-    assert contract["identity"]["binary_sha256"] == contract["macos_host_evidence"]["binary_sha256"]
+    # The earlier Resolve control binary is historical; the current native AEX
+    # binary has a separate identity until real Resolve AEX render is observed.
+    assert contract["identity"]["binary_sha256"] != contract["macos_host_evidence"]["binary_sha256"]
     # Git may expand LF to CRLF in a Windows checkout; this records the
     # canonical source content rather than that checkout's line endings.
     source_bytes = (

@@ -74,6 +74,7 @@ enum {
 #define kOfxImageEffectPropFrameRange "OfxImageEffectPropFrameRange"
 #define kOfxImageEffectPropFrameStep "OfxImageEffectPropFrameStep"
 #define kOfxImageEffectPropPreMultiplication "OfxImageEffectPropPreMultiplication"
+#define kOfxImageEffectPropFrameRate "OfxImageEffectPropFrameRate"
 #define kOfxImageEffectSimpleSourceClipName "Source"
 #define kOfxImageEffectOutputClipName "Output"
 #define kOfxImageComponentRGBA "OfxImageComponentRGBA"

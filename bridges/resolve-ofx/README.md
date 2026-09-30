@@ -32,10 +32,37 @@ and records input/output SHA-256 plus pixel diff. The float fixture also rejects
 mismatched source/output depths without writing output. This proves the host-facing
 pixel path without claiming AEX compatibility.
 
-The AEX RenderSession gate remains separately fail-closed because #385 has not
-supplied that bounded route on this branch. The JSON contract therefore
-records `control_render.state=verified_local_fixture` alongside
-`aex_render_gate.state=blocked`; the fixture is not an identity or AEX success.
+On macOS, setting `AEXCOMPAT_RESOLVE_AEX_PATH` enables the real AEX path from
+#385. The OFX module packs host rows into bounded RGBA8, converts premultiplied
+float/byte pixels to straight alpha, and sends one frame through the verified
+macOS worker. The source path must be relative to `AEXCOMPAT_PLUGIN_ROOT`.
+OpenFX time is an output-frame coordinate; the instance's project frame rate
+converts it to milliseconds before the AEX request. Missing or invalid frame
+rate fails without writing the host image.
+The worker's validated packet supplies plug-in/worker identities and output
+hashes. A failed worker or a missing executable leaves the host output
+untouched. When no AEX source is configured, the original control render
+remains available.
+
+The bridge launches the configured Python interpreter and runner without a
+shell. For a local Resolve run, set these process-local variables before
+starting Resolve:
+
+```text
+OFX_PLUGIN_PATH=<staged bundle parent>
+AEXCOMPAT_RESOLVE_AEX_PATH=DistanceGradation.aex
+AEXCOMPAT_PLUGIN_ROOT=<directory containing that AEX>
+AEXCOMPAT_HARNESS=<absolute Release harness path>
+AEXCOMPAT_GUEST_WORKER=<absolute Release guest worker path>
+AEXCOMPAT_RESOLVE_PYTHON=<absolute Python path with jsonschema installed>
+AEXCOMPAT_RESOLVE_RUNNER=<absolute tools/resolve_ofx_macos_runner.py path>
+AEXCOMPAT_RESOLVE_EVIDENCE_DIR=<existing directory for compact per-render JSON>
+```
+
+The evidence directory is optional. Its files contain hashes and geometry,
+not frame contents. This first route is one process and one AEX render per
+OFX callback; float inputs are quantized to RGBA8, and frame time is rounded
+to milliseconds. It is not a persistent video session.
 
 ## Host evidence
 
@@ -57,8 +84,20 @@ frame from `fixtures/control-input.png` at Strength 0.5. Resolve supplied 32-bit
 in all 1,166,400 content pixels; the sidebars remain unchanged. The exported
 PNGs are RGB previews, so they do not prove the host alpha channel. The native
 float fixture separately verifies alpha and padding. File hashes, frame
-dimensions, and the changed region are recorded in the JSON contract. No AEX
-render was claimed.
+dimensions, and the changed region are recorded in the JSON contract. That
+earlier Resolve run was control-only; a real Resolve AEX render must be
+recorded separately.
+
+The new native OFX smoke used the locally held license-free
+`DistanceGradation.aex` at 64×64, OpenFX frame 6 at 24 fps (250 ms). The host supplied padded float
+rows of 1040 bytes; the output rows were 1056 bytes. The worker accepted
+packed RGBA8, and 9,157 RGB float values changed in the OFX output. Opaque,
+half-alpha, and zero-alpha samples retained premultiplied RGB and alpha;
+padding was preserved. A deliberately missing runner returned
+`kOfxStatErrUnsupported` without changing that output. The contract records
+the host and worker frame hashes plus AEX/worker hashes. This native smoke
+does not by itself prove that Resolve invoked the AEX route. Compact evidence
+files report `worker_rendered` and do not claim successful host publication.
 
 The bounded render path accepts positive rowbytes. Negative rowbytes, although
 valid in OpenFX, return `kOfxStatErrFormat`; the tested Resolve host provided
