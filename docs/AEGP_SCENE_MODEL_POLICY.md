@@ -35,14 +35,28 @@ then evaluated by both PF Interface and AEGP from the same scene state.
 ### Shipping ordinary-layer snapshots
 
 Single-frame `host_context.scene_layers` and resident-batch root `scene_layers`
-accept at most three static ordinary-layer records, using the existing native
+accept at most three ordinary-layer records, using the existing native
 slots. Each record contains a typed `layer` identity including `index`, optional
 typed `parent`, `anchor`, `position`, percent `scale`, `rotation_degrees`, optional
 `orientation_degrees` (three Euler angles, default zero), and
 `is_3d`. Every parent must resolve to a record in this same graph, including its
 generation and index; cycles and duplicate slots/IDs are rejected. Omission
-retains existing scene defaults. No easing or ordinary-layer
-keyframes are inferred from unsupported fields.
+retains existing scene defaults. Optional `keyframes` contains exactly two
+snapshots with rational `time`, `anchor`, `position`, percent `scale`,
+`rotation_degrees`, and optional `orientation_degrees` (default zero).
+Both snapshots share the record's typed identity and dimensionality. Times
+are strictly increasing by rational comparison, within [0,10) seconds, with
+positive denominators at most 1,000,000. No easing is inferred.
+
+At composition time the first/last snapshot is held outside the key interval;
+inside it every transform component is linearly interpolated. Parent and child
+use the same composition time, even with different key intervals. Positive
+scales are validated at every key breakpoint in the graph before publication:
+between breakpoints the logarithm of the composed scale determinant is concave,
+so its minimum occurs at an endpoint. This rejects unsafe intermediate parent
+composition without falsely combining minima that occur at different times.
+The interpolation is deterministic host policy, not verified AE keyframe/easing
+equivalence, and does not add an ordinary-layer keyframe editor.
 
 Transforms retain the camera's finite positive-scale bounds. A 2D record must
 have zero out-of-plane anchor/position/XY rotation, zero orientation, and Z scale 100, rather than
@@ -63,6 +77,13 @@ input retains its existing v1/v2 payload and camera-less input stays explicit.
 Nonzero orientation selects `scene-graph:v2`, appending three IEEE-f64 bit fields
 to every ordinary record (24 fields). Native decoding retains v1 as zero
 orientation; malformed v2 orientation is rejected before binding any identity.
+Any ordinary keyframes select `scene-graph:v3` for the entire graph. Each record
+has 59 fields: the v2 record, one animation flag, then two 17-field snapshots
+(time numerator/denominator and 15 transform IEEE-f64 bit fields). A static
+record uses flag zero and all 34 snapshot fields zero. Invalid key times,
+transforms, flags, or unused snapshot data are rejected before registry binding.
+Snapshots are installed once per session, while every frame queries shared
+scene state at its rational composition time; identities remain stable.
 Both PF Interface effect-layer lookup and AEGP traversal/world matrices read
 the same bound records. These inputs do not create a general renderer or expand
 the native three-slot scene capacity.

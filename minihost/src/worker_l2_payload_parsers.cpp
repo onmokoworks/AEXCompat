@@ -262,7 +262,8 @@ bool parse_authored_layer_graph(const wchar_t* text);
 
 bool parse_active_camera_payload(const wchar_t* text) {
   if (text && (std::wstring(text).compare(0, 15, L"scene-graph:v1|") == 0 ||
-      std::wstring(text).compare(0, 15, L"scene-graph:v2|") == 0))
+      std::wstring(text).compare(0, 15, L"scene-graph:v2|") == 0 ||
+      std::wstring(text).compare(0, 15, L"scene-graph:v3|") == 0))
     return parse_authored_layer_graph(text);
   std::array<uint64_t, 51> fields{};
   std::array<double, 13> values{};
@@ -326,7 +327,8 @@ bool parse_authored_layer_graph(const wchar_t* text) {
   using aexcompat::scene_runtime::AegpLayerTransform;
   if (!text) return false;
   const std::wstring encoded(text);
-  const bool oriented = encoded.compare(0, 15, L"scene-graph:v2|") == 0;
+  const bool layer_animated = encoded.compare(0, 15, L"scene-graph:v3|") == 0;
+  const bool oriented = layer_animated || encoded.compare(0, 15, L"scene-graph:v2|") == 0;
   if (encoded.size() > 4096 || (!oriented && encoded.compare(0, 15, L"scene-graph:v1|") != 0))
     return false;
   const auto separator = encoded.find(L'!', 15);
@@ -346,6 +348,10 @@ bool parse_authored_layer_graph(const wchar_t* text) {
   std::array<std::size_t, 3> slots{};
   std::array<std::size_t, 3> encoded_parent_slots{};
   std::array<AegpLayerTransform, 3> transforms{};
+  std::array<std::array<aexcompat::scene_runtime::AegpLayerTransformKeyframe, 2>, 3> layer_keys{};
+  std::array<aexcompat::suite_abi::AegpTime, 7> breakpoints{};
+  breakpoints[0] = {0, 1};
+  std::size_t breakpoint_count = 1;
   std::array<bool, 3> occupied{};
   std::size_t count = 0;
   std::size_t start = separator + 1;
@@ -360,13 +366,42 @@ bool parse_authored_layer_graph(const wchar_t* text) {
     result.is_3d = is_3d;
     return result;
   };
+  const auto decode_transform = [&](const uint64_t* fields, bool is_3d,
+      bool has_orientation, AegpLayerTransform& output) {
+    std::array<double, 13> values{};
+    values[0] = 1.0;
+    for (std::size_t component = 1; component < values.size(); ++component) {
+      std::memcpy(&values[component], &fields[component - 1], sizeof(double));
+      const double limit = component >= 10 ? 36'000.0 :
+          component >= 7 ? 10'000.0 : 1'000'000.0;
+      if (!std::isfinite(values[component]) || std::abs(values[component]) > limit)
+        return false;
+    }
+    for (std::size_t component = 7; component < 10; ++component)
+      if (values[component] < 0.01) return false;
+    const double determinant = values[7] * values[8] * values[9] / 1'000'000.0;
+    if (!std::isfinite(determinant) || determinant <= 1.001e-12) return false;
+    if (!is_3d && (values[3] != 0.0 || values[6] != 0.0 ||
+        values[9] != 100.0 || values[10] != 0.0 || values[11] != 0.0)) return false;
+    output = transform_from(values, is_3d);
+    if (has_orientation) {
+      for (std::size_t component = 0; component < 3; ++component) {
+        double orientation = 0.0;
+        std::memcpy(&orientation, &fields[12 + component], sizeof(double));
+        if (!std::isfinite(orientation) || std::abs(orientation) > 36'000.0 ||
+            (!is_3d && orientation != 0.0)) return false;
+        output.orientation_degrees[component] = orientation;
+      }
+    }
+    return true;
+  };
   while (start < encoded.size()) {
     if (count >= 3 - static_cast<std::size_t>(has_camera)) return false;
     const auto delimiter = encoded.find(L';', start);
     const auto end = delimiter == std::wstring::npos ? encoded.size() : delimiter;
     const std::wstring record = encoded.substr(start, end - start);
-    std::array<uint64_t, 24> fields{};
-    const std::size_t field_count = oriented ? 24 : 21;
+    std::array<uint64_t, 59> fields{};
+    const std::size_t field_count = layer_animated ? 59 : oriented ? 24 : 21;
     std::size_t offset = 0;
     for (std::size_t field = 0; field < field_count; ++field) {
       const auto comma = record.find(L',', offset);
@@ -405,31 +440,31 @@ bool parse_authored_layer_graph(const wchar_t* text) {
         ObjectKind::layer, {}};
     if (!no_parent) parents[count] = {fields[4], fields[5],
         static_cast<uint32_t>(fields[6]), ObjectKind::layer, {}};
-    std::array<double, 13> values{};
-    values[0] = 1.0;
-    for (std::size_t component = 1; component < values.size(); ++component) {
-      std::memcpy(&values[component], &fields[8 + component], sizeof(double));
-      const double limit = component >= 10 ? 36'000.0 :
-          component >= 7 ? 10'000.0 : 1'000'000.0;
-      if (!std::isfinite(values[component]) || std::abs(values[component]) > limit)
-        return false;
-    }
-    for (std::size_t component = 7; component < 10; ++component)
-      if (values[component] < 0.01) return false;
-    const double local_determinant = values[7] * values[8] * values[9] / 1'000'000.0;
-    if (!std::isfinite(local_determinant) || local_determinant <= 1.001e-12)
-      return false;
-    if (!fields[8] && (values[3] != 0.0 || values[6] != 0.0 ||
-        values[9] != 100.0 || values[10] != 0.0 || values[11] != 0.0))
-      return false;
-    transforms[count] = transform_from(values, fields[8] != 0);
-    if (oriented) {
-      for (std::size_t component = 0; component < 3; ++component) {
-        double orientation = 0.0;
-        std::memcpy(&orientation, &fields[21 + component], sizeof(double));
-        if (!std::isfinite(orientation) || std::abs(orientation) > 36'000.0 ||
-            (!fields[8] && orientation != 0.0)) return false;
-        transforms[count].orientation_degrees[component] = orientation;
+    if (!decode_transform(fields.data() + 9, fields[8] != 0, oriented,
+            transforms[count])) return false;
+    if (layer_animated) {
+      if (fields[24] > 1) return false;
+      if (!fields[24]) {
+        for (std::size_t field = 25; field < fields.size(); ++field)
+          if (fields[field] != 0) return false;
+      } else {
+        for (std::size_t key = 0; key < 2; ++key) {
+          const std::size_t key_offset = 25 + key * 17;
+          const uint64_t value = fields[key_offset];
+          const uint64_t scale = fields[key_offset + 1];
+          if (value > INT32_MAX || scale == 0 || scale > 1'000'000 ||
+              value >= 10 * scale) return false;
+          auto& snapshot = layer_keys[count][key];
+          snapshot.time = {static_cast<int32_t>(value), static_cast<uint32_t>(scale)};
+          if (!decode_transform(fields.data() + key_offset + 2,
+                  fields[8] != 0, true, snapshot.transform)) return false;
+          snapshot.valid = true;
+          breakpoints[breakpoint_count++] = snapshot.time;
+        }
+        const auto& first = layer_keys[count][0].time;
+        const auto& second = layer_keys[count][1].time;
+        if (static_cast<int64_t>(first.value) * second.scale >=
+            static_cast<int64_t>(second.value) * first.scale) return false;
       }
     }
     ++count;
@@ -449,23 +484,30 @@ bool parse_authored_layer_graph(const wchar_t* text) {
     if (encoded_parent_slots[index] != slots[parent]) return false;
     parent_slots[index] = static_cast<int32_t>(slots[parent]);
   }
-  for (std::size_t index = 0; index < count; ++index) {
-    std::array<bool, 3> visited{};
-    std::size_t cursor = index;
-    double determinant = 1.0;
-    for (;;) {
-      if (visited[cursor]) return false;
-      visited[cursor] = true;
-      const auto& scale = transforms[cursor].scale;
-      determinant *= scale[0] * scale[1] * scale[2] / 1'000'000.0;
-      if (parent_slots[cursor] < 0) break;
-      std::size_t parent = 0;
-      while (parent < count && slots[parent] != static_cast<std::size_t>(parent_slots[cursor]))
-        ++parent;
-      if (parent == count) return false;
-      cursor = parent;
+  // Positive affine scales make log(composed determinant) concave between
+  // key breakpoints. Checking every breakpoint proves the full interval.
+  for (std::size_t breakpoint = 0; breakpoint < breakpoint_count; ++breakpoint) {
+    for (std::size_t index = 0; index < count; ++index) {
+      std::array<bool, 3> visited{};
+      std::size_t cursor = index;
+      double determinant = 1.0;
+      for (;;) {
+        if (visited[cursor]) return false;
+        visited[cursor] = true;
+        AegpLayerTransform evaluated{};
+        if (!aexcompat::scene_runtime::sample_layer_transform(transforms[cursor],
+                layer_keys[cursor], breakpoints[breakpoint], evaluated)) return false;
+        const auto& scale = evaluated.scale;
+        determinant *= scale[0] * scale[1] * scale[2] / 1'000'000.0;
+        if (parent_slots[cursor] < 0) break;
+        std::size_t parent = 0;
+        while (parent < count && slots[parent] != static_cast<std::size_t>(parent_slots[cursor]))
+          ++parent;
+        if (parent == count) return false;
+        cursor = parent;
+      }
+      if (!std::isfinite(determinant) || determinant <= 1.001e-12) return false;
     }
-    if (!std::isfinite(determinant) || determinant <= 1.001e-12) return false;
   }
   if (has_camera) {
     const auto slot = static_cast<std::size_t>(camera_fields[3]);
@@ -492,7 +534,7 @@ bool parse_authored_layer_graph(const wchar_t* text) {
     constexpr uint32_t kLayerIs3d = 0x00000800u;
     state.layer_flags[slot] = (state.layer_flags[slot] & ~kLayerIs3d) |
         (transforms[index].is_3d ? kLayerIs3d : 0u);
-    state.layer_transform_keyframes[slot] = {};
+    state.layer_transform_keyframes[slot] = layer_keys[index];
     state.layer_parent_indices[slot] = parent_slots[index];
   }
   if (has_camera) {

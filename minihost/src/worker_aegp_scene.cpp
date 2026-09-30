@@ -93,46 +93,8 @@ bool finite_bounded(double value, double limit) {
 bool resolve_layer_transform(std::size_t index, const AegpTime& comp_time,
     AegpLayerTransform& output) {
   if (index >= g_aegp_layer_transforms.size() || !valid_comp_time(comp_time)) return false;
-  const auto& keyframes = state().layer_transform_keyframes[index];
-  if (!keyframes[0].valid && !keyframes[1].valid) {
-    output = g_aegp_layer_transforms[index];
-    return true;
-  }
-  if (!keyframes[0].valid || !keyframes[1].valid ||
-      !valid_comp_time(keyframes[0].time) || !valid_comp_time(keyframes[1].time) ||
-      keyframes[0].transform.is_3d != keyframes[1].transform.is_3d) return false;
-  const long double first_time = static_cast<long double>(keyframes[0].time.value) /
-      static_cast<long double>(keyframes[0].time.scale);
-  const long double second_time = static_cast<long double>(keyframes[1].time.value) /
-      static_cast<long double>(keyframes[1].time.scale);
-  const long double current_time = static_cast<long double>(comp_time.value) /
-      static_cast<long double>(comp_time.scale);
-  if (!std::isfinite(first_time) || !std::isfinite(second_time) ||
-      !std::isfinite(current_time) || !(first_time < second_time)) return false;
-  if (current_time <= first_time) {
-    output = keyframes[0].transform;
-    return true;
-  }
-  if (current_time >= second_time) {
-    output = keyframes[1].transform;
-    return true;
-  }
-  const long double alpha = (current_time - first_time) / (second_time - first_time);
-  if (!std::isfinite(alpha) || alpha < 0.0L || alpha > 1.0L) return false;
-  output = keyframes[0].transform;
-  const auto blend = [alpha](std::array<double, 3>& destination,
-      const std::array<double, 3>& first, const std::array<double, 3>& second) {
-    for (std::size_t component = 0; component < 3; ++component) {
-      destination[component] = first[component] +
-          static_cast<double>(alpha) * (second[component] - first[component]);
-    }
-  };
-  blend(output.anchor, keyframes[0].transform.anchor, keyframes[1].transform.anchor);
-  blend(output.position, keyframes[0].transform.position, keyframes[1].transform.position);
-  blend(output.scale, keyframes[0].transform.scale, keyframes[1].transform.scale);
-  blend(output.rotation_degrees, keyframes[0].transform.rotation_degrees,
-      keyframes[1].transform.rotation_degrees);
-  return true;
+  return aexcompat::scene_runtime::sample_layer_transform(g_aegp_layer_transforms[index],
+      state().layer_transform_keyframes[index], comp_time, output);
 }
 
 bool resolve_layer_camera_zoom(std::size_t index, const AegpTime& comp_time,

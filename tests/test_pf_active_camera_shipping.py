@@ -281,6 +281,176 @@ def layer_context(chain=False):
     return {"mask_scene": {"masks": []}, "scene_layers": layers}
 
 
+def animated_layer_context(parent=False):
+    context = layer_context()
+    child = context["scene_layers"][0]
+    child["keyframes"] = []
+    for time, position, orientation in [
+        ({"value": 2, "scale": 2}, [10, 20, 30], [0, 0, 0]),
+        ({"value": 4, "scale": 2}, [30, 40, 50], [0, 0, 0 if parent else 90]),
+    ]:
+        child["keyframes"].append({
+            "time": time, "anchor": [0, 0, 0], "position": position,
+            "scale": [100, 100, 100], "rotation_degrees": [0, 0, 0],
+            "orientation_degrees": orientation,
+        })
+    if parent:
+        ancestor = copy.deepcopy(layer_context()["scene_layers"][0])
+        ancestor["layer"].update(object_id=2802, index=1)
+        ancestor["keyframes"] = []
+        for value, position, orientation in [(1, [4, 5, 6], 0), (5, [8, 9, 10], 180)]:
+            ancestor["keyframes"].append({
+                "time": {"value": value, "scale": 2}, "anchor": [0, 0, 0],
+                "position": position, "scale": [100, 100, 100],
+                "rotation_degrees": [0, 0, 0], "orientation_degrees": [0, 0, orientation],
+            })
+        child["parent"] = copy.deepcopy(ancestor["layer"])
+        context["scene_layers"].append(ancestor)
+    return context
+
+
+def test_shipping_layer_keyframes_hold_and_fractional_orientation(probe, tmp_path):
+    for frame, translation, basis in [
+        (0, (138, 148, 158, 255), (10, 0, 0, 255)),
+        (30, (138, 148, 158, 255), (10, 0, 0, 255)),
+        (45, (148, 158, 168, 255), (7, 7, 7, 255)),
+        (60, (158, 168, 178, 255), (0, 10, 10, 255)),
+        (90, (158, 168, 178, 255), (0, 10, 10, 255)),
+    ]:
+        result, output = render(probe, tmp_path, f"layer-key-{frame}", frame,
+                                animated_layer_context())
+        assert result.returncode == 0, failure_summary(result)
+        report = json.loads(result.stdout)
+        assert report["passed"] is True and report["suite_leases_balanced"] is True
+        with Image.open(output) as image:
+            pixels = image.convert("RGBA")
+        assert pixels.getpixel((0, 1)) == (241, 0, 0, 255)
+        assert pixels.getpixel((1, 1)) == translation
+        assert pixels.getpixel((2, 1)) == basis
+
+
+@pytest.mark.parametrize("grandparent", [False, True])
+def test_shipping_layer_and_parent_animate_independent_intervals(probe, tmp_path, grandparent):
+    context = animated_layer_context(True)
+    if grandparent:
+        ancestor = copy.deepcopy(layer_context()["scene_layers"][0])
+        ancestor["layer"].update(object_id=2803, index=2)
+        ancestor["position"] = [1, 2, 3]
+        ancestor["keyframes"] = []
+        for value, position in [(1, [1, 2, 3]), (2, [3, 4, 5])]:
+            ancestor["keyframes"].append({
+                "time": {"value": value, "scale": 1}, "anchor": [0, 0, 0],
+                "position": position, "scale": [100, 100, 100], "rotation_degrees": [0, 0, 0],
+            })
+        context["scene_layers"][1]["parent"] = copy.deepcopy(ancestor["layer"])
+        context["scene_layers"].append(ancestor)
+    for frame, translation, basis in [
+        (0, (142, 153, 164, 255), (10, 0, 0, 255)),
+        (45, (104, 155, 176, 255), (0, 10, 10, 255)),
+        (90, (106, 97, 188, 255), (10, 0, 0, 255)),
+    ]:
+        result, output = render(probe, tmp_path, f"parent-key-{frame}", frame,
+                                context)
+        assert result.returncode == 0, failure_summary(result)
+        assert json.loads(result.stdout)["suite_leases_balanced"] is True
+        with Image.open(output) as image:
+            pixels = image.convert("RGBA")
+        assert pixels.getpixel((0, 1)) == (241, 242, 243 if grandparent else 0, 255)
+        if grandparent:
+            shift = {0: (1, 2, 3), 45: (2, 3, 4), 90: (3, 4, 5)}[frame]
+            translation = tuple(translation[axis] + shift[axis] for axis in range(3)) + (255,)
+        assert pixels.getpixel((1, 1)) == translation
+        assert pixels.getpixel((2, 1)) == basis
+
+
+def test_shipping_layer_keyframes_animate_anchor_scale_rotation(probe, tmp_path):
+    context = animated_layer_context()
+    keys = context["scene_layers"][0]["keyframes"]
+    keys[1].update(anchor=[2, 4, 6], scale=[300, 500, 700],
+                   rotation_degrees=[0, 0, 180], orientation_degrees=[0, 0, 0])
+    for frame, translation, basis in [
+        (0, (138, 148, 158, 255), (10, 0, 0, 255)),
+        (45, (154, 156, 156, 255), (0, 30, 20, 255)),
+        (90, (164, 188, 136, 255), (30, 0, 0, 255)),
+    ]:
+        result, output = render(probe, tmp_path, f"all-transform-{frame}", frame, context)
+        assert result.returncode == 0, failure_summary(result)
+        assert json.loads(result.stdout)["passed"] is True
+        with Image.open(output) as image:
+            pixels = image.convert("RGBA")
+        assert pixels.getpixel((1, 1)) == translation
+        assert pixels.getpixel((2, 1)) == basis
+
+
+@pytest.mark.parametrize("corruption", ["one", "equal", "reversed", "zero_time_scale",
+                                      "negative", "end_bound", "nonfinite", "scale", "2d"])
+def test_shipping_layer_keyframes_reject_without_output(probe, tmp_path, corruption):
+    context = animated_layer_context()
+    layer = context["scene_layers"][0]
+    keys = layer["keyframes"]
+    if corruption == "one":
+        layer["keyframes"] = keys[:1]
+    elif corruption == "equal":
+        keys[1]["time"] = {"value": 1, "scale": 1}
+    elif corruption == "reversed":
+        keys.reverse()
+    elif corruption == "zero_time_scale":
+        keys[1]["time"]["scale"] = 0
+    elif corruption == "negative":
+        keys[0]["time"]["value"] = -1
+    elif corruption == "end_bound":
+        keys[1]["time"] = {"value": 10, "scale": 1}
+    elif corruption == "nonfinite":
+        keys[1]["anchor"][0] = float("nan")
+    elif corruption == "scale":
+        keys[1]["scale"][0] = 0
+    else:
+        layer["is_3d"] = False
+        layer["position"][2] = 0
+        for key in keys:
+            key["position"][2] = 0
+    result, output = render(probe, tmp_path, f"invalid-layer-key-{corruption}", 45, context)
+    assert result.returncode != 0
+    assert not output.exists()
+    assert "frame reported error" not in result.stderr
+
+
+def test_shipping_layer_keyframes_and_camera_in_one_resident_batch(probe, tmp_path):
+    context = animated_layer_context()
+    context["active_camera"] = animated_camera_context()["active_camera"]
+    input_path = tmp_path / "input.png"
+    Image.new("RGBA", (4, 4), (50, 60, 70, 255)).save(input_path)
+    output_dir, report_path, request_path = (tmp_path / name for name in
+                                            ("frames", "report.json", "batch.json"))
+    request_path.write_text(json.dumps({
+        "schema_version": 1, "plugin": str(probe), "input_frames": [str(input_path)] * 6,
+        "output_directory": str(output_dir), "time_scale": 2, "time_step": 1,
+        "scene_layers": context["scene_layers"], "active_camera": context["active_camera"],
+    }), encoding="utf-8")
+    result = subprocess.run([str(BROKER), "render-video-batch", str(request_path), str(report_path)],
+                            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert result.returncode == 0, failure_summary(result)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["passed"] is True and report["frames_ok"] == 6
+    assert report["session"]["session_clean"] is True
+    assert report["session"]["invalidated"] is False
+    for index, (translation, basis, zoom) in enumerate([
+        ((138, 148, 158, 255), (10, 0, 0, 255), 80),
+        ((138, 148, 158, 255), (10, 0, 0, 255), 80),
+        ((138, 148, 158, 255), (10, 0, 0, 255), 80),
+        ((148, 158, 168, 255), (7, 7, 7, 255), 100),
+        ((158, 168, 178, 255), (0, 10, 10, 255), 120),
+        ((158, 168, 178, 255), (0, 10, 10, 255), 120),
+    ]):
+        assert report["frames"][index]["status"] == "ok"
+        with Image.open(output_dir / f"frame-{index:06}.png") as image:
+            pixels = image.convert("RGBA")
+        assert pixels.getpixel((0, 0)) == (2, 247, zoom, 255)
+        assert pixels.getpixel((0, 1)) == (241, 0, 0, 255)
+        assert pixels.getpixel((1, 1)) == translation
+        assert pixels.getpixel((2, 1)) == basis
+
+
 @pytest.mark.parametrize("chain", [False, True])
 def test_shipping_authored_layer_parent_matrix(probe, tmp_path, chain):
     result, output = render(probe, tmp_path, f"layer-{chain}", 45, layer_context(chain))

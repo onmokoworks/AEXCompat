@@ -872,6 +872,77 @@ bool verify_authored_graph_decoder_case() {
   const auto invalid_2d = L"scene-graph:v2|!" + record(2801,1,0,0,0,0,100,false) +
       L",0,0," + std::to_wstring(orientation_bits);
   ok = ok && !parse_active_camera_payload(invalid_2d.c_str()) && unchanged();
+  const auto bits = [](double value) {
+    uint64_t output{};
+    std::memcpy(&output, &value, sizeof(output));
+    return output;
+  };
+  std::array<uint64_t, 59> animated_fields{{1,2801,1,0,0,0,0,0,1}};
+  const std::array<double, 15> transform{{0,0,0,10,20,30,100,100,100,0,0,0,0,0,0}};
+  for (std::size_t component = 0; component < transform.size(); ++component) {
+    animated_fields[9 + component] = bits(transform[component]);
+    animated_fields[27 + component] = bits(transform[component]);
+    animated_fields[44 + component] = bits(transform[component]);
+  }
+  animated_fields[24] = 1;
+  animated_fields[25] = 2;
+  animated_fields[26] = 2;
+  animated_fields[42] = 4;
+  animated_fields[43] = 2;
+  animated_fields[58] = bits(90.0);
+  const auto animated_payload = [](const auto& fields) {
+    std::wstring output = L"scene-graph:v3|!";
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+      if (index) output += L',';
+      output += std::to_wstring(fields[index]);
+    }
+    return output;
+  };
+  for (std::size_t corruption = 0; corruption < 8; ++corruption) {
+    auto invalid = animated_fields;
+    switch (corruption) {
+      case 0: invalid[42] = 1; invalid[43] = 1; break;
+      case 1: invalid[43] = 0; break;
+      case 2: invalid[42] = 20; break;
+      case 3: invalid[58] = bits(std::numeric_limits<double>::quiet_NaN()); break;
+      case 4: invalid[50] = bits(0.0); break;
+      case 5: invalid[24] = 2; break;
+      case 6: invalid[24] = 0; break;
+      case 7: invalid[8] = 0; invalid[14] = invalid[32] = invalid[49] = bits(0.0); break;
+    }
+    ok = ok && !parse_active_camera_payload(animated_payload(invalid).c_str()) && unchanged();
+  }
+  auto child_curve = animated_fields;
+  auto parent_curve = animated_fields;
+  child_curve[4] = 1; child_curve[5] = 2802; child_curve[6] = 1; child_curve[7] = 1;
+  parent_curve[1] = 2802; parent_curve[3] = 1;
+  child_curve[25] = 1; child_curve[26] = 1; child_curve[42] = 3; child_curve[43] = 1;
+  parent_curve[25] = 2; parent_curve[26] = 1; parent_curve[42] = 4; parent_curve[43] = 1;
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    child_curve[50 + axis] = bits(0.02);
+    parent_curve[33 + axis] = bits(0.02);
+  }
+  ok = ok && !parse_active_camera_payload((animated_payload(child_curve) + L';' +
+      animated_payload(parent_curve).substr(16)).c_str()) && unchanged();
+  std::array<AegpLayerTransformKeyframe, 2> keys{};
+  keys[0] = {{2,2}, saved.layer_transforms[0], true};
+  keys[1] = {{4,2}, saved.layer_transforms[0], true};
+  keys[0].transform.position = {{10,20,30}};
+  keys[1].transform.position = {{30,40,50}};
+  keys[0].transform.orientation_degrees = {{0,0,0}};
+  keys[1].transform.orientation_degrees = {{0,0,90}};
+  AegpLayerTransform sampled{};
+  ok = ok && sample_layer_transform(saved.layer_transforms[0], keys, {3,2}, sampled) &&
+      sampled.position == std::array<double,3>{{20,30,40}} &&
+      sampled.orientation_degrees == std::array<double,3>{{0,0,45}};
+  ok = ok && sample_layer_transform(saved.layer_transforms[0], keys, {0,1}, sampled) &&
+      sampled.position == keys[0].transform.position &&
+      sample_layer_transform(saved.layer_transforms[0], keys, {3,1}, sampled) &&
+      sampled.position == keys[1].transform.position;
+  keys[1].time = {1,1};
+  const auto sentinel = sampled;
+  ok = ok && !sample_layer_transform(saved.layer_transforms[0], keys, {3,2}, sampled) &&
+      sampled.position == sentinel.position && sampled.orientation_degrees == sentinel.orientation_degrees;
   const bool released = registry.release(borrowed, scene_model::ObjectKind::layer, 1708, true);
   return ok && released;
 }
@@ -1593,6 +1664,35 @@ bool verify_aegp_resizer_3d_chain() {
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &midpoint, &matrix) == 0 &&
       near(matrix.mat[0][3], 40.0) && near(matrix.mat[1][3], 50.0) &&
       near(matrix.mat[2][3], 15.0);
+  keyframes[0].time = {1,1};
+  keyframes[1].time = {2,1};
+  keyframes[0].transform.anchor = {{0,0,0}};
+  keyframes[0].transform.position = {{10,20,30}};
+  keyframes[1].transform.anchor = {{2,4,6}};
+  keyframes[1].transform.position = {{30,40,50}};
+  keyframes[1].transform.scale = {{300,500,700}};
+  keyframes[1].transform.rotation_degrees = {{0,0,180}};
+  auto& ancestor_keys = scene_runtime_state().layer_transform_keyframes;
+  for (std::size_t slot = 0; slot < 2; ++slot) {
+    ancestor_keys[slot][0] = {{slot ? 0 : 1,1}, {}, true};
+    ancestor_keys[slot][1] = {{slot ? 3 : 2,1}, {}, true};
+    for (auto& key : ancestor_keys[slot]) {
+      key.transform.scale = {{100,100,100}};
+      key.transform.is_3d = true;
+    }
+  }
+  ancestor_keys[1][1].transform.position = {{6,9,12}};
+  ancestor_keys[0][1].transform.position = {{2,4,6}};
+  ancestor_keys[0][1].transform.orientation_degrees = {{0,0,180}};
+  g_aegp_layer_parent_indices = {{-1,0,1}};
+  const AegpTime fractional{3,2};
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &fractional, &matrix) == 0;
+  const double animated_expected[4][4] = {
+      {-2,0,0,-31.5}, {0,-3,0,31}, {0,0,4,37}, {0,0,0,1}};
+  for (std::size_t row = 0; row < 4; ++row)
+    for (std::size_t column = 0; column < 4; ++column)
+      ok = ok && near(matrix.mat[row][column], animated_expected[row][column]);
+  g_aegp_layer_parent_indices = saved_parent_indices;
   keyframes[1].time = {0, 30};
   matrix = matrix_sentinel;
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &midpoint, &matrix) != 0 &&
