@@ -362,6 +362,41 @@ def test_description_hides_unavailable_scalar_records(fake_render_environment, m
     assert [entry["name"] for entry in result["parameter_catalog"]] == ["Echo"]
 
 
+@pytest.mark.parametrize("choices, maximum, expected", [
+    (["Inside", "Outside", "Both"], 3.0, [
+        {"value": 1, "label": "Inside"},
+        {"value": 2, "label": "Outside"},
+        {"value": 3, "label": "Both"},
+    ]),
+    (["Inside", "Outside"], 3.0, None),
+    (["Inside", "Inside", "Both"], 3.0, None),
+    (["Inside", " Outside", "Both"], 3.0, None),
+])
+def test_description_labels_only_unambiguous_integer_popup(
+    fake_render_environment, monkeypatch, choices, maximum, expected,
+):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind="integer", maximum=maximum)
+    parameter = description["parameters"][0]
+    parameter.update(minimum=1.0, value=1.0, choices=choices)
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    entry = result["parameter_catalog"][0]
+    assert entry.get("choices") == expected
+    assert entry["value"] == 1.0
+
+
+def test_description_does_not_label_non_integer_choices(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind="float", maximum=3.0)
+    description["parameters"][0].update(minimum=1.0, value=1.0, choices=["Inside", "Outside", "Both"])
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert "choices" not in result["parameter_catalog"][0]
+
+
 @pytest.mark.parametrize("bad", ["duplicate_slot", "hidden_duplicate_slot", "out_of_range_default", "nonintegral_integer"])
 def test_description_rejects_ambiguous_or_unusable_scalar(fake_render_environment, monkeypatch, bad):
     plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()

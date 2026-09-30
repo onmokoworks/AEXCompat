@@ -429,6 +429,24 @@ def _resolve_parameter_overrides(
     return parameters, records
 
 
+def _popup_choices(parameter: dict[str, Any]) -> list[dict[str, int | str]]:
+    """Only label a popup when its declared integer range matches every choice."""
+    if parameter["kind"] != "integer":
+        return []
+    labels = parameter["choices"]
+    minimum, maximum = parameter["minimum"], parameter["maximum"]
+    if (
+        not 2 <= len(labels) <= 16
+        or not float(minimum).is_integer() or not float(maximum).is_integer()
+        or not -(2**31) <= minimum <= maximum < 2**31
+        or maximum - minimum + 1 != len(labels)
+        or any(not label or label != label.strip() or "\x00" in label for label in labels)
+        or len(set(labels)) != len(labels)
+    ):
+        return []
+    return [{"value": int(minimum) + index, "label": label} for index, label in enumerate(labels)]
+
+
 def _read_description(
     harness: Path, plugin: Path, worker: Path, timeout_ms: int | None,
 ) -> tuple[bytes, dict[str, Any]]:
@@ -498,10 +516,14 @@ def _describe_aex(request: dict[str, Any], source_relative_path: str | None) -> 
             not value.is_integer() or not -(2**31) <= value < 2**31
         ):
             raise SessionRequestError("invalid scalar parameter default", "parameter_description_error")
-        parameters.append({
+        entry = {
             "slot": record["slot"], "name": record["name"], "kind": kind,
             "minimum": minimum, "maximum": maximum, "value": value,
-        })
+        }
+        choices = _popup_choices(record)
+        if choices:
+            entry["choices"] = choices
+        parameters.append(entry)
     source_sha_after = _sha256_file(plugin)
     harness_sha_after = _sha256_file(harness)
     worker_sha_after = _sha256_file(worker)

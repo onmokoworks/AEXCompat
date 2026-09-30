@@ -43,8 +43,20 @@
           "kind": {"enum": ["integer", "float", "angle"]},
           "minimum": {"type": "number"},
           "maximum": {"type": "number"},
-          "value": {"type": "number"}
+          "value": {"type": "number"},
+          "choices": {
+            "type": "array", "minItems": 2, "maxItems": 16,
+            "items": {
+              "type": "object", "required": ["value", "label"],
+              "properties": {
+                "value": {"type": "integer"},
+                "label": {"type": "string", "minLength": 1}
+              },
+              "additionalProperties": false
+            }
+          }
         },
+        "allOf": [{"if": {"required": ["choices"]}, "then": {"properties": {"kind": {"const": "integer"}}}}],
         "additionalProperties": false
       }, {
         "type": "object",
