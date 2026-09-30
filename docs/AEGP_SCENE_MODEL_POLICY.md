@@ -35,7 +35,13 @@ use v2. Nonzero static or key orientation selects v3 (24 fields) or v4
 The three orientation IEEE-f64 bit fields follow the rotation fields in each
 snapshot. Orientation components are finite and bounded to +/-36,000 degrees.
 Local composition is `T(position) * Rz * Ry * Rx * Oz * Oy * Ox * S * T(-anchor)`;
-PF Interface returns its inverse. Rotation and orientation remain separate,
+Internal composition uses column vectors; public LayerSuite exports the
+transpose for SDK row-vector consumers. PF Interface exports the same
+camera-to-world matrix, whose inverse the SDK consumer uses as model-view.
+The public ABI convention is independently covered by transformed-point
+consumers, not by assuming that internal matrix fields are Adobe semantics.
+Default-camera placement and full projection/PAR equivalence remain unverified.
+Rotation and orientation remain separate,
 and each is component-linearly interpolated, without shortest-angle wrapping.
 Snapshots are installed once at session open,
 then evaluated by both PF Interface and AEGP from the same scene state.

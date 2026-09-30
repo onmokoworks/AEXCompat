@@ -4,10 +4,26 @@
 #include "AE_GeneralPlug.h"
 
 #include <cmath>
+#include <array>
 #include <cstddef>
 #include <cstring>
 
 namespace {
+
+bool transform_point(const A_Matrix4& matrix,
+    const std::array<double, 4>& point, std::array<double, 4>& result) {
+  result = {};
+  // Public SDK mathematical row-vector convention, independent of the host's
+  // internal matrix implementation. Include homogeneous w in the oracle.
+  for (std::size_t column = 0; column < 4; ++column)
+    for (std::size_t row = 0; row < 4; ++row) {
+      if (!std::isfinite(matrix.mat[row][column])) return false;
+      result[column] += point[row] * matrix.mat[row][column];
+    }
+  for (double component : result)
+    if (!std::isfinite(component)) return false;
+  return std::abs(result[3] - 1.0) < 1e-9;
+}
 
 PF_Err render(PF_InData* in, PF_LayerDef* output) {
   if (!in || !in->pica_basicP || !output || !output->data ||
@@ -35,6 +51,7 @@ PF_Err render(PF_InData* in, PF_LayerDef* output) {
   A_FpLong zoom = 0.0;
   A_short width = 0, height = 0;
   const AEGP_LayerSuite9* layer_suite = nullptr;
+  std::array<double, 4> camera_origin{}, camera_x{}, camera_y{};
   if (!err && camera) {
     err = static_cast<PF_Err>(in->pica_basicP->AcquireSuite(
         kAEGPLayerSuite, kAEGPLayerSuiteVersion9,
@@ -53,14 +70,16 @@ PF_Err render(PF_InData* in, PF_LayerDef* output) {
           in->effect_ref, &time, &matrix, &zoom, &width, &height));
     }
     if (!err && (!std::isfinite(zoom) || zoom < 0.0 ||
-        !std::isfinite(matrix.mat[0][3]) ||
-        !std::isfinite(matrix.mat[1][3]) ||
-        !std::isfinite(matrix.mat[2][3]))) err = PF_Err_BAD_CALLBACK_PARAM;
+        !transform_point(matrix, {{0,0,0,1}}, camera_origin) ||
+        !transform_point(matrix, {{1,0,0,1}}, camera_x) ||
+        !transform_point(matrix, {{0,1,0,1}}, camera_y)))
+      err = PF_Err_BAD_CALLBACK_PARAM;
   }
 
   A_long layer_ids[3]{};
   AEGP_LayerFlags layer_flags = 0;
   A_Matrix4 layer_world{};
+  std::array<double, 4> layer_origin{}, layer_x{}, layer_y{};
   if (!err && output->height >= 2) {
     if (!layer_suite) {
       err = static_cast<PF_Err>(in->pica_basicP->AcquireSuite(
@@ -84,8 +103,10 @@ PF_Err render(PF_InData* in, PF_LayerDef* output) {
       if (!err) err = static_cast<PF_Err>(layer_suite->AEGP_GetLayerParent(layer, &parent));
       layer = parent;
     }
-    for (std::size_t component = 0; !err && component < 3; ++component)
-      if (!std::isfinite(layer_world.mat[component][3])) err = PF_Err_BAD_CALLBACK_PARAM;
+    if (!err && (!transform_point(layer_world, {{0,0,0,1}}, layer_origin) ||
+        !transform_point(layer_world, {{1,0,0,1}}, layer_x) ||
+        !transform_point(layer_world, {{0,1,0,1}}, layer_y)))
+      err = PF_Err_BAD_CALLBACK_PARAM;
   }
 
   if (!err) {
@@ -101,12 +122,12 @@ PF_Err render(PF_InData* in, PF_LayerDef* output) {
       row[0].red = static_cast<A_u_char>(type);
       row[0].green = static_cast<A_u_char>(id & 0xff);
       row[0].blue = static_cast<A_u_char>(std::lround(zoom / 10.0));
-      row[1].red = static_cast<A_u_char>(std::lround(-matrix.mat[0][3]));
-      row[1].green = static_cast<A_u_char>(std::lround(-matrix.mat[1][3]));
-      row[1].blue = static_cast<A_u_char>(std::lround(-matrix.mat[2][3]));
-      row[2].red = static_cast<A_u_char>(std::lround(std::abs(matrix.mat[0][0]) * 100.0));
-      row[2].green = static_cast<A_u_char>(std::lround(std::abs(matrix.mat[0][1]) * 100.0));
-      row[2].blue = static_cast<A_u_char>(std::lround(std::abs(matrix.mat[1][0]) * 100.0));
+      row[1].red = static_cast<A_u_char>(std::lround(camera_origin[0]));
+      row[1].green = static_cast<A_u_char>(std::lround(camera_origin[1]));
+      row[1].blue = static_cast<A_u_char>(std::lround(camera_origin[2]));
+      row[2].red = static_cast<A_u_char>(std::lround(std::abs(camera_x[0] - camera_origin[0]) * 100.0));
+      row[2].green = static_cast<A_u_char>(std::lround(std::abs(camera_x[1] - camera_origin[1]) * 100.0));
+      row[2].blue = static_cast<A_u_char>(std::lround(std::abs(camera_y[0] - camera_origin[0]) * 100.0));
     }
     if (output->height >= 2) {
       auto* row = reinterpret_cast<PF_Pixel8*>(
@@ -114,12 +135,12 @@ PF_Err render(PF_InData* in, PF_LayerDef* output) {
       row[0].red = static_cast<A_u_char>(layer_ids[0] & 0xff);
       row[0].green = static_cast<A_u_char>(layer_ids[1] & 0xff);
       row[0].blue = static_cast<A_u_char>(layer_ids[2] & 0xff);
-      row[1].red = static_cast<A_u_char>(std::lround(layer_world.mat[0][3] + 128.0));
-      row[1].green = static_cast<A_u_char>(std::lround(layer_world.mat[1][3] + 128.0));
-      row[1].blue = static_cast<A_u_char>(std::lround(layer_world.mat[2][3] + 128.0));
-      row[2].red = static_cast<A_u_char>(std::lround(std::abs(layer_world.mat[0][0]) * 10.0));
-      row[2].green = static_cast<A_u_char>(std::lround(std::abs(layer_world.mat[0][1]) * 10.0));
-      row[2].blue = static_cast<A_u_char>(std::lround(std::abs(layer_world.mat[1][0]) * 10.0));
+      row[1].red = static_cast<A_u_char>(std::lround(layer_origin[0] + 128.0));
+      row[1].green = static_cast<A_u_char>(std::lround(layer_origin[1] + 128.0));
+      row[1].blue = static_cast<A_u_char>(std::lround(layer_origin[2] + 128.0));
+      row[2].red = static_cast<A_u_char>(std::lround(std::abs(layer_x[0] - layer_origin[0]) * 10.0));
+      row[2].green = static_cast<A_u_char>(std::lround(std::abs(layer_y[0] - layer_origin[0]) * 10.0));
+      row[2].blue = static_cast<A_u_char>(std::lround(std::abs(layer_x[1] - layer_origin[1]) * 10.0));
       if (output->width >= 4)
         row[3].red = (layer_flags & AEGP_LayerFlag_LAYER_IS_3D) != 0 ? 1 : 0;
     }

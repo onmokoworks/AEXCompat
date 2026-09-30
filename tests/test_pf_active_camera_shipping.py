@@ -144,7 +144,7 @@ def test_shipping_camera_scale_and_rotation_affect_matrix(probe, tmp_path):
     result, output = render(probe, tmp_path, "transformed", 45, context)
     assert result.returncode == 0, failure_summary(result)
     assert json.loads(result.stdout)["passed"] is True
-    assert Image.open(output).convert("RGBA").getpixel((2, 0)) == (0, 50, 100, 255)
+    assert Image.open(output).convert("RGBA").getpixel((2, 0)) == (0, 200, 100, 255)
 
 
 def oriented_camera_context(animated=False, graph=False):
@@ -172,11 +172,11 @@ def oriented_camera_context(animated=False, graph=False):
 @pytest.mark.parametrize("animated", [False, True])
 @pytest.mark.parametrize("graph", [False, True])
 def test_shipping_camera_separate_orientation(probe, tmp_path, animated, graph):
-    observations = [(45, (20, 30, 0, 255), (0, 100, 0, 255))]
+    observations = [(45, (0, 20, 30, 255), (0, 100, 0, 255))]
     if animated:
-        observations = [(30, (20, 0, 30, 255), (0, 100, 100, 255)),
-                        (45, (20, 21, 21, 255), (0, 100, 71, 255)),
-                        (60, (20, 30, 0, 255), (0, 100, 0, 255))]
+        observations = [(30, (0, 20, 30, 255), (0, 100, 100, 255)),
+                        (45, (0, 20, 30, 255), (0, 100, 71, 255)),
+                        (60, (0, 20, 30, 255), (0, 100, 0, 255))]
     for frame, translation, basis in observations:
         result, output = render(probe, tmp_path, f"orientation-{frame}", frame,
                                 oriented_camera_context(animated, graph))
@@ -230,12 +230,12 @@ def test_shipping_camera_orientation_in_one_resident_batch(probe, tmp_path):
     assert report["session"]["session_clean"] is True
     assert report["session"]["invalidated"] is False
     for index, (translation, basis) in enumerate([
-        ((20, 0, 30, 255), (0, 100, 100, 255)),
-        ((20, 0, 30, 255), (0, 100, 100, 255)),
-        ((20, 0, 30, 255), (0, 100, 100, 255)),
-        ((20, 21, 21, 255), (0, 100, 71, 255)),
-        ((20, 30, 0, 255), (0, 100, 0, 255)),
-        ((20, 30, 0, 255), (0, 100, 0, 255)),
+        ((0, 20, 30, 255), (0, 100, 100, 255)),
+        ((0, 20, 30, 255), (0, 100, 100, 255)),
+        ((0, 20, 30, 255), (0, 100, 100, 255)),
+        ((0, 20, 30, 255), (0, 100, 71, 255)),
+        ((0, 20, 30, 255), (0, 100, 0, 255)),
+        ((0, 20, 30, 255), (0, 100, 0, 255)),
     ]):
         assert report["frames"][index]["status"] == "ok"
         with Image.open(output_dir / f"frame-{index:06}.png") as image:

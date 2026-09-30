@@ -203,8 +203,17 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
   double resolved_distance = static_cast<double>(width);
   if (camera_layer) {
     AegpMatrix4 world{};
-    if (aegp_get_layer_to_world_xform(camera_layer, comp_time, &world) != 0 ||
-        !invert_affine_matrix(world, result)) return 4;
+    if (aegp_get_layer_to_world_xform(camera_layer, comp_time, &world) != 0) return 4;
+    // LayerSuite exports SDK row vectors. Keep the existing affine inverse
+    // validation in its internal column convention, but return camera-to-world:
+    // the SDK consumer takes its inverse to obtain the model-view matrix.
+    AegpMatrix4 column_world{};
+    for (std::size_t row = 0; row < 4; ++row)
+      for (std::size_t column = 0; column < 4; ++column)
+        column_world.mat[row][column] = world.mat[column][row];
+    AegpMatrix4 checked_inverse{};
+    if (!invert_affine_matrix(column_world, checked_inverse)) return 4;
+    result = world;
     constexpr int32_t kLayerStreamZoom = 11;
     constexpr int16_t kCompTimeMode = 1;
     constexpr int32_t kStreamTypeOneD = 5;

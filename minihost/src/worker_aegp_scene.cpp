@@ -974,7 +974,13 @@ int32_t __cdecl aegp_get_layer_to_world_xform(
   if (index < 0 || !comp_time || !transform || !valid_comp_time(*comp_time)) return 4;
   AegpMatrix4 result{};
   if (!build_layer_world_transform(static_cast<std::size_t>(index), *comp_time, result)) return 4;
-  *transform = result;
+  // Composition is internal column-vector math. Adobe's public A_Matrix4
+  // consumer (SDK Artie) applies row vectors, so adapt only at this boundary.
+  AegpMatrix4 public_result{};
+  for (std::size_t row = 0; row < 4; ++row)
+    for (std::size_t column = 0; column < 4; ++column)
+      public_result.mat[row][column] = result.mat[column][row];
+  *transform = public_result;
   return 0;
 }
 int32_t __cdecl aegp_get_item_from_comp(void* comp, void** item) {
