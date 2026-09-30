@@ -238,7 +238,7 @@ fn validate_user_changed(
     let object = value
         .as_object()
         .ok_or_else(|| "USER_CHANGED_PARAM response is not an object".to_string())?;
-    if object.len() != 6
+    if object.len() != 5
         || value["v"].as_u64() != Some(1)
         || value["type"].as_str() != Some("user_changed_done")
         || value["worker_pid"].as_u64() != Some(worker_pid as u64)
