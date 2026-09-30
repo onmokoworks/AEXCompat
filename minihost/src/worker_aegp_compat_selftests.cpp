@@ -823,10 +823,10 @@ bool verify_authored_graph_decoder_case() {
   const auto handles = registry.handle_table_fingerprint();
   const auto saved = scene;
   const auto record = [](uint64_t object, uint64_t generation, uint64_t slot,
-      uint64_t parent, uint64_t parent_generation, uint64_t parent_slot, double scale) {
+      uint64_t parent, uint64_t parent_generation, uint64_t parent_slot, double scale, bool is_3d = true) {
     std::array<uint64_t, 21> fields{{1, object, generation, slot,
-        parent ? 1u : 0u, parent, parent_generation, parent_slot, 1}};
-    const std::array<double, 12> values{{0,0,0,10,20,30,scale,scale,scale,0,0,0}};
+        parent ? 1u : 0u, parent, parent_generation, parent_slot, is_3d ? 1u : 0u}};
+    const std::array<double, 12> values{{0,0,0,10,20,is_3d ? 30.0 : 0.0,scale,scale,scale,0,0,0}};
     for (std::size_t index = 0; index < values.size(); ++index)
       std::memcpy(&fields[9 + index], &values[index], sizeof(double));
     std::wstring output;
@@ -854,10 +854,24 @@ bool verify_authored_graph_decoder_case() {
     return !parse_active_camera_payload((L"scene-graph:v1|!" + child + L';' + parent).c_str()) &&
         unchanged();
   };
-  const bool ok = rejected(record(2801,1,0,2802,1,1,0.01), record(2802,1,1,0,0,0,200)) &&
+  bool ok = rejected(record(2801,1,0,2802,1,1,0.01), record(2802,1,1,0,0,0,200)) &&
       rejected(record(2801,1,0,2802,2,1,100), record(2802,2,1,0,0,0,100)) &&
       rejected(record(2801,1,0,2802,1,2,100), record(2802,1,1,0,0,0,100)) &&
       rejected(record(2801,1,0,2802,1,1,100), record(2802,1,1,2801,1,0,100));
+  for (double invalid_orientation : {36'001.0, std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::quiet_NaN()}) {
+    uint64_t bits{};
+    std::memcpy(&bits, &invalid_orientation, sizeof(bits));
+    const auto child = record(2801,1,0,2802,1,1,100) + L",0,0,0";
+    const auto parent = record(2802,1,1,0,0,0,100) + L",0," + std::to_wstring(bits) + L",0";
+    ok = ok && !parse_active_camera_payload((L"scene-graph:v2|!" + child + L';' + parent).c_str()) && unchanged();
+  }
+  double orientation = 90.0;
+  uint64_t orientation_bits{};
+  std::memcpy(&orientation_bits, &orientation, sizeof(orientation_bits));
+  const auto invalid_2d = L"scene-graph:v2|!" + record(2801,1,0,0,0,0,100,false) +
+      L",0,0," + std::to_wstring(orientation_bits);
+  ok = ok && !parse_active_camera_payload(invalid_2d.c_str()) && unchanged();
   const bool released = registry.release(borrowed, scene_model::ObjectKind::layer, 1708, true);
   return ok && released;
 }

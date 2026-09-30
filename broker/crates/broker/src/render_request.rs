@@ -104,6 +104,8 @@ pub struct SceneLayer {
     pub position: [f64; 3],
     pub scale: [f64; 3],
     pub rotation_degrees: [f64; 3],
+    #[serde(default)]
+    pub orientation_degrees: [f64; 3],
     pub is_3d: bool,
 }
 
@@ -507,6 +509,9 @@ pub(crate) fn encode_scene_snapshot(
         return Err(invalid("scene requires at most three authored layers"));
     }
     let mut records = Vec::with_capacity(layers.len());
+    let oriented = layers
+        .iter()
+        .any(|layer| layer.orientation_degrees != [0.0; 3]);
     for (index, layer) in layers.iter().enumerate() {
         if layers[..index].iter().any(|previous| {
             previous.layer.index == layer.layer.index
@@ -535,12 +540,20 @@ pub(crate) fn encode_scene_snapshot(
             },
             keyframes: None,
         })?;
+        if layer
+            .orientation_degrees
+            .iter()
+            .any(|value| !value.is_finite() || value.abs() > 36_000.0)
+        {
+            return Err(invalid("scene layer orientation is invalid"));
+        }
         if !layer.is_3d
             && (layer.position[2] != 0.0
                 || layer.anchor[2] != 0.0
                 || layer.rotation_degrees[0] != 0.0
                 || layer.rotation_degrees[1] != 0.0
-                || layer.scale[2] != 100.0)
+                || layer.scale[2] != 100.0
+                || layer.orientation_degrees != [0.0; 3])
         {
             return Err(invalid("2D layer has unsupported out-of-plane transform"));
         }
@@ -570,6 +583,13 @@ pub(crate) fn encode_scene_snapshot(
                 .skip(9)
                 .map(str::to_owned),
         );
+        if oriented {
+            fields.extend(
+                layer
+                    .orientation_degrees
+                    .map(|value| value.to_bits().to_string()),
+            );
+        }
         records.push(fields.join(","));
     }
     for layer in layers {
@@ -594,7 +614,8 @@ pub(crate) fn encode_scene_snapshot(
         }
     }
     Ok(Some(format!(
-        "scene-graph:v1|{}!{}",
+        "scene-graph:{}|{}!{}",
+        if oriented { "v2" } else { "v1" },
         encoded_camera.unwrap_or_default(),
         records.join(";")
     )))
@@ -2317,6 +2338,47 @@ mod tests {
         assert_eq!(serialized["scene_layers"][0]["position"][0], 10.0);
         assert_eq!(serialized["scene_layers"][0]["parent"]["object_id"], 2802);
         assert_eq!(serialized["scene_layers"][1]["layer"]["object_id"], 2802);
+    }
+
+    #[test]
+    fn authored_layer_orientation_round_trips_and_rejects_invalid_input() {
+        let mut input = json!({"mask_scene":{"masks":[]},"scene_layers":[{
+            "layer":{"project_id":1,"object_id":2801,"generation":1,"index":0},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[90,0,0],"orientation_degrees":[0,90,0],"is_3d":true
+        }]});
+        let context: HostContext = serde_json::from_value(input.clone()).unwrap();
+        let encoded = encode_active_camera(&context).unwrap().unwrap();
+        assert!(encoded.starts_with("scene-graph:v2|!"));
+        let fields: Vec<u64> = encoded
+            .split_once('!')
+            .unwrap()
+            .1
+            .split(',')
+            .map(|field| field.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 24);
+        assert_eq!(f64::from_bits(fields[22]), 90.0);
+        assert_eq!(
+            serde_json::to_value(context).unwrap()["scene_layers"][0]["orientation_degrees"],
+            json!([0.0, 90.0, 0.0])
+        );
+        for orientation in [json!([0, 36001, 0]), json!([0, 0]), json!([null, 0, 0])] {
+            input["scene_layers"][0]["orientation_degrees"] = orientation;
+            assert!(
+                serde_json::from_value::<HostContext>(input.clone())
+                    .and_then(
+                        |context| encode_active_camera(&context).map_err(serde::de::Error::custom)
+                    )
+                    .is_err()
+            );
+        }
+        input["scene_layers"][0]["orientation_degrees"] = json!([0, 0, 90]);
+        input["scene_layers"][0]["position"] = json!([0, 0, 0]);
+        input["scene_layers"][0]["rotation_degrees"] = json!([0, 0, 0]);
+        input["scene_layers"][0]["is_3d"] = json!(false);
+        let context: HostContext = serde_json::from_value(input).unwrap();
+        assert!(encode_active_camera(&context).is_err());
     }
 
     #[test]

@@ -261,7 +261,8 @@ bool decode_active_camera_payload(const wchar_t* text,
 bool parse_authored_layer_graph(const wchar_t* text);
 
 bool parse_active_camera_payload(const wchar_t* text) {
-  if (text && std::wstring(text).compare(0, 15, L"scene-graph:v1|") == 0)
+  if (text && (std::wstring(text).compare(0, 15, L"scene-graph:v1|") == 0 ||
+      std::wstring(text).compare(0, 15, L"scene-graph:v2|") == 0))
     return parse_authored_layer_graph(text);
   std::array<uint64_t, 51> fields{};
   std::array<double, 13> values{};
@@ -325,7 +326,8 @@ bool parse_authored_layer_graph(const wchar_t* text) {
   using aexcompat::scene_runtime::AegpLayerTransform;
   if (!text) return false;
   const std::wstring encoded(text);
-  if (encoded.size() > 4096 || encoded.compare(0, 15, L"scene-graph:v1|") != 0)
+  const bool oriented = encoded.compare(0, 15, L"scene-graph:v2|") == 0;
+  if (encoded.size() > 4096 || (!oriented && encoded.compare(0, 15, L"scene-graph:v1|") != 0))
     return false;
   const auto separator = encoded.find(L'!', 15);
   if (separator == std::wstring::npos || encoded.find(L'!', separator + 1) != std::wstring::npos)
@@ -363,11 +365,12 @@ bool parse_authored_layer_graph(const wchar_t* text) {
     const auto delimiter = encoded.find(L';', start);
     const auto end = delimiter == std::wstring::npos ? encoded.size() : delimiter;
     const std::wstring record = encoded.substr(start, end - start);
-    std::array<uint64_t, 21> fields{};
+    std::array<uint64_t, 24> fields{};
+    const std::size_t field_count = oriented ? 24 : 21;
     std::size_t offset = 0;
-    for (std::size_t field = 0; field < fields.size(); ++field) {
+    for (std::size_t field = 0; field < field_count; ++field) {
       const auto comma = record.find(L',', offset);
-      const bool final = field + 1 == fields.size();
+      const bool final = field + 1 == field_count;
       if ((final && comma != std::wstring::npos) ||
           (!final && comma == std::wstring::npos)) return false;
       const auto field_end = final ? record.size() : comma;
@@ -420,6 +423,15 @@ bool parse_authored_layer_graph(const wchar_t* text) {
         values[9] != 100.0 || values[10] != 0.0 || values[11] != 0.0))
       return false;
     transforms[count] = transform_from(values, fields[8] != 0);
+    if (oriented) {
+      for (std::size_t component = 0; component < 3; ++component) {
+        double orientation = 0.0;
+        std::memcpy(&orientation, &fields[21 + component], sizeof(double));
+        if (!std::isfinite(orientation) || std::abs(orientation) > 36'000.0 ||
+            (!fields[8] && orientation != 0.0)) return false;
+        transforms[count].orientation_degrees[component] = orientation;
+      }
+    }
     ++count;
     if (delimiter == std::wstring::npos) break;
     start = delimiter + 1;

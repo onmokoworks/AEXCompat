@@ -119,6 +119,7 @@ struct AegpLayerTransform {
   std::array<double, 3> scale{{100.0, 100.0, 100.0}};
   std::array<double, 3> rotation_degrees{};
   bool is_3d{};
+  std::array<double, 3> orientation_degrees{};
 };
 
 struct AegpLayerTransformKeyframe {
