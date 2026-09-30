@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from _render_session import HARNESS
+from _render_session import BROKER, HARNESS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +125,119 @@ def test_shipping_camera_scale_and_rotation_affect_matrix(probe, tmp_path):
     assert result.returncode == 0, failure_summary(result)
     assert json.loads(result.stdout)["passed"] is True
     assert Image.open(output).convert("RGBA").getpixel((2, 0)) == (0, 50, 100, 255)
+
+
+def animated_camera_context():
+    context = camera_context()
+    camera = context["active_camera"]
+    camera["in_point"] = {"value": 0, "scale": 30}
+    camera["duration"] = {"value": 300, "scale": 30}
+    camera["keyframes"] = []
+    for value, scale, position, zoom in [
+        (1, 1, [10.0, 20.0, 30.0], 800.0),
+        (4, 2, [30.0, 40.0, 50.0], 1200.0),
+    ]:
+        camera["keyframes"].append({
+            "time": {"value": value, "scale": scale},
+            "anchor": [0.0, 0.0, 0.0],
+            "position": position,
+            "scale": [100.0, 100.0, 100.0],
+            "rotation_degrees": [0.0, 0.0, 0.0],
+            "zoom": zoom,
+        })
+    return context
+
+
+def test_shipping_camera_keyframes_hold_and_rational_midpoint(probe, tmp_path):
+    for frame, translation, zoom in [
+        (15, (10, 20, 30, 255), 80),
+        (45, (20, 30, 40, 255), 100),
+        (75, (30, 40, 50, 255), 120),
+    ]:
+        result, output = render(
+            probe, tmp_path, f"animated-{frame}", frame, animated_camera_context()
+        )
+        assert result.returncode == 0, failure_summary(result)
+        report = json.loads(result.stdout)
+        assert report["passed"] is True
+        assert report["suite_leases_balanced"] is True
+        pixels = Image.open(output).convert("RGBA")
+        assert pixels.getpixel((0, 0)) == (2, 247, zoom, 255)
+        assert pixels.getpixel((1, 0)) == translation
+
+
+def test_shipping_camera_animation_in_one_resident_batch(probe, tmp_path):
+    assert BROKER.is_file(), "Release broker must be built before batch probe"
+    input_path = tmp_path / "input.png"
+    Image.new("RGBA", (4, 4), (50, 60, 70, 255)).save(input_path)
+    output_dir = tmp_path / "frames"
+    request_path = tmp_path / "batch.json"
+    report_path = tmp_path / "report.json"
+    request_path.write_text(json.dumps({
+        "schema_version": 1, "plugin": str(probe),
+        "input_frames": [str(input_path)] * 6,
+        "output_directory": str(output_dir),
+        "time_scale": 2, "time_step": 1,
+        "active_camera": animated_camera_context()["active_camera"],
+    }), encoding="utf-8")
+    result = subprocess.run(
+        [str(BROKER), "render-video-batch", str(request_path), str(report_path)],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=60,
+    )
+    assert result.returncode == 0, failure_summary(result)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["passed"] is True
+    assert report["frames_ok"] == 6
+    assert report["session"]["session_clean"] is True
+    assert report["session"]["invalidated"] is False
+    for index, (translation, zoom) in enumerate([
+        ((10, 20, 30, 255), 80), ((10, 20, 30, 255), 80),
+        ((10, 20, 30, 255), 80), ((20, 30, 40, 255), 100),
+        ((30, 40, 50, 255), 120), ((30, 40, 50, 255), 120),
+    ]):
+        assert report["frames"][index]["status"] == "ok"
+        pixels = Image.open(output_dir / f"frame-{index:06}.png").convert("RGBA")
+        assert pixels.size == (4, 4)
+        assert pixels.getpixel((0, 0)) == (2, 247, zoom, 255)
+        assert pixels.getpixel((1, 0)) == translation
+
+
+@pytest.mark.parametrize("corruption", [
+    "one", "three", "equal", "reversed", "zero_scale", "negative_time",
+    "past_bound", "end_bound", "singular", "near_singular", "nonfinite", "identity",
+])
+def test_shipping_camera_rejects_invalid_keyframes(probe, tmp_path, corruption):
+    context = animated_camera_context()
+    keys = context["active_camera"]["keyframes"]
+    if corruption == "one":
+        keys.pop()
+    elif corruption == "three":
+        keys.append(copy.deepcopy(keys[1]))
+    elif corruption == "equal":
+        keys[1]["time"] = {"value": 2, "scale": 2}
+    elif corruption == "reversed":
+        keys.reverse()
+    elif corruption == "zero_scale":
+        keys[1]["time"]["scale"] = 0
+    elif corruption == "negative_time":
+        keys[0]["time"]["value"] = -1
+    elif corruption == "past_bound":
+        keys[1]["time"] = {"value": 11, "scale": 1}
+    elif corruption == "end_bound":
+        keys[1]["time"] = {"value": 10, "scale": 1}
+    elif corruption == "singular":
+        keys[1]["scale"][0] = 0
+    elif corruption == "near_singular":
+        keys[1]["scale"] = [0.01, 0.01, 0.01]
+    elif corruption == "nonfinite":
+        keys[1]["zoom"] = float("inf")
+    else:
+        keys[1]["layer"] = {"project_id": 1, "object_id": 2808, "generation": 1}
+    result, output = render(probe, tmp_path, corruption, 45, context)
+    assert result.returncode != 0
+    assert not output.exists()
+    assert "frame reported error" not in result.stderr
 
 
 @pytest.mark.parametrize(

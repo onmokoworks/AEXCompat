@@ -783,6 +783,8 @@ bool verify_authored_camera_transport_case() {
   const auto saved_durations = scene.layer_durations;
   const auto saved_transforms = scene.layer_transforms;
   const auto saved_zooms = scene.layer_camera_zoom;
+  const auto saved_transform_keys = scene.layer_transform_keyframes;
+  const auto saved_zoom_keys = scene.layer_camera_zoom_keyframes;
   const bool saved_effect_live = pf_state_runtime::effect_is_live();
   int32_t saved_width = 0, saved_height = 0;
   g_hooks.get_dimensions(&saved_width, &saved_height);
@@ -791,6 +793,8 @@ bool verify_authored_camera_transport_case() {
   scene.active_camera_layer_index = -1;
   scene.authored_camera_identity = {};
   scene.authored_camera_live = false;
+  scene.layer_transform_keyframes[2] = {};
+  scene.layer_camera_zoom_keyframes[2] = {};
   pf_state_runtime::reset_effect_lifetime(true);
   g_hooks.set_dimensions(640, 480);
   auto& spatial = aexcompat::render::render_context_state();
@@ -816,8 +820,9 @@ bool verify_authored_camera_transport_case() {
       bits(10.0), bits(20.0), bits(30.0),
       bits(100.0), bits(100.0), bits(100.0),
       bits(0.0), bits(0.0), bits(0.0)}};
-  const auto payload = [](const std::array<uint64_t, 21>& values) {
-    std::wstring result = L"scene-camera:v1|";
+  const auto payload = [](const auto& values) {
+    std::wstring result = values.size() == 21 ?
+        L"scene-camera:v1|" : L"scene-camera:v2|";
     for (std::size_t index = 0; index < values.size(); ++index) {
       if (index != 0) result.push_back(L',');
       result += std::to_wstring(values[index]);
@@ -859,6 +864,40 @@ bool verify_authored_camera_transport_case() {
   camera = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
   ok = ok && g_hooks.get_camera(g_hooks.effect, &before, &camera) == 0 && !camera;
 
+  scene.authored_camera_live = false;
+  scene.active_camera_layer_index = -1;
+  std::array<uint64_t, 51> animated{};
+  std::copy(fields.begin(), fields.end(), animated.begin());
+  animated[21] = 1;
+  animated[22] = 1;
+  animated[36] = 4;
+  animated[37] = 2;
+  std::copy(fields.begin() + 8, fields.end(), animated.begin() + 23);
+  std::copy(fields.begin() + 8, fields.end(), animated.begin() + 38);
+  animated[38] = bits(1200.0);
+  animated[42] = bits(30.0);
+  animated[43] = bits(40.0);
+  animated[44] = bits(50.0);
+  auto equal_times = animated;
+  equal_times[36] = 2;  // Same rational time as 1/1.
+  auto invalid_zoom = animated;
+  invalid_zoom[38] = bits(std::numeric_limits<double>::infinity());
+  auto end_bound = animated;
+  end_bound[36] = 10;
+  end_bound[37] = 1;
+  ok = ok && !parse_active_camera_payload(payload(equal_times).c_str()) &&
+      !parse_active_camera_payload(payload(invalid_zoom).c_str()) &&
+      !parse_active_camera_payload(payload(end_bound).c_str()) &&
+      !scene.authored_camera_live && scene.active_camera_layer_index == -1 &&
+      !scene.layer_transform_keyframes[2][0].valid &&
+      !scene.layer_camera_zoom_keyframes[2][0].valid;
+  ok = ok && parse_active_camera_payload(payload(animated).c_str()) &&
+      scene.authored_camera_identity == layer &&
+      g_hooks.get_camera_matrix(g_hooks.effect, &active, &matrix, &zoom,
+          &width, &height) == 0 && zoom == 1000.0 &&
+      matrix.mat[0][3] == -20.0 && matrix.mat[1][3] == -30.0 &&
+      matrix.mat[2][3] == -40.0;
+
   scene.active_camera_layer_index = saved_index;
   scene.authored_camera_identity = saved_identity;
   scene.authored_camera_live = saved_camera_live;
@@ -866,6 +905,8 @@ bool verify_authored_camera_transport_case() {
   scene.layer_durations = saved_durations;
   scene.layer_transforms = saved_transforms;
   scene.layer_camera_zoom = saved_zooms;
+  scene.layer_transform_keyframes = saved_transform_keys;
+  scene.layer_camera_zoom_keyframes = saved_zoom_keys;
   spatial = saved_spatial;
   g_hooks.set_dimensions(saved_width, saved_height);
   pf_state_runtime::reset_effect_lifetime(saved_effect_live);

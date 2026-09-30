@@ -5,6 +5,31 @@ production workers. It covers Issue #26 scene identity and scheduling. Mask
 pixel semantics remain owned by Issue #29 APIs, and parent/camera/zoom math
 remains owned by Issue #30 APIs.
 
+## Shipping active-camera input
+
+GUI/CLI render requests accept an optional `host_context.active_camera`.
+`render-video-batch` accepts the same camera object as `active_camera` at the
+request root. Omission explicitly selects the camera-less deterministic policy.
+The camera has one typed `layer` identity (project/object/generation/index),
+static `anchor`, `position`, `scale` (percent), `rotation_degrees`, `zoom`, and
+rational `in_point`/`duration`. Its identity cannot change between frames.
+
+Optional `keyframes` contains exactly two objects, each with rational `time`
+(`value`/`scale`), `anchor`, `position`, `scale`, `rotation_degrees`, and `zoom`.
+Both snapshots use the camera's single identity. Times are strictly increasing
+by rational comparison and lie within 0 inclusive to 10 exclusive seconds; denominators are positive
+and at most 1,000,000. Transform and zoom values retain the static input bounds
+and non-singular positive-scale requirements. Invalid inputs fail before AEX
+dispatch, not by substituting an identity camera or dropping animation.
+
+The existing native scene policy holds the first/last snapshot outside the
+keyframe interval and linearly interpolates transform components and zoom
+inside it at composition rational time. This is a deterministic host policy,
+not verified AE easing, orientation, or pixel equivalence. Active time range
+still governs whether PF Interface returns a camera. Static inputs keep the
+v1 transport; animated inputs use v2 and are installed once at session open,
+then evaluated by both PF Interface and AEGP from the same scene state.
+
 ## Identity and ownership
 
 - Projects, items, compositions, folders, footage, layers, effects, streams,
