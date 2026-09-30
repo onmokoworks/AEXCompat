@@ -4447,7 +4447,9 @@ mod tests {
             // This thread cannot finish until shutdown returns and releases it.
             // Waiting on the join in shutdown would therefore fail the test
             // without relying on a tight wall-clock assertion on a busy CI VM.
-            release_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            release_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
             assert!(observer_child.lock().unwrap().is_none());
             finished_sender.send(()).unwrap();
         });
