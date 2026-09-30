@@ -49,6 +49,23 @@ def _argb8(value: Any) -> bool:
     )
 
 
+def _point2(value: Any) -> bool:
+    return isinstance(value, list) and len(value) == 2 and all(
+        _finite_scalar(component) and -32768 <= float(component) <= 32768
+        for component in value
+    )
+
+
+def _point_text_values(x: str, y: str) -> list[float]:
+    try:
+        components = [float(x), float(y)]
+    except (ValueError, OverflowError) as exc:
+        raise AEXCompatSessionError("point must contain two bounded finite coordinates") from exc
+    if not _point2(components):
+        raise AEXCompatSessionError("point must contain two bounded finite coordinates")
+    return components
+
+
 def _valid_choice_mapping(choices: Any, minimum: Any, maximum: Any) -> bool:
     if (
         not isinstance(choices, list) or not 2 <= len(choices) <= 16
@@ -229,7 +246,10 @@ def describe_aex(plugin_source: str) -> dict[str, Any]:
             or (entry.get("kind") == "color" and (
                 set(entry) != {"slot", "name", "kind", "color"} or not _argb8(entry.get("color"))
             ))
-            or (entry.get("kind") != "color" and (
+            or (entry.get("kind") == "point" and (
+                set(entry) != {"slot", "name", "kind", "components"} or not _point2(entry.get("components"))
+            ))
+            or (entry.get("kind") not in {"color", "point"} and (
                 set(entry) not in (
                     {"slot", "name", "kind", "minimum", "maximum", "value"},
                     {"slot", "name", "kind", "minimum", "maximum", "value", "choices"},
@@ -371,13 +391,18 @@ def evaluate_rgba8(
             shared_description = None
             for requested, recorded in zip(parameter_overrides, applied_many):
                 color_requested = isinstance(requested, dict) and "color" in requested
+                point_requested = isinstance(requested, dict) and "components" in requested
                 typed_value_valid = (
                     _argb8(recorded.get("color")) and recorded.get("color") == requested.get("color")
-                    and recorded.get("kind") == "color" and "value" not in recorded
+                    and recorded.get("kind") == "color" and "value" not in recorded and "components" not in recorded
                 ) if color_requested and isinstance(recorded, dict) else (
+                    _point2(recorded.get("components")) and recorded.get("components") == requested.get("components")
+                    and recorded.get("kind") == "point" and "value" not in recorded and "color" not in recorded
+                ) if point_requested and isinstance(recorded, dict) else (
                     _finite_scalar(recorded.get("value")) and recorded.get("value") == requested.get("value")
                     and isinstance(recorded.get("kind"), str)
-                    and recorded["kind"] in {"integer", "float", "angle"} and "color" not in recorded
+                    and recorded["kind"] in {"integer", "float", "angle"}
+                    and "color" not in recorded and "components" not in recorded
                 ) if isinstance(requested, dict) and isinstance(recorded, dict) else False
                 if (
                     not isinstance(recorded, dict)
@@ -429,7 +454,8 @@ def _configure_bake_button(node: Any, button: Any) -> None:
     button.parameter_integer_value = node.parameter_integer_value
     button.parameter_value_text = node.parameter_value_text
     button.parameter_overrides_json = json.dumps([
-        {"slot": item.slot, **({"color": list(item.color_argb)} if item.kind == "color" else {
+        {"slot": item.slot, **({"color": list(item.color_argb)} if item.kind == "color" else
+            {"components": [item.point_x_text, item.point_y_text]} if item.kind == "point" else {
             "value": item.integer_value if item.kind == "integer" else item.value_text,
         })}
         for item in node.selected_parameter_items
@@ -455,6 +481,7 @@ def _parameter_override(slot: int, kind: str, integer_value: int, value_text: st
 def _named_parameter_overrides(node: Any) -> list[dict[str, Any]]:
     return [
         {"slot": item.slot, "color": list(item.color_argb)} if item.kind == "color" else
+        {"slot": item.slot, "components": _point_text_values(item.point_x_text, item.point_y_text)} if item.kind == "point" else
         _parameter_override(item.slot, item.kind, item.integer_value, item.value_text, 0.0)
         for item in node.selected_parameter_items
     ]
@@ -480,13 +507,27 @@ def _parse_parameter_overrides(value: str) -> list[dict[str, Any]]:
     seen: set[int] = set()
     for entry in parsed:
         if (
-            not isinstance(entry, dict) or set(entry) not in ({"slot", "value"}, {"slot", "color"})
+            not isinstance(entry, dict) or set(entry) not in (
+                {"slot", "value"}, {"slot", "color"}, {"slot", "components"},
+            )
             or type(entry["slot"]) is not int or entry["slot"] < 1 or entry["slot"] in seen
         ):
             raise AEXCompatSessionError("invalid or duplicate parameter override")
         if "color" in entry:
             if not _argb8(entry["color"]):
                 raise AEXCompatSessionError("color must contain four ARGB8 channels")
+            seen.add(entry["slot"])
+            continue
+        if "components" in entry:
+            if isinstance(entry["components"], list):
+                for index, component in enumerate(entry["components"]):
+                    if isinstance(component, str):
+                        try:
+                            entry["components"][index] = float(component)
+                        except (ValueError, OverflowError) as exc:
+                            raise AEXCompatSessionError("point must contain two bounded finite coordinates") from exc
+            if not _point2(entry["components"]):
+                raise AEXCompatSessionError("point must contain two bounded finite coordinates")
             seen.add(entry["slot"])
             continue
         if isinstance(entry["value"], str):
@@ -524,6 +565,8 @@ class AEXCompatScalarParameter(bpy.types.PropertyGroup):
     value_text: StringProperty(name="Default")
     choices_json: StringProperty(name="Named integer choices", default="")
     color_argb: IntVectorProperty(name="ARGB8 default", size=4, min=0, max=255, default=(255, 0, 0, 0))
+    point_x_text: StringProperty(name="Default X", default="")
+    point_y_text: StringProperty(name="Default Y", default="")
 
 
 class AEXCompatChosenParameter(bpy.types.PropertyGroup):
@@ -534,6 +577,8 @@ class AEXCompatChosenParameter(bpy.types.PropertyGroup):
     value_text: StringProperty(name="Decimal value")
     choices_json: StringProperty(name="Named integer choices", default="")
     color_argb: IntVectorProperty(name="ARGB8 color", size=4, min=0, max=255, default=(255, 0, 0, 0))
+    point_x_text: StringProperty(name="Point X", default="")
+    point_y_text: StringProperty(name="Point Y", default="")
 
 
 class AEXCOMPAT_UL_scalar_parameters(bpy.types.UIList):
@@ -547,6 +592,9 @@ class AEXCOMPAT_UL_chosen_parameters(bpy.types.UIList):
         row.label(text=f"{item.name} (#{item.slot})")
         if item.kind == "color":
             row.label(text=f"ARGB {list(item.color_argb)}")
+        elif item.kind == "point":
+            row.prop(item, "point_x_text", text="X")
+            row.prop(item, "point_y_text", text="Y")
         elif choices := _stored_choices(item.choices_json):
             selected = next((choice["label"] for choice in choices if choice["value"] == item.integer_value), str(item.integer_value))
             row.label(text=selected)
@@ -612,6 +660,8 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
                 selected = self.parameter_items[index]
                 if selected.kind == "color":
                     layout.label(text=f"ARGB8 default {list(selected.color_argb)}")
+                elif selected.kind == "point":
+                    layout.label(text=f"Default X/Y ({selected.point_x_text}, {selected.point_y_text})")
                 else:
                     layout.label(text=f"Range {selected.minimum_text} .. {selected.maximum_text}; default {selected.value_text}")
                     if choices := _stored_choices(selected.choices_json):
@@ -626,6 +676,10 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
                 chosen = self.selected_parameter_items[min(self.selected_override_index, len(self.selected_parameter_items) - 1)]
                 if chosen.kind == "color":
                     layout.prop(chosen, "color_argb", text="ARGB8 (A, R, G, B)")
+                elif chosen.kind == "point":
+                    row = layout.row(align=True)
+                    row.prop(chosen, "point_x_text", text="X")
+                    row.prop(chosen, "point_y_text", text="Y")
                 elif choices := _stored_choices(chosen.choices_json):
                     for choice in choices:
                         button = layout.operator(
@@ -737,6 +791,9 @@ class AEXCompatRefreshParametersOperator(bpy.types.Operator):
             item.kind = record["kind"]
             if record["kind"] == "color":
                 item.color_argb = record["color"]
+            elif record["kind"] == "point":
+                item.point_x_text = str(record["components"][0])
+                item.point_y_text = str(record["components"][1])
             else:
                 item.minimum_text = str(record["minimum"])
                 item.maximum_text = str(record["maximum"])
@@ -786,6 +843,9 @@ class AEXCompatChooseParameterOperator(bpy.types.Operator):
         existing.choices_json = item.choices_json
         if item.kind == "color":
             existing.color_argb = item.color_argb
+        elif item.kind == "point":
+            existing.point_x_text = item.point_x_text
+            existing.point_y_text = item.point_y_text
         elif item.kind == "integer":
             existing.integer_value = int(item.value_text)
         else:
