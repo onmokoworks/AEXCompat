@@ -116,7 +116,7 @@ def test_output_write_failure_does_not_publish_success_evidence(tmp_path, monkey
     assert list(evidence_dir.iterdir()) == []
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS process-group cleanup")
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
 def test_signal_terminates_and_reaps_active_harness(monkeypatch):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     monkeypatch.setattr(RUNNER.macos_session.macos_backend, "_ACTIVE_HARNESS_PID", child.pid)
@@ -137,7 +137,7 @@ def test_signal_terminates_and_reaps_active_harness(monkeypatch):
             pass
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS AEX worker required")
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
 def test_real_native_aex_receives_frame_time_and_straight_pixels(tmp_path, monkeypatch):
     smoke = os.environ.get("AEXCOMPAT_RESOLVE_NATIVE_SMOKE")
     plugin = os.environ.get("AEXCOMPAT_RESOLVE_NATIVE_PLUGIN")
