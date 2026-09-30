@@ -24,8 +24,7 @@ PROBE = (
 WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 
 
-@pytest.fixture(scope="module")
-def probe():
+def build_probe():
     assert WORKER.is_file(), "Release worker must be built before shipping probe"
     assert HARNESS.is_file(), "Release harness must be built before shipping probe"
     subprocess.run(
@@ -37,6 +36,27 @@ def probe():
     )
     assert PROBE.is_file()
     return PROBE
+
+
+@pytest.fixture(scope="module")
+def probe(tmp_path_factory, request):
+    if getattr(request.config, "workerinput", None) is None:
+        return build_probe()
+
+    # Module fixtures run once per xdist worker. Configure/build touches the
+    # same Ninja files, so share one successful build across this test session.
+    from filelock import FileLock
+
+    marker = tmp_path_factory.getbasetemp().parent / "active-camera-probe.json"
+    with FileLock(str(marker) + ".lock"):
+        if marker.is_file():
+            artifact = Path(json.loads(marker.read_text(encoding="utf-8"))["probe"])
+            assert artifact == PROBE and artifact.is_file(), "stale camera probe marker"
+            return artifact
+        artifact = build_probe()
+        # Publish only after the real build has succeeded; failure is not cached.
+        marker.write_text(json.dumps({"probe": str(artifact)}), encoding="utf-8")
+        return artifact
 
 
 def camera_context():
