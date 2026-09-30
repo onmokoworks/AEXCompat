@@ -4033,6 +4033,9 @@ struct VideoBatchRequest {
     plugin: String,
     input_frames: Vec<String>,
     output_directory: String,
+    /// The same optional bounded camera snapshot used by GUI render requests.
+    #[serde(default)]
+    active_camera: Option<crate::render_request::ActiveCamera>,
     #[serde(default)]
     pixel_format: RenderPixelFormat,
     #[serde(default = "default_time_scale")]
@@ -4111,6 +4114,11 @@ pub fn run_video_batch(
         return Err(invalid("batch requires 1..=10000 input frames"));
     }
     let frame_count = request.input_frames.len();
+    let camera_trailer = request
+        .active_camera
+        .as_ref()
+        .map(crate::render_request::encode_camera)
+        .transpose()?;
     let total_time = i32::try_from(frame_count)
         .ok()
         .and_then(|count| count.checked_mul(request.time_step))
@@ -4183,7 +4191,7 @@ pub fn run_video_batch(
         output_checksum_detail: request.output_checksum_detail,
         mask_trailer: None,
         spatial_trailer: None,
-        camera_trailer: None,
+        camera_trailer,
         render_environment_trailer: None,
         audio_trailer: None,
         alpha_as_coverage_params: &request.alpha_as_coverage_params,

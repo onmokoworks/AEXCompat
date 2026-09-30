@@ -189,14 +189,16 @@ bool parse_active_camera_payload(const wchar_t* text) {
   if (!text) return false;
   const std::wstring encoded(text);
   constexpr wchar_t kPrefix[] = L"scene-camera:v1|";
-  if (encoded.compare(0, std::size(kPrefix) - 1, kPrefix) != 0 ||
-      encoded.size() > 512) return false;
-  std::array<uint64_t, 21> fields{};
+  const bool animated = encoded.compare(0, 16, L"scene-camera:v2|") == 0;
+  if ((!animated && encoded.compare(0, std::size(kPrefix) - 1, kPrefix) != 0) ||
+      encoded.size() > (animated ? 1536u : 512u)) return false;
+  std::array<uint64_t, 51> fields{};
+  const std::size_t field_count = animated ? 51 : 21;
   const std::wstring payload = encoded.substr(std::size(kPrefix) - 1);
   std::size_t start = 0;
-  for (std::size_t index = 0; index < fields.size(); ++index) {
+  for (std::size_t index = 0; index < field_count; ++index) {
     const std::size_t comma = payload.find(L',', start);
-    const bool final = index + 1 == fields.size();
+    const bool final = index + 1 == field_count;
     if ((final && comma != std::wstring::npos) ||
         (!final && comma == std::wstring::npos)) return false;
     const std::size_t end = final ? payload.size() : comma;
@@ -224,23 +226,34 @@ bool parse_active_camera_payload(const wchar_t* text) {
           10 * fields[5] * fields[7]) return false;
 
   std::array<double, 13> values{};
+  std::array<std::array<double, 13>, 2> keyframe_values{};
   static_assert(sizeof(double) == sizeof(uint64_t));
-  for (std::size_t index = 0; index < values.size(); ++index) {
-    std::memcpy(&values[index], &fields[index + 8], sizeof(double));
-    const double bound = index == 0 ? 1'000'000'000.0 :
-        index >= 10 ? 36'000.0 :
-        index >= 7 ? 10'000.0 : 1'000'000.0;
-    if (!std::isfinite(values[index]) || std::abs(values[index]) > bound)
+  const auto decode = [&](std::size_t offset, auto& destination) {
+    for (std::size_t index = 0; index < destination.size(); ++index) {
+      std::memcpy(&destination[index], &fields[index + offset], sizeof(double));
+      const double bound = index == 0 ? 1'000'000'000.0 :
+          index >= 10 ? 36'000.0 :
+          index >= 7 ? 10'000.0 : 1'000'000.0;
+      if (!std::isfinite(destination[index]) || std::abs(destination[index]) > bound)
+        return false;
+    }
+    if (destination[0] <= 0.0 ||
+        destination[7] < 0.01 || destination[8] < 0.01 || destination[9] < 0.01)
       return false;
+    const double scale_determinant =
+        destination[7] * destination[8] * destination[9] / 1'000'000.0;
+    return std::isfinite(scale_determinant) && scale_determinant > 1.001e-12;
+  };
+  if (!decode(8, values)) return false;
+  if (animated) {
+    for (std::size_t key = 0; key < 2; ++key) {
+      const std::size_t offset = 21 + key * 15;
+      if (fields[offset + 1] == 0 || fields[offset + 1] > 1'000'000 ||
+          fields[offset] >= 10 * fields[offset + 1] ||
+          !decode(offset + 2, keyframe_values[key])) return false;
+    }
+    if (fields[21] * fields[37] >= fields[36] * fields[22]) return false;
   }
-  if (values[0] <= 0.0 ||
-      values[7] < 0.01 || values[8] < 0.01 || values[9] < 0.01)
-    return false;
-  const double scale_determinant =
-      values[7] * values[8] * values[9] / 1'000'000.0;
-  if (!std::isfinite(scale_determinant) ||
-      scale_determinant <= 1.001e-12)
-    return false;
 
   auto& state = aexcompat::scene_runtime::scene_runtime_state();
   if (!state.scene_registry_initialized || state.authored_camera_live)
@@ -256,15 +269,30 @@ bool parse_active_camera_payload(const wchar_t* text) {
       scene_model::ObjectKind::layer, {}};
   if (!registry.bind_authored_layer_identity(identity, authored, identity))
     return false;
-  aexcompat::scene_runtime::AegpLayerTransform transform{};
-  for (std::size_t component = 0; component < 3; ++component) {
-    transform.anchor[component] = values[1 + component];
-    transform.position[component] = values[4 + component];
-    transform.scale[component] = values[7 + component];
-    transform.rotation_degrees[component] = values[10 + component];
+  const auto transform_from = [](const auto& snapshot) {
+    aexcompat::scene_runtime::AegpLayerTransform transform{};
+    for (std::size_t component = 0; component < 3; ++component) {
+      transform.anchor[component] = snapshot[1 + component];
+      transform.position[component] = snapshot[4 + component];
+      transform.scale[component] = snapshot[7 + component];
+      transform.rotation_degrees[component] = snapshot[10 + component];
+    }
+    transform.is_3d = true;
+    return transform;
+  };
+  state.layer_transforms[index] = transform_from(values);
+  if (animated) {
+    for (std::size_t key = 0; key < 2; ++key) {
+      const std::size_t offset = 21 + key * 15;
+      const aexcompat::suite_abi::AegpTime time{
+          static_cast<int32_t>(fields[offset]),
+          static_cast<uint32_t>(fields[offset + 1])};
+      state.layer_transform_keyframes[index][key] = {
+          time, transform_from(keyframe_values[key]), true};
+      state.layer_camera_zoom_keyframes[index][key] = {
+          time, keyframe_values[key][0], true};
+    }
   }
-  transform.is_3d = true;
-  state.layer_transforms[index] = transform;
   state.layer_in_points[index] = {
       static_cast<int32_t>(fields[4]), static_cast<uint32_t>(fields[5])};
   state.layer_durations[index] = {

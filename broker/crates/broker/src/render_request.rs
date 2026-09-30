@@ -61,6 +61,20 @@ pub struct ActiveCamera {
     pub zoom: f64,
     pub in_point: CameraTime,
     pub duration: CameraTime,
+    /// Two bounded linear snapshots; absent retains the static v1 policy.
+    #[serde(default)]
+    pub keyframes: Option<[CameraKeyframe; 2]>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraKeyframe {
+    pub time: CameraTime,
+    pub anchor: [f64; 3],
+    pub position: [f64; 3],
+    pub scale: [f64; 3],
+    pub rotation_degrees: [f64; 3],
+    pub zoom: f64,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -457,9 +471,15 @@ pub(crate) fn encode_spatial_context(context: &HostContext) -> io::Result<Option
 }
 
 pub(crate) fn encode_active_camera(context: &HostContext) -> io::Result<Option<String>> {
-    let Some(camera) = context.active_camera else {
-        return Ok(None);
-    };
+    context
+        .active_camera
+        .as_ref()
+        .map(encode_camera)
+        .transpose()
+}
+
+pub(crate) fn encode_camera(camera: &ActiveCamera) -> io::Result<String> {
+    let camera = *camera;
     if camera.layer.project_id == 0
         || camera.layer.project_id > i32::MAX as u64
         || camera.layer.object_id == 0
@@ -526,7 +546,49 @@ pub(crate) fn encode_active_camera(context: &HostContext) -> io::Result<Option<S
     {
         fields.push(value.to_bits().to_string());
     }
-    Ok(Some(format!("scene-camera:v1|{}", fields.join(","))))
+    let version = if let Some(keyframes) = camera.keyframes {
+        let [first, second] = keyframes.map(|keyframe| keyframe.time);
+        if [first, second].into_iter().any(|time| {
+            time.value < 0
+                || time.scale == 0
+                || time.scale > 1_000_000
+                || i64::from(time.value) >= 10 * i64::from(time.scale)
+        }) || i64::from(first.value) * i64::from(second.scale)
+            >= i64::from(second.value) * i64::from(first.scale)
+        {
+            return Err(invalid("active camera keyframe times are invalid"));
+        }
+        for keyframe in keyframes {
+            let snapshot = ActiveCamera {
+                anchor: keyframe.anchor,
+                position: keyframe.position,
+                scale: keyframe.scale,
+                rotation_degrees: keyframe.rotation_degrees,
+                zoom: keyframe.zoom,
+                keyframes: None,
+                ..camera
+            };
+            // Reuse exactly the static transform/zoom validation and bit encoding.
+            let encoded = encode_camera(&snapshot)?;
+            fields.extend([
+                keyframe.time.value.to_string(),
+                keyframe.time.scale.to_string(),
+            ]);
+            fields.extend(
+                encoded
+                    .split('|')
+                    .nth(1)
+                    .expect("camera fields")
+                    .split(',')
+                    .skip(8)
+                    .map(str::to_owned),
+            );
+        }
+        "v2"
+    } else {
+        "v1"
+    };
+    Ok(format!("scene-camera:{version}|{}", fields.join(",")))
 }
 
 pub(crate) fn encode_render_environment(context: &HostContext) -> io::Result<Option<String>> {
@@ -2102,6 +2164,75 @@ mod tests {
         invalid.active_camera.as_mut().unwrap().zoom = 800.0;
         invalid.active_camera.as_mut().unwrap().scale = [0.01; 3];
         assert!(encode_active_camera(&invalid).is_err());
+    }
+
+    #[test]
+    fn camera_keyframes_encode_exact_bits_and_reject_invalid_time_or_transform() {
+        let mut camera: ActiveCamera = serde_json::from_value(json!({
+            "layer": {"project_id": 1, "object_id": 2807, "generation": 1, "index": 2},
+            "anchor": [0,0,0], "position": [10,20,30], "scale": [100,100,100],
+            "rotation_degrees": [0,0,0], "zoom": 800,
+            "in_point": {"value":0,"scale":30},
+            "duration": {"value":300,"scale":30}
+        }))
+        .unwrap();
+        let static_encoded = encode_camera(&camera).unwrap();
+        let first = CameraKeyframe {
+            time: CameraTime { value: 1, scale: 1 },
+            anchor: camera.anchor,
+            position: camera.position,
+            scale: camera.scale,
+            rotation_degrees: camera.rotation_degrees,
+            zoom: camera.zoom,
+        };
+        let second = CameraKeyframe {
+            time: CameraTime { value: 4, scale: 2 },
+            position: [30.0, 40.0, 50.0],
+            zoom: 1200.0,
+            ..first
+        };
+        camera.keyframes = Some([first, second]);
+        let encoded = encode_camera(&camera).unwrap();
+        let fields: Vec<u64> = encoded
+            .split('|')
+            .nth(1)
+            .unwrap()
+            .split(',')
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 51);
+        assert_eq!(&fields[21..23], &[1, 1]);
+        assert_eq!(&fields[36..38], &[4, 2]);
+        assert_eq!(f64::from_bits(fields[23]), 800.0);
+        assert_eq!(f64::from_bits(fields[38]), 1200.0);
+        assert_eq!(f64::from_bits(fields[42]), 30.0);
+        for time in [
+            CameraTime { value: 2, scale: 2 },
+            CameraTime { value: 0, scale: 1 },
+            CameraTime { value: 1, scale: 0 },
+            CameraTime {
+                value: 11,
+                scale: 1,
+            },
+            CameraTime {
+                value: 10,
+                scale: 1,
+            },
+        ] {
+            camera.keyframes.as_mut().unwrap()[1].time = time;
+            assert!(encode_camera(&camera).is_err());
+        }
+        camera.keyframes = Some([first, second]);
+        camera.keyframes.as_mut().unwrap()[1].scale = [0.01; 3];
+        assert!(encode_camera(&camera).is_err());
+        camera.keyframes = Some([first, second]);
+        camera.keyframes.as_mut().unwrap()[1].zoom = f64::NAN;
+        assert!(encode_camera(&camera).is_err());
+        camera.keyframes = None;
+        assert_eq!(encode_camera(&camera).unwrap(), static_encoded);
+        let mut malformed = serde_json::to_value(camera).unwrap();
+        malformed["keyframes"] = json!([first]);
+        assert!(serde_json::from_value::<ActiveCamera>(malformed).is_err());
     }
 
     #[test]
