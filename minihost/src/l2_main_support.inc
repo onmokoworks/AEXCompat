@@ -1,6 +1,8 @@
 // Internal worker implementation uses a named namespace so subsystem
 // translation units can own callback state without including implementation
 // fragments into this file.
+namespace dvacore::threads { class AsyncEventLoopAdaptor; }
+
 namespace aexcompat::l2_detail {
 
 using aexcompat::parameter_selftests::verify_parameter_animation_transport;
@@ -19,14 +21,21 @@ bool teardown_bib_suite(void*) noexcept;
 uint32_t bib_termination_attempt_count() noexcept;
 
 // Retained worker-entry identity state (issue #126 Phase D). The worker-kind
-// selector is set once by the entry shims before worker_main runs and is part
-// of the entry/admission minimum that stays owned here. Lifetime: set at
-// process entry, constant afterwards.
+// selector is set once by the entry before worker_main runs and is part of the
+// entry/admission minimum that stays owned here. Lifetime: set at process
+// entry, constant afterwards.
+//
+// The initialiser is Classic rather than a route that renders nothing on
+// purpose (#1495): the entry refuses to start without an explicit --kind, so
+// this value is never the one that runs, and if some future path did reach it
+// uninitialised, failing to render is louder than quietly reporting a
+// discovery result for a render request. Before #1495 it defaulted to the
+// discovery route, where that mistake looked like a successful run.
 aexcompat::worker_target::Kind g_worker_target =
-    aexcompat::worker_target::Kind::L2;
+    aexcompat::worker_target::Kind::Classic;
 
 bool is_render_worker() {
-  return g_worker_target == aexcompat::worker_target::Kind::Render;
+  return g_worker_target == aexcompat::worker_target::Kind::Classic;
 }
 
 bool is_smart_worker() {
@@ -105,6 +114,7 @@ using aexcompat::worker_runtime::ExtendedLookupStringTableState;
 using aexcompat::worker_runtime::guarded_effect_call;
 using aexcompat::worker_runtime::HostCallbackClassification;
 using aexcompat::worker_runtime::invoke_entry_seh;
+using aexcompat::worker_runtime::invoke_tolerated_entry_seh;
 using aexcompat::worker_runtime::invoke_smart_pre_render_cleanup_seh;
 using aexcompat::worker_runtime::module_audit_json;
 using aexcompat::worker_runtime::observe_extended_allocation;
@@ -175,7 +185,8 @@ constexpr std::size_t kInSize = 408;
 constexpr std::size_t kOutSize = 408;
 constexpr std::size_t kParamSize = 176;
 // Modern AE has no fixed parameter-count limit; retain a high bounded host cap.
-constexpr std::size_t kMaxParams = 1024;
+constexpr std::size_t kMaxParams =
+    aexcompat::worker_runtime::parameters::kMaxParameterCount;
 constexpr std::size_t kInAddParam = 16;
 constexpr std::size_t kInUtils = 176;
 constexpr std::size_t kInEffectRef = 184;
@@ -296,6 +307,19 @@ using AegpEntry = int32_t(__cdecl*)(void*, int32_t, int32_t, int32_t, void**);
 // malformed, ambiguous, or non-Effect PiPL is rejected before any selector runs.
 // Ported from the reviewed/audited implementation on codex/issue84-pipl-entrypoint.
 enum class PiplPluginKind { Effect, Aegp, Unknown, Invalid, Missing };
+
+const char* unresolved_entrypoint_plugin_kind(PiplPluginKind kind) {
+  return kind == PiplPluginKind::Aegp
+             ? "aegp_candidate"
+             : (kind == PiplPluginKind::Invalid
+                    ? "invalid_pipl"
+                    : "unknown_no_effect_entrypoint");
+}
+
+std::string unresolved_entrypoint_report_json(PiplPluginKind kind) {
+  return std::string("{\"plugin_kind\":\"") +
+         unresolved_entrypoint_plugin_kind(kind) + "\"}";
+}
 
 struct PiplEntrypoint {
   PiplPluginKind kind{PiplPluginKind::Unknown};
@@ -560,6 +584,7 @@ constexpr std::size_t kPluginDataNameBytes = 256;
 constexpr std::size_t kPluginDataCategoryBytes = 256;
 constexpr std::size_t kPluginDataEntryBytes = 128;
 constexpr std::size_t kPluginDataSupportUrlBytes = 1024;
+constexpr std::size_t kMaxPluginDataRegistrations = 64;
 constexpr int32_t kPluginDataRejected = 3;  // A_Err_PARAMETER
 constexpr int32_t kPluginDataException = 512;
 constexpr int32_t kPluginDataReservedInfo = 8;
@@ -628,8 +653,90 @@ struct PluginDataContext {
   uint32_t callback_count{};
   uint32_t exception_code{};
   bool invalid{};
-  PluginDataRegistration registration{};
+  std::array<PluginDataRegistration, kMaxPluginDataRegistrations> registrations{};
 };
+
+PluginDataContext g_plugin_data_inventory;
+std::size_t g_selected_plugin_data_registration{};
+bool g_plugin_data_inventory_present{};
+bool g_plugin_data_selector_present{};
+std::size_t g_plugin_data_selector_index{};
+std::string g_plugin_data_selector_match;
+
+bool capture_plugin_data_selector(void*, const wchar_t* value) {
+  if (!value) return false;
+  const std::wstring text(value);
+  if (text.compare(0, 3, L"v1|") != 0) return false;
+  const std::size_t separator = text.find(L'|', 3);
+  if (separator == std::wstring::npos || separator == 3) return false;
+  std::size_t index = 0;
+  for (std::size_t cursor = 3; cursor < separator; ++cursor) {
+    if (text[cursor] < L'0' || text[cursor] > L'9') return false;
+    index = index * 10 + static_cast<std::size_t>(text[cursor] - L'0');
+    if (index >= kMaxPluginDataRegistrations) return false;
+  }
+  const std::size_t hex_length = text.size() - separator - 1;
+  if (hex_length == 0 || hex_length > kPluginDataNameBytes * 2 ||
+      hex_length % 2 != 0)
+    return false;
+  std::string match;
+  match.reserve(hex_length / 2);
+  const auto nibble = [](wchar_t ch) -> int {
+    if (ch >= L'0' && ch <= L'9') return ch - L'0';
+    if (ch >= L'a' && ch <= L'f') return ch - L'a' + 10;
+    return -1;
+  };
+  for (std::size_t cursor = separator + 1; cursor < text.size(); cursor += 2) {
+    const int high = nibble(text[cursor]);
+    const int low = nibble(text[cursor + 1]);
+    if (high < 0 || low < 0) return false;
+    const char decoded = static_cast<char>((high << 4) | low);
+    const auto byte = static_cast<unsigned char>(decoded);
+    if (byte < 0x20 || byte == 0x7f) return false;
+    match.push_back(decoded);
+  }
+  g_plugin_data_selector_present = true;
+  g_plugin_data_selector_index = index;
+  g_plugin_data_selector_match = std::move(match);
+  return true;
+}
+
+std::string plugin_data_hex(const char* bytes, std::size_t length) {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(length * 2);
+  for (std::size_t index = 0; index < length; ++index) {
+    const auto value = static_cast<unsigned char>(bytes[index]);
+    encoded.push_back(digits[value >> 4]);
+    encoded.push_back(digits[value & 0x0f]);
+  }
+  return encoded;
+}
+
+std::string plugin_data_inventory_report_json() {
+  if (!g_plugin_data_inventory_present) return ",\"plugin_data\":null";
+  std::ostringstream report;
+  report << ",\"plugin_data\":{\"selected_index\":"
+         << g_selected_plugin_data_registration << ",\"registrations\":[";
+  for (std::size_t index = 0;
+       index < g_plugin_data_inventory.callback_count; ++index) {
+    if (index) report << ',';
+    const auto& registration = g_plugin_data_inventory.registrations[index];
+    report << "{\"index\":" << index
+           << ",\"name_hex\":\""
+           << plugin_data_hex(registration.name.data(), registration.name_length)
+           << "\",\"match_name_hex\":\""
+           << plugin_data_hex(registration.match_name.data(),
+                              registration.match_name_length)
+           << "\",\"category_hex\":\""
+           << plugin_data_hex(registration.category.data(),
+                              registration.category_length)
+           << "\",\"entrypoint\":\"" << registration.entrypoint.data()
+           << "\"}";
+  }
+  report << "]}";
+  return report.str();
+}
 
 bool valid_plugin_data_export_name(const BoundedPluginDataText<kPluginDataEntryBytes>& text) {
   if (!text.readable || !text.terminated || !text.safe_bytes || text.length == 0 ||
@@ -665,13 +772,10 @@ int32_t record_plugin_data_registration(
     int32_t api_minor, int32_t reserved_info,
     const unsigned char* support_url) noexcept {
   if (!context) return kPluginDataRejected;
-  // Multi-effect bundles legitimately register more than once (issue #326):
-  // keep the first registration and accept the rest.
-  if (context->callback_count != 0) {
-    ++context->callback_count;
-    return 0;
+  if (context->callback_count >= kMaxPluginDataRegistrations) {
+    context->invalid = true;
+    return kPluginDataRejected;
   }
-  ++context->callback_count;
   const auto name_copy = copy_bounded_plugin_data_text<kPluginDataNameBytes>(name);
   const auto match_copy =
       copy_bounded_plugin_data_text<kPluginDataNameBytes>(match_name);
@@ -696,7 +800,19 @@ int32_t record_plugin_data_registration(
     context->invalid = true;
     return kPluginDataRejected;
   }
-  auto& registration = context->registration;
+  for (std::size_t index = 0; index < context->callback_count; ++index) {
+    const auto& existing = context->registrations[index];
+    // The launch selector is {registration index, exact match name}. Two
+    // registrations with the same match bytes could swap positions without a
+    // stale selector noticing, so the match identity must be unique by itself.
+    if (existing.match_name_length == match_copy.length &&
+        std::memcmp(existing.match_name.data(), match_copy.text.data(),
+                    match_copy.length) == 0) {
+      context->invalid = true;
+      return kPluginDataRejected;
+    }
+  }
+  auto& registration = context->registrations[context->callback_count++];
   std::copy_n(name_copy.text.data(), name_copy.length + 1,
               registration.name.data());
   std::copy_n(match_copy.text.data(), match_copy.length + 1,
@@ -780,27 +896,78 @@ int32_t invoke_plugin_data_entry1_seh(PluginDataEntry1 entry,
 }
 
 PiplEntrypoint resolve_plugin_data_entrypoints(PluginDataEntry2 entry2,
-                                               PluginDataEntry1 entry1) {
+                                               PluginDataEntry1 entry1,
+                                               std::size_t registration_index = 0,
+                                               const char* expected_match_name = nullptr) {
   if (!entry2 && !entry1) return {PiplPluginKind::Unknown, {}};
   PluginDataContext context;
   const int32_t result = entry2
       ? invoke_plugin_data_entry2_seh(entry2, &context)
       : invoke_plugin_data_entry1_seh(entry1, &context);
   if (result != 0 || context.exception_code != 0 || context.invalid ||
-      context.callback_count == 0 || !context.registration.valid)
+      context.callback_count == 0 ||
+      registration_index >= context.callback_count ||
+      !context.registrations[registration_index].valid)
     return {PiplPluginKind::Unknown, {}};
+  const auto& registration = context.registrations[registration_index];
+  if ((expected_match_name == nullptr && registration_index != 0) ||
+      (expected_match_name != nullptr &&
+       (std::strlen(expected_match_name) != registration.match_name_length ||
+        std::memcmp(expected_match_name, registration.match_name.data(),
+                    registration.match_name_length) != 0)))
+    return {PiplPluginKind::Unknown, {}};
+  g_plugin_data_inventory = context;
+  g_selected_plugin_data_registration = registration_index;
+  g_plugin_data_inventory_present = true;
   return {PiplPluginKind::Effect,
-          std::string(context.registration.entrypoint.data(),
-                      context.registration.entrypoint_length)};
+          std::string(registration.entrypoint.data(),
+                      registration.entrypoint_length)};
 }
 
 PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
   if (!module) return {PiplPluginKind::Unknown, {}};
-  const auto entry2 = reinterpret_cast<PluginDataEntry2>(
+  // PluginDataEntryFunction3 is the entry the AE 2026 bundle ships (VR*,
+  // Fast_Blur, Sharpen; issue #326). It is absent from the public 25.2 header,
+  // but a live probe (tools/aex_plugindata_probe.py) confirmed it takes the
+  // same (opaque, callback, SPBasic, host, version) entry signature and drives
+  // the v2 registration callback with identical argument layout - name,
+  // match_name, category, entrypoint, kind, api, reserved, support_url all
+  // arrive intact - so it resolves through the same v2 path. Preferred over
+  // v2 over v1. That callback layout is confirmed by the live probe across the
+  // whole AE2026 bundle; were some other build's v3 to drive a wider or
+  // narrower callback, record_plugin_data_registration bounds-checks every
+  // field and returns Unknown, so the worst case stays fail-closed (never a
+  // false Effect verdict, never a crash past the v2 SEH guard below).
+  const auto entry3 = reinterpret_cast<PluginDataEntry2>(
+      GetProcAddress(module, "PluginDataEntryFunction3"));
+  const auto entry2 = entry3 ? entry3 : reinterpret_cast<PluginDataEntry2>(
       GetProcAddress(module, "PluginDataEntryFunction2"));
   const auto entry1 = reinterpret_cast<PluginDataEntry1>(
       GetProcAddress(module, "PluginDataEntryFunction"));
   return resolve_plugin_data_entrypoints(entry2, entry1);
+}
+
+PiplEntrypoint discover_effect_entrypoint(HMODULE module) {
+  g_plugin_data_inventory = {};
+  g_selected_plugin_data_registration = 0;
+  g_plugin_data_inventory_present = false;
+  PiplEntrypoint entrypoint = discover_pipl_entrypoint(module);
+  if (entrypoint.kind == PiplPluginKind::Missing) {
+    const auto entry3 = reinterpret_cast<PluginDataEntry2>(
+        GetProcAddress(module, "PluginDataEntryFunction3"));
+    const auto entry2 = entry3 ? entry3 : reinterpret_cast<PluginDataEntry2>(
+        GetProcAddress(module, "PluginDataEntryFunction2"));
+    const auto entry1 = reinterpret_cast<PluginDataEntry1>(
+        GetProcAddress(module, "PluginDataEntryFunction"));
+    entrypoint = resolve_plugin_data_entrypoints(
+        entry2, entry1,
+        g_plugin_data_selector_present ? g_plugin_data_selector_index : 0,
+        g_plugin_data_selector_present ? g_plugin_data_selector_match.c_str()
+                                       : nullptr);
+  } else if (g_plugin_data_selector_present) {
+    return {PiplPluginKind::Unknown, {}};
+  }
+  return entrypoint;
 }
 
 int32_t __cdecl synthetic_plugin_data_entry2(
@@ -814,6 +981,37 @@ int32_t __cdecl synthetic_plugin_data_entry2(
       reinterpret_cast<const unsigned char*>("AEXCompat Synthetic"),
       reinterpret_cast<const unsigned char*>("AEXCompat Tests"),
       reinterpret_cast<const unsigned char*>("entryPointFunc"),
+      static_cast<int32_t>('eFKT'), kPluginDataApiMajor, kPluginDataApiMinor,
+      kPluginDataReservedInfo,
+      reinterpret_cast<const unsigned char*>("https://example.invalid"));
+}
+
+// A multi-effect v2/v3 bundle (the Fast_Blur shape, issue #326): two
+// registrations in one entry, the first the effect the module is discovered
+// as. This pins the shared resolution path that a v3 bundle flows through
+// (multi-registration → first entrypoint); the v3 export lookup itself is a
+// GetProcAddress name a unit test cannot reach, so it is covered by the
+// render sweep, not here.
+int32_t __cdecl synthetic_plugin_data_entry_multi(
+    PluginDataOpaque* in_ptr, PluginDataCallback2 callback, void* basic_suite,
+    const char* host, const char* version) {
+  if (!callback || !basic_suite || !host || !version ||
+      std::strcmp(host, "AEXCompat") != 0 || std::strcmp(version, "2025") != 0)
+    return kPluginDataRejected;
+  const int32_t first = callback(in_ptr,
+      reinterpret_cast<const unsigned char*>("Primary Effect"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Primary"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Tests"),
+      reinterpret_cast<const unsigned char*>("EffectMainExtra"),
+      static_cast<int32_t>('eFKT'), kPluginDataApiMajor, kPluginDataApiMinor,
+      kPluginDataReservedInfo,
+      reinterpret_cast<const unsigned char*>("https://example.invalid"));
+  if (first != 0) return first;
+  return callback(in_ptr,
+      reinterpret_cast<const unsigned char*>("Secondary Effect"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Secondary"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Tests"),
+      reinterpret_cast<const unsigned char*>("EffectMainExtra2"),
       static_cast<int32_t>('eFKT'), kPluginDataApiMajor, kPluginDataApiMinor,
       kPluginDataReservedInfo,
       reinterpret_cast<const unsigned char*>("https://example.invalid"));
@@ -843,9 +1041,47 @@ bool verify_plugin_data_entrypoint() {
                                                   &synthetic_plugin_data_entry1);
   if (v1.kind != PiplPluginKind::Effect || v1.symbol != "EffectMain")
     return false;
+  // A multi-effect bundle defaults to its first registration, while an explicit
+  // selector must match both the bounded index and the exact match name. The
+  // pair prevents a stale cache from silently selecting a different effect
+  // after the bundle changes registration order.
+  const auto multi = resolve_plugin_data_entrypoints(
+      &synthetic_plugin_data_entry_multi, nullptr);
+  if (multi.kind != PiplPluginKind::Effect || multi.symbol != "EffectMainExtra")
+    return false;
+  const auto secondary = resolve_plugin_data_entrypoints(
+      &synthetic_plugin_data_entry_multi, nullptr, 1, "AEXCompat Secondary");
+  if (secondary.kind != PiplPluginKind::Effect ||
+      secondary.symbol != "EffectMainExtra2" ||
+      resolve_plugin_data_entrypoints(&synthetic_plugin_data_entry_multi, nullptr,
+                                      1, "AEXCompat Primary")
+              .kind != PiplPluginKind::Unknown ||
+      resolve_plugin_data_entrypoints(&synthetic_plugin_data_entry_multi, nullptr,
+                                      1)
+              .kind != PiplPluginKind::Unknown)
+    return false;
+  PluginDataContext registrations;
+  if (plugin_data_callback1(
+          &registrations, reinterpret_cast<const unsigned char*>("Name"),
+          reinterpret_cast<const unsigned char*>("Match"),
+          reinterpret_cast<const unsigned char*>("Category"),
+          reinterpret_cast<const unsigned char*>("EffectMain"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
+      plugin_data_callback1(
+          &registrations, reinterpret_cast<const unsigned char*>("Name2"),
+          reinterpret_cast<const unsigned char*>("Match2"),
+          reinterpret_cast<const unsigned char*>("Category2"),
+          reinterpret_cast<const unsigned char*>("EffectMain2"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
+      registrations.callback_count != 2 ||
+      std::string(registrations.registrations[0].name.data(),
+                  registrations.registrations[0].name_length) != "Name" ||
+      std::string(registrations.registrations[1].name.data(),
+                  registrations.registrations[1].name_length) != "Name2")
+    return false;
   PluginDataContext duplicate;
-  // Duplicate registrations are accepted and ignored: both calls must succeed
-  // and the first registration must win (issue #326).
   if (plugin_data_callback1(
           &duplicate, reinterpret_cast<const unsigned char*>("Name"),
           reinterpret_cast<const unsigned char*>("Match"),
@@ -854,15 +1090,38 @@ bool verify_plugin_data_entrypoint() {
           static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
           kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
       plugin_data_callback1(
-          &duplicate, reinterpret_cast<const unsigned char*>("Name2"),
-          reinterpret_cast<const unsigned char*>("Match2"),
-          reinterpret_cast<const unsigned char*>("Category2"),
-          reinterpret_cast<const unsigned char*>("EffectMain2"),
+          &duplicate, reinterpret_cast<const unsigned char*>("Other Name"),
+          reinterpret_cast<const unsigned char*>("Match"),
+          reinterpret_cast<const unsigned char*>("Other Category"),
+          reinterpret_cast<const unsigned char*>("EffectMainOther"),
           static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
-          kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
-      duplicate.callback_count != 2 ||
-      std::string(duplicate.registration.name.data(),
-                  duplicate.registration.name_length) != "Name")
+          kPluginDataApiMinor, kPluginDataReservedInfo) == 0 ||
+      !duplicate.invalid)
+    return false;
+  PluginDataContext overflow;
+  for (std::size_t index = 0; index < kMaxPluginDataRegistrations; ++index) {
+    const std::string name = "Name" + std::to_string(index);
+    const std::string match = "Match" + std::to_string(index);
+    const std::string entrypoint = "EffectMain" + std::to_string(index);
+    if (plugin_data_callback1(
+            &overflow,
+            reinterpret_cast<const unsigned char*>(name.c_str()),
+            reinterpret_cast<const unsigned char*>(match.c_str()),
+            reinterpret_cast<const unsigned char*>("Category"),
+            reinterpret_cast<const unsigned char*>(entrypoint.c_str()),
+            static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+            kPluginDataApiMinor, kPluginDataReservedInfo) != 0)
+      return false;
+  }
+  if (plugin_data_callback1(
+          &overflow, reinterpret_cast<const unsigned char*>("Overflow"),
+          reinterpret_cast<const unsigned char*>("Overflow Match"),
+          reinterpret_cast<const unsigned char*>("Category"),
+          reinterpret_cast<const unsigned char*>("OverflowMain"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo) == 0 ||
+      !overflow.invalid ||
+      overflow.callback_count != kMaxPluginDataRegistrations)
     return false;
   PluginDataContext localized;
   const unsigned char localized_name[] = {0xe3, 0x83, 0x86, 0x00};
@@ -875,7 +1134,24 @@ bool verify_plugin_data_entrypoint() {
           reinterpret_cast<const unsigned char*>("EffectMain"),
           static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
           kPluginDataApiMinor, kPluginDataReservedInfo, localized_url) != 0 ||
-      !localized.registration.valid || !localized.registration.support_url_present)
+      !localized.registrations[0].valid ||
+      !localized.registrations[0].support_url_present)
+    return false;
+  g_plugin_data_inventory = registrations;
+  g_plugin_data_inventory_present = true;
+  g_selected_plugin_data_registration = 1;
+  const std::string inventory = plugin_data_inventory_report_json();
+  if (inventory.find("\"selected_index\":1") == std::string::npos ||
+      inventory.find("\"match_name_hex\":\"4d6174636832\"") ==
+          std::string::npos ||
+      inventory.find("\"entrypoint\":\"EffectMain2\"") ==
+          std::string::npos ||
+      !capture_plugin_data_selector(nullptr, L"v1|1|4d6174636832") ||
+      g_plugin_data_selector_index != 1 ||
+      g_plugin_data_selector_match != "Match2" ||
+      capture_plugin_data_selector(nullptr, L"v1|64|4d6174636832") ||
+      capture_plugin_data_selector(nullptr, L"v1|1|4D6174636832") ||
+      capture_plugin_data_selector(nullptr, L"v1|1|00"))
     return false;
   PluginDataContext invalid_pointer;
   return plugin_data_callback1(
@@ -904,43 +1180,36 @@ int32_t __cdecl host_extended_alloc(void** out, std::size_t size) {
               << " size=0x" << std::hex << size << std::dec << "\n"
               << std::flush;
   }
-  if (!out || size == 0 || size > (size_t{1} << 24)) {
-    record_host_callback_invocation(
-        "inter.extended_alloc", 4,
-        HostCallbackClassification::implemented);
-    return 4;
-  }
-  void* buffer = std::calloc(1, size);
-  if (!buffer) {
-    record_host_callback_invocation(
-        "inter.extended_alloc", 4,
-        HostCallbackClassification::implemented);
-    return 4;
-  }
-  *out = buffer;
-  observe_extended_allocation(buffer);
+  // Ownership and the zero-size contract live in one place
+  // (extended_inter_memory.cpp): a zero-size request succeeds with a releasable
+  // one-byte token, `*out` is always written before the allocator can fail so a
+  // rejected request leaves the plug-in holding nullptr rather than whatever
+  // its uninitialized local held, and the release below refuses any pointer
+  // this host did not hand out. Upscale.aex asks for size 0 first thing in
+  // GLOBAL_SETUP; the old code rejected that without clearing `*out`, so the
+  // plug-in released a stack-garbage pointer and free()ing that unowned pointer
+  // took the worker down with STATUS_HEAP_CORRUPTION (issue #1285).
+  const int32_t status = aexcompat::extended_inter::allocate(out, size);
+  if (status == 0 && out) observe_extended_allocation(*out);
   record_host_callback_invocation(
-      "inter.extended_alloc", 0,
+      "inter.extended_alloc", status,
       HostCallbackClassification::implemented);
-  return 0;
+  return status;
 }
 int32_t __cdecl host_extended_free(void** ptr) {
   // The plug-in passes the address of its buffer pointer (lea rcx,[local]),
-  // not the buffer itself.
-  if (ptr) {
-    observe_extended_free(*ptr);
-    std::free(*ptr);
-  }
+  // not the buffer itself. `observe_extended_free` only counts what the
+  // diagnostics saw; `release` is what decides whether free() may run, and it
+  // fails closed on a foreign, stale, or already-released pointer.
+  if (ptr) observe_extended_free(*ptr);
+  const int32_t status = aexcompat::extended_inter::release(ptr);
   record_host_callback_invocation(
-      "inter.extended_free", 0,
+      "inter.extended_free", status,
       HostCallbackClassification::implemented);
-  return 0;
+  return status;
 }
 
 constexpr std::uintmax_t kMaxAexStringTableFileBytes = 256u * 1024u * 1024u;
-thread_local const aexcompat::aex_strings::StringTable*
-    g_active_aex_string_table = nullptr;
-thread_local HMODULE g_active_effect_module = nullptr;
 
 bool load_aex_string_table(
     HMODULE module, aexcompat::aex_strings::StringTable& table) {
@@ -1009,18 +1278,20 @@ const char* __cdecl host_extended_lookup(void* table, int32_t id, void* arg2,
   // provenance; resource ownership and lookup behavior remain unchanged.
   const ExtendedLookupOpaqueTableClassification table_classification =
       aexcompat::worker_runtime::classify_extended_lookup_table(
-          table, g_active_effect_module, nullptr,
+          table, aexcompat::worker_runtime::active_plugin::effect_module, nullptr,
           &classify_other_lookup_module);
-  const char* result = g_active_aex_string_table
-      ? g_active_aex_string_table->lookup(id)
+  const auto* active_string_table =
+      aexcompat::worker_runtime::active_plugin::string_table;
+  const char* result = active_string_table
+      ? active_string_table->lookup(id)
       : nullptr;
   // LoadString semantics for a valid table (issue #362): bundled effects
   // probe optional string ids and use the result unchecked (Three-Way Color
   // Corrector strlens the answer for the absent id 610), so a missing id in
   // a valid table yields an empty string, never null. An absent/invalid
   // table stays fail-closed and keeps returning null.
-  if (!result && g_active_aex_string_table &&
-      g_active_aex_string_table->status ==
+  if (!result && active_string_table &&
+      active_string_table->status ==
           aexcompat::aex_strings::ParseStatus::Valid) {
     static constexpr char kEmptyString[] = "";
     result = kEmptyString;
@@ -1034,8 +1305,8 @@ const char* __cdecl host_extended_lookup(void* table, int32_t id, void* arg2,
   }
   const ExtendedLookupStringTableState raw_private_table_state =
       extended_lookup_table_state(
-          g_active_aex_string_table
-              ? g_active_aex_string_table->status
+          active_string_table
+              ? active_string_table->status
               : aexcompat::aex_strings::ParseStatus::NoEntries);
   const ExtendedLookupStringTableState windows_resource_source_state =
       ExtendedLookupStringTableState::none;
@@ -1082,6 +1353,17 @@ std::vector<unsigned char> synthetic_pipl(
 }
 
 bool verify_pipl_entrypoint_parser() {
+  if (std::string(unresolved_entrypoint_plugin_kind(PiplPluginKind::Aegp)) !=
+          "aegp_candidate" ||
+      std::string(unresolved_entrypoint_plugin_kind(PiplPluginKind::Invalid)) !=
+          "invalid_pipl" ||
+      std::string(unresolved_entrypoint_plugin_kind(PiplPluginKind::Effect)) !=
+          "unknown_no_effect_entrypoint" ||
+      unresolved_entrypoint_report_json(PiplPluginKind::Aegp) !=
+          "{\"plugin_kind\":\"aegp_candidate\"}" ||
+      unresolved_entrypoint_report_json(PiplPluginKind::Unknown) !=
+          "{\"plugin_kind\":\"unknown_no_effect_entrypoint\"}")
+    return false;
   const auto effect = synthetic_pipl({'T', 'K', 'F', 'e'}, "entryPointFunc");
   const auto parsed_effect = parse_pipl_entrypoint(effect.data(), effect.size());
   if (parsed_effect.kind != PiplPluginKind::Effect ||
@@ -1173,13 +1455,16 @@ void record_selector_dispatch(const char* selector) {
   if (g_trace_writer && selector) g_trace_writer->selector_dispatch(selector);
 }
 
+// Names the route in the trace. It used to name the executable, which said the
+// same thing while there were three of them; with one binary (#1495) the route
+// is the part that still varies.
 const char* trace_worker_label() {
   switch (g_worker_target) {
-    case aexcompat::worker_target::Kind::Render: return "aex_render_worker";
-    case aexcompat::worker_target::Kind::Smart: return "aex_smart_worker";
-    case aexcompat::worker_target::Kind::L2: return "aex_l2_worker";
+    case aexcompat::worker_target::Kind::Classic: return "classic";
+    case aexcompat::worker_target::Kind::Smart: return "smart";
+    case aexcompat::worker_target::Kind::Discovery: return "discovery";
   }
-  return "aex_l2_worker";
+  return "unknown";
 }
 
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
@@ -1226,33 +1511,57 @@ auto& g_parameter_timelines = g_parameter_runtime.timelines;
 std::wstring g_plugin_file_path;
 
 // Legacy-support-library process initialization (issue #362 selector
-// families): PIN-era bundled effects (Curves, FILE.dll-based classics)
-// allocate through U.dll's process-wide allocator, which real AE initializes
-// at process start by calling U_Birth. Nothing in the plug-in closure calls
-// it (verified: no staged DLL imports U_Birth), so the host must, once per
-// process, the first time a closure containing U.dll is loaded. Failures
-// leave the plug-in no worse off than before (its U_AllocateHandle calls
-// keep failing as they already did).
+// families): PIN-era bundled effects (Curves, Reshape, FILE.dll-based
+// classics) allocate through U.dll's process-wide allocator, which real AE
+// initializes at process start by calling U_Birth. Nothing in the plug-in
+// closure calls it (verified: no staged DLL imports U_Birth), so the host
+// must, once per U.dll mapping. Failures leave the plug-in no worse off than
+// before (its U_AllocateHandle calls keep failing as they already did).
+//
+// Called before every plug-in's inspect/bootstrap, one-shot and session alike.
+// The latch (worker_legacy_support_init.hpp) keys on the U.dll mapping, not on
+// "already tried": a session whose first member has no U.dll must still birth
+// the allocator when a later member maps it (issue #1063; the former
+// once-per-process `attempted` flag left Reshape_New failing PARAMS_SETUP with
+// 4 (PF_Err_OUT_OF_MEMORY) whenever it followed a U.dll-free plug-in in the
+// same discovery session).
 int u_birth_seh_filter(EXCEPTION_POINTERS*) {
   return EXCEPTION_EXECUTE_HANDLER;
 }
 
-void initialize_legacy_support_libraries() {
-  static bool attempted = false;
-  if (attempted) return;
-  attempted = true;
+void initialize_u_dll_allocator() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  // The absent/no-export markers are logged once per process: the decision is
+  // re-asked for every member, but a 300-member session must not fill the
+  // bounded stderr tail the broker keeps with the same line.
+  static bool absent_logged = false;
+  static bool no_birth_logged = false;
   const HMODULE u_module = GetModuleHandleW(L"U.dll");
-  if (!u_module) {
-    std::cerr << "stage:legacy_support_init status=absent\n" << std::flush;
-    return;
-  }
   using UBirth = int(__cdecl*)(void*, uint8_t);
-  const auto u_birth =
-      reinterpret_cast<UBirth>(GetProcAddress(u_module, "U_Birth"));
-  if (!u_birth) {
-    std::cerr << "stage:legacy_support_init status=no_u_birth\n" << std::flush;
-    return;
+  const auto u_birth = u_module
+      ? reinterpret_cast<UBirth>(GetProcAddress(u_module, "U_Birth"))
+      : nullptr;
+  switch (legacy::decide(state, u_module, u_birth != nullptr)) {
+    case legacy::Decision::Absent:
+      if (!absent_logged) {
+        absent_logged = true;
+        std::cerr << "stage:legacy_support_init status=absent\n" << std::flush;
+      }
+      return;
+    case legacy::Decision::AlreadyInitialized:
+      return;
+    case legacy::Decision::NoBirthExport:
+      if (!no_birth_logged) {
+        no_birth_logged = true;
+        std::cerr << "stage:legacy_support_init status=no_u_birth\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::Call:
+      break;
   }
+  legacy::note_called(state, u_module);
   int result = -1;
   __try {
     // The first argument is an optional host context block; a zeroed buffer
@@ -1265,6 +1574,1083 @@ void initialize_legacy_support_libraries() {
   }
   std::cerr << "stage:legacy_support_init status=called result=" << result
             << "\n" << std::flush;
+}
+
+// The rest of the process-wide support-library births (issue #1279). U.dll is
+// not the only library real AE births at process start, and a plug-in closure
+// imports only their working entry points, never the birth. Two of the
+// discovery failures in that issue are exactly this gap:
+//
+//   * Particle_Playground, once past U's Sweet Pea gate, faults during
+//     GLOBAL_SETUP on a null read inside VAL.dll (observed:
+//     `stage:selector_seh selector=GLOBAL_SETUP code=0xc0000005
+//     site=other_module module=VAL.dll access=read fault=null`), and it
+//     stops faulting once VAL_Birth runs. That VAL's global value-type
+//     list is what was missing is the reading of VAL_Birth's
+//     disassembly, not something the trace shows directly.
+//   * PSL_Adjustments returns 21249 from GLOBAL_SETUP. That is COR.dll's
+//     0x5301, returned by `COR_GetBIBAddressProc` ("BIB is uninitialized.")
+//     when COR's cached BIB resolver is null - and that global is set by
+//     `COR_Conception`, which nothing but the host's birth sequence calls.
+//
+// The entries below are the part of AE's own startup sequence that this host
+// runs, in AE's order and with AE's arguments. The sequence was read out of
+// `aelib.dll` and is transcribed in
+// docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md:
+// BEZ_Birth() / FILE_Birth() / M_Birth(3, 0) / RND_Birth() / VAL_Birth() /
+// COR_Conception(quiet_bib_errors), where `quiet_bib_errors` is AE's
+// "flags & 1" and is false for a host that does not set that flag, so this is
+// what AE's own code produces rather than a guessed shape. Signatures come
+// from each library's disassembly: `void VAL_Birth(void)`,
+// `int FILE_Birth(void)`, `int BEZ_Birth(void)`, `int RND_Birth(void)`,
+// `int M_Birth(unsigned, void*)`, `int COR_Conception(bool)`.
+//
+// It is a subset, not the whole sequence. What AE also does and this does not,
+// and why:
+//
+//   * `FILE_AddExtensionMap(...)` x9 before FILE_Birth: registers AE's own
+//     document extensions, which no effect plug-in needs to inspect or render.
+//   * `PREF_Birth(...)` (between RND and VAL) and `MC_Birth(...)` (between VAL
+//     and COR_Conception): AE's preferences file and media core. Neither is
+//     needed by anything measured here, and both take AE-mode arguments and
+//     touch user state, so they stay out until something demonstrably needs
+//     them.
+//   * `COR_Birth(a, quiet_bib_errors, b)`, two steps after COR_Conception:
+//     before #1606 it waited for a dvacore main-thread callback while this
+//     worker had registered no main thread. The registration immediately
+//     below lets COR execute that callback on the dispatch thread. It is
+//     attempted only when no other thread owns dvacore's main-thread slot at
+//     the decision point. A concurrent third-party registration could still
+//     race with dvacore's unconditional replacement; see the helper below.
+//   * TDB_Birth, TXT_Birth, BEE_Birth and the rest of the tail: not reached
+//     by any failure measured so far. `PF_Birth`, which sits in that tail, is
+//     run by initialize_pf_dll_host_layer below (issue #1212 / PR #1284) -
+//     after this step, matching AE's order. `PLUG_Birth`, also in that tail
+//     and ahead of PF_Birth in AE's order, is the last entry of the table
+//     below (issue #1280).
+//
+// VAL_Birth allocates through U (U_CopyString) and LIST, so U has to be
+// birthed first, which is why this runs after initialize_u_dll_allocator.
+// Same latch shape as U_Birth: keyed on the mapping, so a session whose first
+// member maps none of these still births them for a later member that does,
+// and a failed attempt is not retried on the same mapping.
+bool ensure_dvacore_dispatch_thread_is_main() {
+  // The worker calls this on its one dispatch thread before any plug-in
+  // selector. Dvacore's RegisterCurrentThreadAsMainThread unconditionally
+  // replaces the process-wide ID, however: this check cannot be made atomic
+  // against a thread spawned by a plug-in's DLL initializer. We avoid
+  // replacing an owner already visible here, but do not claim cross-plug-in
+  // event-loop arbitration or use this as a general main-thread dispatcher.
+  namespace main_thread = aexcompat::worker_runtime::dvacore_main_thread;
+  const HMODULE dva = GetModuleHandleW(L"dvacore.dll");
+  if (!dva) return false;
+  using MainThreadId = unsigned(__cdecl*)();
+  using IsMain = bool(__cdecl*)();
+  using Register =
+      std::shared_ptr<dvacore::threads::AsyncEventLoopAdaptor>(__cdecl*)();
+  const auto main_id = reinterpret_cast<MainThreadId>(GetProcAddress(
+      dva, "?GetCurrentMainThreadID@threads@dvacore@@YAIXZ"));
+  const auto is_main = reinterpret_cast<IsMain>(GetProcAddress(
+      dva, "?CurrentThreadIsMainThread@threads@dvacore@@YA_NXZ"));
+  const auto register_main = reinterpret_cast<Register>(GetProcAddress(
+      dva,
+      "?RegisterCurrentThreadAsMainThread@threads@dvacore@@YA?AV?$shared_ptr@VAsyncEventLoopAdaptor@threads@dvacore@@@std@@XZ"));
+  if (!main_id || !is_main || !register_main) {
+    std::cerr << "stage:dvacore_main_thread status=missing_export\n"
+              << std::flush;
+    return false;
+  }
+  switch (main_thread::decide(main_id(), GetCurrentThreadId())) {
+    case main_thread::Action::AlreadyMain:
+      return is_main();
+    case main_thread::Action::OtherMain:
+      std::cerr << "stage:dvacore_main_thread status=other_thread\n"
+                << std::flush;
+      return false;
+    case main_thread::Action::InvalidThread:
+      return false;
+    case main_thread::Action::Register:
+      // dvacore also retains the adaptor in its thread-local state. Release
+      // only our returned reference here; the dispatch thread owns the
+      // registration until its TLS teardown, before dvacore unloads.
+      {
+        auto adaptor = register_main();
+        if (!adaptor || !is_main()) {
+          std::cerr << "stage:dvacore_main_thread status=register_failed\n"
+                    << std::flush;
+          return false;
+        }
+      }
+      return is_main();
+  }
+  return false;
+}
+
+HMODULE g_successful_cor_birth_module = nullptr;
+HMODULE g_successful_pf_birth_module = nullptr;
+bool g_cor_birth_teardown_attempted = false;
+
+void initialize_process_support_libraries() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  enum class BirthShape {
+    // int (*)()
+    no_arguments,
+    // void (*)(), reported as result 0 when it returns: VAL_Birth has no
+    // return value, so reading one would report whatever is left in eax.
+    no_arguments_void,
+    // int (*)(unsigned, void*), called as AE calls M_Birth: (3, nullptr)
+    m_birth,
+    // int (*)(bool), called with AE's non-quiet value
+    cor_conception,
+    cor_birth,
+    // int (*)(const boost::function<bool(const StdString16&)>&), called with
+    // a reference to an empty function object (see the PLUG.dll entry below).
+    // `?PLUG_Birth@@YAH...` mangles as `YAH` = `int __cdecl`, and `AEBV` = a
+    // reference, which on x86-64 arrives as a pointer in rcx.
+    plug_birth,
+  };
+  struct SupportLibrary {
+    const wchar_t* module;
+    // `name` is the narrow spelling of `module` for the trace (std::cerr
+    // takes no wide strings); `birth` is the exported symbol, which for
+    // COR is a C++ mangled name.
+    const char* name;
+    const char* birth;
+    BirthShape shape;
+  };
+  static constexpr SupportLibrary kLibraries[] = {
+      {L"BEZ.dll", "BEZ.dll", "BEZ_Birth",
+       BirthShape::no_arguments},
+      {L"FILE.dll", "FILE.dll", "FILE_Birth",
+       BirthShape::no_arguments},
+      {L"U.dll", "U.dll", "M_Birth",
+       BirthShape::m_birth},
+      {L"U.dll", "U.dll", "RND_Birth",
+       BirthShape::no_arguments},
+      {L"VAL.dll", "VAL.dll", "VAL_Birth",
+       BirthShape::no_arguments_void},
+      {L"COR.dll", "COR.dll", "?COR_Conception@@YAH_N@Z",
+       BirthShape::cor_conception},
+      {L"COR.dll", "COR.dll", "?COR_Birth@@YAH_N00@Z",
+       BirthShape::cor_birth},
+      // PLUG.dll's static-routine registry (issue #1280). Its guard is two
+      // words that only PLUG_Birth writes: `PLUG_RegisterStaticRoutine`
+      // (PLUG.dll+0x1ca80) compares PLUG.dll+0x6df90 and +0x6e098 against
+      // 0x910ba1 and, when either differs, reports through
+      // `Up_ReportError(0x30002a, 0x10)` and throws the C++ integer 2 instead
+      // of registering. PLUG_Birth (PLUG.dll+0x19810) is what stores both
+      // words (`mov` at PLUG.dll+0x19940 and +0x1994a). Scanning the module
+      // for that immediate finds 26 sites: those two `mov`s and 24 `cmp`s,
+      // which reads as twelve guard pairs. What the scan establishes is that
+      // no other instruction writes the *immediate*; a computed or copied
+      // write would not show up in it, so both "only PLUG_Birth opens the
+      // gate" and "the twelve pairs are twelve separate entry points" are
+      // inferences from the scan plus the disassembly around each site.
+      // Particle_Playground's GLOBAL_SETUP registers each of its 14 particle
+      // action types through that entry, catches the throw and returns 2
+      // (observed under cdb: the throw stack is
+      // `PLUG!PLUG_RegisterStaticRoutine+0x211` <- Particle_Playground, and
+      // the catch block at Particle_Playground+0x2e50f then sets the
+      // selector result to 2).
+      //
+      // Two things this entry needs that the stateless births above do not:
+      //
+      //   * The latch is load-bearing, not an optimization. PLUG_Birth is not
+      //     idempotent: it replaces PLUG.dll+0x6df98 with a fresh
+      //     `U_AllocateHandleClear` handle and two new LIST objects and frees
+      //     none of the previous ones (only PLUG_Death does, which this host
+      //     does not call - see the teardown note in
+      //     docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md §3 and #1282).
+      //     Per-mapping latching is what keeps that to once.
+      //   * A non-zero `result=` here is not the harmless "the library
+      //     answered with a code" it is elsewhere. PLUG_Birth writes both
+      //     sentinels unconditionally, after the allocation step and without
+      //     touching eax again, so a failed allocation leaves the gate open
+      //     with a null scan cache and still reports its error. The host
+      //     records that and does not act on it; the trace line is the only
+      //     place it shows.
+      //
+      // Dependencies, from the disassembly: U.dll (`ALOG_Log`,
+      // `U_ZLookupLStrCache`, `U_AllocateHandleClear`) and LIST.dll
+      // (`LIST_New`), both of which PLUG.dll imports, so both are mapped
+      // whenever it is, and `initialize_u_dll_allocator` has already run. It
+      // also reads the exported data slot `?PLUG_G_zref@@...`
+      // (PLUG.dll+0x6b060), which this host never sets; that only affects the
+      // text of a PLUG error report. No file or registry I/O, no threads, no
+      // TLS, no atexit registration. PLUG_Birth is also the one PLUG entry
+      // that does not take the module's recursive mutex (PLUG.dll+0x6dfc8),
+      // which is safe here because this runs on the dispatch thread between
+      // LoadLibrary and GLOBAL_SETUP, with no other PLUG call in flight.
+      {L"PLUG.dll", "PLUG.dll",
+       "?PLUG_Birth@@YAHAEBV?$function@$$A6A_NAEBV?$basic_string@_WU?$char_"
+       "traits@_W@std@@U?$STLAllocator@_W@allocator@dvacore@@@std@@@Z@boost@@@Z",
+       BirthShape::plug_birth},
+  };
+  static legacy::State states[std::size(kLibraries)];
+  // A mapped library whose birth export is missing is reported once per
+  // library: it means this AE build moved or renamed the entry, which must
+  // not look the same as "the library is not in this closure".
+  static bool no_export_logged[std::size(kLibraries)]{};
+  static bool cor_pair_unavailable_logged = false;
+  for (std::size_t index = 0; index < std::size(kLibraries); ++index) {
+    const SupportLibrary& library = kLibraries[index];
+    const HMODULE module = GetModuleHandleW(library.module);
+    const FARPROC birth =
+        module ? GetProcAddress(module, library.birth) : nullptr;
+    const legacy::Decision decision =
+        legacy::decide(states[index], module, birth != nullptr);
+    if (decision == legacy::Decision::NoBirthExport &&
+        !no_export_logged[index]) {
+      no_export_logged[index] = true;
+      std::cerr << "stage:legacy_support_init library=" << library.name
+                << " entry=" << library.birth << " status=no_export\n"
+                << std::flush;
+    }
+    if (decision != legacy::Decision::Call) continue;
+    if (library.shape == BirthShape::cor_birth) {
+      // COR-only closures previously used Conception without Birth. Do not
+      // start a new lifetime unless PF's already-mapped host layer can be
+      // born later and the reverse-order Death exports are present. PF_Birth
+      // still runs after COR_Birth, matching AE's startup order.
+      const HMODULE pf = GetModuleHandleW(L"PF.dll");
+      if (!pf || !GetProcAddress(pf, "PF_Birth") ||
+          !GetProcAddress(pf, "PF_Death") ||
+          !GetProcAddress(module, "?COR_Death@@YAHXZ")) {
+        if (!cor_pair_unavailable_logged) {
+          cor_pair_unavailable_logged = true;
+          std::cerr << "stage:cor_birth status=skipped_no_paired_teardown\n"
+                    << std::flush;
+        }
+        continue;
+      }
+      if (!ensure_dvacore_dispatch_thread_is_main()) continue;
+    }
+    legacy::note_called(states[index], module);
+    int result = -1;
+    __try {
+      switch (library.shape) {
+        case BirthShape::no_arguments:
+          result = reinterpret_cast<int(__cdecl*)()>(birth)();
+          break;
+        case BirthShape::no_arguments_void:
+          reinterpret_cast<void(__cdecl*)()>(birth)();
+          result = 0;
+          break;
+        case BirthShape::m_birth:
+          result = reinterpret_cast<int(__cdecl*)(uint32_t, void*)>(birth)(
+              3, nullptr);
+          break;
+        case BirthShape::cor_conception:
+          result = reinterpret_cast<int(__cdecl*)(bool)>(birth)(false);
+          break;
+        case BirthShape::cor_birth:
+          result = reinterpret_cast<int(__cdecl*)(bool, bool, bool)>(birth)(
+              false, false, false);
+          break;
+        case BirthShape::plug_birth: {
+          // AE hands PLUG_Birth a `boost::function<bool(const StdString16&)>`
+          // that decides which scanned plug-in files to skip. This host does
+          // not use PLUG's file scan at all - it needs only the registry the
+          // birth initializes - so it passes an empty function.
+          //
+          // Verified against AE 2026's PLUG.dll (PLUG_Birth at +0x19810): the
+          // first thing it reads is the function object's vtable pointer at
+          // offset 0, and the `test rax,rax / jz` at +0x19832 takes the empty
+          // path when that word is zero, leaving the remaining bytes unread.
+          // A zeroed buffer is safe because that early-out is taken, not
+          // because of its size: the non-empty paths either copy through
+          // offset 0x28 or call the vtable's own manager
+          // (`and rax,~1` / `call qword ptr [rax]` at +0x19864..+0x19870),
+          // and how much that reads is the caller's business, not PLUG's.
+          // The empty object is then installed as PLUG's global skip
+          // predicate (PLUG.dll+0x6e0a0), where its only consumer tests the
+          // same word and answers "skip nothing" - the right answer for a
+          // host that never scans.
+          static alignas(std::max_align_t) std::byte empty_skip_predicate[64]{};
+          result = reinterpret_cast<int(__cdecl*)(const void*)>(birth)(
+              empty_skip_predicate);
+          break;
+        }
+      }
+    } __except (u_birth_seh_filter(GetExceptionInformation())) {
+      // COR_Conception reports failures by throwing, which arrives here as
+      // SEH. The sequence continues after a fault rather than stopping:
+      // each entry initializes its own library, a faulted one leaves that
+      // library exactly as unusable as it was before this step existed,
+      // and stopping would deny the later libraries an initialization they
+      // do not depend on the faulted one for. The one real dependency in
+      // this table (VAL needs U) is satisfied by initialize_u_dll_allocator
+      // running first, not by an earlier entry here. The result is not
+      // reported for a faulted entry: the trace says `status=faulted`, and a
+      // number there would look like the library answered.
+      std::cerr << "stage:legacy_support_init library=" << library.name
+                << " entry=" << library.birth << " status=faulted\n"
+                << std::flush;
+      continue;
+    }
+    // A void birth has no result: printing one would be
+    // indistinguishable from a library that answered with that value.
+    std::cerr << "stage:legacy_support_init library=" << library.name
+              << " entry=" << library.birth << " status=called";
+    if (library.shape != BirthShape::no_arguments_void)
+      std::cerr << " result=" << result;
+    std::cerr << "\n" << std::flush;
+    if (library.shape == BirthShape::cor_birth && result == 0)
+      g_successful_cor_birth_module = module;
+  }
+}
+
+// PF.dll (AE's PF host layer) keeps its own dispatch table (`PFp_G_OverFuncs`,
+// PF.dll+0x44d9b0..) that its exported entry points jump through:
+// `PF_TransferRect` is `jmp [PFp_G_OverFuncs+0xe8]`, `PF_TransformWorld` calls
+// through +0xf0, `PF_Blend` reads the block, and so on. Real AE fills the table
+// at startup by calling the exported `PF_Birth` (which reads U.dll's CPU
+// feature block, so U_Birth has to have run first; PF.dll imports U.dll, so it
+// is mapped whenever PF.dll is). Adobe-bundled effects import those exports
+// directly (Echo: PF_TransferRect, Transform: PF_TransformWorld, Spill2:
+// PF_Blend, CannedWarp: PFp_G_fcd_table) and nothing in a plug-in closure
+// calls PF_Birth, so without this step every such call jumps to address 0
+// (observed as `stage:selector_seh ... access=execute fault=null` with the
+// return address in the plug-in or PF.dll; issue #1212's Echo / Transform /
+// Spill2 rows). Same latch as the U.dll step: once per PF.dll mapping.
+void initialize_pf_dll_host_layer() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  static bool no_birth_logged = false;
+  const HMODULE pf_module = GetModuleHandleW(L"PF.dll");
+  using PfBirth = uint32_t(__cdecl*)();
+  const auto pf_birth = pf_module
+      ? reinterpret_cast<PfBirth>(GetProcAddress(pf_module, "PF_Birth"))
+      : nullptr;
+  switch (legacy::decide(state, pf_module, pf_birth != nullptr)) {
+    case legacy::Decision::Absent:
+    case legacy::Decision::AlreadyInitialized:
+      return;
+    case legacy::Decision::NoBirthExport:
+      if (!no_birth_logged) {
+        no_birth_logged = true;
+        std::cerr << "stage:pf_host_layer_init status=no_pf_birth\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::Call:
+      break;
+  }
+  legacy::note_called(state, pf_module);
+  uint32_t result = 0xffffffffu;
+  bool faulted = false;
+  __try {
+    result = pf_birth();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    faulted = true;
+  }
+  std::cerr << "stage:pf_host_layer_init status=called result=" << result
+            << (faulted ? " faulted=1" : "") << "\n" << std::flush;
+  if (!faulted && result == 0) g_successful_pf_birth_module = pf_module;
+}
+
+// COR_Death clears state used by PF's process-exit cleanup. A focused AE 2025
+// PSL_Adjustments run returned 0 from COR_Death alone, then AV'd inside PF's
+// on-exit BIB lock; PF_Death followed by COR_Death returned 0 from both and
+// exited cleanly. Run this pair after plug-in GLOBAL_SETDOWN, before the
+// session releases DLLs or the BIB provider. Never invoke Death for a birth
+// that did not succeed, or through a remapped/unloaded image.
+bool teardown_cor_birth_sequence() noexcept {
+  if (!g_successful_cor_birth_module || g_cor_birth_teardown_attempted)
+    return true;
+  g_cor_birth_teardown_attempted = true;
+  const HMODULE cor = GetModuleHandleW(L"COR.dll");
+  const HMODULE pf = GetModuleHandleW(L"PF.dll");
+  if (cor != g_successful_cor_birth_module ||
+      !g_successful_pf_birth_module || pf != g_successful_pf_birth_module) {
+    std::cerr << "stage:cor_birth_teardown status=module_unavailable\n"
+              << std::flush;
+    return false;
+  }
+  const auto pf_death = reinterpret_cast<int(__cdecl*)()>(
+      GetProcAddress(pf, "PF_Death"));
+  const auto cor_death = reinterpret_cast<int(__cdecl*)()>(
+      GetProcAddress(cor, "?COR_Death@@YAHXZ"));
+  if (!pf_death || !cor_death) {
+    std::cerr << "stage:cor_birth_teardown status=missing_export\n"
+              << std::flush;
+    return false;
+  }
+  int pf_result = -1;
+  __try {
+    pf_result = pf_death();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    std::cerr << "stage:pf_host_layer_teardown status=faulted\n"
+              << std::flush;
+    return false;
+  }
+  std::cerr << "stage:pf_host_layer_teardown result=" << pf_result << "\n"
+            << std::flush;
+  if (pf_result != 0) return false;
+  int cor_result = -1;
+  __try {
+    cor_result = cor_death();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    std::cerr << "stage:cor_birth_teardown status=faulted\n"
+              << std::flush;
+    return false;
+  }
+  std::cerr << "stage:cor_birth_teardown result=" << cor_result << "\n"
+            << std::flush;
+  return cor_result == 0;
+}
+
+// dvacore's localization singleton (issue #1283). AE installs one at process
+// start as part of its dvacore configuration; nothing in a plug-in closure
+// does. Without it `dvacore.dll!?Get@Localizer@config@dvacore@@SAPEAV123@XZ`
+// (dvacore+0x105640) throws
+// "dvacore::config::Localizer not initialized. Check dvacore/config" the
+// moment a plug-in asks for a localized string, which is what stopped
+// `3D Camera Tracker.aex` and `Stabilizer.aex`: both build every parameter
+// name from a `$$$/apd/analysis/parameter/name/...` ZString, so PARAMS_SETUP
+// throws on the first one and comes back as 13 (observed under cdb: the throw
+// stack is `dvacore!Localizer::Get+0x61` under the plug-in's own selector
+// dispatcher).
+//
+// `Get` tests one global, `Localizer::S_localizerP`, and `Initialized()`
+// exports the same test. The installed object is dvacore's own
+// `DummyLocalizerImpl`, whose `GetLocalizedString` returns the default text
+// embedded in the ZString key ("$$$/path=Default" -> "Default"), i.e. what an
+// English AE shows. Loading real `.dat` dictionaries is a separate, larger
+// step and is not needed for discovery.
+//
+// The object is a single vtable pointer (its constructor, dvacore+0xd8bb0,
+// runs the base constructor and stores the vptr and nothing else), so a
+// static, suitably aligned buffer holds it. It is never destroyed: this host
+// does not tear the localizer down (the COR/PF pair has its separate session
+// teardown), and nothing in dvacore deletes what
+// `Set` was given - `Set` is the only writer of `Localizer::S_localizerP` and
+// it stores unconditionally without releasing the previous value.
+//
+// This is also what Adobe's own non-UI hosts do: `AfterFXLib.dll` constructs
+// a `DummyLocalizerImpl` on a static (0x1823c63e8, under a magic-static
+// guard) and calls `Set(thatStatic, nullptr)` at +0x9e9ff4 with `xor edx,edx`.
+//
+// The latch keys on the dvacore.dll mapping, which carries the assumption
+// worker_legacy_support_init.hpp states for U.dll: the worker retires plug-in
+// images rather than freeing them (#474), so a mapping does not come back at
+// the same base with its statics re-zeroed. If that ever stopped holding for
+// dvacore, `S_localizerP` would be zero again while the latch still said
+// AlreadyInitialized, and 13 would come back silently. `Initialized()` is
+// re-checked inside the call for the same reason.
+void initialize_dvacore_localizer() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  static bool no_export_logged = false;
+  static bool absent_logged = false;
+  const HMODULE dvacore = GetModuleHandleW(L"dvacore.dll");
+  using ConstructDummy = void*(__cdecl*)(void*);
+  using SetLocalizer = void(__cdecl*)(void*, const void*);
+  using LocalizerInitialized = bool(__cdecl*)();
+  const auto construct = dvacore
+      ? reinterpret_cast<ConstructDummy>(GetProcAddress(
+            dvacore, "??0DummyLocalizerImpl@config@dvacore@@QEAA@XZ"))
+      : nullptr;
+  const auto set = dvacore
+      ? reinterpret_cast<SetLocalizer>(GetProcAddress(
+            dvacore,
+            "?Set@Localizer@config@dvacore@@SAXPEAV123@PEBVDir@filesupport@3@@Z"))
+      : nullptr;
+  const auto initialized = dvacore
+      ? reinterpret_cast<LocalizerInitialized>(GetProcAddress(
+            dvacore, "?Initialized@Localizer@config@dvacore@@SA_NXZ"))
+      : nullptr;
+  switch (legacy::decide(state, dvacore,
+                         construct && set && initialized)) {
+    case legacy::Decision::Absent:
+      // Logged once per process like initialize_u_dll_allocator's, so a
+      // closure without dvacore is distinguishable from one this never ran
+      // for. The decision is still re-asked for every member.
+      if (!absent_logged) {
+        absent_logged = true;
+        std::cerr << "stage:dvacore_localizer_init status=absent\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::AlreadyInitialized:
+      return;
+    case legacy::Decision::NoBirthExport:
+      if (!no_export_logged) {
+        no_export_logged = true;
+        std::cerr << "stage:dvacore_localizer_init status=no_export\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::Call:
+      break;
+  }
+  legacy::note_called(state, dvacore);
+  const char* status = "called";
+  __try {
+    if (initialized()) {
+      // Something in this process already installed one - AE's own dvacore
+      // configuration, were this host ever hosted inside it. Replacing it
+      // would take a working localizer away.
+      status = "already_initialized";
+    } else {
+      // The `Dir*` is AE's dictionary directory; `Set` handles a null by
+      // constructing a default one, which is the "no dictionaries" case this
+      // host wants.
+      static alignas(std::max_align_t) std::byte storage[64]{};
+      set(construct(storage), nullptr);
+      status = initialized() ? "called" : "call_had_no_effect";
+    }
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    status = "faulted";
+  }
+  std::cerr << "stage:dvacore_localizer_init status=" << status << "\n"
+            << std::flush;
+}
+
+// COR owns the BIB proc-address resolver every module that talks to BIB needs,
+// and hands it out through this export. It answers 0x5301 ("BIB is
+// uninitialized") until COR_Conception has run, which is an entry in the birth
+// table above - so this is only ever asked after that table.
+//
+// `query_result` separates the ways this can come back empty, because they
+// call for different reads of a trace. A non-negative value is COR's own
+// answer: it was asked and declined, 0x5301 being the uninitialized case.
+// `-1` and `-2` mean it was never asked - no COR mapping, no export. `-3` is
+// the third thing: it was asked and the call faulted, which is why the call is
+// contained at all, a COR that has not been conceived being exactly where that
+// is plausible.
+constexpr int kCorResolverNoModule = -1;
+constexpr int kCorResolverNoExport = -2;
+constexpr int kCorResolverFaulted = -3;
+
+void* cor_bib_resolver(int& query_result) {
+  const HMODULE cor = GetModuleHandleW(L"COR.dll");
+  if (cor == nullptr) {
+    query_result = kCorResolverNoModule;
+    return nullptr;
+  }
+  auto* const get_resolver = reinterpret_cast<int(__cdecl*)(void**)>(
+      GetProcAddress(cor, "?COR_GetBIBAddressProc@@YAHPEAP6APEAXPEBD00@Z@Z"));
+  if (get_resolver == nullptr) {
+    query_result = kCorResolverNoExport;
+    return nullptr;
+  }
+  void* resolver = nullptr;
+  __try {
+    query_result = get_resolver(&resolver);
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    query_result = kCorResolverFaulted;
+    return nullptr;
+  }
+  return resolver;
+}
+
+namespace bee_bib = aexcompat::worker_runtime::bee_bib;
+
+// Reading one pointer out of BEE's `.data`. Contained for the same reason the
+// header walk is: `bee_bib::inspect` bounds the offset by SizeOfImage and the
+// prologue matched, so the page is BEE's own, but "the image is not what this
+// build expects" is the whole premise here, and an uncontained read would take
+// the worker down on exactly the module it was written to be careful about.
+// One of the three call sites reads the word from inside an `__except` handler,
+// where a fault would be a fault during exception dispatch and the worker
+// would die with no diagnostic at all - the outcome this exists to prevent.
+bool read_image_word(void** word, void*& value) {
+  __try {
+    value = *word;
+    return true;
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    value = nullptr;
+    return false;
+  }
+}
+
+// Reading BEE's image, contained. The decision itself is in
+// worker_bee_bib_installer.hpp so its refusals can be self-tested without a
+// real BEE.dll; what belongs here is the SEH, because the module is one this
+// build did not produce and a layout it does not expect has to come back as a
+// diagnostic rather than take the worker down with it.
+bee_bib::Check inspect_bee_installer(HMODULE bee, bee_bib::Site& site) {
+  const auto* const image = reinterpret_cast<const unsigned char*>(bee);
+  __try {
+    // SIZE_MAX because a real mapping's extent is the thing being read out of
+    // the headers; this SEH is what stands in for a bound.
+    return bee_bib::inspect(image, SIZE_MAX, site);
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    return bee_bib::Check::ReadFaulted;
+  }
+}
+
+// BEE.dll resolves the interfaces it draws with - notably
+// `ARE_BezierPathRasterPainterInterface` (NewFill / NewStroke), which its
+// ShapeKernel rasterises paths through - by calling a BIB proc-address
+// resolver it keeps at BEE.dll+0x16a13e0. When that word is null every
+// resolution fails, and the failure path itself calls through the equally
+// null BIBNewErrorProc at +0x16a1530:
+//
+//     180c559de: MOV  R10, qword ptr [0x1816a1530]   ; BIBNewErrorProc
+//     180c559fd: CALL R10                            ; access violation
+//
+// so a plug-in that reaches it dies inside CBIBError's constructor - which is
+// what ShapeBlur's PF_Err_INTERNAL_STRUCT_DAMAGED was (issue #1264). The same
+// null word is why PSL_Adjustments returned 14 (issue #1302): one cause, two
+// plug-ins, and installing the resolver is by itself the whole fix for the
+// second.
+//
+// COR owns the resolver and exports it (`COR_GetBIBAddressProc`), so the
+// value is available. What is not exported is the function that installs it
+// into BEE, `FUN_180c568a0`, which BEE_Birth calls partway through a long
+// chain of SND_InstallProcs / FLT_InstallProcs calls. Reaching it through
+// BEE_Birth is not a smaller problem: FLT_Birth pulls in AE's GPU renderer
+// and VideoFilterHost initialisation (`Initialize_RendererGPU`,
+// `Initialize_VideoFilterHost_ML`, `PF_SetOverrideFunc`, `PLUG_InstallScan`)
+// and access-violates without them - measured, not assumed.
+//
+// So the host calls the installer directly, at an image-relative address, and
+// `bee_bib::inspect` is what makes that defensible: nothing is called unless
+// the bytes at that offset are the ones this behaviour was read from and the
+// instruction there names the word read back afterwards. On any other build
+// this leaves BEE exactly as it was, which is the state every build before
+// this change shipped with.
+//
+// What the installer does, from its disassembly in AE 2026's BEE.dll:
+//
+//   * It is idempotent. `cmp qword ptr [rip+0xa4ab2b], 0` at +0xc568ad tests
+//     the resolver word and jumps to a tail that returns 1 having touched
+//     nothing.
+//   * A null argument returns 0 without touching anything either.
+//   * On the install path it stores the resolver first (+0xc568c4), then
+//     resolves five BIB procs through it. Each of the five null-checks jumps
+//     to the `xor eax,eax; ret` tail, so a `result=0` from a call that did run
+//     means one of the five did not resolve while the resolver word is set
+//     anyway - `installed=yes result=0` is a real state, not a contradiction.
+//   * Past the five it keeps going for roughly another 0x160 bytes: a sixth
+//     indirect call storing another global, a guard on a count, four direct
+//     calls, and two symmetric construct-and-register blocks that call back
+//     through the resolver with static data. Those were read as BIB-local
+//     bookkeeping, not as the stream registration, project initialization or
+//     class-factory work the rest of BEE_Birth does - which is the part of
+//     BEE_Birth this deliberately does not run - but "BIB-local" is how far
+//     the reading goes, not a proof that they are inert.
+//
+// Answers whether BEE's resolver is in place on a build this recognized, which
+// is what the ARE half is gated on.
+bool initialize_bee_bib_resolver(HMODULE bee) {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  // Readiness is keyed on the mapping rather than kept beside the latch as a
+  // plain flag, because it is a fact about one mapping and a bool would answer
+  // for whichever mapping asked. A second BEE that gets refused is still
+  // latched, so a later call with it answers `AlreadyInitialized` - and a bool
+  // set by the first BEE would then claim readiness for the refused one, which
+  // is the case the ARE half must not run in. Defensive rather than observed:
+  // the worker retires plug-in images instead of freeing them (issue #474), so
+  // the name resolves to one mapping for the life of the process and the
+  // caller cannot currently produce a second one.
+  static HMODULE ready_mapping = nullptr;
+  // Decided per mapping, not once per process: BEE arrives with the plug-in's
+  // dependency closure, so a session whose first member has no BEE must still
+  // install the resolver when a later member maps it (issue #1063's shape).
+  // There is no birth export to look for here - what makes the call safe is
+  // `bee_bib::inspect` - so the export question is answered `true`.
+  if (legacy::decide(state, bee, /*birth_exported=*/true) !=
+      legacy::Decision::Call)
+    return bee != nullptr && ready_mapping == bee;
+
+  bee_bib::Site site{};
+  const bee_bib::Check check = inspect_bee_installer(bee, site);
+  // Identity of what was read, on every outcome: a line that names no build
+  // cannot be tied back afterwards to the one the check ruled on, and that is
+  // the whole point of recording it. `bee_bib::inspect` fills these in as soon
+  // as the NT headers are readable, so `not_amd64`, `offset_outside_image` and
+  // `entry_mismatch` all carry them. `not_an_image` prints zeros, which is the
+  // honest answer there - nothing legible about the module was reached.
+  // `read_faulted` prints whichever of the two it got to: zeros if the headers
+  // themselves faulted, the real identity if the fault came later, at the code
+  // or data offset (`SizeOfImage` spans reserved gaps and PAGE_NOACCESS pages
+  // that a header check cannot rule out, so that is a reachable fault).
+  const auto identity = [&site] {
+    std::cerr << " bee_size=0x" << std::hex << site.image_size
+              << " bee_timestamp=0x" << site.timestamp << std::dec;
+  };
+  if (check != bee_bib::Check::Ok) {
+    legacy::note_called(state, bee);
+    std::cerr << "stage:bee_bib_resolver status=" << bee_bib::check_text(check);
+    identity();
+    std::cerr << "\n" << std::flush;
+    return false;
+  }
+
+  auto* const base = reinterpret_cast<unsigned char*>(bee);
+  auto* const entry = base + site.installer_offset;
+  auto* const resolver_word =
+      reinterpret_cast<void**>(base + site.resolver_offset);
+
+  void* existing = nullptr;
+  if (!read_image_word(resolver_word, existing)) {
+    legacy::note_called(state, bee);
+    std::cerr << "stage:bee_bib_resolver status=unreadable_word";
+    identity();
+    std::cerr << "\n" << std::flush;
+    return false;
+  }
+  if (existing != nullptr) {
+    // A BEE that birthed itself, or a second mapping that already went
+    // through this. The installer would return 1 without doing anything.
+    legacy::note_called(state, bee);
+    ready_mapping = bee;
+    std::cerr << "stage:bee_bib_resolver status=already_installed";
+    identity();
+    std::cerr << "\n" << std::flush;
+    return true;
+  }
+
+  // The COR step below is the one thing here that is not latched on failure.
+  // Everything above it is a property of the mapping and gives the same answer
+  // next time, so those paths latch; this is the first step that depends on a
+  // second module, and latching a COR that was not ready yet would deny a
+  // later member the install it could have had.
+  int query_result = 0;
+  void* const resolver = cor_bib_resolver(query_result);
+  if (resolver == nullptr) {
+    // Logged once per process: this path is deliberately not latched, so it is
+    // re-reached for every session member, and a 300-member session must not
+    // fill the bounded stderr tail the broker keeps with the same line.
+    static bool no_resolver_logged = false;
+    if (!no_resolver_logged) {
+      no_resolver_logged = true;
+      std::cerr << "stage:bee_bib_resolver status=no_resolver cor_result="
+                << query_result;
+      identity();
+      std::cerr << "\n" << std::flush;
+    }
+    return false;
+  }
+  legacy::note_called(state, bee);
+
+  int install_result = -1;
+  __try {
+    install_result = reinterpret_cast<int(__cdecl*)(void*)>(entry)(resolver);
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    // The installer stores the resolver before it looks up the five BIB procs
+    // through it, so a fault partway leaves BEE in a state worth reporting
+    // rather than only saying that something went wrong. Readiness is left
+    // false either way: BEE's word may be set, but a fault says the rest of
+    // what the installer does did not finish, and the ARE half registers into
+    // exactly that unfinished state.
+    void* after_fault = nullptr;
+    const bool word_readable = read_image_word(resolver_word, after_fault);
+    // `call_faulted`, not `faulted`: the other fault this step can report is
+    // `read_faulted`, which means BEE's image was unreadable and nothing was
+    // called. This one means the host jumped into BEE and BEE crashed, and
+    // conflating the two would hide the distinction the whole design rests on.
+    std::cerr << "stage:bee_bib_resolver status=call_faulted installed="
+              << (!word_readable ? "unreadable"
+                                 : (after_fault != nullptr ? "yes" : "no"));
+    identity();
+    std::cerr << "\n" << std::flush;
+    return false;
+  }
+  // `installed` is read back rather than inferred from the return value: the
+  // point of the whole step is that word being non-null.
+  void* after_install = nullptr;
+  const bool installed =
+      read_image_word(resolver_word, after_install) && after_install != nullptr;
+  if (installed) ready_mapping = bee;
+  std::cerr << "stage:bee_bib_resolver status=called result=" << install_result
+            << " installed=" << (installed ? "yes" : "no");
+  identity();
+  std::cerr << "\n" << std::flush;
+  return installed;
+}
+
+// Whether two paths name the same file. The textual compare answers it for
+// the case this is actually asked about - both spellings come from
+// `GetModuleFileNameW`, one on ARE and one derived from BEE's, so the loader
+// canonicalized both the same way - and it is ordinal rather than `_wcsicmp` so
+// a plug-in that called `setlocale` in its DllMain cannot change what the host
+// considers equal. When the text differs the question is still open: a
+// junction in AE's install path, a `subst` drive, an 8.3 component or a UNC
+// spelling all name one file with two spellings, and answering "different"
+// there would disable the ARE step for the rest of the process without saying
+// anything useful.
+// So the fallback asks the filesystem, and only a genuine answer counts -
+// if either open fails, the paths are not claimed to match. The file index it
+// compares is unique per volume on NTFS; on ReFS and Dev Drive it is not
+// guaranteed to be, so a match there is weaker evidence than on the volume AE
+// actually installs to.
+bool same_file(const wchar_t* left, const wchar_t* right) {
+  if (CompareStringOrdinal(left, -1, right, -1, /*bIgnoreCase=*/TRUE) ==
+      CSTR_EQUAL)
+    return true;
+  const auto open = [](const wchar_t* path) {
+    return CreateFileW(path, 0,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
+                       nullptr);
+  };
+  const HANDLE left_handle = open(left);
+  if (left_handle == INVALID_HANDLE_VALUE) return false;
+  const HANDLE right_handle = open(right);
+  if (right_handle == INVALID_HANDLE_VALUE) {
+    CloseHandle(left_handle);
+    return false;
+  }
+  BY_HANDLE_FILE_INFORMATION left_info{};
+  BY_HANDLE_FILE_INFORMATION right_info{};
+  const bool both =
+      GetFileInformationByHandle(left_handle, &left_info) != 0 &&
+      GetFileInformationByHandle(right_handle, &right_info) != 0;
+  CloseHandle(left_handle);
+  CloseHandle(right_handle);
+  return both &&
+         left_info.dwVolumeSerialNumber == right_info.dwVolumeSerialNumber &&
+         left_info.nFileIndexHigh == right_info.nFileIndexHigh &&
+         left_info.nFileIndexLow == right_info.nFileIndexLow;
+}
+
+// A load runs the DllMain of the module and of everything it pulls in, and a
+// fault there would take the worker down mid-session rather than cost this one
+// step. Contained the same way `load_library_guarded` contains the Sweet Pea
+// and BIB loads, which is the precedent this follows.
+//
+// Containing it is not free: unwinding out of the loader leaves the module in
+// its list with DllMain half-run, so the name stays poisoned for the process.
+// That is still the better trade for a worker that is disposable under a
+// kill-on-close Job Object. What it does mean is that the caller has to be
+// able to tell a fault from an ordinary load failure - `GetLastError()` after
+// an SEH unwind out of the loader is a stale value that would be reported as
+// a reason - so the error is captured next to the call that set it and the
+// fault is its own answer.
+struct ContainedLoad {
+  HMODULE module;
+  DWORD error;
+  bool faulted;
+};
+
+ContainedLoad load_library_contained(const wchar_t* path, DWORD flags) {
+  ContainedLoad result{nullptr, 0, false};
+  __try {
+    result.module = LoadLibraryExW(path, nullptr, flags);
+    result.error = result.module != nullptr ? 0 : GetLastError();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    result.module = nullptr;
+    result.faulted = true;
+  }
+  return result;
+}
+
+// The other half of what a shape-rasterising effect needs, and the reason the
+// resolver alone is not enough. BEE's ShapeKernel does not rasterise anything
+// itself: it resolves `ARE_BezierPathRasterPainterInterface` through BIB and
+// paints through that interface's NewFill / NewStroke. The interface lives in
+// ARE.dll and is published by a `TBIBAutoRegister` that `ARE_Initialize` runs.
+//
+// ARE.dll is not in any effect's import closure - real AE loads it as part of
+// its own startup - so nothing maps it here unless the host does. Measured
+// with BEE's resolver installed and ARE left absent, ShapeBlur stops crashing
+// and returns 14 from SmartRender instead: the resolution now fails cleanly
+// instead of calling through a null BIBNewErrorProc, but it still fails. It
+// takes both steps for ShapeBlur to render (issue #1264). PSL_Adjustments
+// renders on the resolver alone and is unaffected by this one (issue #1302),
+// which is what says the two steps are separate gaps rather than one.
+//
+// Runs only where the resolver step recognized the build and left BEE's word
+// set. Registering a raster painter into a BIB whose BEE half was correctly
+// refused publishes an interface nothing can reach, so an unrecognized build
+// would pay a DLL load, a DllMain and a call through an assumed ABI for
+// nothing.
+void initialize_are_raster_painter(HMODULE bee) {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  // Logged once per process apiece: the decision is re-asked for every session
+  // member, and a 300-member session must not fill the bounded stderr tail the
+  // broker keeps with the same line.
+  static bool path_logged = false;
+  static bool absent_logged = false;
+  static bool foreign_logged = false;
+  static bool no_export_logged = false;
+  static bool no_resolver_logged = false;
+  // A load that faulted is the one outcome that has to stop every later
+  // member, not just its own. `LoadLibraryExW` inserts the module into the
+  // loader's list before running its DllMain, so after a fault in there the
+  // name resolves to a module whose initialization half-ran - and the
+  // already-mapped path below would find it, agree it is the file it wanted,
+  // and call `ARE_Initialize` on uninitialized state. A log-once flag would
+  // silence the second report without preventing the second call.
+  //
+  // Deliberately broader than that one poisoned name: it is per process, so a
+  // later member mapping a BEE from a different directory gets no ARE step
+  // either, even though its sibling ARE might have loaded cleanly. After
+  // unwinding out of the loader the loader lock is plausibly still held, and a
+  // second `LoadLibraryExW` would deadlock the worker rather than fail it.
+  static bool load_faulted = false;
+  if (load_faulted) return;
+
+  // ARE is taken from BEE's own directory. The worker runs under the same
+  // token as the plug-in and its search path admits every plug-in directory in
+  // the manifest (LOAD_LIBRARY_SEARCH_USER_DIRS), so a name-resolved ARE.dll
+  // is one a plug-in's own closure could have supplied. The AE support library
+  // BEE itself came out of is the one meant here, and its directory is the one
+  // fact about it this host does not have to take on trust.
+  wchar_t are_path[MAX_PATH]{};
+  const DWORD bee_path_length = GetModuleFileNameW(bee, are_path, MAX_PATH);
+  const DWORD bee_path_error = bee_path_length == 0 ? GetLastError() : 0;
+  wchar_t* const leaf = (bee_path_length != 0 && bee_path_length < MAX_PATH)
+                            ? std::wcsrchr(are_path, L'\\')
+                            : nullptr;
+  static constexpr wchar_t kAreLeaf[] = L"\\ARE.dll";
+  const bool fits =
+      leaf != nullptr &&
+      static_cast<std::size_t>(leaf - are_path) + std::size(kAreLeaf) <=
+          MAX_PATH;
+  if (!fits) {
+    if (!path_logged) {
+      path_logged = true;
+      // The three ways this happens read differently: a failed query, a path
+      // with no separator, and one long enough that appending the leaf would
+      // not fit (a `length` of MAX_PATH is the truncation return).
+      std::cerr << "stage:are_raster_painter status=no_bee_path length="
+                << bee_path_length << " error=" << bee_path_error
+                << " separator=" << (leaf != nullptr ? "yes" : "no") << "\n"
+                << std::flush;
+    }
+    return;
+  }
+  std::memcpy(leaf, kAreLeaf, sizeof(kAreLeaf));
+
+  // Already mapped is the common case after the first member, and asking the
+  // loader again would add a reference per member for the rest of the process.
+  // It is only accepted when it is the same file the load below would have
+  // taken: an ARE.dll a plug-in's closure already pulled in from a plug-in
+  // directory would otherwise be accepted here, and pinning the load's
+  // directory would have bought nothing.
+  HMODULE are = GetModuleHandleW(L"ARE.dll");
+  if (are != nullptr) {
+    wchar_t mapped_path[MAX_PATH]{};
+    const DWORD mapped_length = GetModuleFileNameW(are, mapped_path, MAX_PATH);
+    const bool mapped_path_known =
+        mapped_length != 0 && mapped_length < MAX_PATH;
+    if (!mapped_path_known || !same_file(mapped_path, are_path)) {
+      if (!foreign_logged) {
+        foreign_logged = true;
+        // The path itself is not printed - it is a private absolute path -
+        // so what goes out is enough to tell the two causes apart: the
+        // loader would not say where the module came from, or it did and the
+        // file is not the one beside BEE.
+        std::cerr << "stage:are_raster_painter status=foreign_module path="
+                  << (mapped_path_known ? "known" : "unknown") << "\n"
+                  << std::flush;
+      }
+      return;
+    }
+  } else {
+    // Pinned to BEE's directory for ARE's own dependency resolution too, not
+    // just for ARE itself: leaving that on USER_DIRS would put the closure
+    // back in the plug-in directories this just avoided.
+    const ContainedLoad load = load_library_contained(
+        are_path,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (load.faulted) {
+      // Distinct from a load that failed: DllMain ran and faulted, so the
+      // loader's list now holds a half-initialized module under that name.
+      // The latch at the top of this function is what keeps every later
+      // member away from it, since `GetModuleHandleW` would otherwise hand
+      // back exactly that module and it would pass the identity check.
+      load_faulted = true;
+      std::cerr << "stage:are_raster_painter status=load_faulted\n"
+                << std::flush;
+      return;
+    }
+    if (load.module == nullptr) {
+      // The error separates "no ARE.dll beside BEE" from "ARE.dll is there and
+      // its own dependency closure did not resolve", which pinning the search
+      // to that one directory makes a real possibility.
+      if (!absent_logged) {
+        absent_logged = true;
+        std::cerr << "stage:are_raster_painter status=absent error="
+                  << load.error << "\n"
+                  << std::flush;
+      }
+      return;
+    }
+    are = load.module;
+  }
+
+  auto* const initialize = reinterpret_cast<int(__cdecl*)(void*)>(
+      GetProcAddress(are, "ARE_Initialize"));
+  if (legacy::decide(state, are, initialize != nullptr) !=
+      legacy::Decision::Call) {
+    if (initialize == nullptr && !no_export_logged) {
+      no_export_logged = true;
+      std::cerr << "stage:are_raster_painter status=no_export\n" << std::flush;
+    }
+    return;
+  }
+
+  // ARE_Initialize takes the same BIB resolver BEE was just given: ARE uses it
+  // to resolve the five BIB procs of its own before registering anything, and
+  // returns 0 - its failure value - when handed null. It answers 1 here, which
+  // is what says the registration happened. Whether a second call would
+  // register twice is not something this has to answer: `note_called` below
+  // makes it one call per ARE mapping.
+  int query_result = 0;
+  void* const resolver = cor_bib_resolver(query_result);
+  if (resolver == nullptr) {
+    // Deliberately not latched, so a later member can still get the
+    // registration - which means this is re-reached every member until one
+    // does, and has to be logged once like the others. Reachable despite the
+    // resolver step having answered yes: that step answers yes without asking
+    // COR anything when BEE's word was already set.
+    if (!no_resolver_logged) {
+      no_resolver_logged = true;
+      std::cerr << "stage:are_raster_painter status=no_resolver cor_result="
+                << query_result << "\n"
+                << std::flush;
+    }
+    return;
+  }
+  legacy::note_called(state, are);
+  int result = -1;
+  __try {
+    result = initialize(resolver);
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    std::cerr << "stage:are_raster_painter status=faulted\n" << std::flush;
+    return;
+  }
+  std::cerr << "stage:are_raster_painter status=called result=" << result
+            << "\n"
+            << std::flush;
+}
+
+void initialize_legacy_support_libraries() {
+  initialize_dvacore_localizer();
+  initialize_u_dll_allocator();
+  initialize_process_support_libraries();
+  initialize_pf_dll_host_layer();
+  // Last, and after the PF layer rather than before it. These come after the
+  // table because the resolver they install comes from COR, whose
+  // COR_Conception entry is in that table; they come after PF because the
+  // second of them loads ARE.dll, whose own import closure this host does not
+  // control - if it reaches into PF.dll, PF is already wired by then. Going
+  // last costs nothing observed in return: the corpus was swept with the block
+  // in each position and rendered identically both times (recorded in §9 of
+  // docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md). That is weaker than a
+  // reading of the PF layer's dependencies, but it is what was measured.
+  //
+  // What this ordering does not fix: a support library that ARE's closure maps
+  // for the first time arrives after the birth table has already run, so it
+  // stays un-birthed for the member that triggered it and is picked up by the
+  // next one, since every latch keys on the mapping. That was true of the
+  // block's old position too.
+  //
+  // The second step is gated on the first: a raster painter registered into a
+  // BIB that BEE cannot reach is a DLL load and a call through an assumed ABI
+  // for nothing.
+  if (const HMODULE bee_module = GetModuleHandleW(L"BEE.dll")) {
+    if (initialize_bee_bib_resolver(bee_module))
+      initialize_are_raster_painter(bee_module);
+  }
 }
 
 const aexcompat::host_audio::Telemetry& audio_telemetry() {
@@ -1385,8 +2771,24 @@ OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
 // and layer refs every suite callback validates against. They are the
 // dispatch-boundary identity the suites pin, so they stay owned beside the
 // callback ABI in this TU. Lifetime: process-lifetime constants.
-OpaqueHostObject g_effect{0x45464658};
-OpaqueHostObject g_layer{0x4c415952};
+// The effect ref is a PF_ProgressInfo-shaped object (issue #1212): its
+// identity is still this address, but a plug-in (or PF.dll) that reads it as
+// AE's `PF_ProgressInfo` finds the refcon / abort / progress slots instead of a
+// 4-byte tag. The slots are published by publish_effect_ref_object() before
+// every plug-in bootstrap (worker_pf_progress_info).
+aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect{};
+// Called before every plug-in bootstrap (one-shot, cluster member, swap):
+// republishes the effect-ref layout in case the previous member left a slot
+// edited.
+void publish_effect_ref_object() {
+  aexcompat::worker_runtime::pf_progress_info::publish(g_effect);
+}
+// The effect layer handle is a BEE.dll-compatible object (issue #1210): its
+// identity is still this address, but a plug-in that reads it as a
+// `BEE_AVLayer*` finds the observed layout instead of a 4-byte tag. The
+// vtable and object graph behind it are installed at hand-out time by
+// AEGP_GetEffectLayer (worker_bee_scene_facade).
+aexcompat::worker_runtime::bee_facade::LayerObject g_layer{};
 
 // The mask scene helpers and configure_mask_scene moved to their state
 // owner, worker_mask_runtime_callbacks.cpp (issue #170); worker_main keeps
@@ -1766,18 +3168,21 @@ int32_t& g_aegp_active_camera_layer_index =
 // layer/effect/collection/stream/keyframe callbacks are compiled in
 // worker_aegp_scene.cpp.
 bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
-  return plugin_id == 1 && item == &g_aegp_comp_item;
+  return plugin_id == 1 && valid_scene_item_handle(item);
 }
 bool __cdecl initialize_layer_render_options(
     int32_t plugin_id, void* source, AegpLayerEffectBoundary boundary,
     AegpLayerRenderOptionsValue* value) {
-  if (plugin_id <= 0 || !value) return false;
+  if (plugin_id < 0 || !value) return false;
   AegpLayerRenderOptionsValue initialized{};
   initialized.owner_plugin_id = plugin_id;
   initialized.effect_boundary = boundary;
   if (boundary == AegpLayerEffectBoundary::all) {
-    if (aegp_layer_index(source) < 0) return false;
-    initialized.layer = source;
+    const int32_t layer_index = aegp_layer_index(source);
+    if (layer_index < 0) return false;
+    initialized.layer = static_cast<std::size_t>(layer_index) < g_aegp_layers.size()
+        ? &g_aegp_layers[static_cast<std::size_t>(layer_index)]
+        : source;
   } else {
     const auto* instance = resolve_effect_instance(source, plugin_id);
     if (!instance) return false;
@@ -1809,7 +3214,8 @@ bool isolated_aegp_read_cache_is_bounded() {
         (key.first == "AEGP Item Suite" && key.second == 14) ||
         (key.first == "AEGP Comp Suite" && (key.second == 25 || key.second == 26)) ||
         (key.first == "AEGP Layer Suite" &&
-         (key.second == 11 || key.second == 14 || key.second == 15)) ||
+         (key.second == 11 || key.second == 13 || key.second == 14 ||
+          key.second == 15)) ||
         (key.first == "AEGP Effect Suite" && key.second == 4) ||
         (key.first == "AEGP Collection Suite" && key.second == 2) ||
         (key.first == "AEGP Stream Suite" && key.second == 11) ||
@@ -1881,6 +3287,16 @@ T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
 template <typename T, std::size_t N>
 void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
   std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
+
+// The same accessors on a world storage (the LayerDef part).
+template <typename T>
+T read(const aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset) {
+  return read<T>(world.layer_def, offset);
+}
+template <typename T>
+void write(aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset, T value) {
+  write(world.layer_def, offset, value);
 }
 
 // The render-worker click/draw probes and close_render_ui_context moved to
@@ -1990,24 +3406,57 @@ bool dispatch_conditional_ui_selectors(EffectEntry entry,
   g_conditional_ui_selectors_dispatched = false;
   g_update_params_ui_error = -1;
   g_query_dynamic_flags_error = -1;
-  if (g_update_params_ui_advertised) {
-    g_active_ui_params = params;
-    g_active_ui_param_count = g_params.size() + 1;
-    g_update_params_ui_active = true;
-    g_update_params_ui_error = entry(kUpdateParamsUi, input.data(), output.data(), params,
-                                     nullptr, nullptr);
-    g_update_params_ui_active = false;
-    g_active_ui_params = nullptr;
-    g_active_ui_param_count = 0;
-    g_conditional_ui_selectors_dispatched = true;
-  }
+  // UPDATE_PARAMS_UI is not dispatched here (issue #1156). A headless render has
+  // no Effect Controls panel, and an AE oracle capture confirmed AE's own
+  // aerender never issues UPDATE_PARAMS_UI even to an effect that advertises
+  // SEND_UPDATE_PARAMS_UI (selector-timeline probe, AE 26.3: GLOBAL_SETUP ..
+  // SEQUENCE_SETUP .. FRAME_SETUP .. RENDER .. with zero UPDATE_PARAMS_UI).
+  // Issuing it here drove UI-only suite lifecycles the render never pairs -
+  // Cycore effects released PF Path Data Suite they only acquire while a real
+  // UI is up, which the fail-closed suite-lease check then rejected at close
+  // (session_close_failed), and DeepGlow2 answered it with error 4 and lost the
+  // frame (#883) though it renders in AE. Matching AE (not issuing it) is the
+  // fix. `g_update_params_ui_error` stays -1 (not dispatched) for the report.
   if (g_query_dynamic_flags_advertised) {
     g_query_dynamic_flags_error = entry(kQueryDynamicFlags, input.data(), output.data(), params,
                                         nullptr, nullptr);
     g_conditional_ui_selectors_dispatched = true;
   }
-  return (!g_update_params_ui_advertised || g_update_params_ui_error == 0) &&
-      (!g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0);
+  // Only QUERY_DYNAMIC_FLAGS decides whether the frame can proceed.
+  //
+  // The two selectors are not the same kind of precondition. QUERY_DYNAMIC_FLAGS
+  // rewrites out_flags/out_flags2, which the render path then reads for the
+  // wide-time and shutter rules and for NOP_RENDER, so a plug-in that fails it
+  // has left the host without the flags the rest of the frame is built on.
+  // UPDATE_PARAMS_UI only refreshes what the Effect Controls panel shows. The
+  // observation this rests on is that DeepGlow2 answers it with error 4 and
+  // renders in AE anyway, while here that error ended the frame before
+  // SMART_PRE_RENDER (issue #883); AE's own dispatch conditions are not
+  // measured, so "AE does not require it to render" is inference from that one
+  // plug-in, not something this host has checked.
+  //
+  // The error is not swallowed - it stays in `update_params_ui_error` for the
+  // report and in the line below - it just no longer decides the frame. It
+  // does still decide whether the definitions the selector rewrote are
+  // adopted; see `conditional_ui_definitions_usable`.
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:conditional_ui update_advertised="
+              << g_update_params_ui_advertised
+              << " update_error=" << g_update_params_ui_error
+              << " query_advertised=" << g_query_dynamic_flags_advertised
+              << " query_error=" << g_query_dynamic_flags_error << "\n"
+              << std::flush;
+  return !g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0;
+}
+
+// Whether the parameter definitions the conditional-UI selectors left behind
+// may replace the host's own. A selector that reported an error stopped
+// somewhere it chose not to say, so what it wrote is partial by definition;
+// letting the frame proceed without it is the #883 fix, adopting its writes
+// anyway is not part of that. UPDATE_PARAMS_UI is no longer dispatched (#1156),
+// so it rewrites nothing and does not gate this; only QUERY_DYNAMIC_FLAGS does.
+bool conditional_ui_definitions_usable() {
+  return !g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0;
 }
 
 
@@ -2023,6 +3472,7 @@ auto& g_user_changed_parameters = g_parameter_runtime.user_changed_parameters;
 bool parse_layer_transport_key(const wchar_t* text, ExternalLayerInput& layer);
 bool parse_mask_context_payload(const wchar_t* text);
 bool parse_spatial_context_payload(const wchar_t* text);
+bool parse_active_camera_payload(const wchar_t* text);
 bool parse_render_environment_payload(const wchar_t* text);
 bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output);
 
@@ -2036,9 +3486,13 @@ bool parameter_active_mask_id(std::size_t index, int32_t* id) {
   *id = masks[index]->id;
   return true;
 }
+// The arbitrary-data probes tolerate a non-zero answer and a fault alike
+// (count it, go on, or end the frame with -5), so they dispatch through the
+// paused entry: neither outcome may decide a frame's `selector_crash`
+// (issue #983).
 const bool g_parameter_execution_configured = configure_hooks({
-    &invoke_entry_seh, &host_handle_is_live, &parameter_active_mask_count,
-    &parameter_active_mask_id});
+    &invoke_tolerated_entry_seh, &host_handle_is_live,
+    &parameter_active_mask_count, &parameter_active_mask_id});
 
 // Write one packed-ARGB world as raw RGBA in the byte layout that
 // tools/compare-pixel-oracles.py consumes (rgba8 / rgba16le / rgba32f-le,
@@ -2094,9 +3548,11 @@ std::string build_l2_report_json(
   c.last_seh_exception_code = g_last_seh_exception_code;
   c.lifecycle_errors = lifecycle_errors; c.lifecycle_data_null = lifecycle_data_null;
   c.unsupported_suite_calls_json = unsupported_suite_calls_report_json();
+  c.bee_facade_json = aexcompat::worker_runtime::bee_facade::report_json();
   c.suite_call_slot_probe_json = suite_call_slot_probe_report_json();
   c.compute_cache_timeline_json = compute_cache_timeline_report_json();
   c.selector_invocations_json = selector_invocations_report_json();
+  c.plugin_data_json = plugin_data_inventory_report_json();
   if (!module_audit_passed())
     c.module_audit_failure_json = module_audit_failure_json();
   if (include_module_audit) c.module_audit_json = module_audit_json();

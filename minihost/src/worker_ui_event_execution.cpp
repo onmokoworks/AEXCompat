@@ -4,6 +4,8 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <mutex>
+#include <utility>
 #include <vector>
 
 namespace aexcompat::worker_runtime::ui_event_execution {
@@ -13,6 +15,17 @@ CustomUiTelemetry& custom_ui_telemetry() {
   return telemetry;
 }
 namespace {
+struct InfoTextTelemetry {
+  std::mutex mutex;
+  uint32_t calls{};
+  std::string last_text;
+};
+
+InfoTextTelemetry& info_text_telemetry() {
+  static InfoTextTelemetry telemetry;
+  return telemetry;
+}
+
 constexpr int32_t kEvent = 15;
 
 template <typename T, std::size_t N>
@@ -38,6 +51,26 @@ struct UiScope {
   ~UiScope() { hooks.leave_ui_context(state); }
 };
 }  // namespace
+
+void record_info_text(std::string text) {
+  auto& telemetry = info_text_telemetry();
+  std::lock_guard<std::mutex> lock(telemetry.mutex);
+  telemetry.last_text = std::move(text);
+  ++telemetry.calls;
+}
+
+InfoTextTelemetrySnapshot snapshot_info_text_telemetry() {
+  auto& telemetry = info_text_telemetry();
+  std::lock_guard<std::mutex> lock(telemetry.mutex);
+  return {telemetry.calls, telemetry.last_text};
+}
+
+void reset_info_text_telemetry() {
+  auto& telemetry = info_text_telemetry();
+  std::lock_guard<std::mutex> lock(telemetry.mutex);
+  telemetry.calls = 0;
+  telemetry.last_text.clear();
+}
 
 bool dispatch(const Request& r, const Hooks& hooks, Result& result) {
   if (!r.entry || !r.input || !r.output || !r.assignments || !r.context_slot ||

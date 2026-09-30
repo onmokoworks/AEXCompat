@@ -12,6 +12,8 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         dependencies,
         Vec::new(),
         runtime_policy,
+        "--l2-params-only",
+        None,
     )
 }
 
@@ -23,17 +25,20 @@ fn inspect_experimental_impl(
     mut dependencies: Vec<ApprovedImageArtifact>,
     dependency_search_dirs: Vec<std::path::PathBuf>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
+    inspection_mode: &'static str,
+    plugin_data_selector: Option<&crate::render_session::PluginDataEffectSelector>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     // In-place inspection (issue #751): the loader resolves the closure, so
     // staged dependencies and resources cannot ride the same launch. Runtime
     // policy inspection remains outside #815's GPU render-session migration.
-    if !dependency_search_dirs.is_empty() && (!dependencies.is_empty() || runtime_policy.is_some()) {
+    if !dependency_search_dirs.is_empty() && (!dependencies.is_empty() || runtime_policy.is_some())
+    {
         return Err(invalid(
             "in-place inspection cannot combine approved dependencies or a runtime policy",
         ));
     }
     let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
-    let args_before_plugin = vec!["--l2-params-only".into()];
+    let args_before_plugin = vec![inspection_mode.into()];
     let mut args_after_plugin = vec![actual.to_ascii_lowercase()];
     let authorization = runtime_policy
         .map(|(policy, backend)| {
@@ -43,6 +48,9 @@ fn inspect_experimental_impl(
     if let Some(authorization) = &authorization {
         authorization.append_launch(false, &mut args_after_plugin, &mut dependencies);
     }
+    if let Some(selector) = plugin_data_selector {
+        args_after_plugin.extend(["--plugin-data-selector-v1".to_owned(), selector.encoded()?]);
+    }
     let started = Instant::now();
     // Parameter inspection runs with no deadline (issue #354). A watchdog here
     // contains nothing the job object does not already contain, and it decides
@@ -51,26 +59,25 @@ fn inspect_experimental_impl(
     // Containment stays — the job object kills the tree when the launch handle
     // drops, and the sealed root is still torn down.
     let isolated = if !dependencies.is_empty() || !dependency_search_dirs.is_empty() {
-        crate::secure_image_dispatch::dispatch_secure_image(
-            SecureImageDispatch {
-                repository,
-                worker_kind: WorkerKind::L2,
-                plugin: ApprovedImageArtifact {
-                    path: plugin_path.to_path_buf(),
-                    expected_sha256: decode_sha256_hex(approved_sha256)?,
-                    expected_size: fs::metadata(plugin_path)?.len(),
-                },
-                dependencies,
-                dependency_search_dirs,
-                args_before_plugin: &args_before_plugin,
-                args_after_plugin: &args_after_plugin,
-                timeout: None,
+        crate::secure_image_dispatch::dispatch_secure_image(SecureImageDispatch {
+            repository,
+            worker_kind: WorkerKind::Discovery,
+            plugin: ApprovedImageArtifact {
+                path: plugin_path.to_path_buf(),
+                expected_sha256: decode_sha256_hex(approved_sha256)?,
+                expected_size: fs::metadata(plugin_path)?.len(),
             },
-        )?
+            dependencies,
+            dependency_search_dirs,
+            args_before_plugin: &args_before_plugin,
+            args_after_plugin: &args_after_plugin,
+            timeout: None,
+            launch_environment: Default::default(),
+        })?
     } else {
         dispatch_approved_image(
             repository,
-            WorkerKind::L2,
+            WorkerKind::Discovery,
             plugin_path,
             approved_sha256,
             &args_before_plugin,
@@ -81,8 +88,12 @@ fn inspect_experimental_impl(
     let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     let worker_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
     if let Some(report) = &worker_report {
+        if let Some(plugin_data) = report.get("plugin_data") {
+            diagnostics["plugin_data"] = plugin_data.clone();
+        }
         propagate_missing_suites(&mut diagnostics, report);
         propagate_unsupported_suite_calls(&mut diagnostics, report);
+        propagate_bee_facade(&mut diagnostics, report);
         propagate_suite_call_slot_probe(&mut diagnostics, report);
         propagate_selector_invocations(&mut diagnostics, report);
         propagate_host_callback_timeline(&mut diagnostics, report);
@@ -96,6 +107,26 @@ fn inspect_experimental_impl(
             .map(str::to_owned);
         if let Some(summary) = module_audit_failure_summary(report, selector_phase.as_deref()) {
             diagnostics["module_audit_failure"] = summary;
+        }
+        // The selector outcome travels with the failure too (issue #1063):
+        // an exit-20 inspect (a selector refused) is otherwise a bare exit
+        // code, and which selector answered what is the evidence a fix
+        // starts from.
+        if let Some(status) = report.get("status").and_then(Value::as_str) {
+            diagnostics["inspection_status"] = json!(status);
+        }
+        for field in [
+            "global_setup_error",
+            "params_setup_error",
+            "global_setdown_error",
+            "reported_num_params",
+        ] {
+            if let Some(value) = report.get(field).and_then(Value::as_i64) {
+                diagnostics[field] = json!(value);
+            }
+        }
+        if let Some(parameters) = report.get("parameters").and_then(Value::as_array) {
+            diagnostics["parameter_count"] = json!(parameters.len());
         }
     }
     if isolated.classification.as_str() != "ok" {
@@ -112,6 +143,14 @@ fn inspect_experimental_impl(
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }
+    inspection_result_from_report(report, diagnostics, runtime_policy.is_some())
+}
+
+fn inspection_result_from_report(
+    report: Value,
+    mut diagnostics: Value,
+    runtime_module_policy_applied: bool,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     let advertised_out_flags = report
         .get("out_flags")
         .and_then(Value::as_u64)
@@ -126,7 +165,7 @@ fn inspect_experimental_impl(
     diagnostics["smart_render_advertised"] = json!(smart_render_advertised(advertised_out_flags2));
     diagnostics["audio_effect_only"] = json!(audio_effect_only);
     diagnostics["image_render_supported"] = json!(!audio_effect_only);
-    diagnostics["runtime_module_policy_applied"] = json!(runtime_policy.is_some());
+    diagnostics["runtime_module_policy_applied"] = json!(runtime_module_policy_applied);
     if report.get("params_setup_error") != Some(&json!(0)) {
         return Err(invalid("AEX rejected PF_PARAMS_SETUP"));
     }
@@ -341,7 +380,7 @@ pub fn probe_experimental_custom_ui_cursor(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -378,7 +417,7 @@ pub fn probe_experimental_custom_ui_draw(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -432,7 +471,7 @@ pub fn probe_experimental_custom_ui_lifecycle(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -472,7 +511,7 @@ pub fn probe_experimental_custom_ui_idle(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -519,7 +558,7 @@ pub fn probe_experimental_custom_ui_keydown(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -561,7 +600,7 @@ pub fn probe_experimental_custom_ui_mouse_exited(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -618,7 +657,7 @@ pub fn probe_experimental_custom_ui_click(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -671,7 +710,7 @@ pub fn probe_experimental_custom_ui_drag(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -719,7 +758,7 @@ pub fn trigger_experimental_button(
     let args_after_plugin = vec![actual.to_ascii_lowercase(), slot.to_string(), payload];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -748,22 +787,72 @@ pub fn initialize_experimental_aegp(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
+    initialize_experimental_aegp_impl(repository, plugin_path, approved_sha256, Vec::new())
+}
+
+/// In-place AEGP discovery variant. The AEGP image stays in its configured
+/// install tree and resolves imports only through the same broker-approved
+/// search roots used by PF discovery.
+pub fn initialize_experimental_aegp_in_place(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+) -> io::Result<Value> {
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "in-place AEGP initialization requires at least one dependency search directory",
+        ));
+    }
+    initialize_experimental_aegp_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        dependency_search_dirs,
+    )
+}
+
+fn initialize_experimental_aegp_impl(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+) -> io::Result<Value> {
     let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-init".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
-    let isolated = dispatch_approved_image(
-        repository,
-        WorkerKind::L2,
-        plugin_path,
-        approved_sha256,
-        &args_before_plugin,
-        &args_after_plugin,
-        Some(Duration::from_millis(5_000)),
-    )?;
+    let started = Instant::now();
+    let isolated = if dependency_search_dirs.is_empty() {
+        dispatch_approved_image(
+            repository,
+            WorkerKind::Discovery,
+            plugin_path,
+            approved_sha256,
+            &args_before_plugin,
+            &args_after_plugin,
+            Some(Duration::from_millis(5_000)),
+        )?
+    } else {
+        crate::secure_image_dispatch::dispatch_secure_image(SecureImageDispatch {
+            repository,
+            worker_kind: WorkerKind::Discovery,
+            plugin: ApprovedImageArtifact {
+                path: plugin_path.to_path_buf(),
+                expected_sha256: decode_sha256_hex(approved_sha256)?,
+                expected_size: fs::metadata(plugin_path)?.len(),
+            },
+            dependencies: Vec::new(),
+            dependency_search_dirs,
+            args_before_plugin: &args_before_plugin,
+            args_after_plugin: &args_after_plugin,
+            timeout: Some(Duration::from_millis(5_000)),
+            launch_environment: Default::default(),
+        })?
+    };
     if isolated.classification.as_str() != "ok" {
+        let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
         return Err(invalid(format!(
-            "AEGP initialization failed safely: {}",
-            isolated.stderr.trim()
+            "AEGP initialization failed safely: {diagnostics}"
         )));
     }
     let report: Value = serde_json::from_str(isolated.stdout.trim())
@@ -771,10 +860,61 @@ pub fn initialize_experimental_aegp(
     if report.get("stage") != Some(&json!("aegp_init"))
         || report.get("init_error") != Some(&json!(0))
         || report.get("suite_leases_balanced") != Some(&json!(true))
+        || report.get("dynamic_suite_live_references") != Some(&json!(0))
+        || !valid_dynamic_suite_report(&report)
     {
-        return Err(invalid("AEGP initialization contract failed"));
+        let diagnostics = json!({
+            "classification": "aegp_init_contract",
+            "stage": report.get("stage"),
+            "status": report.get("status"),
+            "init_error": report.get("init_error"),
+            "entry_fault": report.get("entry_fault"),
+            "entry_exception_code": report.get("entry_exception_code"),
+            "suite_leases_balanced": report.get("suite_leases_balanced"),
+            "dynamic_suite_live_references": report.get("dynamic_suite_live_references"),
+            "dynamic_suites_valid": valid_dynamic_suite_report(&report),
+        });
+        return Err(invalid(format!(
+            "AEGP initialization contract failed safely: {diagnostics}"
+        )));
     }
     Ok(report)
+}
+
+fn valid_dynamic_suite_report(report: &Value) -> bool {
+    let Some(suites) = report.get("dynamic_suites").and_then(Value::as_array) else {
+        return false;
+    };
+    if suites.len() > 32 {
+        return false;
+    }
+    let mut identities = std::collections::HashSet::with_capacity(suites.len());
+    suites.iter().all(|suite| {
+        let Some(object) = suite.as_object() else {
+            return false;
+        };
+        if object.len() != 3
+            || !object.contains_key("name")
+            || !object.contains_key("api_version")
+            || !object.contains_key("internal_version")
+        {
+            return false;
+        }
+        let Some(name) = object.get("name").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(api_version) = object.get("api_version").and_then(Value::as_i64) else {
+            return false;
+        };
+        let Some(internal_version) = object.get("internal_version").and_then(Value::as_i64) else {
+            return false;
+        };
+        !name.is_empty()
+            && name.len() <= 255
+            && (1..=i64::from(i32::MAX)).contains(&api_version)
+            && (0..=i64::from(i32::MAX)).contains(&internal_version)
+            && identities.insert((name, api_version, internal_version))
+    })
 }
 
 pub fn dispatch_experimental_aegp_update_menu(
@@ -787,7 +927,7 @@ pub fn dispatch_experimental_aegp_update_menu(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -822,7 +962,7 @@ pub fn dispatch_experimental_aegp_idle(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -862,7 +1002,7 @@ pub fn dispatch_experimental_aegp_command_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -898,7 +1038,7 @@ pub fn dispatch_experimental_aegp_active_idle_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -936,7 +1076,7 @@ pub fn dispatch_experimental_aegp_comp_idle_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1121,7 +1261,7 @@ pub fn dispatch_experimental_aegp_keyframe_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1185,7 +1325,7 @@ pub fn dispatch_experimental_aegp_seek_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1242,7 +1382,7 @@ pub fn dispatch_experimental_aegp_trim_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1291,7 +1431,7 @@ pub fn dispatch_experimental_aegp_switch_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1371,6 +1511,15 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
             "integer" | "path" if item.value.fract() == 0.0 => {
                 payload.push_str(&format!("{id}@{}:i32={}", item.slot, item.value as i64))
             }
+            "popup"
+                if item.value.fract() == 0.0
+                    && !item.choices.is_empty()
+                    && item.choices.len() <= 64
+                    && item.minimum == 1.0
+                    && item.maximum == item.choices.len() as f64 =>
+            {
+                payload.push_str(&format!("{id}@{}:i32={}", item.slot, item.value as i64))
+            }
             "float" => payload.push_str(&format!("{id}@{}:f64={}", item.slot, item.value)),
             "color" => payload.push_str(&format!(
                 "{id}@{}:argb8={},{},{},{}",
@@ -1418,4 +1567,48 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
         return Err(invalid("interactive parameter payload is too large"));
     }
     Ok(payload)
+}
+
+/// Encodes values obtained from parameter discovery for a session launch.
+/// Numeric defaults are constrained to the descriptor's declared host range,
+/// matching the value an exposed UI control can actually send. An arbitrary
+/// default that the plug-in could not PRINT is left unassigned: the worker has
+/// already copied that plug-in-owned default before applying assignments.
+/// Explicit per-frame values continue to use [`encode_interactive_payload`]
+/// and remain fail-closed instead of being silently normalized.
+pub fn encode_default_interactive_payload(
+    parameters: &[InteractiveParameter],
+) -> io::Result<String> {
+    encode_interactive_payload(&normalize_default_interactive_parameters(parameters))
+}
+
+/// Returns the sendable subset of discovery defaults used at session launch.
+/// Callers that intentionally resend those defaults on each frame (such as the
+/// sweep) must use the same normalized values so launch and frame validation do
+/// not disagree.
+pub fn normalize_default_interactive_parameters(
+    parameters: &[InteractiveParameter],
+) -> Vec<InteractiveParameter> {
+    parameters
+        .iter()
+        .filter(|item| !(item.kind == "arbitrary_data" && item.debug_summary.is_none()))
+        .cloned()
+        .map(|mut item| {
+            if matches!(item.kind.as_str(), "integer" | "float" | "path" | "popup")
+                && item.value.is_finite()
+                && item.minimum.is_finite()
+                && item.maximum.is_finite()
+                && item.minimum <= item.maximum
+            {
+                item.value = item.value.clamp(item.minimum, item.maximum);
+            } else if !matches!(item.kind.as_str(), "integer" | "float" | "path" | "popup") {
+                // These fields share descriptor storage with the typed value
+                // and are not part of color/component/arbitrary transport.
+                item.minimum = 0.0;
+                item.maximum = 0.0;
+                item.value = 0.0;
+            }
+            item
+        })
+        .collect()
 }

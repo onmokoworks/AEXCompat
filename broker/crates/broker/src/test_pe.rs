@@ -37,6 +37,15 @@ pub fn pe64_with_broken_import_directory() -> Vec<u8> {
     image
 }
 
+/// A valid eager import directory alongside an invalid optional delay table.
+pub fn pe64_with_broken_delay_import_directory(imports: &[&str]) -> Vec<u8> {
+    let mut image = pe64_importing(imports);
+    const DELAY_DIRECTORY_VA: usize = 0x58 + 112 + 13 * 8;
+    image[DELAY_DIRECTORY_VA..DELAY_DIRECTORY_VA + 4]
+        .copy_from_slice(&0x7fff_0000u32.to_le_bytes());
+    image
+}
+
 /// A PE32+ image whose import descriptors and name strings live in *different*
 /// sections, as a linker that emits `.idata` plus `.rdata` produces.
 pub fn pe64_with_names_in_a_second_section(imports: &[&str]) -> Vec<u8> {

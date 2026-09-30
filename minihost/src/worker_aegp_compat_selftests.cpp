@@ -1,7 +1,10 @@
 #include "worker_aegp_compat_selftests.hpp"
+#include "worker_pf_suites_internal.hpp"
+#include "worker_parameter_execution.hpp"
 #include "worker_parameter_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_mask_runtime.hpp"
+#include "worker_mask_suite_tables.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_model.hpp"
 #include "worker_aegp_scene_transaction.hpp"
@@ -33,6 +36,7 @@
 namespace aexcompat::l2_detail {
 bool configure_mask_scene(const std::string&);
 bool prepare_scene_staged_item(void*);
+bool parse_active_camera_payload(const wchar_t*);
 namespace { AegpCompatSelftestHooks g_hooks; }
 
 namespace {
@@ -43,6 +47,8 @@ int32_t compat_release_suite(const char* name, int32_t version) {
   return g_hooks.release_suite(name, version);
 }
 bool compat_suite_leases_balanced() { return g_hooks.suite_leases_balanced(); }
+bool __cdecl receipt_disabled_for_test() { return false; }
+bool __cdecl receipt_enabled_for_test() { return true; }
 
 uint32_t unsupported_effect_slot_seven_count(const std::string& report) {
   constexpr char marker[] =
@@ -211,7 +217,7 @@ bool verify_aegp_layer_suite1_slots() {
   const auto* slots = static_cast<void* const*>(raw);
   if (!slots || raw != g_aegp_layer_suite1.data()) return finish(false);
 
-  const std::array<std::pair<std::size_t, void*>, 15> wired{{
+  const std::array<std::pair<std::size_t, void*>, 17> wired{{
       {0, reinterpret_cast<void*>(&aegp_get_comp_num_layers)},
       {1, reinterpret_cast<void*>(&aegp_get_comp_layer_by_index)},
       {2, reinterpret_cast<void*>(&aegp_get_active_layer)},
@@ -224,7 +230,9 @@ bool verify_aegp_layer_suite1_slots() {
       {15, reinterpret_cast<void*>(&aegp_get_layer_duration)},
       {16, reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration)},
       {21, reinterpret_cast<void*>(&aegp_get_layer_transfer_mode)},
+      {26, reinterpret_cast<void*>(&aegp_get_layer_masked_bounds)},
       {27, reinterpret_cast<void*>(&aegp_get_layer_object_type)},
+      {33, reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time)},
       {35, reinterpret_cast<void*>(&aegp_get_layer_id)},
       {36, reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)},
   }};
@@ -293,6 +301,125 @@ bool verify_aegp_layer_suite1_slots() {
     ok = false;
   }
   g_aegp_comp_idle_roundtrip_mode = saved_mode;
+
+  const void* version8_raw = nullptr;
+  const bool version8_acquired =
+      compat_acquire_suite("AEGP Layer Suite", 8, &version8_raw) == 0;
+  if (version8_acquired) {
+    const auto* version8 = static_cast<void* const*>(version8_raw);
+    const std::array<std::pair<std::size_t, void*>, 21> version8_wired{{
+        {0, reinterpret_cast<void*>(&aegp_get_comp_num_layers)},
+        {1, reinterpret_cast<void*>(&aegp_get_comp_layer_by_index)},
+        {2, reinterpret_cast<void*>(&aegp_get_active_layer)},
+        {3, reinterpret_cast<void*>(&aegp_get_layer_index)},
+        {4, reinterpret_cast<void*>(&aegp_get_layer_source_item)},
+        {5, reinterpret_cast<void*>(&aegp_get_layer_parent_comp)},
+        {9, reinterpret_cast<void*>(&aegp_get_layer_flags)},
+        {10, reinterpret_cast<void*>(&aegp_set_layer_flag)},
+        {14, reinterpret_cast<void*>(&aegp_get_layer_in_point)},
+        {15, reinterpret_cast<void*>(&aegp_get_layer_duration)},
+        {16, reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration)},
+        {21, reinterpret_cast<void*>(&aegp_get_layer_transfer_mode)},
+        {26, reinterpret_cast<void*>(&aegp_get_layer_masked_bounds)},
+        {27, reinterpret_cast<void*>(&aegp_get_layer_object_type)},
+        {33, reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time)},
+        {34, reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time)},
+        {36, reinterpret_cast<void*>(&aegp_get_layer_id)},
+        {37, reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)},
+        {40, reinterpret_cast<void*>(&aegp_get_layer_parent)},
+        {41, reinterpret_cast<void*>(&aegp_set_layer_parent)},
+        {42, reinterpret_cast<void*>(&aegp_delete_layer)},
+    }};
+    ok = ok && version8 && version8_raw == g_aegp_layer_suite3.data();
+    if (version8) {
+      for (const auto& [slot, implementation] : version8_wired)
+        ok = ok && version8[slot] == implementation;
+      const auto& version8_stubs =
+          aexcompat::worker_runtime::unsupported_suite_slots<
+              aexcompat::worker_runtime::UnsupportedSuiteId::aegp_layer_8, 43>();
+      const auto version8_claimed = [&version8_wired](std::size_t slot) {
+        for (const auto& entry : version8_wired)
+          if (entry.first == slot) return true;
+        return false;
+      };
+      for (std::size_t slot = 0; slot < version8_stubs.size(); ++slot)
+        if (!version8_claimed(slot))
+          ok = ok && version8[slot] == version8_stubs[slot];
+      ok = ok && version8[6] != reinterpret_cast<void*>(&aegp_get_layer_name);
+    }
+    ok = compat_release_suite("AEGP Layer Suite", 8) == 0 && ok;
+  } else {
+    ok = false;
+  }
+
+  // Version 15 used to make its availability and ten otherwise-supported
+  // slots depend on an active render receipt, even though versions 13 and 14
+  // exposed the same operations unconditionally. Exercise the production
+  // acquisition path with both receipt states and idle mode disabled: both
+  // must publish the same complete table, with every unclaimed slot left on
+  // its exact diagnostic stub.
+  const SceneContext* configured_context = scene_context();
+  if (!configured_context) return finish(false);
+  const SceneContext saved_context = *configured_context;
+  const bool saved_idle_mode = g_aegp_comp_idle_roundtrip_mode;
+  g_aegp_comp_idle_roundtrip_mode = false;
+  const std::array<std::pair<std::size_t, void*>, 23> version15_wired{{
+      {0, reinterpret_cast<void*>(&aegp_get_comp_num_layers)},
+      {1, reinterpret_cast<void*>(&aegp_get_comp_layer_by_index)},
+      {2, reinterpret_cast<void*>(&aegp_get_active_layer)},
+      {3, reinterpret_cast<void*>(&aegp_get_layer_index)},
+      {4, reinterpret_cast<void*>(&aegp_get_layer_source_item)},
+      {6, reinterpret_cast<void*>(&aegp_get_layer_parent_comp)},
+      {7, reinterpret_cast<void*>(&aegp_get_layer_name)},
+      {10, reinterpret_cast<void*>(&aegp_get_layer_flags)},
+      {11, reinterpret_cast<void*>(&aegp_set_layer_flag)},
+      {15, reinterpret_cast<void*>(&aegp_get_layer_in_point)},
+      {16, reinterpret_cast<void*>(&aegp_get_layer_duration)},
+      {17, reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration)},
+      {22, reinterpret_cast<void*>(&aegp_get_layer_transfer_mode)},
+      {27, reinterpret_cast<void*>(&aegp_get_layer_masked_bounds)},
+      {28, reinterpret_cast<void*>(&aegp_get_layer_object_type)},
+      {34, reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time)},
+      {35, reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time)},
+      {37, reinterpret_cast<void*>(&aegp_get_layer_id)},
+      {38, reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)},
+      {41, reinterpret_cast<void*>(&aegp_get_layer_parent)},
+      {42, reinterpret_cast<void*>(&aegp_set_layer_parent)},
+      {43, reinterpret_cast<void*>(&aegp_delete_layer)},
+      {45, reinterpret_cast<void*>(&aegp_get_layer_from_id)},
+  }};
+  const auto version15_claimed = [&version15_wired](std::size_t slot) {
+    for (const auto& entry : version15_wired)
+      if (entry.first == slot) return true;
+    return false;
+  };
+  const auto verify_version15 = [&](bool receipt) {
+    SceneContext test_context = saved_context;
+    test_context.hooks.suite_factory.render_scene_enabled =
+        receipt ? &receipt_enabled_for_test : &receipt_disabled_for_test;
+    bool result = configure_scene_context(test_context);
+    const void* version15_raw = nullptr;
+    const bool acquired = result &&
+        compat_acquire_suite("AEGP Layer Suite", 15, &version15_raw) == 0;
+    const auto* version15 = static_cast<void* const*>(version15_raw);
+    result = acquired && version15 && version15_raw == g_aegp_layer_suite9.data();
+    if (version15) {
+      for (const auto& [slot, implementation] : version15_wired)
+        result = result && version15[slot] == implementation;
+      const auto& stubs =
+          aexcompat::worker_runtime::unsupported_suite_slots<
+              aexcompat::worker_runtime::UnsupportedSuiteId::aegp_layer_15, 53>();
+      for (std::size_t slot = 0; slot < stubs.size(); ++slot)
+        if (!version15_claimed(slot))
+          result = result && version15[slot] == stubs[slot];
+    }
+    if (acquired)
+      result = compat_release_suite("AEGP Layer Suite", 15) == 0 && result;
+    result = configure_scene_context(saved_context) && result;
+    return result;
+  };
+  ok = verify_version15(false) && verify_version15(true) && ok;
+  g_aegp_comp_idle_roundtrip_mode = saved_idle_mode;
   return finish(ok);
 }
 
@@ -307,10 +434,6 @@ bool verify_aegp_scene_registry_suites() {
   using GetLayerIndex = int32_t (__cdecl*)(void*, int32_t*);
   using GetLayerParentComp = int32_t (__cdecl*)(void*, void**);
   using GetLayerFromId = int32_t (__cdecl*)(void*, int32_t, void**);
-  struct alignas(std::max_align_t) ForgedBorrowedToken {
-    uint64_t lease_identity{};
-  };
-
   const bool saved_mode = g_aegp_comp_idle_roundtrip_mode;
   g_aegp_comp_idle_roundtrip_mode = true;
   const void* item_suite_raw = nullptr;
@@ -392,13 +515,11 @@ bool verify_aegp_scene_registry_suites() {
       unchanged_i32 == i32_sentinel;
 
   auto& registry = scene_model::registry();
-  const auto observed_lease_identity =
-      *static_cast<const uint64_t*>(item);
-  ForgedBorrowedToken forged{observed_lease_identity};
+  void* forged = reinterpret_cast<void*>(
+      reinterpret_cast<uintptr_t>(item) + alignof(std::max_align_t));
   unchanged_handle =
       reinterpret_cast<void*>(static_cast<uintptr_t>(0x5550));
-  ok = ok && observed_lease_identity != 0 &&
-      get_comp_from_item(&forged, &unchanged_handle) != 0 &&
+  ok = ok && get_comp_from_item(forged, &unchanged_handle) != 0 &&
       unchanged_handle == handle_sentinel;
 
   alignas(std::max_align_t) std::array<std::byte, 64> foreign{};
@@ -651,12 +772,113 @@ bool verify_matrix_case(bool smart_case) {
   return ok;
 }
 
+bool verify_authored_camera_transport_case() {
+  if (!g_hooks.get_camera || !g_hooks.get_camera_matrix || !g_hooks.layer_at ||
+      !g_hooks.get_dimensions || !g_hooks.set_dimensions) return false;
+  auto& scene = scene_runtime_state();
+  const auto saved_index = scene.active_camera_layer_index;
+  const auto saved_identity = scene.authored_camera_identity;
+  const auto saved_camera_live = scene.authored_camera_live;
+  const auto saved_in_points = scene.layer_in_points;
+  const auto saved_durations = scene.layer_durations;
+  const auto saved_transforms = scene.layer_transforms;
+  const auto saved_zooms = scene.layer_camera_zoom;
+  const bool saved_effect_live = pf_state_runtime::effect_is_live();
+  int32_t saved_width = 0, saved_height = 0;
+  g_hooks.get_dimensions(&saved_width, &saved_height);
+  const auto saved_spatial = aexcompat::render::render_context_state();
+
+  scene.active_camera_layer_index = -1;
+  scene.authored_camera_identity = {};
+  scene.authored_camera_live = false;
+  pf_state_runtime::reset_effect_lifetime(true);
+  g_hooks.set_dimensions(640, 480);
+  auto& spatial = aexcompat::render::render_context_state();
+  spatial.downsample_x = {1, 1};
+  spatial.downsample_y = {1, 1};
+  spatial.pixel_aspect_ratio = {1, 1};
+  const suite_abi::AegpTime active{45, 30};
+  void* camera = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  bool ok = g_hooks.get_camera(g_hooks.effect, &active, &camera) == 0 && !camera;
+
+  scene_model::Identity layer{};
+  ok = ok && scene_model::registry().identity_for_legacy(
+      &scene.layers[2], scene_model::ObjectKind::layer, layer);
+  const auto bits = [](double value) {
+    uint64_t result{};
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
+  };
+  std::array<uint64_t, 21> fields{{
+      layer.project_id, layer.object_id, layer.generation, 2,
+      30, 30, 60, 30, bits(800.0),
+      bits(0.0), bits(0.0), bits(0.0),
+      bits(10.0), bits(20.0), bits(30.0),
+      bits(100.0), bits(100.0), bits(100.0),
+      bits(0.0), bits(0.0), bits(0.0)}};
+  const auto payload = [](const std::array<uint64_t, 21>& values) {
+    std::wstring result = L"scene-camera:v1|";
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      if (index != 0) result.push_back(L',');
+      result += std::to_wstring(values[index]);
+    }
+    return result;
+  };
+  auto stale = fields;
+  stale[2] += 1;
+  ok = ok && !parse_active_camera_payload(payload(stale).c_str()) &&
+      !scene.authored_camera_live && scene.active_camera_layer_index == -1;
+  auto singular = fields;
+  singular[15] = bits(0.0);
+  ok = ok && !parse_active_camera_payload(payload(singular).c_str()) &&
+      !scene.authored_camera_live && scene.active_camera_layer_index == -1;
+  auto near_singular = fields;
+  near_singular[15] = bits(0.01);
+  near_singular[16] = bits(0.01);
+  near_singular[17] = bits(0.01);
+  ok = ok && !parse_active_camera_payload(payload(near_singular).c_str()) &&
+      !scene.authored_camera_live && scene.active_camera_layer_index == -1;
+  const bool accepted = parse_active_camera_payload(payload(fields).c_str());
+  ok = ok && accepted;
+  camera = nullptr;
+  int32_t object_type = -1;
+  AegpMatrix4 matrix{};
+  double zoom = -1.0;
+  int16_t width = -1, height = -1;
+  const bool observed = scene.authored_camera_identity == layer &&
+      g_hooks.get_camera(g_hooks.effect, &active, &camera) == 0 &&
+      camera == g_hooks.layer_at(2) &&
+      aegp_get_layer_object_type(camera, &object_type) == 0 && object_type == 2 &&
+      g_hooks.get_camera_matrix(g_hooks.effect, &active, &matrix, &zoom,
+          &width, &height) == 0 &&
+      zoom == 800.0 && width == 640 && height == 480 &&
+      matrix.mat[0][3] == -10.0 && matrix.mat[1][3] == -20.0 &&
+      matrix.mat[2][3] == -30.0;
+  ok = ok && observed;
+  const suite_abi::AegpTime before{29, 30};
+  camera = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && g_hooks.get_camera(g_hooks.effect, &before, &camera) == 0 && !camera;
+
+  scene.active_camera_layer_index = saved_index;
+  scene.authored_camera_identity = saved_identity;
+  scene.authored_camera_live = saved_camera_live;
+  scene.layer_in_points = saved_in_points;
+  scene.layer_durations = saved_durations;
+  scene.layer_transforms = saved_transforms;
+  scene.layer_camera_zoom = saved_zooms;
+  spatial = saved_spatial;
+  g_hooks.set_dimensions(saved_width, saved_height);
+  pf_state_runtime::reset_effect_lifetime(saved_effect_live);
+  return ok;
+}
+
 bool verify_aegp_get_effect_camera() {
   if (!g_hooks.acquire_suite || !g_hooks.release_suite) return false;
   const void* suite = nullptr;
   bool ok = g_hooks.acquire_suite("AEGP PF Interface Suite", 1, &suite) == 0 &&
       suite == g_hooks.interface_suite && verify_camera_case(false) &&
-      verify_camera_case(true) && verify_matrix_case(false) && verify_matrix_case(true);
+      verify_camera_case(true) && verify_matrix_case(false) &&
+      verify_matrix_case(true) && verify_authored_camera_transport_case();
   ok = g_hooks.release_suite("AEGP PF Interface Suite", 1) == 0 && ok;
   return ok && (!g_hooks.suite_leases_balanced || g_hooks.suite_leases_balanced());
 }
@@ -672,8 +894,6 @@ bool verify_aegp_apply_effect() {
   const uint32_t timestamp_before =
       aexcompat::aegp_external_render_runtime::project_generation();
   g_aegp_effect_instances = {};
-  g_aegp_effect_instances[0] = {
-      &g_aegp_layers[0], kAegpInstalledEffects[0].key, 0, 1, 1, true};
   g_aegp_effect_leases = {};
   g_aegp_effect_live = false;
   g_aegp_comp_idle_roundtrip_mode = true;
@@ -697,7 +917,7 @@ bool verify_aegp_apply_effect() {
   int32_t layer1_count = -1;
   void* applied = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
   ok = ok && aegp_get_layer_num_effects(&g_aegp_layers[0], &layer0_count) == 0 &&
-      layer0_count == 1 && aegp_get_layer_num_effects(&g_aegp_layers[1], &layer1_count) == 0 &&
+      layer0_count == 0 && aegp_get_layer_num_effects(&g_aegp_layers[1], &layer1_count) == 0 &&
       layer1_count == 0 && aegp_apply_effect(7, &g_aegp_layers[1],
           kAegpInstalledEffects[0].key, &applied) == 0 && applied &&
       applied != reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
@@ -711,6 +931,29 @@ bool verify_aegp_apply_effect() {
       g_aegp_transform_stream.effect_instance_generation ==
           g_aegp_effect_instances[1].generation &&
       aegp_dispose_stream(stream) == 0;
+
+  void* duplicate = nullptr;
+  ok = ok && aegp_duplicate_effect(applied, &duplicate) == 0 && duplicate &&
+      duplicate != applied && g_aegp_effect_instances[2].occupied &&
+      !g_aegp_effect_instances[2].loaded_plugin;
+
+  // Acquiring the loaded plug-in handle after ApplyEffect (or its duplicate)
+  // used to reuse slot 0 and turn that Levels instance into a loaded-plugin
+  // instance.
+  // The installed key then still said Levels while its parameter count came
+  // from the loaded plug-in. Slot 0 is now reserved even when initially empty.
+  void* loaded = nullptr;
+  int32_t applied_key = -1;
+  int32_t applied_param_count = -1;
+  ok = ok && get_new_effect_for_effect(7, g_hooks.effect, &loaded) == 0 &&
+      loaded && loaded != applied && g_aegp_effect_instances[0].loaded_plugin &&
+      !g_aegp_effect_instances[1].loaded_plugin &&
+      !g_aegp_effect_instances[2].loaded_plugin &&
+      aegp_get_installed_key_from_layer_effect(applied, &applied_key) == 0 &&
+      applied_key == kAegpInstalledEffects[0].key &&
+      aegp_get_effect_num_param_streams_v2(applied, &applied_param_count) == 0 &&
+      applied_param_count == kAegpInstalledEffects[0].parameter_count &&
+      aegp_dispose_effect(loaded) == 0;
   void* unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
   const auto scene_before_failures = g_aegp_effect_instances;
   const uint32_t timestamp_after_apply =
@@ -725,7 +968,7 @@ bool verify_aegp_apply_effect() {
                   sizeof(g_aegp_effect_instances)) == 0 &&
       aexcompat::aegp_external_render_runtime::project_generation() == timestamp_after_apply;
 
-  std::array<void*, kAegpEffectInstanceCapacity - 2> more{};
+  std::array<void*, kAegpEffectInstanceCapacity - 3> more{};
   for (std::size_t i = 0; ok && i < more.size(); ++i)
     ok = aegp_apply_effect(7, &g_aegp_layers[2], kAegpInstalledEffects[0].key,
                           &more[i]) == 0;
@@ -739,7 +982,8 @@ bool verify_aegp_apply_effect() {
 
   const void* stale = applied;
   int32_t key = -1;
-  ok = ok && aegp_dispose_effect(applied) == 0 &&
+  ok = ok && aegp_dispose_effect(duplicate) == 0 &&
+      aegp_dispose_effect(applied) == 0 &&
       aegp_get_installed_key_from_layer_effect(const_cast<void*>(stale), &key) == 4 &&
       aegp_dispose_effect(const_cast<void*>(stale)) == 4 &&
       aegp_dispose_effect(g_hooks.effect) == 4;
@@ -748,6 +992,23 @@ bool verify_aegp_apply_effect() {
       reacquired != stale && aegp_get_installed_key_from_layer_effect(reacquired, &key) == 0 &&
       key == kAegpInstalledEffects[0].key && aegp_dispose_effect(reacquired) == 0;
   for (void* lease : more) if (lease) ok = aegp_dispose_effect(lease) == 0 && ok;
+
+  // The opposite acquisition order must preserve the same partition.
+  g_aegp_effect_instances = {};
+  g_aegp_effect_leases = {};
+  g_aegp_effect_live = false;
+  void* loaded_first = nullptr;
+  void* applied_second = nullptr;
+  ok = ok && get_new_effect_for_effect(7, g_hooks.effect, &loaded_first) == 0 &&
+      loaded_first && aegp_apply_effect(7, &g_aegp_layers[2],
+                          kAegpInstalledEffects[0].key, &applied_second) == 0 &&
+      applied_second && applied_second != loaded_first &&
+      g_aegp_effect_instances[0].occupied &&
+      g_aegp_effect_instances[0].loaded_plugin &&
+      g_aegp_effect_instances[1].occupied &&
+      !g_aegp_effect_instances[1].loaded_plugin &&
+      aegp_dispose_effect(applied_second) == 0 &&
+      aegp_dispose_effect(loaded_first) == 0;
 
   ok = release_suite("AEGP Effect Suite", 4) == 0 && ok;
   ok = release_suite("AEGP Effect Suite", 3) == 0 && ok;
@@ -1001,8 +1262,13 @@ bool verify_aegp_projector_levels() {
 bool verify_aegp_resizer_3d_chain() {
   const void* layer_suite = nullptr;
   const void* stream_suite = nullptr;
+  const void* stream_suite3 = nullptr;
+  const void* stream_suite1 = nullptr;
+  const void* iterate_suite1 = nullptr;
   const void* comp_suite = nullptr;
+  const void* comp_suite1 = nullptr;
   const void* item_suite = nullptr;
+  const void* item_suite1 = nullptr;
   const int32_t saved_camera_index = g_aegp_active_camera_layer_index;
   int32_t saved_width = 0, saved_height = 0;
   g_hooks.get_dimensions(&saved_width, &saved_height);
@@ -1025,13 +1291,69 @@ bool verify_aegp_resizer_3d_chain() {
       acquire_suite("AEGP Stream Suite", 7, &stream_suite) == 0 &&
       stream_suite == g_aegp_stream_suite2.data() &&
       g_aegp_stream_suite2[16] == reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2) &&
+      acquire_suite("AEGP Stream Suite", 8, &stream_suite3) == 0 &&
+      stream_suite3 == g_aegp_stream_suite3.data() &&
+      g_aegp_stream_suite3[3] == reinterpret_cast<void*>(&aegp_get_new_layer_stream) &&
+      g_aegp_stream_suite3[12] == reinterpret_cast<void*>(&aegp_get_stream_type) &&
+      // v4 (AEGP_StreamSuite1) reuses the v7 legacy callbacks at slots shifted
+      // down by one (no GetValidInterpolations at slot 2), issue #1053.
+      acquire_suite("AEGP Stream Suite", 4, &stream_suite1) == 0 &&
+      stream_suite1 == g_aegp_stream_suite1.data() &&
+      g_aegp_stream_suite1[3] == g_aegp_stream_suite2[4] &&
+      g_aegp_stream_suite1[4] == g_aegp_stream_suite2[5] &&
+      g_aegp_stream_suite1[6] == g_aegp_stream_suite2[7] &&
+      g_aegp_stream_suite1[7] == g_aegp_stream_suite2[8] &&
+      g_aegp_stream_suite1[11] == g_aegp_stream_suite2[12] &&
+      g_aegp_stream_suite1[14] == g_aegp_stream_suite2[15] &&
+      g_aegp_stream_suite1[15] == reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2) &&
+      acquire_suite("AEGP Iterate Suite", 1, &iterate_suite1) == 0 &&
+      iterate_suite1 == g_aegp_iterate_suite1.data() &&
+      g_aegp_iterate_suite1[0] == reinterpret_cast<void*>(&aegp_get_num_threads) &&
+      g_aegp_iterate_suite1[1] == reinterpret_cast<void*>(&iterate_generic) &&
       acquire_suite("AEGP Comp Suite", 9, &comp_suite) == 0 &&
       comp_suite == g_aegp_comp_suite4.data() &&
       g_aegp_comp_suite4[1] == reinterpret_cast<void*>(&aegp_get_item_from_comp) &&
+      acquire_suite("AEGP Comp Suite", 4, &comp_suite1) == 0 &&
+      comp_suite1 == g_aegp_comp_suite1.data() &&
+      g_aegp_comp_suite1[0] == reinterpret_cast<void*>(&aegp_get_comp_from_item) &&
+      g_aegp_comp_suite1[1] == reinterpret_cast<void*>(&aegp_get_item_from_comp) &&
+      g_aegp_comp_suite1[3] != nullptr &&
+      g_aegp_comp_suite1[5] == reinterpret_cast<void*>(&aegp_get_comp_framerate) &&
       acquire_suite("AEGP Item Suite", 10, &item_suite) == 0 &&
       item_suite == &g_aegp_legacy_item_suite6 &&
       reinterpret_cast<void**>(&g_aegp_legacy_item_suite6)[16] ==
-          reinterpret_cast<void*>(&aegp_get_item_dimensions);
+          reinterpret_cast<void*>(&aegp_get_item_dimensions) &&
+      acquire_suite("AEGP Item Suite", 3, &item_suite1) == 0 &&
+      item_suite1 == g_aegp_item_suite1.data() &&
+      g_aegp_item_suite1[1] == reinterpret_cast<void*>(&aegp_get_active_item) &&
+      g_aegp_item_suite1[4] == reinterpret_cast<void*>(&aegp_get_item_type) &&
+      g_aegp_item_suite1[7] == reinterpret_cast<void*>(&aegp_get_item_id) &&
+      g_aegp_item_suite1[11] == reinterpret_cast<void*>(&aegp_get_item_duration) &&
+      g_aegp_item_suite1[12] == reinterpret_cast<void*>(&aegp_get_item_current_time) &&
+      g_aegp_item_suite1[13] == reinterpret_cast<void*>(&aegp_get_item_dimensions) &&
+      g_aegp_item_suite1[18] == reinterpret_cast<void*>(&aegp_set_item_current_time);
+  AegpTime in_point{-1, 1};
+  AegpTime duration{-1, 1};
+  const AegpTime saved_layer_in_point = g_aegp_layer_in_points[2];
+  g_aegp_layer_in_points[2] = {30, 30};
+  ok = ok && aegp_get_layer_in_point(&g_aegp_layers[2], 0, &in_point) == 0 &&
+      in_point.value == 0 && in_point.scale == 30 &&
+      aegp_get_layer_duration(&g_aegp_layers[2], 0, &duration) == 0 &&
+      duration.value == 300 && duration.scale == 30;
+  in_point = {-1, 1};
+  duration = {-1, 1};
+  ok = ok && aegp_get_layer_in_point(&g_aegp_layers[2], 1, &in_point) == 0 &&
+      in_point.value == 30 && in_point.scale == 30 &&
+      aegp_get_layer_duration(&g_aegp_layers[2], 1, &duration) == 0 &&
+      duration.value == 300 && duration.scale == 30;
+  const AegpTime time_sentinel{-2, 7};
+  in_point = time_sentinel;
+  duration = time_sentinel;
+  ok = ok && aegp_get_layer_in_point(&g_aegp_layers[2], 2, &in_point) != 0 &&
+      in_point.value == time_sentinel.value && in_point.scale == time_sentinel.scale &&
+      aegp_get_layer_duration(&g_aegp_layers[2], 2, &duration) != 0 &&
+      duration.value == time_sentinel.value && duration.scale == time_sentinel.scale;
+  g_aegp_layer_in_points[2] = saved_layer_in_point;
   AegpMatrix4 matrix{};
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0;
   for (std::size_t row = 0; row < 4; ++row) {
@@ -1186,9 +1508,29 @@ bool verify_aegp_resizer_3d_chain() {
       aegp_get_item_dimensions(g_hooks.pf_layer, &width, &height) != 0 &&
       width == -2 && height == -3;
 
+  const auto& comp_suite1_stubs =
+      aexcompat::worker_runtime::unsupported_suite_slots<
+          aexcompat::worker_runtime::UnsupportedSuiteId::aegp_comp_4, 17>();
+  for (std::size_t slot = 0; slot < comp_suite1_stubs.size(); ++slot) {
+    if (slot != 0 && slot != 1 && slot != 3 && slot != 5)
+      ok = ok && g_aegp_comp_suite1[slot] == comp_suite1_stubs[slot];
+  }
+  const auto& item_suite1_stubs =
+      aexcompat::worker_runtime::unsupported_suite_slots<
+          aexcompat::worker_runtime::UnsupportedSuiteId::aegp_item_3, 20>();
+  for (std::size_t slot = 0; slot < item_suite1_stubs.size(); ++slot) {
+    if (slot != 1 && slot != 4 && slot != 7 && slot != 11 && slot != 12 &&
+        slot != 13 && slot != 18)
+      ok = ok && g_aegp_item_suite1[slot] == item_suite1_stubs[slot];
+  }
+  ok = release_suite("AEGP Item Suite", 3) == 0 && ok;
   ok = release_suite("AEGP Item Suite", 10) == 0 && ok;
+  ok = release_suite("AEGP Comp Suite", 4) == 0 && ok;
   ok = release_suite("AEGP Comp Suite", 9) == 0 && ok;
+  ok = release_suite("AEGP Iterate Suite", 1) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", 8) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 7) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", 4) == 0 && ok;
   ok = release_suite("AEGP Layer Suite", 14) == 0 && ok;
   g_aegp_active_camera_layer_index = saved_camera_index;
   g_hooks.set_dimensions(saved_width, saved_height);
@@ -1413,6 +1755,8 @@ bool verify_aegp_scene_mutation_transactions() {
       void*, int16_t, const HostTime*, int32_t*);
   using DeleteKeyframe = int32_t (__cdecl*)(void*, int32_t);
   using KeyframeCount = int32_t (__cdecl*)(void*, int32_t*);
+  using GetKeyframeTimeV4 = int32_t (__cdecl*)(
+      void*, int32_t, int16_t, HostTime*);
   using StartAdd = int32_t (__cdecl*)(void*, void**);
   using AddKey = int32_t (__cdecl*)(
       void*, int16_t, const HostTime*, int32_t*);
@@ -1444,6 +1788,8 @@ bool verify_aegp_scene_mutation_transactions() {
   using SetDynamicName = int32_t (__cdecl*)(void*, const uint16_t*);
   using AddDynamic = int32_t (__cdecl*)(
       int32_t, void*, const char*, void**);
+  using GetExpressionAnsi = int32_t (__cdecl*)(int32_t, void*, void**);
+  using SetExpressionAnsi = int32_t (__cdecl*)(int32_t, void*, const char*);
 
   ok = configure_mask_scene("rectangle") && ok;
   const bool saved_mask_model_enabled =
@@ -1452,19 +1798,27 @@ bool verify_aegp_scene_mutation_transactions() {
   g_aegp_comp_idle_roundtrip_mode = false;
   const void* mask_suite_raw = nullptr;
   const void* mask_stream_suite_raw = nullptr;
+  const void* mask_stream_suite4_raw = nullptr;
   const void* keyframe_suite_raw = nullptr;
+  const void* keyframe_suite4_raw = nullptr;
   const void* dynamic_suite_raw = nullptr;
   ok = acquire_suite("AEGP Layer Mask Suite", 7, &mask_suite_raw) == 0 &&
       acquire_suite("AEGP Stream Suite", 11, &mask_stream_suite_raw) == 0 &&
+      acquire_suite("AEGP Stream Suite", 9, &mask_stream_suite4_raw) == 0 &&
       acquire_suite("AEGP Keyframe Suite", 5, &keyframe_suite_raw) == 0 &&
+      acquire_suite("AEGP Keyframe Suite", 4, &keyframe_suite4_raw) == 0 &&
       acquire_suite("AEGP Dynamic Stream Suite", 5, &dynamic_suite_raw) == 0 &&
       ok;
   const auto* mask_slots =
       static_cast<void* const*>(const_cast<void*>(mask_suite_raw));
   const auto* mask_stream_slots =
       static_cast<void* const*>(const_cast<void*>(mask_stream_suite_raw));
+  const auto* mask_stream4_slots =
+      static_cast<void* const*>(const_cast<void*>(mask_stream_suite4_raw));
   const auto* key_slots =
       static_cast<void* const*>(const_cast<void*>(keyframe_suite_raw));
+  const auto* key4_slots =
+      static_cast<void* const*>(const_cast<void*>(keyframe_suite4_raw));
   const auto* dynamic_slots =
       static_cast<void* const*>(const_cast<void*>(dynamic_suite_raw));
   const auto get_mask = mask_slots
@@ -1478,8 +1832,21 @@ bool verify_aegp_scene_mutation_transactions() {
   const auto dispose_mask_value = mask_stream_slots
       ? reinterpret_cast<int32_t (__cdecl*)(StreamValue*)>(
             mask_stream_slots[14]) : nullptr;
+  const auto get_expression_ansi = mask_stream4_slots
+      ? reinterpret_cast<GetExpressionAnsi>(mask_stream4_slots[19]) : nullptr;
+  const auto set_expression_ansi = mask_stream4_slots
+      ? reinterpret_cast<SetExpressionAnsi>(mask_stream4_slots[20]) : nullptr;
+  void* rejected_ansi_expression = reinterpret_cast<void*>(1);
+  ok = mask_stream4_slots &&
+      mask_stream_suite4_raw == g_aegp_stream_suite4.data() &&
+      get_expression_ansi && set_expression_ansi &&
+      get_expression_ansi(1, nullptr, &rejected_ansi_expression) == 4 &&
+      rejected_ansi_expression == nullptr &&
+      set_expression_ansi(1, nullptr, "x") == 4 && ok;
   const auto key_count = key_slots
       ? reinterpret_cast<KeyframeCount>(key_slots[0]) : nullptr;
+  const auto get_keyframe_time_v4 = key4_slots
+      ? reinterpret_cast<GetKeyframeTimeV4>(key4_slots[1]) : nullptr;
   const auto insert_key = key_slots
       ? reinterpret_cast<InsertKeyframe>(key_slots[2]) : nullptr;
   const auto delete_key = key_slots
@@ -1524,7 +1891,8 @@ bool verify_aegp_scene_mutation_transactions() {
       ? reinterpret_cast<SetDynamicName>(dynamic_slots[12]) : nullptr;
   const auto add_dynamic = dynamic_slots
       ? reinterpret_cast<AddDynamic>(dynamic_slots[14]) : nullptr;
-  ok = ok && get_mask && dispose_mask_fn && get_mask_stream &&
+  ok = ok && keyframe_suite4_raw == g_aegp_keyframe_suite4.data() &&
+      get_keyframe_time_v4 && get_mask && dispose_mask_fn && get_mask_stream &&
       dispose_mask_stream && dispose_mask_value && key_count && insert_key &&
       delete_key && start_add && add_key && end_add && get_key_value &&
       set_key_value && get_tangents && set_tangents && set_ease &&
@@ -1578,6 +1946,11 @@ bool verify_aegp_scene_mutation_transactions() {
   HostKeyframe* key = keyframe_at(mask_stream_record, inserted_index);
   ok = ok && mask_stream_record && key &&
       key->identity.kind == aexcompat::scene_model::ObjectKind::keyframe;
+  HostTime observed_key_time{-1, 0};
+  ok = ok && get_keyframe_time_v4(
+                 mask_stream, inserted_index, 1, &observed_key_time) == 0 &&
+      observed_key_time.value == key_time.value &&
+      observed_key_time.scale == key_time.scale;
   const auto key_identity = key ? key->identity :
       aexcompat::scene_model::Identity{};
 
@@ -1930,6 +2303,8 @@ bool verify_aegp_scene_mutation_transactions() {
 
   ok = release_suite("AEGP Dynamic Stream Suite", 5) == 0 && ok;
   ok = release_suite("AEGP Keyframe Suite", 5) == 0 && ok;
+  ok = release_suite("AEGP Keyframe Suite", 4) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", 9) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 11) == 0 && ok;
   ok = release_suite("AEGP Layer Mask Suite", 7) == 0 && ok;
   g_mask_scene.clear();
@@ -1942,46 +2317,532 @@ bool verify_aegp_scene_mutation_transactions() {
   return ok && suite_leases_balanced();
 }
 
-bool verify_aegp_installed_effect_catalog_suite4() {
+// The parameters a loaded plug-in's effect handle answers with (issue #909).
+//
+// Slot 0 of the effect instance table is seeded at scene start with the probe
+// fixture's key, and `AEGP_GetNewEffectForEffect` hands that same slot to the
+// plug-in this worker loaded. Deciding whose parameters to answer from that
+// key alone answered a real plug-in out of a five-entry fixture table; the
+// instance carries a mark instead. Everything below is a property that broke
+// at some point while getting there.
+bool verify_aegp_loaded_plugin_effect_streams() {
+  if (!g_hooks.get_new_effect_for_effect || !g_hooks.dispose_effect ||
+      !g_hooks.get_effect_num_param_streams_v2 || !g_hooks.get_new_effect_stream_v2 ||
+      !g_hooks.get_stream_name_v2 || !g_hooks.get_stream_type_v2 ||
+      !g_hooks.get_new_stream_value_v2 || !g_hooks.dispose_stream_value_v2 ||
+      !g_hooks.dispose_stream_v2 || !g_hooks.effect)
+    return false;
+  using aexcompat::worker_runtime::parameters::ParamRecord;
+  auto& records = aexcompat::worker_runtime::parameters::state().records;
+  auto& timelines = aexcompat::worker_runtime::parameters::state().timelines;
+  const auto saved_records = records;
+  const auto saved_timelines = timelines;
+  const auto saved_instances = scene_runtime_state().effect_instances;
+  const auto saved_streams = scene_runtime_state().legacy_effect_streams;
+  const auto saved_leases = scene_runtime_state().effect_leases;
+  const bool saved_effect_live = scene_runtime_state().effect_live;
   const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
-  g_aegp_comp_idle_roundtrip_mode = true;
-  const void* acquired = nullptr;
-  bool ok = acquire_suite("AEGP Effect Suite", 4, &acquired) == 0 &&
-            acquired == g_aegp_effect_suite4.data();
+  g_aegp_comp_idle_roundtrip_mode = false;
+  // Every stream and value this test opens has to be handed back. The suite
+  // lease balance says nothing about that - this test acquires no suite - so
+  // the counters the stream paths keep are what closes the loop, the way the
+  // Levels projector test beside it does it.
+  const uint32_t streams_before = g_aegp_stream_acquires;
+  const uint32_t stream_disposes_before = g_aegp_stream_disposes;
+  const uint32_t values_before = g_aegp_stream_value_acquires;
+  const uint32_t value_disposes_before = g_aegp_stream_value_disposes;
+
+  records.clear();
+  ParamRecord slider{};
+  slider.index = 1;
+  slider.type = 10;  // PF_Param_FLOAT_SLIDER
+  slider.name = "Amount";
+  slider.has_numeric = true;
+  slider.valid_min = 0.0;
+  slider.valid_max = 100.0;
+  slider.default_value = 12.5;
+  slider.has_current = true;
+  slider.current_value = 37.25;
+  records.push_back(slider);
+  ParamRecord matte{};
+  matte.index = 2;
+  matte.type = 0;  // PF_Param_LAYER
+  matte.name = "Matte";
+  records.push_back(matte);
+  for (const auto [type, name] : std::array{
+           std::pair{9, "No Data"}, std::pair{13, "Group Start"},
+           std::pair{14, "Group End"}, std::pair{15, "Button"},
+           std::pair{8, "Custom"}, std::pair{12, "Path"}}) {
+    ParamRecord marker{};
+    marker.index = static_cast<int32_t>(records.size() + 1);
+    marker.type = type;
+    marker.name = name;
+    records.push_back(marker);
+  }
+  ParamRecord fallback{};
+  fallback.index = 9;
+  fallback.type = 1;  // PF_Param_SLIDER
+  fallback.name = "Fallback";
+  fallback.default_value = 23.5;
+  records.push_back(fallback);
+  ParamRecord color{};
+  color.index = 10;
+  color.type = 5;  // PF_Param_COLOR
+  color.name = "Color";
+  color.has_color = true;
+  color.current_color = {64, 128, 192, 255};
+  records.push_back(color);
+  ParamRecord point{};
+  point.index = 11;
+  point.type = 6;  // PF_Param_POINT
+  point.name = "Point";
+  point.component_count = 2;
+  point.current_components = {17.5, -3.25, 0.0};
+  point.default_components = {10.0, 20.0, 0.0};
+  records.push_back(point);
+  ParamRecord point3d{};
+  point3d.index = 12;
+  point3d.type = 18;  // PF_Param_POINT_3D
+  point3d.name = "Point 3D";
+  point3d.component_count = 3;
+  point3d.current_components = {1.25, 2.5, 5.0};
+  records.push_back(point3d);
+  ParamRecord angle{};
+  angle.index = 13;
+  angle.type = 3;  // PF_Param_ANGLE
+  angle.name = "Angle";
+  angle.component_count = 1;
+  angle.current_components = {91.5, 0.0, 0.0};
+  records.push_back(angle);
+  ParamRecord arbitrary{};
+  arbitrary.index = 14;
+  arbitrary.type = 11;  // PF_Param_ARBITRARY_DATA
+  arbitrary.name = "Arbitrary";
+  records.push_back(arbitrary);
+  records[0].name = u8"量";
+  scene_runtime_state().effect_live = false;
+
+  void* effect = nullptr;
+  bool ok = g_hooks.get_new_effect_for_effect(0, g_hooks.effect, &effect) == 0 &&
+      effect == &scene_runtime_state().effect;
+
+  const void* stream_suite4_raw = nullptr;
+  ok = ok && acquire_suite("AEGP Stream Suite", 9, &stream_suite4_raw) == 0 &&
+      stream_suite4_raw == g_aegp_stream_suite4.data();
+  const auto* stream_suite4_slots =
+      static_cast<void* const*>(const_cast<void*>(stream_suite4_raw));
+  using GetEffectStreamCount = int32_t (__cdecl*)(void*, int32_t*);
+  using GetEffectStream = int32_t (__cdecl*)(int32_t, void*, int32_t, void**);
+  using DisposeStream = int32_t (__cdecl*)(void*);
+  using GetStreamName = int32_t (__cdecl*)(int32_t, void*, uint8_t, void**);
+  using GetStreamType = int32_t (__cdecl*)(void*, int32_t*);
+  using GetStreamValue = int32_t (__cdecl*)(
+      int32_t, void*, int32_t, const suite_abi::AegpTime*, uint8_t,
+      scene_runtime::AegpStreamValue*);
+  using DisposeStreamValue = int32_t (__cdecl*)(scene_runtime::AegpStreamValue*);
+  const auto get_v9_stream_count = stream_suite4_slots
+      ? reinterpret_cast<GetEffectStreamCount>(stream_suite4_slots[4]) : nullptr;
+  const auto get_v9_effect_stream = stream_suite4_slots
+      ? reinterpret_cast<GetEffectStream>(stream_suite4_slots[5]) : nullptr;
+  const auto dispose_v9_stream = stream_suite4_slots
+      ? reinterpret_cast<DisposeStream>(stream_suite4_slots[7]) : nullptr;
+  const auto get_v9_stream_name = stream_suite4_slots
+      ? reinterpret_cast<GetStreamName>(stream_suite4_slots[8]) : nullptr;
+  const auto get_v9_stream_type = stream_suite4_slots
+      ? reinterpret_cast<GetStreamType>(stream_suite4_slots[12]) : nullptr;
+  const auto get_v9_stream_value = stream_suite4_slots
+      ? reinterpret_cast<GetStreamValue>(stream_suite4_slots[13]) : nullptr;
+  const auto dispose_v9_stream_value = stream_suite4_slots
+      ? reinterpret_cast<DisposeStreamValue>(stream_suite4_slots[14]) : nullptr;
+
+  // Counted the way AE counts: the input layer plus one per declared
+  // parameter. Keyed on the fixture instead, this answered 5.
   int32_t count = -1;
-  ok = ok && aegp_get_num_installed_effects(&count) == 0 &&
+  ok = ok && get_v9_stream_count && get_v9_effect_stream &&
+      dispose_v9_stream && get_v9_stream_name && get_v9_stream_type &&
+      get_v9_stream_value && dispose_v9_stream_value &&
+      get_v9_stream_count(effect, &count) == 0 && count == 15;
+
+  void* v9_amount = nullptr;
+  ok = ok && get_v9_effect_stream(0, effect, 1, &v9_amount) == 0 && v9_amount;
+  const void* keyframe_suite4_raw = nullptr;
+  ok = ok && acquire_suite(
+                 "AEGP Keyframe Suite", 4, &keyframe_suite4_raw) == 0 &&
+      keyframe_suite4_raw == g_aegp_keyframe_suite4.data();
+  const auto* keyframe4_slots =
+      static_cast<void* const*>(const_cast<void*>(keyframe_suite4_raw));
+  using GetStreamNumKeyframes = int32_t (__cdecl*)(void*, int32_t*);
+  using InsertKeyframe = int32_t (__cdecl*)(
+      void*, int16_t, const suite_abi::AegpTime*, int32_t*);
+  const auto get_v4_keyframe_count = keyframe4_slots
+      ? reinterpret_cast<GetStreamNumKeyframes>(keyframe4_slots[0]) : nullptr;
+  const auto insert_v4_keyframe = keyframe4_slots
+      ? reinterpret_cast<InsertKeyframe>(keyframe4_slots[2]) : nullptr;
+  int32_t v4_keyframe_count = -1;
+  int32_t rejected_keyframe_index = 0x12345678;
+  const suite_abi::AegpTime rejected_keyframe_time{1, 30};
+  ok = ok && get_v4_keyframe_count && insert_v4_keyframe &&
+      get_v4_keyframe_count(v9_amount, &v4_keyframe_count) == 0 &&
+      v4_keyframe_count == 0 &&
+      insert_v4_keyframe(
+          v9_amount, 1, &rejected_keyframe_time,
+          &rejected_keyframe_index) == 4 &&
+      rejected_keyframe_index == 0x12345678;
+  aexcompat::parameter_animation::ParameterTimeline animated{};
+  animated.slot = 1;
+  animated.keys.push_back({0, 30, false,
+      aexcompat::parameter_animation::AnimationValueKind::Scalar, 12.5});
+  timelines = {animated};
+  int32_t animated_count_sentinel = 0x12345678;
+  ok = ok &&
+      get_v4_keyframe_count(v9_amount, &animated_count_sentinel) == 4 &&
+      animated_count_sentinel == 0x12345678;
+  timelines.clear();
+  void* v9_name_handle = nullptr;
+  void* v9_name_data = nullptr;
+  int32_t v9_type = -1;
+  scene_runtime::AegpStreamValue v9_value{};
+  suite_abi::AegpTime v9_time{0, 30};
+  const int32_t v9_name_error =
+      get_v9_stream_name(0, v9_amount, 1, &v9_name_handle);
+  const int32_t v9_lock_error = v9_name_handle
+      ? aexcompat::worker_runtime::handles::lock_aegp_mem_handle(
+            v9_name_handle, &v9_name_data)
+      : 4;
+  const int32_t v9_type_error = get_v9_stream_type(v9_amount, &v9_type);
+  const int32_t v9_value_error =
+      get_v9_stream_value(0, v9_amount, 1, &v9_time, 1, &v9_value);
+  ok = ok && v9_name_error == 0 &&
+      v9_name_handle &&
+      v9_lock_error == 0 &&
+      v9_name_data &&
+      std::char_traits<char16_t>::compare(
+          static_cast<const char16_t*>(v9_name_data), u"量", 2) == 0 &&
+      aexcompat::worker_runtime::handles::unlock_aegp_mem_handle(
+          v9_name_handle) == 0 &&
+      v9_type_error == 0 && v9_type == 5 && v9_value_error == 0;
+  ok = dispose_v9_stream_value(&v9_value) == 0 && ok;
+  ok = aexcompat::worker_runtime::handles::free_aegp_mem_handle(
+           v9_name_handle) == 0 && ok;
+  ok = dispose_v9_stream(v9_amount) == 0 && ok;
+  ok = release_suite("AEGP Keyframe Suite", 4) == 0 && ok;
+  records[0].name.assign("\xc0\xaf", 2);
+  void* invalid_name_stream = nullptr;
+  void* invalid_name_handle = reinterpret_cast<void*>(1);
+  ok = ok &&
+      get_v9_effect_stream(0, effect, 1, &invalid_name_stream) == 0 &&
+      invalid_name_stream &&
+      get_v9_stream_name(
+          0, invalid_name_stream, 1, &invalid_name_handle) == 4 &&
+      invalid_name_handle == nullptr;
+  ok = dispose_v9_stream(invalid_name_stream) == 0 && ok;
+  records[0].name = "Amount";
+
+  // Index 0 is the input layer, which has no record of its own and still
+  // opens, as a layer stream.
+  void* input = nullptr;
+  char name[32]{};
+  int32_t type = -1;
+  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 0, &input) == 0 && input &&
+      g_hooks.get_stream_name_v2(input, 1, name) == 0 && std::strcmp(name, "Input") == 0 &&
+      g_hooks.get_stream_type_v2(input, &type) == 0 && type == 9;
+
+  // The declared parameters, by their own names and with their PF types
+  // translated to AEGP stream types: FLOAT_SLIDER 10 -> OneD 5, LAYER 0 ->
+  // LAYER_ID 9. Handing the PF value straight through left every stream
+  // reading as no-data and refusing to open.
+  void* amount = nullptr;
+  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 1, &amount) == 0 && amount &&
+      g_hooks.get_stream_name_v2(amount, 1, name) == 0 && std::strcmp(name, "Amount") == 0 &&
+      g_hooks.get_stream_type_v2(amount, &type) == 0 && type == 5;
+
+  // AE exposes group markers and other valueless parameter definitions as
+  // real NO_DATA streams. They can be enumerated, named, typed, and disposed,
+  // but a value checkout must fail without modifying the caller's output.
+  for (int32_t index = 3; ok && index <= 7; ++index) {
+    void* no_data = nullptr;
+    scene_runtime::AegpStreamValue sentinel{};
+    sentinel.stream = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
+    sentinel.value.fill(std::byte{0x5a});
+    const auto before = sentinel;
+    ok = g_hooks.get_new_effect_stream_v2(0, effect, index, &no_data) == 0 &&
+        no_data && g_hooks.get_stream_name_v2(no_data, 1, name) == 0 &&
+        std::strcmp(name, records[static_cast<std::size_t>(index - 1)].name.c_str()) == 0 &&
+        g_hooks.get_stream_type_v2(no_data, &type) == 0 && type == 0 &&
+        g_hooks.get_new_stream_value_v2(
+            0, no_data, 1, &v9_time, 1, &sentinel) == 4 &&
+        std::memcmp(&sentinel, &before, sizeof(sentinel)) == 0;
+    ok = g_hooks.dispose_stream_v2(no_data) == 0 && ok;
+  }
+
+  // PATH requires a MASK stream implementation; do not misrepresent it as
+  // NO_DATA merely to make enumeration succeed.
+  void* unsupported_path = reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc));
+  ok = ok && g_hooks.get_new_effect_stream_v2(
+                 0, effect, 8, &unsupported_path) == 4 &&
+      unsupported_path == reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc));
+
+  // Past the declared parameters there is nothing to open.
+  void* past = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 15, &past) != 0 &&
+      past == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+
+  // A loaded plug-in reads the parameter runtime's current value, not the
+  // probe fixture's value and not a fabricated zero (issue #929).
+  scene_runtime::AegpStreamValue value{};
+  suite_abi::AegpTime time{0, 30};
+  std::array<double, 4> scalars{-1.0, -1.0, -1.0, -1.0};
+  ok = ok && g_hooks.get_new_stream_value_v2(0, amount, 1, &time, 1, &value) == 0;
+  if (ok) std::memcpy(scalars.data(), value.value.data(), sizeof(scalars));
+  ok = ok && scalars == std::array<double, 4>{37.25, 0.0, 0.0, 0.0};
+  // Non-short-circuiting, like the stream disposes below: the check that
+  // can fail just above it is the one that leaves a value checked out,
+  // and skipping the dispose there would leave the stream undisposable
+  // and its borrow spent.
+  ok = g_hooks.dispose_stream_value_v2(&value) == 0 && ok;
+
+  const auto read_loaded_value = [&](int32_t index,
+                                     const std::array<double, 4>& expected) {
+    void* loaded_stream = nullptr;
+    scene_runtime::AegpStreamValue loaded_value{};
+    std::array<double, 4> actual{};
+    bool read_ok = g_hooks.get_new_effect_stream_v2(
+                       0, effect, index, &loaded_stream) == 0 &&
+        loaded_stream && g_hooks.get_new_stream_value_v2(
+                             0, loaded_stream, 1, &time, 1,
+                             &loaded_value) == 0;
+    if (read_ok)
+      std::memcpy(actual.data(), loaded_value.value.data(), sizeof(actual));
+    read_ok = read_ok && actual == expected;
+    if (loaded_value.stream)
+      read_ok = g_hooks.dispose_stream_value_v2(&loaded_value) == 0 && read_ok;
+    if (loaded_stream)
+      read_ok = g_hooks.dispose_stream_v2(loaded_stream) == 0 && read_ok;
+    return read_ok;
+  };
+  ok = ok && read_loaded_value(2, {});  // Unconnected layer.
+  ok = ok && read_loaded_value(9, {23.5, 0.0, 0.0, 0.0});
+  ok = ok && read_loaded_value(
+                 10, {64.0 / 255.0, 128.0 / 255.0,
+                      192.0 / 255.0, 1.0});
+  ok = ok && read_loaded_value(11, {17.5, -3.25, 0.0, 0.0});
+  ok = ok && read_loaded_value(12, {1.25, 2.5, 5.0, 0.0});
+  ok = ok && read_loaded_value(13, {91.5, 0.0, 0.0, 0.0});
+
+  // Cross the production assignment seam: scalar current values replace the
+  // declared default, while point percentages become current-frame pixels in
+  // both PF_ParamDef and the AEGP stream view.
+  aexcompat::worker_runtime::parameter_execution::Definitions definitions(
+      records.size() + 1);
+  aexcompat::worker_runtime::parameter_execution::initialize_parameter_definitions(
+      definitions, 200, 80);
+  aexcompat::worker_runtime::parameters::RequestedAssignment scalar_override{};
+  scalar_override.id = L"Amount";
+  scalar_override.index = 1;
+  scalar_override.kind =
+      aexcompat::worker_runtime::parameters::RequestedKind::Float;
+  scalar_override.value = 81.75;
+  aexcompat::worker_runtime::parameters::RequestedAssignment point_override{};
+  point_override.id = L"Point";
+  point_override.index = 11;
+  point_override.kind =
+      aexcompat::worker_runtime::parameters::RequestedKind::Point;
+  point_override.components = {25.0, 50.0, 0.0};
+  aexcompat::worker_runtime::parameters::RequestedAssignment color_override{};
+  color_override.id = L"Color";
+  color_override.index = 10;
+  color_override.kind =
+      aexcompat::worker_runtime::parameters::RequestedKind::Color;
+  color_override.color = {16, 32, 64, 128};
+  ok = ok &&
+      aexcompat::worker_runtime::parameter_execution::apply_requested_assignments(
+          definitions, {scalar_override, point_override, color_override},
+          200, 80) &&
+      read_loaded_value(1, {81.75, 0.0, 0.0, 0.0}) &&
+      read_loaded_value(11, {50.0, 40.0, 0.0, 0.0}) &&
+      read_loaded_value(
+          10, {16.0 / 255.0, 32.0 / 255.0,
+               64.0 / 255.0, 128.0 / 255.0});
+
+  point_override.components = {40000.0, -50000.0, 0.0};
+  aexcompat::worker_runtime::parameters::RequestedAssignment angle_override{};
+  angle_override.id = L"Angle";
+  angle_override.index = 13;
+  angle_override.kind =
+      aexcompat::worker_runtime::parameters::RequestedKind::Angle;
+  angle_override.components = {32768.0, 0.0, 0.0};
+  ok = ok &&
+      aexcompat::worker_runtime::parameter_execution::apply_requested_assignments(
+          definitions, {point_override, angle_override}, 200, 80) &&
+      read_loaded_value(11, {32767.0, -32768.0, 0.0, 0.0}) &&
+      read_loaded_value(13, {32767.0, 0.0, 0.0, 0.0});
+
+  const auto committed_definitions = definitions;
+  const double committed_scalar = records[0].current_value;
+  const auto committed_point = records[10].current_components;
+  auto invalid_second = point_override;
+  invalid_second.index = 1;
+  scalar_override.value = 42.0;
+  ok = ok &&
+      !aexcompat::worker_runtime::parameter_execution::apply_requested_assignments(
+          definitions, {scalar_override, invalid_second}, 200, 80) &&
+      definitions == committed_definitions &&
+      records[0].current_value == committed_scalar &&
+      records[10].current_components == committed_point;
+
+  // A fresh frame without overrides returns to its effective defaults. The
+  // changed extent catches stale point pixels from the preceding frame.
+  aexcompat::worker_runtime::parameter_execution::initialize_parameter_definitions(
+      definitions, 300, 100);
+  ok = ok && read_loaded_value(1, {12.5, 0.0, 0.0, 0.0}) &&
+      read_loaded_value(10, {}) &&
+      read_loaded_value(11, {30.0, 20.0, 0.0, 0.0});
+
+  // Arbitrary data has no bounded ParamRecord representation. Refuse it
+  // without modifying the caller's output or consuming the stream borrow.
+  void* arbitrary_stream = nullptr;
+  scene_runtime::AegpStreamValue arbitrary_value{};
+  arbitrary_value.stream = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  arbitrary_value.value.fill(std::byte{0x5a});
+  const auto arbitrary_before = arbitrary_value;
+  ok = ok && g_hooks.get_new_effect_stream_v2(
+                 0, effect, 14, &arbitrary_stream) == 0 &&
+      arbitrary_stream && g_hooks.get_new_stream_value_v2(
+                              0, arbitrary_stream, 1, &time, 1,
+                              &arbitrary_value) == 4 &&
+      std::memcmp(&arbitrary_value, &arbitrary_before,
+                  sizeof(arbitrary_value)) == 0;
+  ok = g_hooks.dispose_stream_v2(arbitrary_stream) == 0 && ok;
+
+  // A null stream handle is refused, not dereferenced.
+  scene_runtime::AegpStreamValue unused{};
+  ok = ok && g_hooks.get_new_stream_value_v2(0, nullptr, 1, &time, 1, &unused) != 0;
+  // So is a negative caller id.
+  ok = ok && g_hooks.get_new_stream_value_v2(-1, amount, 1, &time, 1, &unused) != 0;
+
+  // A stream opened under an id and read under 0. This is what an
+  // unregistered plug-in does - it has no id of its own to give back, and 0
+  // is not a claim to be anyone - and requiring the read to name the open's
+  // id refused it, ending the frame DeepGlow2 had opened its matte stream to
+  // answer (issue #958). A different id is still refused, which is the half
+  // `verify_aegp_effect_stack` pins; without this half, restoring the strict
+  // rule leaves every self-test green.
+  void* under_seven = nullptr;
+  scene_runtime::AegpStreamValue borrowed{};
+  ok = ok && g_hooks.get_new_effect_stream_v2(7, effect, 1, &under_seven) == 0 &&
+      under_seven &&
+      g_hooks.get_new_stream_value_v2(8, under_seven, 1, &time, 1, &unused) != 0 &&
+      g_hooks.get_new_stream_value_v2(0, under_seven, 1, &time, 1, &borrowed) == 0;
+  ok = g_hooks.dispose_stream_value_v2(&borrowed) == 0 && ok;
+  ok = g_hooks.dispose_stream_v2(under_seven) == 0 && ok;
+
+  // Disposing the effect handle does not change what its streams answer:
+  // they outlive it, and the mark belongs to the instance.
+  ok = ok && g_hooks.dispose_effect(effect) == 0 &&
+      g_hooks.get_stream_name_v2(amount, 1, name) == 0 &&
+      std::strcmp(name, "Amount") == 0 &&
+      g_hooks.get_stream_type_v2(amount, &type) == 0 && type == 5;
+
+  ok = g_hooks.dispose_stream_v2(amount) == 0 && ok;
+  ok = g_hooks.dispose_stream_v2(input) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", 9) == 0 && ok;
+
+  // Restored whether or not the checks passed: a failed run must not leave the
+  // scene holding this test's streams and leases, the way the mutation
+  // transaction test beside it restores the same three tables.
+  records = saved_records;
+  timelines = saved_timelines;
+  scene_runtime_state().effect_instances = saved_instances;
+  scene_runtime_state().legacy_effect_streams = saved_streams;
+  scene_runtime_state().effect_leases = saved_leases;
+  scene_runtime_state().effect_live = saved_effect_live;
+  g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
+  return ok &&
+      g_aegp_stream_acquires - streams_before ==
+          g_aegp_stream_disposes - stream_disposes_before &&
+      g_aegp_stream_value_acquires - values_before ==
+          g_aegp_stream_value_disposes - value_disposes_before;
+}
+
+bool verify_aegp_installed_effect_catalog_suite4() {
+  using GetNumInstalledEffects = int32_t (__cdecl*)(int32_t*);
+  using GetNextInstalledEffect = int32_t (__cdecl*)(int32_t, int32_t*);
+  using GetInstalledEffectText = int32_t (__cdecl*)(int32_t, char*);
+
+  const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
+  // A normally loaded PF effect acquires suites outside the AEGP idle
+  // roundtrip harness. Effect Suite v4 is a public render-time table, so its
+  // availability must not depend on that diagnostic mode.
+  g_aegp_comp_idle_roundtrip_mode = false;
+  const void* acquired2 = nullptr;
+  const void* acquired3 = nullptr;
+  const void* acquired4 = nullptr;
+  bool ok = acquire_suite("AEGP Effect Suite", 2, &acquired2) == 0 &&
+            acquire_suite("AEGP Effect Suite", 3, &acquired3) == 0 &&
+            acquire_suite("AEGP Effect Suite", 4, &acquired4) == 0 &&
+            acquired2 == g_aegp_effect_suite2.data() &&
+            acquired3 == g_aegp_effect_suite3.data() &&
+            acquired4 == g_aegp_effect_suite4.data();
+  const auto* slots2 = static_cast<void* const*>(acquired2);
+  const auto* slots3 = static_cast<void* const*>(acquired3);
+  const auto* slots4 = static_cast<void* const*>(acquired4);
+  for (std::size_t slot = 11; slot <= 15; ++slot) {
+    ok = ok && slots2 && slots3 && slots4 &&
+         slots2[slot] == slots3[slot] && slots3[slot] == slots4[slot];
+  }
+  const auto& suite4_stubs =
+      aexcompat::worker_runtime::unsupported_suite_slots<
+          aexcompat::worker_runtime::UnsupportedSuiteId::aegp_effect_4, 22>();
+  for (const std::size_t slot : {7u, 17u, 18u, 19u, 20u, 21u})
+    ok = ok && slots4 && slots4[slot] == suite4_stubs[slot];
+  const auto get_num = slots3
+      ? reinterpret_cast<GetNumInstalledEffects>(slots3[11]) : nullptr;
+  const auto get_next = slots3
+      ? reinterpret_cast<GetNextInstalledEffect>(slots3[12]) : nullptr;
+  const auto get_name = slots3
+      ? reinterpret_cast<GetInstalledEffectText>(slots3[13]) : nullptr;
+  const auto get_match_name = slots3
+      ? reinterpret_cast<GetInstalledEffectText>(slots3[14]) : nullptr;
+  const auto get_category = slots3
+      ? reinterpret_cast<GetInstalledEffectText>(slots3[15]) : nullptr;
+  ok = ok && get_num && get_next && get_name && get_match_name && get_category;
+  int32_t count = -1;
+  ok = ok && get_num(&count) == 0 &&
        count == static_cast<int32_t>(kAegpInstalledEffects.size());
   count = 0x12345678;
-  ok = ok && aegp_get_num_installed_effects(nullptr) == 4 && count == 0x12345678;
+  ok = ok && get_num(nullptr) == 4 && count == 0x12345678;
 
   int32_t key = -1;
-  ok = ok && aegp_get_next_installed_effect(kAegpInstalledEffectKeyNone, &key) == 0 &&
+  ok = ok && get_next(kAegpInstalledEffectKeyNone, &key) == 0 &&
        key == kAegpInstalledEffects[0].key;
   const int32_t installed_key = key;
   for (std::size_t index = 1; index < kAegpInstalledEffects.size(); ++index)
-    ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
+    ok = ok && get_next(key, &key) == 0 &&
          key == kAegpInstalledEffects[index].key;
-  ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
+  ok = ok && get_next(key, &key) == 0 &&
        key == kAegpInstalledEffectKeyNone;
   key = 0x12345678;
-  ok = ok && aegp_get_next_installed_effect(9999, &key) == 4 &&
+  ok = ok && get_next(9999, &key) == 4 &&
        key == 0x12345678 &&
-       aegp_get_next_installed_effect(kAegpInstalledEffectKeyNone, nullptr) == 4;
+       get_next(kAegpInstalledEffectKeyNone, nullptr) == 4;
 
   std::array<char, kAegpMaxEffectCategoryNameSize> name{};
   std::array<char, kAegpMaxEffectCategoryNameSize> match_name{};
   std::array<char, kAegpMaxEffectCategoryNameSize> category{};
-  ok = ok && aegp_get_effect_name(installed_key, name.data()) == 0 &&
+  ok = ok && get_name(installed_key, name.data()) == 0 &&
        std::strcmp(name.data(), kAegpInstalledEffects[0].name) == 0 &&
-       aegp_get_effect_match_name(installed_key, match_name.data()) == 0 &&
+       get_match_name(installed_key, match_name.data()) == 0 &&
        std::strcmp(match_name.data(), kAegpInstalledEffects[0].match_name) == 0 &&
-       aegp_get_effect_category(installed_key, category.data()) == 0 &&
+       get_category(installed_key, category.data()) == 0 &&
        std::strcmp(category.data(), kAegpInstalledEffects[0].category) == 0 &&
        category[std::strlen(kAegpInstalledEffects[0].category)] == '\0';
   category.fill('Z');
-  ok = ok && aegp_get_effect_category(9999, category.data()) == 4 &&
+  ok = ok && get_category(9999, category.data()) == 4 &&
        std::all_of(category.begin(), category.end(), [](char value) { return value == 'Z'; }) &&
-       aegp_get_effect_category(installed_key, nullptr) == 4;
+       get_category(installed_key, nullptr) == 4;
+  ok = release_suite("AEGP Effect Suite", 4) == 0 && ok;
+  ok = release_suite("AEGP Effect Suite", 3) == 0 && ok;
+  ok = release_suite("AEGP Effect Suite", 2) == 0 && ok;
   g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
   return ok;
 }

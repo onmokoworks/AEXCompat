@@ -23,7 +23,9 @@ struct HostHooks {
 struct SimpleHooks {
   bool (*aegp_installed_effect_catalog)(){};
   bool (*aegp_layer_suite1_slots)(){};
+  bool (*aegp_loaded_plugin_effect_streams)(){};
   bool (*parameter_animation)(){};
+  bool (*parameter_registry_capacity)(){};
   bool (*pf_param_utils)(){};
   bool (*pf_pre_checkout_result)(){};
   bool (*pf_checkout_intersection)(){};
@@ -39,14 +41,32 @@ struct SimpleHooks {
   bool (*world_transform_composite)(){};
   bool (*world_transform_affine)(){};
   bool (*world_transform_blend)(){};
+  bool (*world_transform_convolve)(){};
   bool (*world_transform_transfer_mask)(){};
   bool (*aegp_world_suite3)(){};
   bool (*pf_batch_sampling_suite)(){};
   bool (*pf_ae_channel_native_provider)(){};
   bool (*aegp_layer_render_options_suite2)(){};
   bool (*pf_utils_handle_callbacks)(){};
+  bool (*utility_callback_table)(){};
+  bool (*pf_utils_iterate_slots)(){};
+  bool (*pf_utils_composite_rect)(){};
+  bool (*pf_utils_gaussian_kernel)(){};
+  bool (*checkout_param_beyond_table)(){};
+  bool (*pf_private_callbacks)(){};
+  bool (*bee_scene_facade)(){};
+  bool (*pf_progress_info)(){};
+  bool (*pf_world_facade)(){};
   bool (*flt_blur_suite1)(){};
   bool (*aefx_ace_suite1)(){};
+  bool (*pf_private_effect_suite)(){};
+  bool (*aegp_persistent_data_suite3)(){};
+  bool (*native_stdout_routing)(){};
+  bool (*aegp_persistent_data_suite4)(){};
+  bool (*headless_system_sound_suppression)(){};
+  bool (*argb32f_depth_conversion)(){};
+  bool (*pixel_depth_conform)(){};
+  bool (*dispatch_pixel_depth_rule)(){};
 };
 
 struct Hooks {

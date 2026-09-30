@@ -2,7 +2,8 @@
 /// `kind == "layer"`) in declaration order. Taken from the raw discovery
 /// parameters: `build_item` never maps a layer into a config item, so the
 /// registered `defaults` cannot contain one.
-fn layer_slots_of(parameters: &[InteractiveParameter]) -> Vec<u32> {
+#[doc(hidden)]
+pub fn layer_slots_of(parameters: &[InteractiveParameter]) -> Vec<u32> {
     parameters
         .iter()
         .filter(|parameter| parameter.kind == "layer")
@@ -217,6 +218,8 @@ fn build_item(
         "float" => {
             let (min, max) = bounded_range(parameter)?;
             let ptr = leak_track(item_name, parameter.value, min, max, track_step(max - min));
+            let mut sent = parameter.clone();
+            sent.value = sent.value.clamp(min, max);
             Some((
                 ptr as *const c_void,
                 ItemReader::Track {
@@ -224,22 +227,19 @@ fn build_item(
                     slot: parameter.slot,
                     integer: false,
                 },
-                parameter.clone(),
+                sent,
             ))
         }
         "integer" => {
             if !parameter.choices.is_empty() {
                 // Popup -> dropdown (AE popups are 1-based).
                 let count = parameter.choices.len() as i32;
-                let ptr = leak_select(
-                    item_name,
-                    (parameter.value as i32).clamp(1, count),
-                    &parameter.choices,
-                );
+                let selected = (parameter.value as i32).clamp(1, count);
+                let ptr = leak_select(item_name, selected, &parameter.choices);
                 let mut sent = parameter.clone();
                 sent.minimum = 1.0;
                 sent.maximum = count as f64;
-                sent.value = sent.value.clamp(1.0, count as f64);
+                sent.value = f64::from(selected);
                 return Some((
                     ptr as *const c_void,
                     ItemReader::Select {
@@ -252,16 +252,20 @@ fn build_item(
             let (min, max) = bounded_range(parameter)?;
             if min == 0.0 && max == 1.0 {
                 let ptr = leak_checkbox(item_name, parameter.value != 0.0);
+                let mut sent = parameter.clone();
+                sent.value = f64::from(parameter.value != 0.0);
                 Some((
                     ptr as *const c_void,
                     ItemReader::Checkbox {
                         ptr,
                         slot: parameter.slot,
                     },
-                    parameter.clone(),
+                    sent,
                 ))
             } else {
                 let ptr = leak_track(item_name, parameter.value.round(), min, max, 1.0);
+                let mut sent = parameter.clone();
+                sent.value = sent.value.round().clamp(min, max);
                 Some((
                     ptr as *const c_void,
                     ItemReader::Track {
@@ -269,7 +273,7 @@ fn build_item(
                         slot: parameter.slot,
                         integer: true,
                     },
-                    parameter.clone(),
+                    sent,
                 ))
             }
         }
@@ -469,13 +473,16 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
     unsafe { ((*video).get_image_data)(pixels.as_mut_ptr()) };
     let rgba = pixels_to_bytes(&pixels);
 
-    // Overlay this frame's current config values onto the exposed defaults.
+    // Overlay this frame's current config values onto the exposed defaults,
+    // then transport only actual changes. An untouched UI must leave the
+    // PARAMS_SETUP definitions untouched, matching AE's parameter contract.
     let parameters = if ctx.defaults.is_empty() {
         None
     } else {
         let mut values = ctx.defaults.clone();
         apply_readers(&mut values, &ctx.readers);
-        Some(values)
+        let changed = changed_interactive_parameters(&ctx.defaults, &values);
+        (!changed.is_empty()).then_some(changed)
     };
 
     let effect_id = unsafe { (*object).effect_id };
@@ -535,18 +542,81 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
         .layer_slots
         .first()
         .and_then(|&slot| read_virtual_buffer_rgba8(video).map(|(_, _, rgba)| (slot, rgba)));
-    match render_on(&tx, plugin_index, current_time, rgba, parameters, layer) {
+    let reply = render_on(&tx, plugin_index, current_time, rgba, parameters, layer);
+    let reply = match reply {
+        FrameReply::RenderedClassicFallback(frame) => {
+            match &route {
+                SessionRoute::PerEffect(_, serial) => {
+                    remove_session(&ctx.sessions, effect_id, *serial)
+                }
+                SessionRoute::Pooled(_, serial, _, key) => pool_remove(key, *serial),
+            }
+            if let Ok(mut fallbacks) = ctx.classic_fallbacks.lock() {
+                fallbacks.insert(effect_id, identity.clone());
+            } else {
+                return false;
+            }
+            FrameReply::Rendered(frame)
+        }
+        other => other,
+    };
+    match reply {
         FrameReply::Rendered(frame) => {
-            // Says so once when a filter that had been failing renders again;
-            // silent for one that never stopped.
-            report_frame_recovered(&ctx.plugin);
-            // A filter object cannot change the image size; reject a resized frame.
-            if frame.width != width || frame.height != height {
+            let out = bytes_to_pixels(&frame.pixels);
+            let output_pixel_count = u64::from(frame.width) * u64::from(frame.height);
+            if frame.width == 0
+                || frame.height == 0
+                || frame.width > MAX_DIMENSION
+                || frame.height > MAX_DIMENSION
+                || output_pixel_count > MAX_PIXELS
+                || out.len() as u64 != output_pixel_count
+            {
+                // Unreachable while the broker validates the frame it sends,
+                // which is exactly why it must say something if it happens -
+                // dropping a frame in silence is how #914 stayed invisible.
+                report_frame_trouble(
+                    &ctx.plugin,
+                    FrameTrouble::Refused("the frame's size is outside this bridge's bounds"),
+                );
                 return true;
             }
-            let out = bytes_to_pixels(&frame.pixels);
-            if out.len() == count {
-                unsafe { ((*video).set_image_data)(out.as_ptr(), width as i32, height as i32) };
+            // The worker reports the frame top-left in layer coordinates.
+            // filter2's set_image_data has no placement argument, so publish an
+            // object-sized image after placing the returned frame onto the
+            // current object pixels. This preserves pixels outside a partial
+            // result and clips an expanded result at all four object edges.
+            let mut placed = pixels;
+            let overlaps = match place_frame_at_origin(
+                &mut placed,
+                width,
+                height,
+                &out,
+                frame.width,
+                frame.height,
+                frame.origin_x,
+                frame.origin_y,
+            ) {
+                Ok(overlaps) => overlaps,
+                Err(()) => {
+                    report_frame_trouble(
+                        &ctx.plugin,
+                        FrameTrouble::Refused(
+                            "the frame placement is outside this bridge's bounds",
+                        ),
+                    );
+                    return true;
+                }
+            };
+            // Says so once when a filter that had been failing renders again;
+            // silent for one that never stopped. After the refusal above, not
+            // before it: a filter refused on every frame would otherwise clear
+            // its own trouble state each time, so the once-per-60 collapse
+            // never engaged and every frame printed both "rendering again" and
+            // the refusal - at preview frame rate, and the first of the two
+            // untrue.
+            report_frame_recovered(&ctx.plugin);
+            if overlaps {
+                unsafe { ((*video).set_image_data)(placed.as_ptr(), width as i32, height as i32) };
             }
             true
         }
@@ -557,6 +627,7 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
             report_frame_trouble(&ctx.plugin, FrameTrouble::Error(code, said.as_deref()));
             true
         }
+        FrameReply::RenderedClassicFallback(_) => unreachable!("normalized above"),
         FrameReply::SessionLost(reason) => {
             report_frame_trouble(&ctx.plugin, FrameTrouble::SessionLost(&reason));
             // Drop this exact instance so the next frame reopens, without
@@ -580,14 +651,36 @@ enum FrameTrouble<'a> {
     Error(i64, Option<&'a str>),
     /// The session is gone; the next frame opens a fresh one.
     SessionLost(&'a str),
+    /// The frame arrived but this bridge would not hand it to AviUtl2. The
+    /// session stays usable; the object keeps the pixels it had.
+    Refused(&'a str),
 }
 
-/// The `PF_Err` name for a code AE defines, so a reader does not have to look
-/// up a bare number. Codes outside the enum - a plug-in's own, or one of the
-/// host's negative internal ones - keep just their number.
-fn pf_error_name(code: i64) -> Option<&'static str> {
+/// The name AE's own headers give a selector's return code, so a reader does not
+/// have to look up a bare number. Codes outside both enumerations - a plug-in's
+/// own, or one of the host's negative internal ones - keep just their number.
+///
+/// The 512 block is `PF_Err`, not an effect's private codes: `AE_Effect.h`
+/// defines `PF_FIRST_ERR` as 512 and numbers `PF_Err_INTERNAL_STRUCT_DAMAGED`
+/// onward from it by ordinal. Issue #704 recorded the opposite - "the SDK's
+/// PF_Err / A_Err enumerations do not have this value", with a hypothesis that
+/// Adobe's own effects define private codes based at 512 - because `A_Err`,
+/// which stops at 13, was the enumeration consulted. Its 41 plug-ins answering
+/// 512 are answering `PF_Err_INTERNAL_STRUCT_DAMAGED`.
+///
+/// Below 512 only what a *selector* can return is named. `PF_Err` defines
+/// exactly `NONE` (0), `OUT_OF_MEMORY` (4) and the 512 block, so a small code
+/// is otherwise the plug-in's own and keeps just its number. The one exception
+/// is 13: `A_Err_MISSING_SUITE` reaches a selector's return through the SDK's
+/// own suite-acquire helper, and #704 recorded four AE effects answering it.
+/// The rest of `A_Err` (1..=6, 22..=24) is what an AEGP suite call answers, not
+/// a selector, and naming those here would label a plug-in's own code 2 as
+/// `A_Err_STRUCT` and send a reader after a host failure that never happened.
+#[doc(hidden)]
+pub fn pf_error_name(code: i64) -> Option<&'static str> {
     Some(match code {
         4 => "PF_Err_OUT_OF_MEMORY",
+        13 => "A_Err_MISSING_SUITE",
         512 => "PF_Err_INTERNAL_STRUCT_DAMAGED",
         513 => "PF_Err_INVALID_INDEX",
         514 => "PF_Err_UNRECOGNIZED_PARAM_TYPE",
@@ -633,7 +726,7 @@ fn frame_trouble_report(
     // exactly the burial FRAME_TROUBLE_REPORT_INTERVAL exists to prevent.
     let said = match trouble {
         FrameTrouble::Error(_, said) => said,
-        FrameTrouble::SessionLost(_) => None,
+        FrameTrouble::SessionLost(_) | FrameTrouble::Refused(_) => None,
     };
     let detail = said.map(|text| format!(": {text}")).unwrap_or_default();
     let summary = match trouble {
@@ -642,6 +735,7 @@ fn frame_trouble_report(
             None => format!("frame error {code}"),
         },
         FrameTrouble::SessionLost(reason) => format!("session lost: {reason}"),
+        FrameTrouble::Refused(reason) => format!("frame refused: {reason}"),
     };
     match states.get_mut(plugin) {
         Some(state) if state.summary == summary => {
@@ -731,6 +825,13 @@ fn route_session(
     // reuse never pays for reading the host virtual buffer (issue #645).
     open_layers: &dyn Fn() -> Vec<SessionLayer>,
 ) -> Result<SessionRoute, ()> {
+    let use_classic_fallback = ctx
+        .classic_fallbacks
+        .lock()
+        .ok()
+        .and_then(|fallbacks| fallbacks.get(&effect_id).cloned())
+        .is_some_and(|fallback_identity| fallback_identity == *identity);
+    let route_smart = ctx.smart && !use_classic_fallback;
     // An AEX with a layer parameter stays on its per-effect session: only there
     // can the virtual buffer be supplied (a pooled session is shared by members
     // whose parameter layouts differ, so a layer slot valid for one member may
@@ -739,14 +840,15 @@ fn route_session(
     // Issue #816: discovery and render are both in-place, so a search-root
     // identity can always pool compatible members.
     let identity_pools = ctx.closure_identity.is_some();
-    if ctx.layer_slots.is_empty()
+    if route_smart
+        && ctx.layer_slots.is_empty()
         && identity_pools
         && let Some(closure_identity) = &ctx.closure_identity
     {
         let key = PoolKey {
             closure_identity: closure_identity.clone(),
             geom: identity.clone(),
-            smart: ctx.smart,
+            smart: route_smart,
         };
         if let Some((tx, serial, plugin_index)) = pool_sender(&key, &ctx.plugin) {
             return Ok(SessionRoute::Pooled(tx, serial, plugin_index, key));
@@ -758,7 +860,8 @@ fn route_session(
     }
     let (tx, serial) = match existing_sender(&ctx.sessions, effect_id, identity) {
         Some(pair) => pair,
-        None => open_and_get_sender(ctx, effect_id, identity, open_layers).map_err(|_| ())?,
+        None => open_and_get_sender(ctx, effect_id, identity, route_smart, open_layers)
+            .map_err(|_| ())?,
     };
     Ok(SessionRoute::PerEffect(tx, serial))
 }
@@ -781,27 +884,23 @@ fn pool_open_route(
         .position(|(path, _)| path == &ctx.plugin)
         .ok_or_else(|| "requester is not a cluster member".to_owned())?
         as u32;
-    // The swap payload for a member is its exposed defaults, encoded the way
-    // the launch payload is (design §2.1/§4.1); the entry for plugins[0] is
-    // ignored because the launch argv payload wins.
-    let swap_payloads: Vec<Option<String>> = members
+    // A swap preserves the member's PARAMS_SETUP state. Untouched discovered
+    // defaults are definitions, not host assignments; actual per-object
+    // changes arrive with the subsequent frame request.
+    let swap_payloads = vec![None; members.len()];
+    let mut companions: Vec<ApprovedCompanion> = members
         .iter()
-        .enumerate()
-        .map(|(index, member)| {
-            if index == 0 || member.defaults.is_empty() {
-                None
-            } else {
-                encode_interactive_payload(&member.defaults).ok()
-            }
-        })
+        .flat_map(|member| member.companions.iter().cloned())
         .collect();
+    companions.sort_by(|left, right| left.artifact.path.cmp(&right.artifact.path));
+    companions.dedup_by(|left, right| left.artifact.path == right.artifact.path);
     let opened = open_mf_session(MfSessionConfig {
         repository: ctx.repository.clone(),
         plugin: ctx.plugin.clone(),
         dependency: ctx.dependency.clone(),
         sha: ctx.sha.clone(),
         smart: ctx.smart,
-        defaults: ctx.defaults.clone(),
+        plugin_data_selector: ctx.plugin_data_selector.clone(),
         identity: key.geom.clone(),
         // No virtual-buffer layer on a pooled cluster session: the members share
         // one dependency closure but not a parameter layout, so the opener's
@@ -809,6 +908,7 @@ fn pool_open_route(
         // worker fails closed (-3) — a regression for members that rendered
         // fine before. A layer-fed AEX keeps its per-effect session (issue #645).
         layers: Vec::new(),
+        companions,
         cluster: Some(ClusterLaunch {
             plugins: plugins.clone(),
             swap_payloads,
@@ -859,35 +959,225 @@ fn pool_open_route(
 }
 
 /// The owned launch config moved into a session's thread.
+#[derive(Clone)]
 struct MfSessionConfig {
     repository: PathBuf,
     plugin: PathBuf,
     dependency: DependencyConfig,
     sha: String,
     smart: bool,
-    defaults: Vec<InteractiveParameter>,
+    plugin_data_selector: Option<PluginDataEffectSelector>,
     identity: GeomIdentity,
     /// Secondary layers read once at open (issue #645): AviUtl2's virtual buffer
     /// feeding an AEX layer parameter. Read on the AviUtl2 callback thread (only
     /// there can the host texture be read) and moved here for the session thread.
     layers: Vec<SessionLayer>,
+    companions: Vec<ApprovedCompanion>,
     /// Cluster launch (issue #405): when set, the session opens over the
     /// whole same-closure cluster and swaps plugins per request instead of
     /// serving a single AEX.
     cluster: Option<ClusterLaunch>,
 }
 
+fn route_plugin_data_session<R, T, E>(
+    request: R,
+    selector: Option<&PluginDataEffectSelector>,
+    open_default: impl FnOnce(R) -> Result<T, E>,
+    open_selected: impl FnOnce(R, &PluginDataEffectSelector) -> Result<T, E>,
+) -> Result<T, E> {
+    match selector {
+        Some(selector) => open_selected(request, selector),
+        None => open_default(request),
+    }
+}
+
 /// The cluster a pooled session opens over (issue #405): the manifest order
 /// (requester first) and each member's swap payload. `plugins[0]` is always
 /// the requesting AEX, matching the base request's positional contract.
+#[derive(Clone)]
 struct ClusterLaunch {
     plugins: Vec<(PathBuf, String)>,
     swap_payloads: Vec<Option<String>>,
 }
 
+fn classic_fallback_identity(
+    plugin: &Path,
+    sha: &str,
+    cluster: Option<&ClusterLaunch>,
+    plugin_index: u32,
+) -> Result<(PathBuf, String), &'static str> {
+    match cluster {
+        Some(cluster) => cluster
+            .plugins
+            .get(plugin_index as usize)
+            .cloned()
+            .ok_or("Classic fallback plugin index is outside the cluster"),
+        None if plugin_index == 0 => Ok((plugin.to_path_buf(), sha.to_owned())),
+        None => Err("single-plugin Classic fallback index is nonzero"),
+    }
+}
+
+fn completed_classic_fallback_reply(
+    rendered: Option<RenderedFrame>,
+    close_clean: bool,
+) -> FrameReply {
+    match (rendered, close_clean) {
+        (Some(frame), true) => FrameReply::RenderedClassicFallback(frame),
+        _ => FrameReply::SessionLost("Classic fallback did not render and close cleanly".into()),
+    }
+}
+
+struct ClassicFallbackRun {
+    reply: FrameReply,
+    smart_authorized: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SmartFallbackEvidence {
+    UntouchedOutput,
+    HeapCorruption,
+}
+
+fn orchestrate_classic_fallback<F>(
+    smart_close: &serde_json::Value,
+    evidence: SmartFallbackEvidence,
+    launch_classic_once: F,
+) -> ClassicFallbackRun
+where
+    F: FnOnce() -> Result<(Option<RenderedFrame>, serde_json::Value), String>,
+{
+    let authorized = match evidence {
+        SmartFallbackEvidence::UntouchedOutput => {
+            validate_abandoned_smart_untouched_close(smart_close)
+        }
+        SmartFallbackEvidence::HeapCorruption => {
+            validate_abandoned_smart_heap_corruption_close(smart_close)
+        }
+    };
+    if authorized.is_err() {
+        return ClassicFallbackRun {
+            reply: FrameReply::SessionLost("Smart attempt failed fallback validation".into()),
+            smart_authorized: false,
+        };
+    }
+    let reply = match launch_classic_once() {
+        Ok((rendered, close)) => completed_classic_fallback_reply(
+            rendered,
+            validate_completed_session_close(&close, false).is_ok(),
+        ),
+        Err(error) => FrameReply::SessionLost(error),
+    };
+    ClassicFallbackRun {
+        reply,
+        smart_authorized: true,
+    }
+}
+
+fn run_classic_fallback_once(
+    config: &MfSessionConfig,
+    plugin_index: u32,
+    retained: &RetainedFrameRequest,
+    roots: &[PathBuf],
+) -> Result<(Option<RenderedFrame>, serde_json::Value), String> {
+    // Preserve the exact request already sent to Smart: this helper never calls
+    // the host and publishes nothing until the fresh Classic close validates.
+    let mut fallback_layers = config.layers.clone();
+    if let Some((slot, pixels)) = &retained.layer
+        && let Some(layer) = fallback_layers.iter_mut().find(|layer| layer.slot == *slot)
+    {
+        layer.rgba.clone_from(pixels);
+    }
+    let mut classic_config = config.clone();
+    let (plugin, sha) = classic_fallback_identity(
+        &config.plugin,
+        &config.sha,
+        config.cluster.as_ref(),
+        plugin_index,
+    )
+    .map_err(str::to_owned)?;
+    classic_config.plugin = plugin;
+    classic_config.sha = sha;
+    classic_config.smart = false;
+    classic_config.cluster = None;
+    classic_config.layers = fallback_layers;
+    let classic_request = SessionOpenRequest {
+        repository: &classic_config.repository,
+        plugin_path: &classic_config.plugin,
+        plugin_sha256: &classic_config.sha,
+        parameters: None,
+        parameter_animation: None,
+        aux_manifest: None,
+        world_dump_dir: None,
+        output_checksum_detail: false,
+        mask_trailer: None,
+        spatial_trailer: None,
+        camera_trailer: None,
+        render_environment_trailer: None,
+        audio_trailer: None,
+        alpha_as_coverage_params: &[],
+        conformance_render_settings: None,
+        layers: &classic_config.layers,
+        dependencies: Vec::new(),
+        companions: classic_config.companions.clone(),
+        dependency_search_dirs: roots.to_vec(),
+        width: classic_config.identity.width,
+        height: classic_config.identity.height,
+        pixel_format: RenderPixelFormat::Argb8,
+        time_step: classic_config.identity.time_step,
+        total_time: classic_config.identity.total_time,
+        time_scale: classic_config.identity.time_scale,
+        frame_deadline: Duration::from_millis(FRAME_DEADLINE_MS),
+        smart: false,
+        gpu_backend: RenderGpuBackend::Auto,
+        gpu_runtime_policy: None,
+        payload_override: None,
+        launch_environment: Default::default(),
+    };
+    let mut classic = route_plugin_data_session(
+        classic_request,
+        classic_config.plugin_data_selector.as_ref(),
+        RenderSession::open,
+        RenderSession::open_plugin_data_effect,
+    )
+    .map_err(|error| format!("Classic fallback open failed: {error}"))?;
+    let classic_outcome = classic.render_frame_with_parameters(
+        0,
+        retained.current_time,
+        &retained.rgba,
+        retained.parameters.as_deref(),
+    );
+    let rendered = match classic_outcome {
+        Ok(outcome) => match outcome.status {
+            FrameStatus::Rendered {
+                pixels,
+                width,
+                height,
+                origin_x,
+                origin_y,
+            } => Some(RenderedFrame {
+                pixels,
+                width,
+                height,
+                origin_x,
+                origin_y,
+            }),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    let classic_close = classic.close();
+    record_session_close(&classic_config, &classic_close);
+    Ok((rendered, classic_close))
+}
+
 /// Opens a session on its own thread, which owns the `!Send` `RenderSession` and
 /// serves render requests until the channel closes or the session is lost.
 fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
+    if config.cluster.is_some() && config.plugin_data_selector.is_some() {
+        return Err(
+            "PluginData secondary effects cannot use a DLL-indexed cluster session".to_owned(),
+        );
+    }
     let identity = config.identity.clone();
     let (tx, rx) = channel::<RenderReq>();
     let (open_tx, open_rx) = channel::<Result<(), String>>();
@@ -895,7 +1185,11 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
     let join = std::thread::Builder::new()
         .name("aex-multifilter-session".into())
         .spawn(move || {
-            let baseline = (!config.defaults.is_empty()).then_some(&config.defaults[..]);
+            // PARAMS_SETUP already installed the plug-in's defaults. Sending
+            // the same values back as assignments is observably different
+            // from an untouched effect in AE. Frames carry only values that
+            // differ from these defaults.
+            let baseline = None;
             // Whether this session actually opened a layer the frames may
             // rewrite (issue #674). Read here, before `config` is borrowed into
             // the open request, and used by the frame loop below to tell "there
@@ -903,7 +1197,11 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
             let dynamic_layer_open = config.layers.iter().any(|layer| layer.dynamic);
             // Issue #816: render is in-place only. The worker resolves the
             // closure through the same search roots discovery inspected.
-            let roots = search_roots_for(&config.plugin, &config.dependency.dirs);
+            let roots = search_roots_for(
+                &config.plugin,
+                &config.dependency.dirs,
+                config.dependency.default_runtime,
+            );
             if roots.is_empty() {
                 let _ = open_tx.send(Err("no dependency search roots resolved".to_owned()));
                 return;
@@ -921,6 +1219,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 output_checksum_detail: false,
                 mask_trailer: None,
                 spatial_trailer: None,
+                camera_trailer: None,
                 render_environment_trailer: None,
                 // The multifilter bridge renders video frames only; an audio
                 // source would come from the host's audio graph, which it
@@ -930,6 +1229,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 conformance_render_settings: None,
                 layers: &config.layers,
                 dependencies,
+                companions: config.companions.clone(),
                 dependency_search_dirs,
                 width: config.identity.width,
                 height: config.identity.height,
@@ -942,6 +1242,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
                 payload_override: None,
+                launch_environment: Default::default(),
             };
             // A pooled session opens over the whole same-closure cluster
             // (issue #405): staging, hashing, the ACL, and the closure's
@@ -1025,7 +1326,12 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         }
                     }
                 }
-                None => match RenderSession::open(request) {
+                None => match route_plugin_data_session(
+                    request,
+                    config.plugin_data_selector.as_ref(),
+                    RenderSession::open,
+                    RenderSession::open_plugin_data_effect,
+                ) {
                     Ok(session) => (session, 0),
                     Err(error) => {
                         let _ = open_tx.send(Err(format!("RenderSession::open failed: {error}")));
@@ -1044,6 +1350,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
             let mut frame_index: u32 = 0;
             let mut current_plugin: u32 = 0;
             while let Ok(req) = rx.recv() {
+                let retained = retain_frame_request(&req);
                 // Pooled cluster session: swap to the frame's plugin first
                 // (design §4.1). A plugin-local GLOBAL_SETUP failure is
                 // reported frame-local and the session stays usable; an
@@ -1087,7 +1394,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 // and still rejects the update is the other case: the pixels no
                 // longer fit what the worker was handed, so the session goes
                 // and the next frame opens one at the new geometry.
-                if let Some((slot, pixels)) = &req.layer
+                if let Some((slot, pixels)) = &retained.layer
                     && dynamic_layer_open
                     && let Err(error) = session.update_dynamic_layer(*slot, pixels)
                 {
@@ -1098,9 +1405,9 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 }
                 let outcome = session.render_frame_with_parameters(
                     frame_index,
-                    req.current_time,
-                    &req.rgba,
-                    req.parameters.as_deref(),
+                    retained.current_time,
+                    &retained.rgba,
+                    retained.parameters.as_deref(),
                 );
                 frame_index = frame_index.wrapping_add(1);
                 let reply = match outcome {
@@ -1109,11 +1416,14 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                             pixels,
                             width,
                             height,
-                            ..
+                            origin_x,
+                            origin_y,
                         } => FrameReply::Rendered(RenderedFrame {
                             pixels,
                             width,
                             height,
+                            origin_x,
+                            origin_y,
                         }),
                         FrameStatus::FrameError {
                             render_error,
@@ -1123,8 +1433,54 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                             render_error,
                             return_message.map(|message| message.text),
                         ),
+                        FrameStatus::SmartOutputUntouched => {
+                            let smart_close = session.close();
+                            let fallback = orchestrate_classic_fallback(
+                                &smart_close,
+                                SmartFallbackEvidence::UntouchedOutput,
+                                || {
+                                    run_classic_fallback_once(
+                                        &config,
+                                        req.plugin_index,
+                                        &retained,
+                                        &roots,
+                                    )
+                                },
+                            );
+                            if !fallback.smart_authorized {
+                                record_session_close(&config, &smart_close);
+                            }
+                            let _ = req.reply.send(fallback.reply);
+                            return;
+                        }
                     },
-                    Err(error) => FrameReply::SessionLost(format!("render_frame failed: {error}")),
+                    Err(error) => {
+                        if config.smart {
+                            let smart_close = session.close();
+                            let fallback = orchestrate_classic_fallback(
+                                &smart_close,
+                                SmartFallbackEvidence::HeapCorruption,
+                                || {
+                                    run_classic_fallback_once(
+                                        &config,
+                                        req.plugin_index,
+                                        &retained,
+                                        &roots,
+                                    )
+                                },
+                            );
+                            if fallback.smart_authorized {
+                                let _ = req.reply.send(fallback.reply);
+                                return;
+                            }
+                            record_session_close(&config, &smart_close);
+                            let _ = req.reply.send(FrameReply::SessionLost(format!(
+                                "render_frame failed: {error}"
+                            )));
+                            return;
+                        }
+                        FrameReply::SessionLost(format!("render_frame failed: {error}"))
+                    }
                 };
                 // A host-protection invariant failure invalidates the whole
                 // session; report it lost so the next frame reopens.
@@ -1140,6 +1496,9 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                             None => format!("session invalidated (render_error {code})"),
                         },
                         FrameReply::Rendered(_) => "session invalidated".to_string(),
+                        FrameReply::RenderedClassicFallback(_) => {
+                            "session invalidated (Classic fallback)".to_string()
+                        }
                     })
                 } else {
                     reply
@@ -1247,6 +1606,7 @@ fn open_and_get_sender(
     ctx: &FilterCtx,
     effect_id: i64,
     identity: &GeomIdentity,
+    smart: bool,
     open_layers: &dyn Fn() -> Vec<SessionLayer>,
 ) -> Result<(Sender<RenderReq>, u64), String> {
     let opened = open_mf_session(MfSessionConfig {
@@ -1254,10 +1614,11 @@ fn open_and_get_sender(
         plugin: ctx.plugin.clone(),
         dependency: ctx.dependency.clone(),
         sha: ctx.sha.clone(),
-        smart: ctx.smart,
-        defaults: ctx.defaults.clone(),
+        smart,
+        plugin_data_selector: ctx.plugin_data_selector.clone(),
         identity: identity.clone(),
         layers: open_layers(),
+        companions: ctx.companions.clone(),
         cluster: None,
     })?;
     let serial = opened.serial;
@@ -1363,6 +1724,35 @@ fn apply_readers(parameters: &mut [InteractiveParameter], readers: &[ItemReader]
     }
 }
 
+/// Selects values whose typed payload differs from the PARAMS_SETUP default.
+/// Metadata changes do not mutate a rendered parameter and are ignored.
+fn changed_interactive_parameters(
+    defaults: &[InteractiveParameter],
+    current: &[InteractiveParameter],
+) -> Vec<InteractiveParameter> {
+    current
+        .iter()
+        .filter(|value| {
+            let Some(default) = defaults.iter().find(|item| item.slot == value.slot) else {
+                return true;
+            };
+            if default.kind != value.kind {
+                return true;
+            }
+            match value.kind.as_str() {
+                "integer" | "path" | "float" => default.value != value.value,
+                "color" => default.color != value.color,
+                "angle" => default.components[0] != value.components[0],
+                "point" => default.components[..2] != value.components[..2],
+                "point3d" => default.components != value.components,
+                "arbitrary_data" => default.debug_summary != value.debug_summary,
+                _ => false,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 fn pixels_to_bytes(pixels: &[PIXEL_RGBA]) -> Vec<u8> {
     let mut out = Vec::with_capacity(pixels.len() * 4);
     for p in pixels {
@@ -1381,4 +1771,74 @@ fn bytes_to_pixels(bytes: &[u8]) -> Vec<PIXEL_RGBA> {
             a: c[3],
         })
         .collect()
+}
+
+fn place_frame_at_origin(
+    destination: &mut [PIXEL_RGBA],
+    destination_width: u32,
+    destination_height: u32,
+    source: &[PIXEL_RGBA],
+    source_width: u32,
+    source_height: u32,
+    origin_x: i32,
+    origin_y: i32,
+) -> Result<bool, ()> {
+    let destination_len = usize::try_from(
+        u64::from(destination_width)
+            .checked_mul(u64::from(destination_height))
+            .ok_or(())?,
+    )
+    .map_err(|_| ())?;
+    let source_len = usize::try_from(
+        u64::from(source_width)
+            .checked_mul(u64::from(source_height))
+            .ok_or(())?,
+    )
+    .map_err(|_| ())?;
+    if destination.len() != destination_len || source.len() != source_len {
+        return Err(());
+    }
+
+    let source_left = i64::from(origin_x);
+    let source_top = i64::from(origin_y);
+    let source_right = source_left.checked_add(i64::from(source_width)).ok_or(())?;
+    let source_bottom = source_top.checked_add(i64::from(source_height)).ok_or(())?;
+    let left = source_left.max(0);
+    let top = source_top.max(0);
+    let right = source_right.min(i64::from(destination_width));
+    let bottom = source_bottom.min(i64::from(destination_height));
+    if left >= right || top >= bottom {
+        return Ok(false);
+    }
+
+    let copy_width = usize::try_from(right - left).map_err(|_| ())?;
+    let source_x = usize::try_from(left - source_left).map_err(|_| ())?;
+    let destination_x = usize::try_from(left).map_err(|_| ())?;
+    let source_stride = usize::try_from(source_width).map_err(|_| ())?;
+    let destination_stride = usize::try_from(destination_width).map_err(|_| ())?;
+    for y in top..bottom {
+        let destination_y = usize::try_from(y).map_err(|_| ())?;
+        let source_y = usize::try_from(y - source_top).map_err(|_| ())?;
+        let source_start = source_y
+            .checked_mul(source_stride)
+            .and_then(|offset| offset.checked_add(source_x))
+            .ok_or(())?;
+        let destination_start = destination_y
+            .checked_mul(destination_stride)
+            .and_then(|offset| offset.checked_add(destination_x))
+            .ok_or(())?;
+        let source_end = source_start.checked_add(copy_width).ok_or(())?;
+        let destination_end = destination_start.checked_add(copy_width).ok_or(())?;
+        let source_row = source.get(source_start..source_end).ok_or(())?;
+        let destination_row = destination
+            .get_mut(destination_start..destination_end)
+            .ok_or(())?;
+        for (destination_pixel, source_pixel) in destination_row.iter_mut().zip(source_row.iter()) {
+            destination_pixel.r = source_pixel.r;
+            destination_pixel.g = source_pixel.g;
+            destination_pixel.b = source_pixel.b;
+            destination_pixel.a = source_pixel.a;
+        }
+    }
+    Ok(true)
 }

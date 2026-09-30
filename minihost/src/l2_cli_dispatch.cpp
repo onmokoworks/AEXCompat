@@ -34,7 +34,12 @@ AuxiliaryOptionResult strip_auxiliary_options(
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
   bool saw_dump_worlds = false, saw_checksum_detail = false;
   bool saw_render_settings = false, saw_authorization = false;
-  bool saw_cluster_manifest = false, saw_dependency_dirs = false;
+  bool saw_cluster_manifest = false, saw_companion_manifest = false;
+  bool saw_dependency_dirs = false;
+  bool saw_plugin_data_selector = false;
+  bool saw_render_diagnostic_layout = false;
+  bool saw_scene_camera = false;
+  int world_capture_count = 0;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
@@ -66,10 +71,30 @@ AuxiliaryOptionResult strip_auxiliary_options(
                hooks.load_cluster_manifest && !saw_cluster_manifest) {
       accepted = hooks.load_cluster_manifest(hooks.context, value);
       saw_cluster_manifest = accepted;
+    } else if (equals(flag, L"--companion-manifest-v1") &&
+               hooks.load_companion_manifest && !saw_companion_manifest) {
+      accepted = hooks.load_companion_manifest(hooks.context, value);
+      saw_companion_manifest = accepted;
     } else if (equals(flag, L"--dependency-dirs-v1") &&
                hooks.set_dependency_search_dirs && !saw_dependency_dirs) {
       accepted = hooks.set_dependency_search_dirs(hooks.context, value);
       saw_dependency_dirs = accepted;
+    } else if (equals(flag, L"--plugin-data-selector-v1") &&
+               hooks.set_plugin_data_selector && !saw_plugin_data_selector) {
+      accepted = hooks.set_plugin_data_selector(hooks.context, value);
+      saw_plugin_data_selector = accepted;
+    } else if (equals(flag, L"--render-diagnostic-layout-v1") &&
+               hooks.parse_render_diagnostic_layout && !saw_render_diagnostic_layout) {
+      accepted = hooks.parse_render_diagnostic_layout(hooks.context, value);
+      saw_render_diagnostic_layout = accepted;
+    } else if (equals(flag, L"--capture-world-handle-v1") &&
+               hooks.parse_world_capture_target && world_capture_count < 16) {
+      accepted = hooks.parse_world_capture_target(hooks.context, value);
+      if (accepted) ++world_capture_count;
+    } else if (equals(flag, L"--scene-camera-v1") &&
+               hooks.parse_scene_camera && !saw_scene_camera) {
+      accepted = hooks.parse_scene_camera(hooks.context, value);
+      saw_scene_camera = accepted;
     } else {
       break;
     }
@@ -94,7 +119,7 @@ WorkerMode classify_worker_mode(
     return mode;
   }
 
-  if (kind == WorkerKind::Render) {
+  if (kind == WorkerKind::Classic) {
     const bool session16 = equals(command, L"--render-session16-v1");
     const bool session32 = equals(command, L"--render-session32-v1");
     // Session launches carry no input/output paths and no current_time:
@@ -125,7 +150,9 @@ WorkerMode classify_worker_mode(
       // The secondary-layer trailer sits ahead of the context trailers in the
       // positional tail; peel it last to reach the ten-slot session contract.
       mode.session_layers = mode.image_argc >= 11 &&
-          starts_with(argv[mode.image_argc - 1], L"session-layers:v2|");
+          (starts_with(argv[mode.image_argc - 1], L"session-layers:v2|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v3|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v4|"));
       const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);
       mode.render_session_mode = session_core_argc == 10;
       if (mode.render_session_mode) {
@@ -192,7 +219,9 @@ WorkerMode classify_worker_mode(
           starts_with(argv[mode.image_trailer_argc - 1], L"v2|");
       mode.image_argc = mode.image_trailer_argc - (mode.image_mask_context ? 1 : 0);
       mode.session_layers = mode.image_argc >= 11 &&
-          starts_with(argv[mode.image_argc - 1], L"session-layers:v2|");
+          (starts_with(argv[mode.image_argc - 1], L"session-layers:v2|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v3|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v4|"));
       const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);
       mode.render_session_mode = session_core_argc == 10;
       if (mode.render_session_mode) {
@@ -213,24 +242,24 @@ WorkerMode classify_worker_mode(
   // deleted with W4 (#365). The smart session commands above carry every depth,
   // backend, and layered shape it did; what remains here is the diagnostic
   // request family, none of which renders an image.
-  mode.mask_request_mode = argc == 5 && has_command(argc, argv, L"--smart-mask-request");
-  mode.mask_scene_request_mode = argc == 6 && has_command(argc, argv, L"--smart-mask-scene-request");
-  mode.mask_context_request_mode = argc == 6 && has_command(argc, argv, L"--smart-mask-context-request");
-  mode.mask_count_error_mode = argc == 5 && has_command(argc, argv, L"--smart-mask-count-error-request");
-  mode.mask_count_crash_mode = argc == 5 && has_command(argc, argv, L"--smart-mask-count-crash-request");
-  mode.mask_double_dispose_mode = argc == 5 && has_command(argc, argv, L"--smart-mask-double-dispose-request");
-  mode.stream_live_value_dispose_mode = argc == 5 && has_command(argc, argv, L"--smart-stream-live-value-dispose-request");
-  mode.stream_metadata_ownership_mode = argc == 5 && has_command(argc, argv, L"--smart-stream-metadata-ownership-request");
-  mode.keyframe_ownership_mode = argc == 5 && has_command(argc, argv, L"--smart-keyframe-ownership-request");
-  mode.dynamic_stream_tree_mode = argc == 5 && has_command(argc, argv, L"--smart-dynamic-stream-tree-request");
-  mode.aegp_memory_strings_mode = argc == 5 && has_command(argc, argv, L"--smart-aegp-memory-strings-request");
-  mode.suite_release_without_acquire_mode = argc == 5 && has_command(argc, argv, L"--smart-suite-release-without-acquire-request");
-  mode.handle_resize_while_locked_mode = argc == 5 && has_command(argc, argv, L"--smart-handle-resize-while-locked-request");
-  mode.world_double_dispose_mode = argc == 5 && has_command(argc, argv, L"--smart-world-double-dispose-request");
-  mode.world_allocation_limit_mode = argc == 5 && has_command(argc, argv, L"--smart-world-allocation-limit-request");
-  mode.pixel_format_registry_mode = argc == 5 && has_command(argc, argv, L"--smart-pixel-format-registry-request");
-  mode.outline_mutation_mode = argc == 5 && has_command(argc, argv, L"--smart-outline-mutation-request");
-  mode.mask_attribute_mode = argc == 5 && has_command(argc, argv, L"--smart-mask-attribute-request");
+  mode.mask_request_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-mask-request");
+  mode.mask_scene_request_mode = effective_argc == 6 && has_command(argc, argv, L"--smart-mask-scene-request");
+  mode.mask_context_request_mode = effective_argc == 6 && has_command(argc, argv, L"--smart-mask-context-request");
+  mode.mask_count_error_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-mask-count-error-request");
+  mode.mask_count_crash_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-mask-count-crash-request");
+  mode.mask_double_dispose_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-mask-double-dispose-request");
+  mode.stream_live_value_dispose_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-stream-live-value-dispose-request");
+  mode.stream_metadata_ownership_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-stream-metadata-ownership-request");
+  mode.keyframe_ownership_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-keyframe-ownership-request");
+  mode.dynamic_stream_tree_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-dynamic-stream-tree-request");
+  mode.aegp_memory_strings_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-aegp-memory-strings-request");
+  mode.suite_release_without_acquire_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-suite-release-without-acquire-request");
+  mode.handle_resize_while_locked_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-handle-resize-while-locked-request");
+  mode.world_double_dispose_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-world-double-dispose-request");
+  mode.world_allocation_limit_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-world-allocation-limit-request");
+  mode.pixel_format_registry_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-pixel-format-registry-request");
+  mode.outline_mutation_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-outline-mutation-request");
+  mode.mask_attribute_mode = effective_argc == 5 && has_command(argc, argv, L"--smart-mask-attribute-request");
   mode.request_mode = mode.mask_request_mode || mode.mask_scene_request_mode ||
       mode.mask_context_request_mode || mode.mask_count_error_mode || mode.mask_count_crash_mode ||
       mode.mask_double_dispose_mode || mode.stream_live_value_dispose_mode ||
@@ -239,8 +268,9 @@ WorkerMode classify_worker_mode(
       mode.suite_release_without_acquire_mode || mode.handle_resize_while_locked_mode ||
       mode.world_double_dispose_mode || mode.world_allocation_limit_mode ||
       mode.pixel_format_registry_mode || mode.outline_mutation_mode || mode.mask_attribute_mode ||
-      (argc == 5 && has_command(argc, argv, L"--smart-request"));
-  mode.command_accepted = mode.request_mode || (argc == 5 && has_command(argc, argv, L"--smart"));
+      (effective_argc == 5 && has_command(argc, argv, L"--smart-request"));
+  mode.command_accepted = mode.request_mode ||
+      (effective_argc == 5 && has_command(argc, argv, L"--smart"));
   mode.mask_model_enabled = mode.mask_request_mode || mode.mask_scene_request_mode ||
       mode.mask_context_request_mode || mode.mask_count_error_mode || mode.mask_count_crash_mode ||
       mode.mask_double_dispose_mode || mode.stream_live_value_dispose_mode ||
@@ -250,6 +280,54 @@ WorkerMode classify_worker_mode(
       mode.world_double_dispose_mode || mode.world_allocation_limit_mode ||
       mode.pixel_format_registry_mode || mode.outline_mutation_mode || mode.mask_attribute_mode;
   return mode;
+}
+
+bool verify_smart_diagnostic_auxiliary_admission() {
+  struct Case {
+    const wchar_t* command;
+    int core_argc;
+  };
+  const Case cases[]{
+      {L"--smart", 5},
+      {L"--smart-request", 5},
+      {L"--smart-mask-request", 5},
+      {L"--smart-mask-scene-request", 6},
+      {L"--smart-mask-context-request", 6},
+      {L"--smart-mask-count-error-request", 5},
+      {L"--smart-mask-count-crash-request", 5},
+      {L"--smart-mask-double-dispose-request", 5},
+      {L"--smart-stream-live-value-dispose-request", 5},
+      {L"--smart-stream-metadata-ownership-request", 5},
+      {L"--smart-keyframe-ownership-request", 5},
+      {L"--smart-dynamic-stream-tree-request", 5},
+      {L"--smart-aegp-memory-strings-request", 5},
+      {L"--smart-suite-release-without-acquire-request", 5},
+      {L"--smart-handle-resize-while-locked-request", 5},
+      {L"--smart-world-double-dispose-request", 5},
+      {L"--smart-world-allocation-limit-request", 5},
+      {L"--smart-pixel-format-registry-request", 5},
+      {L"--smart-outline-mutation-request", 5},
+      {L"--smart-mask-attribute-request", 5},
+  };
+  wchar_t program[] = L"worker";
+  wchar_t plugin[] = L"fixture.aex";
+  wchar_t sha[] =
+      L"0000000000000000000000000000000000000000000000000000000000000000";
+  wchar_t payload[] = L"payload";
+  wchar_t context[] = L"context";
+  wchar_t dependency_flag[] = L"--dependency-dirs-v1";
+  wchar_t dependency_dirs[] = L"C:\\runtime";
+  for (const auto& test : cases) {
+    wchar_t* argv[]{program, const_cast<wchar_t*>(test.command), plugin, sha,
+                   payload, context, dependency_flag, dependency_dirs};
+    const int raw_argc = test.core_argc + 2;
+    const auto admitted = classify_worker_mode(
+        WorkerKind::Smart, raw_argc, argv, test.core_argc);
+    const auto wrong_shape = classify_worker_mode(
+        WorkerKind::Smart, raw_argc, argv, test.core_argc + 1);
+    if (!admitted.command_accepted || wrong_shape.command_accepted) return false;
+  }
+  return true;
 }
 
 }  // namespace aexcompat::l2cli

@@ -15,9 +15,10 @@ $build = Join-Path $repository "target\pf-smart-map-layer-probe-build"
 $headers = Join-Path $AfterEffectsSdk "Examples\Headers\AE_Effect.h"
 if (-not (Test-Path -LiteralPath $headers)) { throw "After Effects SDK headers were not found: $headers" }
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
-& $CMake -S $source -B $build -G $Generator -A $Architecture
+& $CMake -S $source -B $build -G $Generator @ConfigureArgs
 if ($LASTEXITCODE -ne 0) { throw "Smart map layer probe configure failed" }
 & $CMake --build $build --config $Configuration --target pf_smart_map_layer_probe --clean-first
 if ($LASTEXITCODE -ne 0) { throw "Smart map layer probe build failed" }

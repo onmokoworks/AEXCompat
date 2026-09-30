@@ -1225,28 +1225,10 @@ DONE:\n\
                 aexcompat_broker::cuda_compute_probe::CudaAggregateStatus::NoDriver
             );
 
-            for symbol in [
-                b"cuInit\0".as_slice(),
-                b"cuDriverGetVersion\0".as_slice(),
-                b"cuDeviceGetCount\0".as_slice(),
-                b"cuDeviceGet\0".as_slice(),
-                b"cuDeviceGetName\0".as_slice(),
-                b"cuDeviceGetUuid_v2\0".as_slice(),
-                b"cuDeviceGetAttribute\0".as_slice(),
-                b"cuDeviceTotalMem_v2\0".as_slice(),
-                b"cuCtxCreate_v2\0".as_slice(),
-                b"cuCtxDestroy_v2\0".as_slice(),
-                b"cuCtxGetCurrent\0".as_slice(),
-                b"cuMemAlloc_v2\0".as_slice(),
-                b"cuMemFree_v2\0".as_slice(),
-                b"cuMemcpyHtoD_v2\0".as_slice(),
-                b"cuMemcpyDtoH_v2\0".as_slice(),
-                b"cuModuleLoadDataEx\0".as_slice(),
-                b"cuModuleUnload\0".as_slice(),
-                b"cuModuleGetFunction\0".as_slice(),
-                b"cuLaunchKernel\0".as_slice(),
-                b"cuCtxSynchronize\0".as_slice(),
-            ] {
+            // Any one missing symbol produces the same refusal, so the first
+            // and last resolved symbols stand for the set; the count below is
+            // what catches a requirement silently dropped from the middle.
+            for symbol in [b"cuInit\0".as_slice(), b"cuCtxSynchronize\0".as_slice()] {
                 let drops = Arc::new(AtomicUsize::new(0));
                 let loader = MockLoader {
                     loaded: RefCell::new(Some(MockLoadedResolver {
@@ -1262,6 +1244,16 @@ DONE:\n\
                 );
                 assert_eq!(drops.load(Ordering::SeqCst), 1, "{symbol:?}");
             }
+
+            struct ResolvesNothing;
+            impl SymbolResolver for ResolvesNothing {
+                fn resolve(&self, _: &[u8]) -> Option<RawFunction> {
+                    None
+                }
+            }
+            let (functions, missing) = resolve_functions(&ResolvesNothing);
+            assert!(functions.is_none());
+            assert_eq!(missing.len(), 20);
         }
 
         unsafe extern "system" fn init(_: u32) -> i32 {

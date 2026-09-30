@@ -7,6 +7,7 @@ oracles while entering through the supported session-only harness command.
 """
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -14,7 +15,17 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
+# Which cargo profile's binaries these tests drive. Release is the default
+# because that is what the operator gates in `tools/` build and run.
+#
+# CI selects debug instead: `cargo build --workspace` already produces both
+# binaries there for the workspace tests, so building them again under a
+# second profile costs a full compile of aexcompat-broker, host-core and the
+# harness for artifacts that only differ in optimization (#945).
+CARGO_PROFILE = os.environ.get("AEXCOMPAT_CARGO_PROFILE", "release")
+CARGO_BIN_DIR = ROOT / "broker" / "target" / CARGO_PROFILE
+HARNESS = CARGO_BIN_DIR / "aexcompat-harness.exe"
+BROKER = CARGO_BIN_DIR / "broker.exe"
 
 
 def assert_artifact_fresh(artifact: Path, *runtime_inputs: Path):

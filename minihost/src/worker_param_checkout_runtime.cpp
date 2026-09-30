@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <map>
 #include <mutex>
 
 namespace aexcompat::l2_detail {
@@ -34,6 +35,14 @@ auto& g_last_param_checkout_time = g_parameter_runtime.checkout.last_time;
 auto& g_last_param_checkout_time_step = g_parameter_runtime.checkout.last_time_step;
 auto& g_last_param_checkout_time_scale = g_parameter_runtime.checkout.last_time_scale;
 
+// The published tables are contiguous 0..N (classic render, smart setup, l2
+// lifecycle all publish every slot), so "past the table" is "past the last
+// published slot". Mirrors Context::beyond_definition_table for the hosted map.
+bool beyond_definition_table(const std::map<int32_t, aexcompat::worker_runtime::parameters::Definition>& table,
+                             int32_t index) {
+  return !table.empty() && index > table.rbegin()->first;
+}
+
 int32_t finish_param_callback(aexcompat::callback_diagnostics::Callback callback,
                               int32_t result,
                               aexcompat::callback_diagnostics::Reason reason =
@@ -44,7 +53,7 @@ int32_t finish_param_callback(aexcompat::callback_diagnostics::Callback callback
               << aexcompat::callback_diagnostics::CALLBACK_NAMES[
                      static_cast<std::size_t>(callback)]
               << " -> " << result;
-    if (result != 0)
+    if (result != 0 || reason != aexcompat::callback_diagnostics::Reason::None)
       std::cerr << " ("
                 << aexcompat::callback_diagnostics::REASON_NAMES[
                        static_cast<std::size_t>(reason)]
@@ -61,32 +70,25 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   using aexcompat::callback_diagnostics::Reason;
   if (extended_diag_enabled())
     std::cerr << "extended_diag:checkout_param index=" << index
-              << " time=" << what_time << "/" << time_scale << "\n"
+              << " time=" << what_time << "/" << time_scale
+              << " step=" << time_step << "\n"
               << std::flush;
-  if (!definition || time_step <= 0 || time_scale == 0) {
+  // time_step == 0 is accepted: AE-shipped effects (CycoreFXHD RipplePulse
+  // here; ForceMB/WideTime make the same request through pre_checkout_layer)
+  // pass a zero step and render in AE, so AE tolerates it (an inference from
+  // the plug-ins' behaviour, not an observation of AE's own callback - the
+  // #777 form). The host evaluates at `what_time` only, so the step carries no
+  // semantic weight here; a negative step stays refused as nonsense.
+  if (!definition || time_step < 0 || time_scale == 0) {
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::InvalidArguments);
   }
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
   if (!classic_context && aexcompat::worker_runtime::classic::dispatch_active())
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::NoActiveState);
-  if (classic_context && !classic_context->checkout_time_allowed(what_time, time_scale))
-    return finish_param_callback(
-        Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
-  if (!classic_context) {
-    // A zero ledger scale is not "no gate": it would reduce the comparison to
-    // 0 == current_time * time_scale, which admits every time when the frame is
-    // at 0 and refuses every time - including the frame's own - otherwise. Close
-    // the gate instead, the same way the classic context does
-    // (`Context::checkout_time_allowed`). Wide time still bypasses it below.
-    const bool current_time = g_checkout_current_time_scale != 0 &&
-        static_cast<int64_t>(what_time) * g_checkout_current_time_scale ==
-            static_cast<int64_t>(g_checkout_current_time) * time_scale;
-    if (!current_time && !g_wide_time_checkout_allowed) {
-      ++g_rejected_temporal_param_checkouts;
-      return finish_param_callback(
-          Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
-    }
-  }
+  if (classic_context &&
+      !classic_context->checkout_time_allowed(what_time, time_scale))
+    return finish_param_callback(Callback::CheckoutParam, 4,
+                                 Reason::InvalidArguments);
   const auto record_checkout = [&] {
     if (classic_context) {
       classic_context->record_checkout(definition, index, what_time, time_step, time_scale);
@@ -107,30 +109,61 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   }
   if (classic_context && classic_context->has_timed_slot(index))
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::UnknownLayer);
+  // A slot past the published table (index > last registered slot) is not a
+  // refusal: AE answers it with PF_Err_NONE and an empty layer definition
+  // (param_type LAYER, u.ld.data NULL), and the matching checkin also returns
+  // PF_Err_NONE. Observed directly in AE 2026 through
+  // instruments/pf-checkout-index-probe (5-slot table, indices 29/31/5
+  // queried; docs/CHECKOUT_PARAM_INDEX_OBSERVATION_2026-08-17.md), which is
+  // what lets Pixel Motion Blur (RollingShutter.aex, issue #1251) render:
+  // its Kronos render core checks out Timewarp's Matte/Warp Layer slots 29
+  // and 31 unconditionally, zero-fills the def first, reads `data == NULL` as
+  // "no layer", and gates its main loop on that checkout's return code. The
+  // host hands back the same zero-filled def and records the checkout, so the
+  // checkin balances; the result-0 history entry carries `beyond_param_table`
+  // so the report marks that a checkout resolved past the table (the slot
+  // number itself is only in the extended_diag trace line). Negative slots and
+  // slots inside the table with no definition stay refused (unknown_layer),
+  // and so does a table that has not been published yet.
+  const auto answer_beyond_table = [&] {
+    std::memset(definition, 0, kParamSize);
+    record_checkout();
+    return finish_param_callback(Callback::CheckoutParam, 0,
+                                 Reason::BeyondParamTable);
+  };
   if (classic_context) {
     if (classic_context->copy_definition(index, definition, kParamSize) ||
         classic_context->copy_fallback_definition(index, definition, kParamSize)) {
       record_checkout();
       return finish_param_callback(Callback::CheckoutParam, 0);
     }
+    if (classic_context->beyond_definition_table(index))
+      return answer_beyond_table();
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::UnknownLayer);
   }
   const auto hosted = g_checkout_layer_definitions.find(index);
   if (hosted != g_checkout_layer_definitions.end()) {
-    std::memcpy(definition, hosted->second.data(), hosted->second.size());
+    aexcompat::worker_runtime::parameters::Definition evaluated{};
+    if (!aexcompat::worker_runtime::parameters::copy_definition_at_time(
+            index, what_time, time_scale, hosted->second, evaluated)) {
+      ++g_rejected_temporal_param_checkouts;
+      return finish_param_callback(
+          Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
+    }
+    std::memcpy(definition, evaluated.data(), evaluated.size());
     record_checkout();
     return finish_param_callback(Callback::CheckoutParam, 0);
   }
+  if (beyond_definition_table(g_checkout_layer_definitions, index))
+    return answer_beyond_table();
   return finish_param_callback(Callback::CheckoutParam, 4, Reason::UnknownLayer);
 }
 
 void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
                                     bool wide_time_allowed) noexcept {
-  // A zero scale is stored as given; `checkout_param` treats it as a closed time
-  // gate rather than quietly substituting a scale the caller never meant. No
-  // shipped caller can reach that - `smart_setup::prepare` refuses a zero
-  // external time scale before the smart path gets here - so this only decides
-  // the direction a future caller bug fails in.
+  // Retain the frame and WIDE_TIME_INPUT declaration for diagnostics and cache
+  // policy. The flag describes temporal dependencies; it is not permission to
+  // call checkout_param at another time.
   g_checkout_current_time = current_time;
   g_checkout_current_time_scale = time_scale;
   g_wide_time_checkout_allowed = wide_time_allowed;

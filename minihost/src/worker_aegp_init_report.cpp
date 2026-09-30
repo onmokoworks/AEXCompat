@@ -3,14 +3,43 @@
 #include "runtime_module_audit.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
+#include "worker_dynamic_suite_registry.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_render_receipts.hpp"
 
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <string>
 
 namespace aexcompat::l2_detail {
+
+namespace {
+std::string escape_json(const std::string& input) {
+  static constexpr char hex[] = "0123456789abcdef";
+  std::string output;
+  for (const unsigned char ch : input) {
+    switch (ch) {
+      case '"': output += "\\\""; break;
+      case '\\': output += "\\\\"; break;
+      case '\b': output += "\\b"; break;
+      case '\f': output += "\\f"; break;
+      case '\n': output += "\\n"; break;
+      case '\r': output += "\\r"; break;
+      case '\t': output += "\\t"; break;
+      default:
+        if (ch < 0x20) {
+          output += "\\u00";
+          output.push_back(hex[ch >> 4]);
+          output.push_back(hex[ch & 0xf]);
+        } else {
+          output.push_back(static_cast<char>(ch));
+        }
+    }
+  }
+  return output;
+}
+}  // namespace
 
 using aexcompat::worker_runtime::handles::aegp_memory_balanced;
 using aexcompat::worker_runtime::handles::aegp_memory_statistics;
@@ -107,6 +136,16 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
   const auto& trim_probe = in.trim_pipe;
   const auto& switch_probe = in.switch_pipe;
   const bool module_audit_ok = in.module_audit_ok;
+  const auto dynamic_suite_statistics =
+      aexcompat::worker_runtime::dynamic_suites::statistics();
+  const auto registered_dynamic_suites =
+      aexcompat::worker_runtime::dynamic_suites::observed_suites();
+  const auto borrowed_handle_statistics =
+      aexcompat::scene_model::registry().borrowed_handle_statistics();
+  const auto object_record_statistics =
+      aexcompat::scene_model::registry().object_record_statistics();
+  const bool scene_registry_initialized =
+      scene_runtime_state().scene_registry_initialized;
   const uint32_t live_suite_references = live_suite_reference_count();
   const std::string live_suite_summary = live_suite_lease_summary();
   const bool isolated_item_cache = g_aegp_active_idle_roundtrip_mode &&
@@ -123,13 +162,16 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
   const bool collection_lifetimes_balanced = !g_aegp_selection.live &&
       g_aegp_collection_creates == g_aegp_collection_disposes;
   const bool aegp_memory_lifetimes_balanced = aegp_memory_balanced();
-  const bool passed = init_error == 0 && event_error == 0 && death_error == 0 &&
+  const bool passed = scene_registry_initialized && init_error == 0 &&
+      event_error == 0 && death_error == 0 &&
       leases_balanced && effect_lifetimes_balanced && stream_lifetimes_balanced &&
       collection_lifetimes_balanced &&
       aegp_memory_lifetimes_balanced && async_receipt_lifetimes_balanced() &&
+      dynamic_suite_statistics.live_references == 0 &&
       module_audit_ok;
   const bool boundary_regression_passed =
-      in.boundary_regression_mode && in.entry_invoked && init_error != 0 &&
+      scene_registry_initialized && in.boundary_regression_mode &&
+      in.entry_invoked && init_error != 0 &&
       in.entry_fault !=
           aexcompat::worker_runtime::aegp_entry_guard::FaultKind::none &&
       leases_balanced && effect_lifetimes_balanced &&
@@ -141,6 +183,8 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
             << "\",\"identity_verified\":true,\"entrypoint\":\"EntryPointFunc\""
             << ",\"driver_major_version\":24,\"driver_minor_version\":0"
             << ",\"plugin_id\":1,\"init_error\":" << init_error
+            << ",\"scene_registry_initialized\":"
+            << (scene_registry_initialized ? "true" : "false")
             << ",\"entry_invoked\":" << (in.entry_invoked ? "true" : "false")
             << ",\"entry_fault\":\""
             << aexcompat::worker_runtime::aegp_entry_guard::fault_name(
@@ -162,6 +206,17 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
             << ",\"death_hooks_registered\":" << g_aegp_death_hooks
             << ",\"death_hooks_invoked\":" << death_hooks_invoked
             << ",\"death_error\":" << death_error
+            << ",\"dynamic_suite_live_references\":"
+            << dynamic_suite_statistics.live_references
+            << ",\"dynamic_suites\":[";
+  for (std::size_t index = 0; index < registered_dynamic_suites.size(); ++index) {
+    if (index) std::cout << ',';
+    const auto& suite = registered_dynamic_suites[index];
+    std::cout << "{\"name\":\"" << escape_json(suite.name)
+              << "\",\"api_version\":" << suite.api_version
+              << ",\"internal_version\":" << suite.internal_version << '}';
+  }
+  std::cout << ']'
             << ",\"event_requested\":\"" << (g_aegp_update_menu_mode ? "update_menu" : (g_aegp_idle_mode ? "idle" : (g_aegp_command_roundtrip_mode ? "command_roundtrip" : (g_aegp_active_idle_roundtrip_mode ? "active_idle_roundtrip" : (g_aegp_keyframe_roundtrip_mode ? "keyframe_roundtrip" : (g_aegp_seek_roundtrip_mode ? "seek_roundtrip" : (g_aegp_trim_roundtrip_mode ? "trim_roundtrip" : (g_aegp_switch_roundtrip_mode ? "switch_roundtrip" : (g_aegp_comp_idle_roundtrip_mode ? "comp_idle_roundtrip" : "none"))))))))) << "\""
             << ",\"event_error\":" << event_error
             << ",\"hooks_invoked\":" << hooks_invoked
@@ -211,6 +266,22 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
             << (effect_lifetimes_balanced ? "true" : "false")
             << ",\"stream_acquires\":" << g_aegp_stream_acquires
             << ",\"stream_disposes\":" << g_aegp_stream_disposes
+            << ",\"borrowed_handle_issues\":"
+            << borrowed_handle_statistics.issues
+            << ",\"borrowed_handle_reuses\":"
+            << borrowed_handle_statistics.reuses
+            << ",\"borrowed_handle_live\":"
+            << borrowed_handle_statistics.live
+            << ",\"borrowed_handle_exhaustion_failures\":"
+            << borrowed_handle_statistics.exhaustion_failures
+            << ",\"object_record_issues\":"
+            << object_record_statistics.issues
+            << ",\"object_record_reuses\":"
+            << object_record_statistics.reuses
+            << ",\"object_record_live\":"
+            << object_record_statistics.live
+            << ",\"object_record_exhaustion_failures\":"
+            << object_record_statistics.exhaustion_failures
             << ",\"stream_value_acquires\":" << g_aegp_stream_value_acquires
             << ",\"stream_value_disposes\":" << g_aegp_stream_value_disposes
             << ",\"stream_sampled_selector_mask\":"
@@ -271,6 +342,84 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
             << (aexcompat::render_receipts::statistics().created > 0 ? "true" : "false")
             << ",\"module_audit\":" << module_audit_json() << "}\n";
   return passed || boundary_regression_passed;
+}
+
+bool emit_aegp_borrowed_handle_report_selftest() {
+  auto& registry = aexcompat::scene_model::registry();
+  const auto before = registry.borrowed_handle_statistics();
+  const auto object_before = registry.object_record_statistics();
+  const auto item = registry.active_item();
+  std::array<void*, aexcompat::scene_model::kBorrowedHandleCapacity> handles{};
+  bool exercised = item.kind == aexcompat::scene_model::ObjectKind::item &&
+      before.issues == 0 && before.reuses == 0 &&
+      before.exhaustion_failures == 0 && before.live == 0;
+  for (std::size_t index = 0; exercised && index < handles.size(); ++index) {
+    handles[index] = registry.borrow_unique(
+        item, static_cast<int32_t>(index + 1));
+    exercised = handles[index] != nullptr;
+  }
+  exercised = exercised &&
+      registry.borrow_unique(item, 1000) == nullptr;
+  for (std::size_t index = 0; exercised && index < handles.size(); ++index) {
+    exercised = registry.release(
+        handles[index], aexcompat::scene_model::ObjectKind::item,
+        static_cast<int32_t>(index + 1), true);
+  }
+  void* replacement = exercised ? registry.borrow_unique(item, 2000) : nullptr;
+  exercised = exercised && replacement != nullptr &&
+      replacement != handles[0] &&
+      registry.release(replacement, aexcompat::scene_model::ObjectKind::item,
+                       2000, true);
+  const auto after = registry.borrowed_handle_statistics();
+  exercised = exercised &&
+      after.issues == aexcompat::scene_model::kBorrowedHandleCapacity + 1 &&
+      after.reuses == 1 && after.exhaustion_failures == 1 && after.live == 0;
+  aexcompat::scene_model::Identity first_erased{};
+  for (std::size_t index = 0;
+       exercised && index < 2 * aexcompat::scene_model::kObjectCapacity;
+       ++index) {
+    aexcompat::scene_model::Identity created{};
+    exercised = registry.create_child(
+        aexcompat::scene_model::ObjectKind::effect, item,
+        static_cast<int32_t>(index), nullptr, u"Cycled Effect", created);
+    if (!exercised) break;
+    if (index == 0) first_erased = created;
+    exercised = registry.erase_tree(created);
+  }
+  aexcompat::scene_model::ObjectSnapshot stale{};
+  exercised = exercised && !registry.snapshot(first_erased, stale);
+  const std::size_t capacity_to_fill =
+      aexcompat::scene_model::kObjectCapacity - object_before.live;
+  std::array<aexcompat::scene_model::Identity,
+             aexcompat::scene_model::kObjectCapacity> live_records{};
+  for (std::size_t index = 0; exercised && index < capacity_to_fill; ++index)
+    exercised = registry.create_child(
+        aexcompat::scene_model::ObjectKind::effect, item,
+        static_cast<int32_t>(index), nullptr, u"Live Effect",
+        live_records[index]);
+  aexcompat::scene_model::Identity rejected{};
+  exercised = exercised && !registry.create_child(
+      aexcompat::scene_model::ObjectKind::effect, item, 0, nullptr,
+      u"Exhausted Effect", rejected);
+  for (std::size_t index = 0; exercised && index < capacity_to_fill; ++index)
+    exercised = registry.erase_tree(live_records[index]);
+  const auto object_after = registry.object_record_statistics();
+  exercised = exercised && object_before.issues == object_before.live &&
+      object_before.reuses == 0 && object_before.exhaustion_failures == 0 &&
+      object_after.issues == object_before.issues +
+          2 * aexcompat::scene_model::kObjectCapacity + capacity_to_fill &&
+      object_after.reuses == 2 * aexcompat::scene_model::kObjectCapacity &&
+      object_after.exhaustion_failures == 1 &&
+      object_after.live == object_before.live;
+  if (!exercised) {
+    std::cout << "{\"aegp_borrowed_handle_report\":\"failed\"}\n";
+    return false;
+  }
+
+  AegpInitCompletionInputs inputs{};
+  inputs.entry_invoked = true;
+  inputs.module_audit_ok = true;
+  return emit_aegp_init_completion_report(inputs);
 }
 
 }  // namespace aexcompat::l2_detail

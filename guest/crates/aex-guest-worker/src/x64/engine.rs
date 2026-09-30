@@ -107,6 +107,12 @@ fn initialize_static_tls_image(
     Ok(next_data)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrimaryImportHooks {
+    Eager,
+    Deferred,
+}
+
 impl GuestEngine<'static> {
     fn run_process_attach_addresses(
         &mut self,
@@ -114,22 +120,56 @@ impl GuestEngine<'static> {
         tls_callbacks: &[u64],
         dll_entry: Option<u64>,
     ) -> Result<(), GuestError> {
+        let report_timings = std::env::var_os("AEXCOMPAT_LOAD_TIMINGS").is_some();
+        let attach_started = Instant::now();
         // The Windows loader invokes TLS callbacks in image order before
         // DllMain for DLL_PROCESS_ATTACH.  Several MSVC runtimes use this
         // phase to make later C++ static initialization safe.
         for (index, address) in tls_callbacks.iter().copied().enumerate() {
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=begin stage=tls_callback image_base={image_base:#x} index={} address={address:#x}",
+                    index + 1
+                );
+            }
+            let callback_started = Instant::now();
             self.call_win64(address, [image_base, 1, 0, 0, 0, 0])
                 .map_err(|error| GuestError::TlsProcessAttach {
                     index: index + 1,
                     address,
                     detail: error.to_string(),
                 })?;
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=end stage=tls_callback image_base={image_base:#x} index={} elapsed_ms={}",
+                    index + 1,
+                    callback_started.elapsed().as_millis()
+                );
+            }
         }
         if let Some(entry) = dll_entry {
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=begin stage=dll_main image_base={image_base:#x} address={entry:#x}"
+                );
+            }
+            let dll_started = Instant::now();
             let attached = self.call_win64(entry, [image_base, 1, 0, 0, 0, 0])?;
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=end stage=dll_main image_base={image_base:#x} elapsed_ms={}",
+                    dll_started.elapsed().as_millis()
+                );
+            }
             if attached == 0 {
                 return Err(GuestError::DllProcessAttach);
             }
+        }
+        if report_timings {
+            eprintln!(
+                "aex_guest_load_timing: event=end stage=process_attach image_base={image_base:#x} elapsed_ms={}",
+                attach_started.elapsed().as_millis()
+            );
         }
         Ok(())
     }
@@ -139,6 +179,22 @@ impl GuestEngine<'static> {
     }
 
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
+        let mut engine = match std::env::var_os("AEXCOMPAT_GUEST_LIBRARIES") {
+            Some(path) => Self::load_with_library_manifest(image, std::path::Path::new(&path)),
+            None => Self::load_primary(image, true, PrimaryImportHooks::Eager),
+        }?;
+        // All primary and dependency PE pages have now passed
+        // `seal_unicorn_image`, which always grants read access and never
+        // exposes an image unmap/protection capability to the guest.
+        engine.unicorn.get_data_mut().seal_image_reads();
+        Ok(engine)
+    }
+
+    fn load_primary(
+        image: &PeImage,
+        attach: bool,
+        import_hooks: PrimaryImportHooks,
+    ) -> Result<Self, GuestError> {
         let trace_points = discover_trace_points(image);
         let image_report = image.report();
         let mut trace_modules = vec![TraceModule {
@@ -165,10 +221,17 @@ impl GuestEngine<'static> {
             "create x86_64 engine",
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()),
         )?;
+        uc(
+            "disable unused memory-hook exit polling",
+            aex_unicorn_buffer::set_memory_exit_checks(&unicorn, false),
+        )?;
+        unicorn.get_data_mut().guest_files = GuestFiles::from_environment()?;
         install_avx_fallback(&mut unicorn)?;
         unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
         unicorn.get_data_mut().next_aegp_memory_handle = AEGP_MEMORY_HANDLE_BASE;
         unicorn.get_data_mut().next_pf_handle_data = PF_HANDLE_DATA_BASE;
+        unicorn.get_data_mut().next_windows_thread_id = 2;
+        unicorn.get_data_mut().current_windows_thread_id = 1;
         let image_size =
             u64::try_from(image.mapped_bytes().len()).map_err(|_| GuestError::ImageAlignment)?;
         unicorn.get_data_mut().image_region = Some((
@@ -201,7 +264,16 @@ impl GuestEngine<'static> {
             "write PE image",
             unicorn.mem_write(image.image_base(), image.mapped_bytes()),
         )?;
-        install_avx_state_sync_points(&mut unicorn, discover_image_avx_state_sync_points(image)?)?;
+        let primary_avx_sync_points = discover_image_avx_state_sync_points(image)?;
+        if import_hooks == PrimaryImportHooks::Deferred {
+            // Library-backed loads install one translator-side table for both
+            // the primary and dependencies. This preserves exact AVX repair
+            // semantics without adding thousands of Rust code hooks before
+            // dependency initialization begins.
+            install_runtime_avx_state_sync(&mut unicorn, primary_avx_sync_points)?;
+        } else {
+            install_avx_state_sync_points(&mut unicorn, primary_avx_sync_points)?;
+        }
         uc(
             "map import stubs",
             unicorn.mem_map(STUB_BASE, STUB_SIZE, Prot::ALL),
@@ -217,9 +289,12 @@ impl GuestEngine<'static> {
             "map minimal TEB page",
             unicorn.mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE),
         )?;
+        let mut teb_stack = [0u8; 16];
+        teb_stack[0..8].copy_from_slice(&(STACK_BASE + STACK_SIZE).to_le_bytes());
+        teb_stack[8..16].copy_from_slice(&STACK_BASE.to_le_bytes());
         uc(
-            "write TEB stack limit",
-            unicorn.mem_write(0x10, &STACK_BASE.to_le_bytes()),
+            "write TEB stack bounds",
+            unicorn.mem_write(0x08, &teb_stack),
         )?;
         uc(
             "map guest data",
@@ -241,14 +316,16 @@ impl GuestEngine<'static> {
                     "write import stub",
                     unicorn.mem_write(stub, &[0x31, 0xc0, 0xc3]),
                 )?;
-                install_win64_import(&mut unicorn, stub, &library.name, &symbol.name)?;
-                unicorn.get_data_mut().trace_labels.insert(
-                    stub,
-                    TraceLabel {
-                        kind: TraceLabelKind::Import,
-                        name: canonical_import_trace_label(&library.name, &symbol.name),
-                    },
-                );
+                if import_hooks == PrimaryImportHooks::Eager {
+                    install_win64_import(&mut unicorn, stub, &library.name, &symbol.name)?;
+                    unicorn.get_data_mut().trace_labels.insert(
+                        stub,
+                        TraceLabel {
+                            kind: TraceLabelKind::Import,
+                            name: canonical_import_trace_label(&library.name, &symbol.name),
+                        },
+                    );
+                }
                 let iat_rva = u64::try_from(symbol.iat_rva).map_err(|_| GuestError::IatRange)?;
                 let iat = image
                     .image_base()
@@ -291,7 +368,24 @@ impl GuestEngine<'static> {
                 continue_fls_free,
             ),
         )?;
+        uc(
+            "write CreateThread continuation",
+            unicorn.mem_write(HOST_CREATE_THREAD_CONTINUE, &[0x41, 0xff, 0xe3]),
+        )?;
+        uc(
+            "write iterate row trampoline",
+            unicorn.mem_write(HOST_ITERATE_ROW_TRAMPOLINE, ITERATE_ROW_TRAMPOLINE),
+        )?;
+        uc(
+            "install CreateThread continuation",
+            unicorn.add_code_hook(
+                HOST_CREATE_THREAD_CONTINUE,
+                HOST_CREATE_THREAD_CONTINUE,
+                continue_windows_thread,
+            ),
+        )?;
         install_windows_condition_variable_callbacks(&mut unicorn)?;
+        install_dynamic_windows_import_callbacks(&mut unicorn)?;
         uc(
             "write add_param callback",
             unicorn.mem_write(HOST_ADD_PARAM, &[0xc3]),
@@ -357,6 +451,7 @@ impl GuestEngine<'static> {
             ("write Iterate8 continuation", HOST_ITERATE8_CONTINUE),
             ("write color-param callback", HOST_COLOR_PARAM_VALUE),
             ("write point-param callback", HOST_POINT_PARAM_VALUE),
+            ("write register-ui callback", HOST_REGISTER_UI),
             ("write extended allocation callback", HOST_EXTENDED_ALLOC),
             ("write extended free callback", HOST_EXTENDED_FREE),
             ("write extended lookup callback", HOST_EXTENDED_LOOKUP),
@@ -372,6 +467,11 @@ impl GuestEngine<'static> {
             ("write TransferRect8 callback", HOST_TRANSFER_RECT8),
             ("write Iterate16 callback", HOST_ITERATE16),
             ("write Iterate16 continuation", HOST_ITERATE16_CONTINUE),
+            ("write IterateFloat callback", HOST_ITERATE_FLOAT),
+            (
+                "write IterateFloat continuation",
+                HOST_ITERATE_FLOAT_CONTINUE,
+            ),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -384,6 +484,10 @@ impl GuestEngine<'static> {
             unicorn.add_code_hook(HOST_ADD_PARAM, HOST_ADD_PARAM, |unicorn, _, _| {
                 capture_add_param(unicorn);
             }),
+        )?;
+        uc(
+            "install register-ui callback",
+            unicorn.add_code_hook(HOST_REGISTER_UI, HOST_REGISTER_UI, emulate_register_ui),
         )?;
         uc(
             "install ANSI strcpy callback",
@@ -524,6 +628,22 @@ impl GuestEngine<'static> {
             unicorn.add_code_hook(
                 HOST_ITERATE16_CONTINUE,
                 HOST_ITERATE16_CONTINUE,
+                continue_iterate,
+            ),
+        )?;
+        uc(
+            "install IterateFloat callback",
+            unicorn.add_code_hook(
+                HOST_ITERATE_FLOAT,
+                HOST_ITERATE_FLOAT,
+                emulate_iterate_float,
+            ),
+        )?;
+        uc(
+            "install IterateFloat continuation",
+            unicorn.add_code_hook(
+                HOST_ITERATE_FLOAT_CONTINUE,
+                HOST_ITERATE_FLOAT_CONTINUE,
                 continue_iterate,
             ),
         )?;
@@ -726,7 +846,11 @@ impl GuestEngine<'static> {
             unicorn.mem_write(HOST_WORLD_SUITE, &world_suite),
         )?;
         install_iterate8_suites(&mut unicorn)?;
+        install_typed_iterate_suites(&mut unicorn)?;
         install_pf_ansi_suite_v2(&mut unicorn)?;
+        install_effect_ui_suite_v1(&mut unicorn)?;
+        install_pf_app_suite_v6(&mut unicorn)?;
+        install_persistent_data_suite_v3(&mut unicorn)?;
         install_gpu_device_suite(&mut unicorn).map_err(|error| GuestError::Unicorn {
             operation: "install PF GPU Device Suite",
             detail: error.to_string(),
@@ -749,6 +873,7 @@ impl GuestEngine<'static> {
         install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),
+            (HOST_REGISTER_UI, "register_ui"),
             (HOST_POISON, "unsupported_callback"),
             (HOST_ANSI_STRCPY, "ansi_strcpy"),
             (HOST_COPY, "copy"),
@@ -829,6 +954,7 @@ impl GuestEngine<'static> {
                 HOST_WAKE_ALL_CONDITION_VARIABLE,
                 "wake_all_condition_variable",
             ),
+            (HOST_DYNAMIC_FLS_ALLOC, "dynamic_fls_alloc"),
             (HOST_GPU_GET_DEVICE_COUNT, "gpu_get_device_count"),
             (HOST_GPU_GET_DEVICE_INFO, "gpu_get_device_info"),
             (HOST_GPU_ACQUIRE_EXCLUSIVE, "gpu_acquire_exclusive"),
@@ -862,7 +988,12 @@ impl GuestEngine<'static> {
         )?;
         let mut engine = Self {
             unicorn,
+            scheduled_windows_threads: BTreeMap::new(),
+            scheduler_ready: VecDeque::new(),
+            scheduler_deferred_ready: VecDeque::new(),
+            parked_main_context: None,
             next_data,
+            next_import_stub: stub_index,
             image_base: image.image_base(),
             image_end: image.image_base() + image_size,
             census_hook: None,
@@ -871,7 +1002,12 @@ impl GuestEngine<'static> {
             image_sha256: image_report.sha256,
             entry_export: image_report.entry_export,
             trace_modules,
+            primary_attached: attach,
+            primary_poisoned: false,
         };
+        engine.link_emulated_import_data(image)?;
+        initialize_windows_command_line_a(&mut engine)?;
+        initialize_windows_command_line_w(&mut engine)?;
         if let Some(table) = image.string_table() {
             let empty = engine.allocate(1, 1)?;
             engine.write(empty, &[0])?;
@@ -887,11 +1023,13 @@ impl GuestEngine<'static> {
             state.extended_empty_string = empty;
             state.extended_string_table_valid = true;
         }
-        engine.run_process_attach_addresses(
-            image.image_base(),
-            image.tls_callbacks(),
-            image.dll_entry_address(),
-        )?;
+        if attach {
+            engine.run_process_attach_addresses(
+                image.image_base(),
+                image.tls_callbacks(),
+                image.dll_entry_address(),
+            )?;
+        }
         Ok(engine)
     }
 
@@ -1029,6 +1167,8 @@ impl GuestEngine<'static> {
             watch_occurrence_counts: HashMap::new(),
             watch_stack: Vec::new(),
             selector_watches,
+            checkpoint_returns: HashMap::new(),
+            unhookable_watches: Vec::new(),
             witnesses: Vec::new(),
             dropped_witnesses: 0,
             basic_blocks: HashMap::new(),
@@ -1041,11 +1181,66 @@ impl GuestEngine<'static> {
             known_function_entries: HashSet::from([entry_address.saturating_sub(self.image_base)]),
             truncated: false,
             dropped_events: 0,
+            checkpoint_only: self.unicorn.get_data().trace_checkpoint_only,
         });
         let image_base = self.image_base;
         let image_end = self.image_end;
-        let mut hook_points = self.trace_points.clone();
-        hook_points.push(entry_address);
+        let checkpoint_only = self.unicorn.get_data().trace_checkpoint_only;
+        let mut hook_points = if checkpoint_only {
+            // Checkpoint capture hooks three kinds of points only: the direct
+            // call sites a watch names (by call-site rva or by callee
+            // function rva), the instruction right after each of them (the
+            // return checkpoint), and the selector entry so `function=` on
+            // the selector itself still arms. Everything a watch needs
+            // beyond that (tail-call jumps, indirect calls) is reported in
+            // `unhookable_watches` rather than silently producing nothing.
+            let watches = self.unicorn.get_data().trace_watches.clone();
+            let sites = self
+                .trace_points
+                .iter()
+                .filter_map(|point| {
+                    let mut bytes = [0u8; 15];
+                    self.unicorn.mem_read(*point, &mut bytes).ok()?;
+                    let instruction =
+                        Decoder::with_ip(64, &bytes, *point, DecoderOptions::NONE).decode();
+                    checkpoint_site(&instruction, *point, image_base, image_end)
+                })
+                .collect::<Vec<_>>();
+            let entry_rva = entry_address.saturating_sub(image_base);
+            let unhookable_watches = watches
+                .iter()
+                .filter_map(|watch| {
+                    checkpoint_unhookable_reason(watch, entry_rva, &sites).map(|reason| {
+                        UnhookableWatch {
+                            id: watch.id.clone(),
+                            reason,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            if let Some(capture) = self.unicorn.get_data_mut().trace.as_mut() {
+                capture.unhookable_watches = unhookable_watches;
+            }
+            let mut points = sites
+                .iter()
+                .filter(|site| {
+                    site.hookable_call()
+                        && watches.iter().any(|watch| {
+                            watch.instruction_rva == Some(site.pc_rva)
+                                || watch
+                                    .function_rva
+                                    .is_some_and(|rva| Some(rva) == site.target_rva)
+                        })
+                })
+                .flat_map(|site| [site.address, site.return_address])
+                .collect::<Vec<_>>();
+            points.push(entry_address);
+            points
+        } else {
+            let mut points = self.trace_points.clone();
+            points.push(entry_address);
+            points
+        };
         let label_points = self
             .unicorn
             .get_data()
@@ -1053,8 +1248,14 @@ impl GuestEngine<'static> {
             .keys()
             .copied()
             .collect::<Vec<_>>();
-        hook_points.extend(label_points.iter().copied());
-        for point in label_points {
+        if !checkpoint_only {
+            hook_points.extend(label_points.iter().copied());
+        }
+        for point in if checkpoint_only {
+            Vec::new()
+        } else {
+            label_points
+        } {
             let mut bytes = [0u8; STUB_STRIDE as usize];
             if self.unicorn.mem_read(point, &mut bytes).is_err() {
                 continue;
@@ -1070,43 +1271,49 @@ impl GuestEngine<'static> {
         }
         hook_points.sort_unstable();
         hook_points.dedup();
-        let block_hook = uc(
-            "install guest trace block hook",
-            self.unicorn.add_block_hook(
-                image_base,
-                image_end - 1,
-                move |unicorn, address, size| {
-                    advance_runtime_target_lifecycle(unicorn.get_data_mut(), address);
-                    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
-                        let block_key = (address, size);
-                        if let Some(observed) = capture.basic_blocks.get_mut(&block_key) {
-                            *observed += 1;
-                        } else if capture.basic_blocks.len() < MAX_TRACE_BASIC_BLOCKS {
-                            capture.basic_blocks.insert(block_key, 1);
-                        } else {
-                            capture.dropped_basic_blocks += 1;
-                        }
-                        if let Some(previous) = capture.previous_block.replace(address) {
-                            let edge_key = (previous, address);
-                            if let Some(observed) = capture.branch_edges.get_mut(&edge_key) {
+        if !self.unicorn.get_data().trace_checkpoint_only {
+            let block_hook = uc(
+                "install guest trace block hook",
+                self.unicorn.add_block_hook(
+                    image_base,
+                    image_end - 1,
+                    move |unicorn, address, size| {
+                        advance_runtime_target_lifecycle(unicorn.get_data_mut(), address);
+                        if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+                            let block_key = (address, size);
+                            if let Some(observed) = capture.basic_blocks.get_mut(&block_key) {
                                 *observed += 1;
-                            } else if capture.branch_edges.len() < MAX_TRACE_BRANCH_EDGES {
-                                capture.branch_edges.insert(edge_key, 1);
+                            } else if capture.basic_blocks.len() < MAX_TRACE_BASIC_BLOCKS {
+                                capture.basic_blocks.insert(block_key, 1);
                             } else {
-                                capture.dropped_branch_edges += 1;
+                                capture.dropped_basic_blocks += 1;
+                            }
+                            if let Some(previous) = capture.previous_block.replace(address) {
+                                let edge_key = (previous, address);
+                                if let Some(observed) = capture.branch_edges.get_mut(&edge_key) {
+                                    *observed += 1;
+                                } else if capture.branch_edges.len() < MAX_TRACE_BRANCH_EDGES {
+                                    capture.branch_edges.insert(edge_key, 1);
+                                } else {
+                                    capture.dropped_branch_edges += 1;
+                                }
                             }
                         }
-                    }
-                },
-            ),
-        )?;
-        self.trace_hooks.push(block_hook);
+                    },
+                ),
+            )?;
+            self.trace_hooks.push(block_hook);
+        }
         for point in hook_points {
             let hook = uc(
                 "install guest execution trace point",
                 self.unicorn
                     .add_code_hook(point, point, move |unicorn, address, size| {
-                        trace_instruction(unicorn, address, size, image_base, image_end);
+                        if unicorn.get_data().trace_checkpoint_only {
+                            checkpoint_instruction(unicorn, address, image_base, image_end);
+                        } else {
+                            trace_instruction(unicorn, address, size, image_base, image_end);
+                        }
                     }),
             )?;
             self.trace_hooks.push(hook);
@@ -1249,6 +1456,12 @@ impl GuestEngine<'static> {
         }
         let trace_truncated = !truncation.is_empty();
         let trace_configuration = TraceConfiguration {
+            capture_mode: if capture.checkpoint_only {
+                "checkpoint"
+            } else {
+                "full_trace"
+            },
+            unhookable_watches: capture.unhookable_watches.clone(),
             max_events: MAX_TRACE_EVENTS,
             max_basic_blocks: MAX_TRACE_BASIC_BLOCKS,
             max_branch_edges: MAX_TRACE_BRANCH_EDGES,
@@ -1291,7 +1504,12 @@ impl GuestEngine<'static> {
                 std::env::consts::OS,
                 std::env::consts::ARCH
             ),
-            modules: self.trace_modules.clone(),
+            modules: self
+                .trace_modules
+                .iter()
+                .chain(self.unicorn.get_data().guest_files.reports.iter())
+                .cloned()
+                .collect(),
             trace_configuration,
             selector: capture.selector,
             entry_rva: capture.entry_rva,
@@ -1329,6 +1547,10 @@ impl GuestEngine<'static> {
 
     pub fn configure_trace_watches(&mut self, watches: Vec<TraceWatchSpec>) {
         self.unicorn.get_data_mut().trace_watches = watches;
+    }
+
+    pub fn configure_trace_checkpoint_only(&mut self, enabled: bool) {
+        self.unicorn.get_data_mut().trace_checkpoint_only = enabled;
     }
 
     pub fn add_trace_watch(&mut self, watch: TraceWatchSpec) {
@@ -1486,7 +1708,17 @@ impl GuestEngine<'static> {
     }
 
     pub fn call_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
-        self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS)
+        self.call_win64_args(address, &args)
+    }
+
+    /// Calls a guest function using the Win64 ABI with an arbitrary number of
+    /// integer/pointer argument slots.
+    ///
+    /// Each value is copied as an opaque 64-bit payload. This is intentional:
+    /// callers that need to pass a raw `f32` word can place `value.to_bits()` in
+    /// the low 32 bits without a host-side numeric conversion.
+    pub fn call_win64_args(&mut self, address: u64, args: &[u64]) -> Result<u64, GuestError> {
+        self.call_win64_with_timeout(address, args, TIMEOUT_MICROSECONDS)
     }
 
     pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
@@ -1512,20 +1744,68 @@ impl GuestEngine<'static> {
         args: &[u64],
         timeout_microseconds: u64,
     ) -> Result<u64, GuestError> {
-        if args.len() < 4 || args.len() > 16 {
+        const WIN64_HOME_SPACE_BYTES: u64 = 0x20;
+        const RETURN_ADDRESS_BYTES: u64 = 8;
+        const MINIMUM_CALLEE_STACK_BYTES: u64 = PAGE_SIZE;
+
+        let stack_argument_count = args.len().saturating_sub(4);
+        let stack_argument_bytes = u64::try_from(stack_argument_count)
+            .ok()
+            .and_then(|count| count.checked_mul(8))
+            .ok_or_else(|| GuestError::Callback("Win64 argument list is too large".to_string()))?;
+        let unaligned_frame_bytes = RETURN_ADDRESS_BYTES
+            .checked_add(WIN64_HOME_SPACE_BYTES)
+            .and_then(|bytes| bytes.checked_add(stack_argument_bytes))
+            .ok_or_else(|| GuestError::Callback("Win64 argument frame is too large".to_string()))?;
+        // STACK_BASE + STACK_SIZE is 16-byte aligned. At function entry the
+        // Win64 ABI requires RSP % 16 == 8, so the bytes above RSP must also be
+        // congruent to 8 modulo 16.
+        let frame_bytes = if unaligned_frame_bytes % 16 == 8 {
+            unaligned_frame_bytes
+        } else {
+            unaligned_frame_bytes.checked_add(8).ok_or_else(|| {
+                GuestError::Callback("Win64 argument frame is too large".to_string())
+            })?
+        };
+        let available_frame_bytes = STACK_SIZE - MINIMUM_CALLEE_STACK_BYTES;
+        if frame_bytes > available_frame_bytes {
             return Err(GuestError::Callback(format!(
-                "Win64 call requires 4..=16 arguments, got {}",
-                args.len()
+                "Win64 argument frame requires {frame_bytes} bytes, but only \
+                 {available_frame_bytes} are available",
             )));
         }
+        while let Some(thread_id) = self.scheduler_deferred_ready.pop_front() {
+            if !self.scheduled_windows_threads.contains_key(&thread_id) {
+                return Err(GuestError::Callback(format!(
+                    "deferred-ready thread {thread_id} has no saved context"
+                )));
+            }
+            if self.scheduler_ready.contains(&thread_id) {
+                return Err(GuestError::Callback(format!(
+                    "deferred-ready thread {thread_id} is already runnable"
+                )));
+            }
+            self.scheduler_ready.push_back(thread_id);
+        }
+        self.unicorn.get_data_mut().scheduler_ready_hint = !self.scheduler_ready.is_empty();
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
         self.unicorn.get_data_mut().avx_defined_ymm = [false; 16];
+        uc(
+            "reset translated AVX defined mask",
+            aex_unicorn_buffer::reset_x86_avx_defined_mask(&self.unicorn),
+        )?;
         self.unicorn.get_data_mut().latest_runtime_target = None;
         self.unicorn.get_data_mut().unsupported_import = None;
         let stack_top = STACK_BASE + STACK_SIZE;
-        // Win64 function entry observes RSP % 16 == 8. Reserve a return
-        // address, 32-byte shadow space, bounded stack arguments, and scratch.
-        let rsp = (stack_top - 0x108) | 8;
+        // Reserve the return address, 32-byte home space, every stack argument,
+        // alignment padding, and at least one page below RSP for the callee.
+        let rsp = stack_top - frame_bytes;
+        debug_assert_eq!(rsp % 16, 8);
+        uc(
+            "clear Win64 argument frame",
+            self.unicorn
+                .mem_write(rsp, &vec![0; usize::try_from(frame_bytes).unwrap()]),
+        )?;
         uc(
             "write return address",
             self.unicorn.mem_write(rsp, &RETURN_ADDRESS.to_le_bytes()),
@@ -1539,23 +1819,546 @@ impl GuestEngine<'static> {
         }
         for (register, value) in [
             (RegisterX86::RSP, rsp),
-            (RegisterX86::RCX, args[0]),
-            (RegisterX86::RDX, args[1]),
-            (RegisterX86::R8, args[2]),
-            (RegisterX86::R9, args[3]),
+            (RegisterX86::RCX, args.first().copied().unwrap_or(0)),
+            (RegisterX86::RDX, args.get(1).copied().unwrap_or(0)),
+            (RegisterX86::R8, args.get(2).copied().unwrap_or(0)),
+            (RegisterX86::R9, args.get(3).copied().unwrap_or(0)),
         ] {
             uc(
                 "write argument register",
                 self.unicorn.reg_write(register, value),
             )?;
         }
-        if let Err(error) = self.unicorn.emu_start(
-            address,
-            RETURN_ADDRESS,
-            timeout_microseconds,
-            MAX_INSTRUCTIONS,
-        ) {
-            return Err(self.execution_crash(format!("emulation error: {error}")));
+        const MAX_SCHEDULER_SWITCHES: usize = 256;
+        let timeout = Duration::from_micros(timeout_microseconds);
+        let started = Instant::now();
+        let mut begin = address;
+        for scheduler_switch in 0..=MAX_SCHEDULER_SWITCHES {
+            self.unicorn.get_data_mut().scheduler_switches_remaining =
+                (MAX_SCHEDULER_SWITCHES - scheduler_switch) as u64;
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err(self.execution_crash(format!(
+                    "execution exceeded the total timeout of {timeout_microseconds} microseconds"
+                )));
+            }
+            let remaining_timeout_microseconds = u64::try_from((timeout - elapsed).as_micros())
+                .unwrap_or(u64::MAX)
+                .max(1);
+            if let Err(error) = self.unicorn.emu_start(
+                begin,
+                RETURN_ADDRESS,
+                remaining_timeout_microseconds,
+                MAX_INSTRUCTIONS,
+            ) {
+                return Err(self.execution_crash(format!("emulation error: {error}")));
+            }
+            self.unicorn.get_data_mut().scheduler_virtual_tick = self
+                .unicorn
+                .get_data()
+                .scheduler_virtual_tick
+                .saturating_add(1);
+            while let Some(thread_id) = self
+                .unicorn
+                .get_data_mut()
+                .scheduler_woken_threads
+                .pop_front()
+            {
+                if !self.scheduled_windows_threads.contains_key(&thread_id) {
+                    return Err(GuestError::Callback(format!(
+                        "address wake selected non-parked guest thread {thread_id}"
+                    )));
+                }
+                if let Some(lock_address) = self
+                    .unicorn
+                    .get_data_mut()
+                    .scheduler_condition_locks
+                    .remove(&thread_id)
+                {
+                    let lock = self
+                        .unicorn
+                        .get_data_mut()
+                        .windows_srw_locks
+                        .get_mut(&lock_address)
+                        .ok_or_else(|| {
+                            GuestError::Callback(format!(
+                                "condition-variable SRW lock {lock_address:#x} disappeared"
+                            ))
+                        })?;
+                    if lock.owner.is_some() {
+                        return Err(GuestError::Callback(format!(
+                            "condition-variable wake cannot reacquire owned SRW lock {lock_address:#x}"
+                        )));
+                    }
+                    lock.owner = Some(thread_id);
+                    uc(
+                        "restore condition-variable SRW ownership",
+                        self.unicorn.mem_write(lock_address, &1u64.to_le_bytes()),
+                    )?;
+                    self.unicorn
+                        .get_data_mut()
+                        .windows_condition_waiters
+                        .retain(|_, waiters| {
+                            waiters.retain(|waiter| *waiter != thread_id);
+                            !waiters.is_empty()
+                        });
+                }
+                if !self.scheduler_ready.contains(&thread_id) {
+                    self.scheduler_ready.push_back(thread_id);
+                }
+            }
+            self.unicorn.get_data_mut().scheduler_ready_hint = !self.scheduler_ready.is_empty();
+            let expired_waiter = self
+                .scheduled_windows_threads
+                .iter()
+                .filter_map(|(thread_id, thread)| {
+                    thread.wait_deadline.map(|deadline| (*thread_id, deadline))
+                })
+                .filter(|(thread_id, deadline)| {
+                    *deadline <= self.unicorn.get_data().scheduler_virtual_tick
+                        && !self.scheduler_ready.contains(thread_id)
+                })
+                .min_by_key(|(thread_id, deadline)| (*deadline, *thread_id));
+            let timed_out_waiter = expired_waiter.or_else(|| {
+                self.scheduler_ready
+                    .is_empty()
+                    .then(|| {
+                        self.scheduled_windows_threads
+                            .iter()
+                            .filter_map(|(thread_id, thread)| {
+                                thread.wait_deadline.map(|deadline| (*thread_id, deadline))
+                            })
+                            .min_by_key(|(thread_id, deadline)| (*deadline, *thread_id))
+                    })
+                    .flatten()
+            });
+            if let Some((thread_id, deadline)) = timed_out_waiter {
+                self.unicorn.get_data_mut().scheduler_virtual_tick =
+                    self.unicorn.get_data().scheduler_virtual_tick.max(deadline);
+                let thread = self
+                    .scheduled_windows_threads
+                    .get_mut(&thread_id)
+                    .expect("observed finite waiter");
+                thread
+                    .context
+                    .reg_write(RegisterX86::RAX, 0)
+                    .map_err(|error| {
+                        GuestError::Callback(format!(
+                            "set timed-out WaitOnAddress result failed: {error}"
+                        ))
+                    })?;
+                thread.last_error = 1460;
+                thread.wait_deadline = None;
+                self.unicorn
+                    .get_data_mut()
+                    .windows_address_waiters
+                    .retain(|_, waiters| {
+                        waiters.remove(&thread_id);
+                        !waiters.is_empty()
+                    });
+                self.scheduler_ready.push_back(thread_id);
+                self.unicorn.get_data_mut().scheduler_ready_hint = true;
+            }
+            if self.unicorn.get_data_mut().scheduler_child_completed {
+                self.unicorn.get_data_mut().scheduler_child_completed = false;
+                let mut parent = self.parked_main_context.take().ok_or_else(|| {
+                    GuestError::Callback(
+                        "scheduler completed a child without a parked parent context".into(),
+                    )
+                })?;
+                if let Some(main_wait) = self.unicorn.get_data_mut().scheduler_main_wait.take() {
+                    if !main_wait.woken {
+                        if let Some(deadline) = main_wait.deadline {
+                            self.unicorn.get_data_mut().scheduler_virtual_tick =
+                                self.unicorn.get_data().scheduler_virtual_tick.max(deadline);
+                            parent.reg_write(RegisterX86::RAX, 0).map_err(|error| {
+                                GuestError::Callback(format!(
+                                    "set completed-peer main WaitOnAddress timeout failed: {error}"
+                                ))
+                            })?;
+                            self.unicorn.get_data_mut().windows_last_error = 1460;
+                            self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                |_, waiters| {
+                                    waiters.remove(&1);
+                                    !waiters.is_empty()
+                                },
+                            );
+                        } else {
+                            self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                |_, waiters| {
+                                    waiters.remove(&1);
+                                    !waiters.is_empty()
+                                },
+                            );
+                            return Err(GuestError::Callback(
+                                "WaitOnAddress deadlock: completed peer did not wake the INFINITE main wait"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
+                uc(
+                    "restore parked main thread context",
+                    self.unicorn.context_restore(&parent),
+                )?;
+                begin = uc(
+                    "read resumed main thread instruction pointer",
+                    self.unicorn.reg_read(RegisterX86::RIP),
+                )?;
+                continue;
+            }
+            let stopped_rip = uc(
+                "read scheduler stop instruction pointer",
+                self.unicorn.reg_read(RegisterX86::RIP),
+            )?;
+            if stopped_rip == RETURN_ADDRESS
+                && self.unicorn.get_data().scheduler_yield_reason.is_none()
+                && !self.scheduler_ready.is_empty()
+            {
+                // A Win32 process does not terminate a runnable child merely
+                // because the creating callback returned. Drain ready guest
+                // work deterministically before declaring the call quiescent.
+                self.unicorn.get_data_mut().scheduler_yield_reason =
+                    Some(SchedulerYieldReason::Voluntary);
+                self.unicorn.get_data_mut().scheduler_resume_rip = RETURN_ADDRESS;
+            }
+            if let Some(yield_reason) = self.unicorn.get_data_mut().scheduler_yield_reason.take() {
+                if self.unicorn.get_data().pending_windows_thread.is_some() {
+                    // The running child is leaving the CPU without completing.
+                    // Its next completion must be classified only after this
+                    // saved context is explicitly resumed again.
+                    self.unicorn.get_data_mut().scheduler_resume_active = false;
+                    if self.scheduled_windows_threads.len() >= MAX_WINDOWS_THREADS {
+                        return Err(GuestError::Callback(format!(
+                            "cooperative scheduler exceeded {MAX_WINDOWS_THREADS} parked threads"
+                        )));
+                    }
+                    let mut context = uc(
+                        "save yielding child thread context",
+                        self.unicorn.context_init(),
+                    )?;
+                    let resume_rip = self.unicorn.get_data().scheduler_resume_rip;
+                    uc(
+                        "advance yielding child context past SwitchToThread",
+                        context.reg_write(RegisterX86::RIP, resume_rip),
+                    )?;
+                    let mut pending = self
+                        .unicorn
+                        .get_data_mut()
+                        .pending_windows_thread
+                        .take()
+                        .expect("observed pending child");
+                    let mut parent = if let Some(parent) = self.parked_main_context.take() {
+                        parent
+                    } else {
+                        self.unicorn
+                            .get_data_mut()
+                            .scheduler_parent_context
+                            .take()
+                            .ok_or_else(|| {
+                                GuestError::Callback(
+                                    "yielding child has no saved parent context".into(),
+                                )
+                            })?
+                    };
+                    let mut keep_main_waiting = false;
+                    let mut main_wait_timed_out = false;
+                    if let Some(main_wait) = self.unicorn.get_data_mut().scheduler_main_wait.take()
+                    {
+                        if !main_wait.woken {
+                            if let Some(deadline) = main_wait.deadline {
+                                if deadline <= self.unicorn.get_data().scheduler_virtual_tick {
+                                    parent.reg_write(RegisterX86::RAX, 0).map_err(|error| {
+                                        GuestError::Callback(format!(
+                                            "set yielding-peer main WaitOnAddress timeout failed: {error}"
+                                        ))
+                                    })?;
+                                    pending.caller_last_error = 1460;
+                                    main_wait_timed_out = true;
+                                    self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                        |_, waiters| {
+                                            waiters.remove(&1);
+                                            !waiters.is_empty()
+                                        },
+                                    );
+                                } else if yield_reason == SchedulerYieldReason::Voluntary {
+                                    self.unicorn.get_data_mut().scheduler_main_wait =
+                                        Some(main_wait);
+                                    keep_main_waiting = true;
+                                } else {
+                                    self.unicorn.get_data_mut().scheduler_virtual_tick = deadline;
+                                    parent.reg_write(RegisterX86::RAX, 0).map_err(|error| {
+                                        GuestError::Callback(format!(
+                                            "set mutually-parked main WaitOnAddress timeout failed: {error}"
+                                        ))
+                                    })?;
+                                    pending.caller_last_error = 1460;
+                                    main_wait_timed_out = true;
+                                    self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                        |_, waiters| {
+                                            waiters.remove(&1);
+                                            !waiters.is_empty()
+                                        },
+                                    );
+                                }
+                            } else if yield_reason == SchedulerYieldReason::Voluntary {
+                                self.unicorn.get_data_mut().scheduler_main_wait = Some(main_wait);
+                                keep_main_waiting = true;
+                            } else {
+                                self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                    |_, waiters| {
+                                        waiters.remove(&1);
+                                        !waiters.is_empty()
+                                    },
+                                );
+                                return Err(GuestError::Callback(
+                                    "WaitOnAddress deadlock: main and peer are both parked INFINITE"
+                                        .into(),
+                                ));
+                            }
+                        }
+                    }
+                    let tls_values = self.unicorn.get_data().windows_tls_slots.clone();
+                    let fls_values = self
+                        .unicorn
+                        .get_data()
+                        .windows_fls_slots
+                        .iter()
+                        .map(|(index, slot)| (*index, slot.value))
+                        .collect();
+                    let last_error = self.unicorn.get_data().windows_last_error;
+                    let crt_errno =
+                        get_guest_crt_errno(&self.unicorn).map_err(GuestError::Callback)?;
+                    let thread_error_mode = self.unicorn.get_data().windows_thread_error_mode;
+                    let mut teb_stack = [0u8; 16];
+                    uc(
+                        "read yielding child TEB stack bounds",
+                        self.unicorn.mem_read(0x08, &mut teb_stack),
+                    )?;
+                    if keep_main_waiting {
+                        self.parked_main_context = Some(parent);
+                        self.unicorn.context_restore(&context).map_err(|error| {
+                            GuestError::Callback(format!(
+                                "resume peer while main WaitOnAddress remains parked failed: {error}"
+                            ))
+                        })?;
+                        self.unicorn.get_data_mut().pending_windows_thread = Some(pending);
+                        self.unicorn.get_data_mut().scheduler_resume_active = true;
+                        begin = uc(
+                            "read continued WaitOnAddress peer instruction pointer",
+                            self.unicorn.reg_read(RegisterX86::RIP),
+                        )?;
+                        continue;
+                    }
+                    restore_windows_thread_context(self.unicorn.get_data_mut(), &pending);
+                    uc(
+                        "restore yielding child's parent context",
+                        self.unicorn.context_restore(&parent),
+                    )?;
+                    uc(
+                        "restore yielding child's parent TEB stack bounds",
+                        self.unicorn.mem_write(0x08, &pending.caller_teb_stack),
+                    )?;
+                    let thread_id = self
+                        .unicorn
+                        .get_data()
+                        .windows_threads
+                        .get(&pending.handle)
+                        .map(|thread| thread.id)
+                        .ok_or_else(|| {
+                            GuestError::Callback("yielding child handle disappeared".into())
+                        })?;
+                    if self
+                        .scheduled_windows_threads
+                        .insert(
+                            thread_id,
+                            ParkedWindowsThread {
+                                crt_errno,
+                                context,
+                                pending,
+                                tls_values,
+                                fls_values,
+                                last_error,
+                                thread_error_mode,
+                                teb_stack,
+                                wait_deadline: self
+                                    .unicorn
+                                    .get_data_mut()
+                                    .scheduler_wait_deadline
+                                    .take(),
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(GuestError::Callback(format!(
+                            "cooperative scheduler parked thread {thread_id} twice"
+                        )));
+                    }
+                    if yield_reason == SchedulerYieldReason::Voluntary {
+                        if main_wait_timed_out {
+                            self.scheduler_deferred_ready.push_back(thread_id);
+                        } else {
+                            self.scheduler_ready.push_back(thread_id);
+                            self.unicorn.get_data_mut().scheduler_ready_hint = true;
+                        }
+                    }
+                } else if let Some(thread_id) = self.scheduler_ready.pop_front() {
+                    self.unicorn.get_data_mut().scheduler_ready_hint =
+                        !self.scheduler_ready.is_empty();
+                    let mut child = self
+                        .scheduled_windows_threads
+                        .remove(&thread_id)
+                        .ok_or_else(|| {
+                            GuestError::Callback(format!(
+                                "ready thread {thread_id} has no saved context"
+                            ))
+                        })?;
+                    if self.parked_main_context.is_some() {
+                        return Err(GuestError::Callback(
+                            "cooperative scheduler already has a parked main context".into(),
+                        ));
+                    }
+                    let mut main_context = uc(
+                        "save yielding main thread context",
+                        self.unicorn.context_init(),
+                    )?;
+                    let resume_rip = self.unicorn.get_data().scheduler_resume_rip;
+                    uc(
+                        "advance yielding main context past SwitchToThread",
+                        main_context.reg_write(RegisterX86::RIP, resume_rip),
+                    )?;
+                    child.pending.caller_tls_values =
+                        self.unicorn.get_data().windows_tls_slots.clone();
+                    child.pending.caller_fls_values = self
+                        .unicorn
+                        .get_data()
+                        .windows_fls_slots
+                        .iter()
+                        .map(|(index, slot)| (*index, slot.value))
+                        .collect();
+                    child.pending.caller_last_error = self.unicorn.get_data().windows_last_error;
+                    child.pending.caller_crt_errno =
+                        get_guest_crt_errno(&self.unicorn).map_err(GuestError::Callback)?;
+                    child.pending.caller_thread_error_mode =
+                        self.unicorn.get_data().windows_thread_error_mode;
+                    child.pending.caller_thread_id =
+                        self.unicorn.get_data().current_windows_thread_id;
+                    uc(
+                        "read yielding main TEB stack bounds",
+                        self.unicorn
+                            .mem_read(0x08, &mut child.pending.caller_teb_stack),
+                    )?;
+                    for (index, slot) in &mut self.unicorn.get_data_mut().windows_tls_slots {
+                        *slot = child.tls_values.get(index).copied().unwrap_or(0);
+                    }
+                    for (index, slot) in &mut self.unicorn.get_data_mut().windows_fls_slots {
+                        slot.value = child.fls_values.get(index).copied().unwrap_or(0);
+                    }
+                    self.unicorn.get_data_mut().windows_last_error = child.last_error;
+                    self.unicorn.get_data_mut().crt_errno = child.crt_errno;
+                    self.unicorn.get_data_mut().windows_thread_error_mode = child.thread_error_mode;
+                    self.unicorn.get_data_mut().current_windows_thread_id = self
+                        .unicorn
+                        .get_data()
+                        .windows_threads
+                        .get(&child.pending.handle)
+                        .map(|thread| thread.id)
+                        .ok_or_else(|| {
+                            GuestError::Callback("parked child handle disappeared".into())
+                        })?;
+                    uc(
+                        "restore parked child TEB stack bounds",
+                        self.unicorn.mem_write(0x08, &child.teb_stack),
+                    )?;
+                    uc(
+                        "restore parked child CPU context",
+                        self.unicorn.context_restore(&child.context),
+                    )?;
+                    self.unicorn.get_data_mut().pending_windows_thread = Some(child.pending);
+                    self.unicorn.get_data_mut().scheduler_resume_active = true;
+                    self.parked_main_context = Some(main_context);
+                } else if yield_reason == SchedulerYieldReason::AddressWait {
+                    let main_wait = self
+                        .unicorn
+                        .get_data_mut()
+                        .scheduler_main_wait
+                        .take()
+                        .ok_or_else(|| {
+                            GuestError::Callback(
+                                "main WaitOnAddress yield has no wait metadata".into(),
+                            )
+                        })?;
+                    if let Some(deadline) = main_wait.deadline {
+                        self.unicorn.get_data_mut().scheduler_virtual_tick =
+                            self.unicorn.get_data().scheduler_virtual_tick.max(deadline);
+                        self.unicorn.get_data_mut().windows_last_error = 1460;
+                        self.unicorn
+                            .get_data_mut()
+                            .windows_address_waiters
+                            .retain(|_, waiters| {
+                                waiters.remove(&1);
+                                !waiters.is_empty()
+                            });
+                        self.unicorn
+                            .reg_write(RegisterX86::RAX, 0)
+                            .map_err(|error| {
+                                GuestError::Callback(format!(
+                                    "set quiescent main WaitOnAddress timeout failed: {error}"
+                                ))
+                            })?;
+                        let resume_rip = self.unicorn.get_data().scheduler_resume_rip;
+                        uc(
+                            "advance timed-out main WaitOnAddress",
+                            self.unicorn.reg_write(RegisterX86::RIP, resume_rip),
+                        )?;
+                    } else {
+                        self.unicorn
+                            .get_data_mut()
+                            .windows_address_waiters
+                            .retain(|_, waiters| {
+                                waiters.remove(&1);
+                                !waiters.is_empty()
+                            });
+                        return Err(GuestError::Callback(
+                            "WaitOnAddress deadlock: no runnable guest thread can wake the equal address"
+                                .into(),
+                        ));
+                    }
+                } else if yield_reason == SchedulerYieldReason::SrwLock {
+                    return Err(GuestError::Callback(
+                        "SRW lock deadlock: no runnable guest thread can release the exclusive owner"
+                            .into(),
+                    ));
+                } else if yield_reason == SchedulerYieldReason::Event {
+                    return Err(GuestError::Callback(
+                        "event deadlock: no runnable guest thread can signal the event".into(),
+                    ));
+                } else if yield_reason == SchedulerYieldReason::ConditionVariable {
+                    return Err(GuestError::Callback(
+                        "condition-variable deadlock: no runnable guest thread can wake it".into(),
+                    ));
+                } else {
+                    // Windows permits SwitchToThread to find no runnable peer.
+                    // The hook has already completed the call and returned FALSE/TRUE
+                    // deterministically; resume the same logical thread.
+                    let resume_rip = self.unicorn.get_data().scheduler_resume_rip;
+                    uc(
+                        "advance yielding thread past SwitchToThread",
+                        self.unicorn.reg_write(RegisterX86::RIP, resume_rip),
+                    )?;
+                }
+                begin = uc(
+                    "read scheduler resume instruction pointer",
+                    self.unicorn.reg_read(RegisterX86::RIP),
+                )?;
+                if scheduler_switch == MAX_SCHEDULER_SWITCHES {
+                    return Err(GuestError::Callback(format!(
+                        "cooperative scheduler exceeded {MAX_SCHEDULER_SWITCHES} context switches"
+                    )));
+                }
+                continue;
+            }
+            break;
         }
         if let Some(abort) = self.unicorn.get_data_mut().selector_abort.take() {
             return Err(GuestError::SelectorAbort {
@@ -1659,6 +2462,16 @@ impl GuestEngine<'static> {
         } else {
             String::new()
         };
+        let rsp = *registers.get("rsp").unwrap_or(&0);
+        let stack_words = (0..96u64)
+            .map_while(|index| {
+                let bytes = self
+                    .unicorn
+                    .mem_read_as_vec(rsp.checked_add(index * 8)?, 8)
+                    .ok()?;
+                Some(u64::from_le_bytes(bytes.try_into().ok()?))
+            })
+            .collect();
         let runtime_target = self
             .unicorn
             .get_data()
@@ -1666,6 +2479,18 @@ impl GuestEngine<'static> {
             .as_ref()
             .filter(|target| target.source_address == rip || target.effective_target == Some(rip))
             .cloned();
+        let crt_heap_allocation_count = self.unicorn.get_data().crt_heap.allocations().count();
+        let crt_heap_tail_allocations = self
+            .unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .rev()
+            .take(16)
+            .map(|(pointer, allocation)| {
+                (pointer, allocation.requested_size, allocation.backing_size)
+            })
+            .collect();
         let snapshot = TraceCrashSnapshot {
             reason: reason.clone(),
             registers,
@@ -1676,10 +2501,14 @@ impl GuestEngine<'static> {
                 .contains(&rip)
                 .then(|| rip - self.image_base),
             instruction_bytes,
+            stack_words,
             runtime_target,
             handle_allocations: self.unicorn.get_data().handle_allocations.clone(),
             handle_allocation_failures: self.unicorn.get_data().handle_allocation_failures.clone(),
             live_handle_count: self.unicorn.get_data().handles.len(),
+            crt_heap_live_bytes: self.unicorn.get_data().crt_heap.live_bytes(),
+            crt_heap_allocation_count,
+            crt_heap_tail_allocations,
             next_pf_handle_data: self.unicorn.get_data().next_pf_handle_data,
             pf_handle_data_end: PF_HANDLE_DATA_END,
         };
@@ -1713,7 +2542,12 @@ impl GuestEngine<'static> {
     }
 
     pub fn read(&self, address: u64, bytes: &mut [u8]) -> Result<(), GuestError> {
-        uc("read guest data", self.unicorn.mem_read(address, bytes))
+        self.unicorn
+            .mem_read(address, bytes)
+            .map_err(|error| GuestError::Unicorn {
+                operation: "read guest data",
+                detail: format!("address={address:#x}, length={}: {error}", bytes.len()),
+            })
     }
 
     pub fn write_u64(&mut self, address: u64, value: u64) -> Result<(), GuestError> {
@@ -1722,6 +2556,14 @@ impl GuestEngine<'static> {
 
     pub fn add_param_callback_address(&self) -> u64 {
         HOST_ADD_PARAM
+    }
+
+    pub fn register_ui_callback_address(&self) -> u64 {
+        HOST_REGISTER_UI
+    }
+
+    pub fn custom_ui_registration(&self) -> Option<CustomUiRegistration> {
+        self.unicorn.get_data().custom_ui_registration
     }
 
     pub fn poison_callback_address(&self) -> u64 {
@@ -1816,16 +2658,44 @@ impl GuestEngine<'static> {
         HOST_PF_ANSI_CEIL
     }
 
+    pub fn ansi_atan_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_ATAN
+    }
+
+    pub fn ansi_atan2_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_ATAN2
+    }
+
     pub fn ansi_cos_callback_address(&self) -> u64 {
         HOST_PF_ANSI_COS
+    }
+
+    pub fn ansi_exp_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_EXP
     }
 
     pub fn ansi_fabs_callback_address(&self) -> u64 {
         HOST_PF_ANSI_FABS
     }
 
+    pub fn ansi_floor_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_FLOOR
+    }
+
+    pub fn ansi_fmod_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_FMOD
+    }
+
     pub fn ansi_hypot_callback_address(&self) -> u64 {
         HOST_PF_ANSI_HYPOT
+    }
+
+    pub fn ansi_log_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_LOG
+    }
+
+    pub fn ansi_log10_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_LOG10
     }
 
     pub fn ansi_pow_callback_address(&self) -> u64 {
@@ -1838,6 +2708,10 @@ impl GuestEngine<'static> {
 
     pub fn ansi_sqrt_callback_address(&self) -> u64 {
         HOST_PF_ANSI_SQRT
+    }
+
+    pub fn ansi_tan_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_TAN
     }
 
     pub fn ansi_asin_callback_address(&self) -> u64 {
@@ -1915,6 +2789,10 @@ impl GuestEngine<'static> {
 
     pub fn dropped_unsupported_suite_calls(&self) -> u64 {
         self.unicorn.get_data().dropped_unsupported_suite_calls
+    }
+
+    pub fn smart_checkout_disk_id_fallbacks(&self) -> &[SmartCheckoutDiskIdFallback] {
+        &self.unicorn.get_data().smart_checkout_disk_id_fallbacks
     }
 
     pub fn smart_callback_counts(&self) -> (u32, u32, u32) {
@@ -2001,6 +2879,12 @@ impl GuestEngine<'static> {
         self.unicorn.get_data_mut().render_pixel_format = pixel_format;
     }
 
+    pub fn configure_resident_world_formats(&mut self, formats: &[(u64, i32)]) {
+        let registered = &mut self.unicorn.get_data_mut().resident_world_formats;
+        registered.clear();
+        registered.extend(formats.iter().copied());
+    }
+
     pub fn finish_smart_checkout_scope(&mut self) -> bool {
         let state = self.unicorn.get_data_mut();
         let balanced = state
@@ -2014,4 +2898,31 @@ impl GuestEngine<'static> {
     pub fn parameters(&self) -> &[GuestParam] {
         &self.unicorn.get_data().params
     }
+
+    pub fn parameters_mut(&mut self) -> &mut [GuestParam] {
+        &mut self.unicorn.get_data_mut().params
+    }
+}
+
+fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
+    const WINDOWS_COMMAND_LINE_A: &[u8] = b"\"aex-guest-worker.exe\"\0";
+    let command_line = engine.allocate(WINDOWS_COMMAND_LINE_A.len(), 1)?;
+    engine.write(command_line, WINDOWS_COMMAND_LINE_A)?;
+    engine.unicorn.get_data_mut().windows_command_line_a = command_line;
+    Ok(())
+}
+
+fn initialize_windows_command_line_w(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
+    const WINDOWS_COMMAND_LINE: &str = "\"aex-guest-worker.exe\"";
+    let mut bytes = Vec::with_capacity((WINDOWS_COMMAND_LINE.encode_utf16().count() + 1) * 2);
+    for unit in WINDOWS_COMMAND_LINE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    let command_line = engine.allocate(bytes.len(), 2)?;
+    engine.write(command_line, &bytes)?;
+    engine.unicorn.get_data_mut().windows_command_line_w = command_line;
+    Ok(())
 }

@@ -5,12 +5,14 @@ use iced_x86::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
-use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
+use unicorn_engine::{Context, RegisterX86, UcHookId, Unicorn};
 
-use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_HEAP_BYTES};
+use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_ALLOCATION_BYTES, MAX_CRT_HEAP_BYTES};
 use crate::pe::{PeImage, StaticTlsImage};
 use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
@@ -27,6 +29,10 @@ use wgpu_runtime::{
 const PAGE_SIZE: u64 = 0x1000;
 const STACK_BASE: u64 = 0x0000_0000_7000_0000;
 const STACK_SIZE: u64 = 0x20_0000;
+const MAX_WINDOWS_THREADS: usize = 32;
+const WINDOWS_HOOK_HANDLE_BASE: u64 = 0x0000_000a_0000_0000;
+const MAX_WINDOWS_HOOKS: usize = 64;
+const CRT_LOCALE_HANDLE_BASE: u64 = 0x0000_000a_0001_0000;
 const STUB_BASE: u64 = 0x0000_0000_6000_0000;
 const STUB_SIZE: u64 = 0x10_0000;
 const STUB_STRIDE: u64 = 16;
@@ -100,6 +106,8 @@ const HOST_AREA_SAMPLE8: u64 = STUB_BASE + 0x80410;
 const HOST_TRANSFER_RECT8: u64 = STUB_BASE + 0x80420;
 const HOST_ITERATE16: u64 = STUB_BASE + 0x80430;
 const HOST_ITERATE16_CONTINUE: u64 = STUB_BASE + 0x80440;
+const HOST_ITERATE_FLOAT: u64 = STUB_BASE + 0x804d0;
+const HOST_ITERATE_FLOAT_CONTINUE: u64 = STUB_BASE + 0x804e0;
 const HOST_BLEND: u64 = STUB_BASE + 0x80450;
 const HOST_CRT_INITTERM_CONTINUE: u64 = STUB_BASE + 0x80470;
 const HOST_INITIALIZE_CONDITION_VARIABLE: u64 = STUB_BASE + 0x80480;
@@ -116,7 +124,59 @@ const HOST_AEGP_COMPUTE_CACHE_CALLBACKS: [u64; 6] = [
     STUB_BASE + 0x80550,
     STUB_BASE + 0x80560,
 ];
+const HOST_DYNAMIC_FLS_ALLOC: u64 = STUB_BASE + 0x80570;
+const HOST_REGISTER_UI: u64 = STUB_BASE + 0x80590;
+const HOST_CREATE_THREAD_CONTINUE: u64 = STUB_BASE + 0x80580;
+const HOST_ITERATE_ROW_TRAMPOLINE: u64 = STUB_BASE + 0x80700;
+const GUEST_ROUNDF: u64 = STUB_BASE + 0x80800;
+const GUEST_FLOORF: u64 = STUB_BASE + 0x80880;
+// Win64 floorf(float): handle negative subnormals explicitly before ROUNDSS.
+// DAZ would otherwise treat them as -0 and lose the required -1 result.
+// The 44-byte RIP-relative block has no relocations and preserves MXCSR and
+// XMM0's upper lanes.
+const GUEST_FLOORF_CODE: &[u8] = &[
+    0x66, 0x0f, 0x7e, 0xc0, 0x3d, 0x00, 0x00, 0x00, 0x80, 0x76, 0x14, 0x3d, 0x00, 0x00, 0x80, 0x80,
+    0x73, 0x0d, 0xf3, 0x0f, 0x10, 0x0d, 0x0e, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x10, 0xc1, 0xc3, 0x66,
+    0x0f, 0x3a, 0x0a, 0xc0, 0x09, 0xc3, 0x66, 0x90, 0x00, 0x00, 0x80, 0xbf,
+];
+// Win64 roundf(float): round the finite f32 bit pattern to an integer with
+// ties away from zero, preserve signed zero, and quiet signaling NaNs. This
+// integer-only routine does not read or alter MXCSR, including DAZ/FTZ and
+// unmasked exceptions. XMM1 and the integer temporaries are Win64 volatile;
+// XMM0's upper lanes and the stack are untouched. The 128-byte block has no
+// relocations and ends exactly where the separate floorf routine begins.
+const GUEST_ROUNDF_CODE: &[u8] = &[
+    0x66, 0x0f, 0x7e, 0xc0, 0x89, 0xc1, 0x81, 0xe1, 0xff, 0xff, 0xff, 0x7f, 0x81, 0xf9, 0x00, 0x00,
+    0x00, 0x3f, 0x72, 0x43, 0x81, 0xf9, 0x00, 0x00, 0x80, 0x3f, 0x72, 0x42, 0x81, 0xf9, 0x00, 0x00,
+    0x00, 0x4b, 0x73, 0x46, 0x89, 0xca, 0xc1, 0xea, 0x17, 0xf7, 0xda, 0x81, 0xc2, 0x96, 0x00, 0x00,
+    0x00, 0x41, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x41, 0x89, 0xc9, 0x89, 0xd1, 0x41, 0xd3, 0xe0, 0x44,
+    0x89, 0xc2, 0xd1, 0xea, 0x41, 0x01, 0xd1, 0x41, 0xf7, 0xd8, 0x45, 0x21, 0xc1, 0x25, 0x00, 0x00,
+    0x00, 0x80, 0x44, 0x09, 0xc8, 0xeb, 0x20, 0x25, 0x00, 0x00, 0x00, 0x80, 0xeb, 0x19, 0x25, 0x00,
+    0x00, 0x00, 0x80, 0x0d, 0x00, 0x00, 0x80, 0x3f, 0xeb, 0x0d, 0x81, 0xf9, 0x00, 0x00, 0x80, 0x7f,
+    0x76, 0x0d, 0x0d, 0x00, 0x00, 0x40, 0x00, 0x66, 0x0f, 0x6e, 0xc8, 0xf3, 0x0f, 0x10, 0xc1, 0xc3,
+];
+// Win64 guest trampoline for a contiguous row of pixel callbacks. The host
+// writes the callback, count, and pixel stride into the incoming stack frame.
+// Keeping this loop in translated guest code avoids a Rust/Unicorn round trip
+// for every pixel while retaining the existing row-level progress/abort hooks.
+const ITERATE_ROW_TRAMPOLINE: &[u8] = &[
+    0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x89, 0xcb, 0x89, 0xd6,
+    0x44, 0x89, 0xc7, 0x4d, 0x89, 0xcc, 0x4c, 0x8b, 0x6c, 0x24, 0x60, 0x4c, 0x8b, 0x74, 0x24, 0x68,
+    0x44, 0x8b, 0x7c, 0x24, 0x70, 0x48, 0x8b, 0x44, 0x24, 0x78, 0x4c, 0x8b, 0x94, 0x24, 0x80, 0x00,
+    0x00, 0x00, 0x48, 0x83, 0xec, 0x40, 0x48, 0x89, 0x44, 0x24, 0x28, 0x4c, 0x89, 0x54, 0x24, 0x30,
+    0x48, 0x89, 0xd9, 0x89, 0xf2, 0x41, 0x89, 0xf8, 0x4d, 0x89, 0xe1, 0x4c, 0x89, 0x6c, 0x24, 0x20,
+    0x41, 0xff, 0xd6, 0x85, 0xc0, 0x75, 0x17, 0xff, 0xc6, 0x4c, 0x8b, 0x54, 0x24, 0x28, 0x4d, 0x01,
+    0xd4, 0x4c, 0x8b, 0x54, 0x24, 0x30, 0x4d, 0x01, 0xd5, 0x41, 0xff, 0xcf, 0x75, 0xd2, 0x48, 0x83,
+    0xc4, 0x40, 0x41, 0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5f, 0x5e, 0x5b, 0xc3,
+];
 const WINDOWS_KERNEL32_MODULE_TOKEN: u64 = STUB_BASE + 0x8f000;
+const WINDOWS_NTDLL_MODULE_TOKEN: u64 = STUB_BASE + 0x8f180;
+const WINDOWS_STANDARD_INPUT_TOKEN: u64 = STUB_BASE + 0x8f100;
+const WINDOWS_STANDARD_OUTPUT_TOKEN: u64 = STUB_BASE + 0x8f110;
+const WINDOWS_STANDARD_ERROR_TOKEN: u64 = STUB_BASE + 0x8f120;
+const WINDOWS_THREAD_HANDLE_BASE: u64 = STUB_BASE + 0x8f200;
+const WINDOWS_THREAD_STACK_BASE: u64 = 0x0000_0000_6800_0000;
+const WINDOWS_THREAD_STACK_STRIDE: u64 = STACK_SIZE + PAGE_SIZE;
 const HOST_GPU_GET_DEVICE_COUNT: u64 = STUB_BASE + 0x80600;
 const HOST_GPU_GET_DEVICE_INFO: u64 = STUB_BASE + 0x80610;
 const HOST_GPU_ACQUIRE_EXCLUSIVE: u64 = STUB_BASE + 0x80620;
@@ -152,6 +212,8 @@ const HOST_GPU_SUITE_CALLBACKS: [u64; 15] = [
 const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
+const HOST_ITERATE16_SUITE: u64 = STUB_BASE + 0x81180;
+const HOST_ITERATE_FLOAT_SUITE: u64 = STUB_BASE + 0x81188;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
 const HOST_POINT_PARAM_SUITE: u64 = STUB_BASE + 0x81300;
 const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81400;
@@ -159,6 +221,46 @@ const HOST_WORLD_SUITE: u64 = STUB_BASE + 0x81500;
 const HOST_PF_ANSI_SUITE_V2: u64 = STUB_BASE + 0x81600;
 const HOST_GPU_DEVICE_SUITE_V1: u64 = STUB_BASE + 0x81700;
 const HOST_AEGP_COMPUTE_CACHE_SUITE_V1: u64 = STUB_BASE + 0x81800;
+const HOST_EFFECT_UI_SUITE_V1: u64 = STUB_BASE + 0x81900;
+const HOST_SET_OPTIONS_BUTTON_NAME: u64 = STUB_BASE + 0x81910;
+const HOST_PF_APP_SUITE_V6: u64 = STUB_BASE + 0x81a00;
+const HOST_PF_APP_CALLBACKS_V6: [u64; 11] = [
+    STUB_BASE + 0x81b00,
+    STUB_BASE + 0x81b10,
+    STUB_BASE + 0x81b20,
+    STUB_BASE + 0x81b30,
+    STUB_BASE + 0x81b40,
+    STUB_BASE + 0x81b50,
+    STUB_BASE + 0x81b60,
+    STUB_BASE + 0x81b70,
+    STUB_BASE + 0x81b80,
+    STUB_BASE + 0x81b90,
+    STUB_BASE + 0x81ba0,
+];
+const HOST_PERSISTENT_DATA_SUITE_V3: u64 = STUB_BASE + 0x81c00;
+// Opaque, unmapped guest handle. A callback accepts it only after this engine
+// returned it through GetApplicationBlob.
+const HOST_PERSISTENT_BLOB_TOKEN: u64 = DATA_BASE + DATA_SIZE + 0x1000;
+const HOST_PERSISTENT_DATA_CALLBACKS_V3: [u64; 18] = [
+    STUB_BASE + 0x81d00,
+    STUB_BASE + 0x81d10,
+    STUB_BASE + 0x81d20,
+    STUB_BASE + 0x81d30,
+    STUB_BASE + 0x81d40,
+    STUB_BASE + 0x81d50,
+    STUB_BASE + 0x81d60,
+    STUB_BASE + 0x81d70,
+    STUB_BASE + 0x81d80,
+    STUB_BASE + 0x81d90,
+    STUB_BASE + 0x81da0,
+    STUB_BASE + 0x81db0,
+    STUB_BASE + 0x81dc0,
+    STUB_BASE + 0x81dd0,
+    STUB_BASE + 0x81de0,
+    STUB_BASE + 0x81df0,
+    STUB_BASE + 0x81e00,
+    STUB_BASE + 0x81e10,
+];
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const HOST_ITERATE8_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x88000;
@@ -177,6 +279,12 @@ const WORLD_DATA_BASE: u64 = PF_HANDLE_DATA_END;
 const WORLD_DATA_END: u64 = WORLD_DATA_BASE + 0x2_0000_0000;
 const CRT_HEAP_BASE: u64 = 0x0000_0010_0000_0000;
 const CRT_HEAP_END: u64 = CRT_HEAP_BASE + MAX_CRT_HEAP_BYTES;
+const ENVIRONMENT_STRINGS_BASE: u64 = 0x0000_0020_0000_0000;
+const ENVIRONMENT_STRINGS_NAMESPACE_SIZE: u64 = MAX_CRT_HEAP_BYTES;
+const ENVIRONMENT_STRINGS_END: u64 = 0x0000_7fff_0000_0000;
+static NEXT_ENVIRONMENT_STRINGS_NAMESPACE: AtomicU64 = AtomicU64::new(0);
+static NEXT_PRIVATE_HEAP_TOKEN: AtomicU64 = AtomicU64::new(1);
+const PRIVATE_HEAP_TOKEN_BASE: u64 = 0x0000_7ffe_0000_0000;
 const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
 const MAX_WORLD_DIMENSION: i32 = 32_768;
@@ -185,7 +293,10 @@ const MAX_ITERATE_PIXELS: i64 = 16_777_216;
 // whole run, which is prohibitively expensive for image kernels. The wall-clock
 // timeout and return-sentinel check still bound and validate guest execution.
 const MAX_INSTRUCTIONS: usize = 0;
-const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
+// A plug-in call that cannot finish inside an interactive frame budget must
+// fail with a bounded crash snapshot instead of stalling the host or a corpus
+// sweep for minutes. This covers loader callbacks and effect selectors alike.
+const TIMEOUT_MICROSECONDS: u64 = 20_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
 const MAX_TRACE_BASIC_BLOCKS: usize = 50_000;
 const MAX_TRACE_BRANCH_EDGES: usize = 100_000;
@@ -206,6 +317,7 @@ const MAX_AVX_FALLBACK_INSTRUCTIONS: u64 = 1_000_000;
 // when a smaller executable section contains dense or false-positive decodes.
 const MAX_SPARSE_AVX_STATE_SYNC_HOOKS: usize = 4_096;
 const MAX_AVX_STATE_SYNC_POINTS: usize = 512 * 1_024;
+const MAX_RUNTIME_AVX_STATE_SYNC_POINTS: usize = 2 * 1_024 * 1_024;
 const MAX_VCOMP_REQUESTED_THREADS: i32 = 1_024;
 const MAX_CRT_MEMORY_COPY_BYTES: u64 = 128 * 1024 * 1024;
 const CRT_MEMORY_COPY_CHUNK: usize = 64 * 1024;
@@ -216,15 +328,49 @@ const MAX_CRT_STDIO_ARGUMENTS: usize = 32;
 const MAX_CRT_INITIALIZERS: usize = 4096;
 const MAX_CRT_ONEXIT_TABLES: usize = 64;
 const WINDOWS_CRITICAL_SECTION_BYTES: usize = 40;
-const MAX_WINDOWS_CRITICAL_SECTIONS: usize = 256;
+// Shared across the primary image and every loaded runtime DLL. Real DLL
+// sets keep hundreds of startup locks alive; retain a finite resource bound.
+const MAX_WINDOWS_CRITICAL_SECTIONS: usize = 4096;
 const MAX_WINDOWS_CRITICAL_SECTION_RECURSION: u32 = 1024;
+const MAX_WINDOWS_SRW_LOCKS: usize = 256;
+const MAX_WINDOWS_SRW_WAITERS: usize = MAX_WINDOWS_THREADS;
 const MAX_WINDOWS_CONDITION_VARIABLES: usize = 256;
+const MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS: usize = 256;
+const MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION: usize = 32;
 const MAX_WINDOWS_FLS_SLOTS: u32 = 128;
+const MAX_WINDOWS_TLS_SLOTS: u32 = 128;
 const MAX_WINDOWS_ENVIRONMENT_NAME_BYTES: usize = 255;
+const MAX_PROCESS_PRNG_BYTES: u64 = 1024 * 1024;
+const PROCESS_HEAP_HANDLE: u64 = 0x0000_0000_AE70_0001;
+const HEAP_NO_SERIALIZE: u32 = 0x0000_0001;
+const HEAP_GENERATE_EXCEPTIONS: u32 = 0x0000_0004;
+const HEAP_ZERO_MEMORY: u32 = 0x0000_0008;
+const HEAP_REALLOC_IN_PLACE_ONLY: u32 = 0x0000_0010;
+const HEAP_ALLOC_ALLOWED_FLAGS: u32 = HEAP_NO_SERIALIZE | HEAP_ZERO_MEMORY;
+const HEAP_REALLOC_ALLOWED_FLAGS: u32 =
+    HEAP_NO_SERIALIZE | HEAP_ZERO_MEMORY | HEAP_REALLOC_IN_PLACE_ONLY;
 const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
-const OBSERVED_MSVCP_MUTEX_TYPE: u32 = 0x102;
+const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_PATH_NOT_FOUND: u32 = 3;
+const ERROR_ACCESS_DENIED: u32 = 5;
+const ERROR_NOT_SUPPORTED: u32 = 50;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+const ERROR_MOD_NOT_FOUND: u32 = 126;
+const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+const MAX_WINDOWS_MODULE_REFERENCES: u32 = 1_000_000;
+const ERROR_PROC_NOT_FOUND: u32 = 127;
+const HRESULT_E_INVALIDARG: u32 = 0x8007_0057;
+const WINDOWS_MAX_PATH_BYTES: u64 = 260;
+const MSVCP_MUTEX_TRY: u32 = 0x02;
+const MSVCP_MUTEX_RECURSIVE: u32 = 0x100;
+const OBSERVED_MSVCP_MUTEX_TYPE: u32 = MSVCP_MUTEX_TRY | MSVCP_MUTEX_RECURSIVE;
+const MSVCP_MUTEX_BYTES: usize = 80;
 const MAX_MSVCP_MUTEXES: usize = 256;
 const MAX_MSVCP_MUTEX_RECURSION: u32 = 1024;
+const MSVCP_THRD_BUSY: u32 = 3;
 const MSVCP_EXCEPTION_PTR_BYTES: usize = 16;
 const VCRUNTIME_EXCEPTION_DATA_BYTES: usize = 16;
 
@@ -263,6 +409,14 @@ fn iterate8_suite_table_address(version: u64) -> Option<u64> {
     match version {
         1 => Some(HOST_ITERATE8_SUITE),
         2 => Some(HOST_ITERATE8_SUITE + 0x40),
+        _ => None,
+    }
+}
+
+fn typed_iterate_suite_table_address(name: &str, version: u64) -> Option<u64> {
+    match (name, version) {
+        ("PF iterate16 Suite", 1) => Some(HOST_ITERATE16_SUITE),
+        ("PF iterateFloat Suite", 1) => Some(HOST_ITERATE_FLOAT_SUITE),
         _ => None,
     }
 }
@@ -370,6 +524,7 @@ include!("x64/types.rs");
 include!("x64/imports.rs");
 include!("x64/opencl_imports.rs");
 include!("x64/engine.rs");
+include!("x64/libraries.rs");
 include!("x64/callbacks.rs");
 include!("x64/iterate_and_suites.rs");
 include!("x64/tail.rs");
@@ -377,6 +532,29 @@ include!("x64/tail.rs");
 #[cfg(test)]
 mod tests {
     include!("x64/tests_support.rs");
+    include!("x64/tests_area_sample.rs");
+    include!("x64/tests_ansi_callbacks.rs");
+    include!("x64/tests_transfer_rect.rs");
+    include!("x64/tests_register_ui.rs");
     include!("x64/tests_cases.rs");
+    include!("x64/tests_issue1077.rs");
     include!("x64/tests_gpu.rs");
 }
+
+include!("x64/lockit.rs");
+
+include!("x64/import_data.rs");
+
+include!("x64/environment.rs");
+
+include!("x64/files.rs");
+
+include!("x64/mutex.rs");
+
+include!("x64/sid.rs");
+
+include!("x64/acl.rs");
+include!("x64/network.rs");
+
+include!("x64/printf.rs");
+include!("x64/windows_files.rs");

@@ -13,15 +13,14 @@
 //! Requires the real workers and the probe fixtures from this checkout; each
 //! test skips with a message when its fixture is not built.
 
-mod common;
-
 #[cfg(test)]
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
         AnimationInterpolation, AnimationTime, AnimationValue, InteractiveParameter,
         ParameterAnimation, ParameterAnimationKey, RENDER_SESSION_WRAPPER_RENDERS,
-        RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction, TimedLayerImage,
+        RenderArtifactKind, RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction,
+        TimedLayerImage, render_declarative_fixture, render_experimental_artifact_at_time,
         render_experimental_audio, render_experimental_image, render_experimental_image_at_time,
         render_experimental_image_at_time_with_format_and_context,
         render_experimental_image_at_time_with_format_context_and_ui_action,
@@ -36,9 +35,15 @@ mod windows_e2e {
     #[cfg(debug_assertions)]
     use aexcompat_broker::image_render::FORCE_SESSION_FALLBACK_ENV;
     use aexcompat_broker::render_request::HostContext;
+    use aexcompat_broker::render_session::{
+        ClusterRenderPlugins, FrameStatus, RenderSession, SessionOpenRequest, SwapOutcome,
+    };
+    use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
+    use aexcompat_broker::secure_launch::LaunchEnvironment;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     fn repository_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -201,11 +206,6 @@ mod windows_e2e {
     /// (docs/EVIDENCE_POLICY_2026-07-18.md, issue #361).
     #[test]
     fn smart_single_image_renders_deterministically_and_follows_its_input() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "smart_single_image_renders_deterministically_and_follows_its_input",
-        ) {
-            return;
-        }
         // Still takes the route lock: the tests that assert on exact deltas of
         // RENDER_SESSION_WRAPPER_RENDERS are perturbed by a concurrent session
         // render, and the two fail-closed diagnostics set a process-global
@@ -214,12 +214,12 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping smart session render: build aex_smart_worker.exe and                  pf_smart_geometry_probe.aex first"
+                "skipping smart session render: build aex_worker.exe and                  pf_smart_geometry_probe.aex first"
             );
             return;
         }
@@ -309,8 +309,11 @@ mod windows_e2e {
         );
 
         // A legally empty result still has to be reported as one: the probe
-        // answers an empty result_rect at current_time % 4 == 3, and neither the
-        // PNG nor a checksum may be invented for it.
+        // answers an empty result_rect at current_time % 5 == 3. Since #1285 the
+        // host emits the effect's input in place of the promised-nothing frame,
+        // matching what AE does with the same answer, so there is a PNG -- but
+        // it is the input, not a frame the probe drew, and the report says so
+        // through `empty_result_passthrough`.
         let out_empty = scratch.join("empty.png");
         let empty = render_experimental_smart_image_at_time(
             &root,
@@ -333,9 +336,26 @@ mod windows_e2e {
             Some(&serde_json::json!(true)),
             "the session must report the empty result: {empty}"
         );
+        assert_eq!(
+            empty.get("empty_result_passthrough"),
+            Some(&serde_json::json!(true)),
+            "the session must report the passthrough: {empty}"
+        );
+        assert_eq!(
+            empty.get("smart_render_selector_dispatched"),
+            Some(&serde_json::json!(false)),
+            "the empty result must still skip the render selector: {empty}"
+        );
         assert!(
-            !out_empty.exists(),
-            "an empty result must not write a PNG: {empty}"
+            out_empty.exists(),
+            "the passthrough frame must be written: {empty}"
+        );
+        // The passthrough copies; it does not invent. Anything but equality
+        // here would be a silently wrong frame.
+        assert_eq!(
+            empty.get("output_sha256"),
+            empty.get("input_sha256"),
+            "the passthrough frame is not the input: {empty}"
         );
 
         let _ = std::fs::remove_dir_all(&scratch);
@@ -348,16 +368,11 @@ mod windows_e2e {
     /// preflight record (#361).
     #[test]
     fn smart_argb32f_auto_without_a_policy_folds_to_the_cpu_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "smart_argb32f_auto_without_a_policy_folds_to_the_cpu_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
@@ -454,22 +469,931 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    #[test]
+    fn render_artifact_pipeline_commits_raw_and_exr_sets_after_a_clean_session() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex =
+            root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping render artifact pipeline: build smart worker and geometry probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-render-artifact-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 31) as u8, (y * 47) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        let timing = RenderTiming {
+            current_time: 0,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+        };
+        let mut pf32_identity = None;
+        for format in [
+            RenderPixelFormat::Argb8,
+            RenderPixelFormat::Argb16,
+            RenderPixelFormat::Argb32f,
+        ] {
+            let output = scratch.join(format!("raw-{}", format.report_name()));
+            let report = render_experimental_artifact_at_time(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                &output,
+                &[],
+                timing,
+                true,
+                format,
+                RenderArtifactKind::Raw,
+            )
+            .unwrap();
+            assert_eq!(report["passed"], true);
+            assert!(report["output_png"].is_null());
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(output.join("output.json")).unwrap())
+                    .unwrap();
+            let raw = std::fs::read(output.join("output.bin")).unwrap();
+            assert_eq!(metadata, report["render_artifact"]);
+            assert_eq!(metadata["pixel_format"], format.report_name());
+            assert_eq!(metadata["data_size_bytes"], raw.len());
+            assert_eq!(
+                metadata["data_sha256"],
+                format!("{:x}", Sha256::digest(&raw))
+            );
+            assert_eq!(metadata["premultiplication"], report["premultiplication"]);
+            assert_eq!(metadata["working_space"], "None");
+            assert_eq!(metadata["render_mode"], "software");
+            assert_eq!(metadata["row_padding"], "excluded");
+            if format == RenderPixelFormat::Argb32f {
+                pf32_identity = Some(metadata["comparison_identity"].clone());
+            }
+        }
+        let exr_output = scratch.join("exr");
+        let exr_report = render_experimental_artifact_at_time(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &exr_output,
+            &[],
+            timing,
+            true,
+            RenderPixelFormat::Argb32f,
+            RenderArtifactKind::Float32Exr,
+        )
+        .unwrap();
+        assert_eq!(exr_report["passed"], true);
+        let exr_metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(exr_output.join("output.json")).unwrap())
+                .unwrap();
+        assert_eq!(exr_metadata["compression"], "none");
+        assert_eq!(exr_metadata["storage"], "scanline");
+        assert_eq!(
+            exr_metadata["comparison_identity"],
+            pf32_identity.expect("PF32 raw comparison identity")
+        );
+        assert_eq!(
+            exr_metadata["premultiplication"],
+            exr_report["premultiplication"]
+        );
+        let exr = exr_output.join("output.exr");
+        let script = "import OpenEXR,sys; f=OpenEXR.File(sys.argv[1]); h=f.header(); assert str(h['compression'])=='Compression.NO_COMPRESSION'; assert str(h['type'])=='Storage.scanlineimage'; assert 'RGBA' in f.channels()";
+        let decoded = std::process::Command::new("uv")
+            .args(["run", "--project"])
+            .arg(&root)
+            .args(["python", "-c", script])
+            .arg(&exr)
+            .status()
+            .expect("launch independent OpenEXR decoder");
+        assert!(decoded.success(), "OpenEXR rejected {}", exr.display());
+        let raw32 = scratch.join("raw-argb32f");
+        let compared = std::process::Command::new("uv")
+            .args(["run", "--project"])
+            .arg(&root)
+            .arg("python")
+            .arg(root.join("tools/compare-pixel-oracles.py"))
+            .args(["--raw-u32", "--raw"])
+            .arg(raw32.join("output.bin"))
+            .arg("--render")
+            .arg(&exr)
+            .arg("--raw-metadata")
+            .arg(raw32.join("output.json"))
+            .arg("--render-metadata")
+            .arg(exr_output.join("output.json"))
+            .output()
+            .unwrap();
+        assert!(
+            compared.status.success(),
+            "artifact-bound raw-u32 comparison failed: {}",
+            String::from_utf8_lossy(&compared.stderr)
+        );
+        let comparison: serde_json::Value = serde_json::from_slice(&compared.stdout).unwrap();
+        assert_eq!(comparison["match"], true);
+        assert_eq!(
+            comparison["comparison_boundary"]["claim_level"],
+            "raw_u32_exact"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn declarative_fixture_commits_exr_and_selected_native_checkpoints_together() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex =
+            root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping declarative fixture: build smart worker and geometry probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-declarative-fixture-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_fn(8, 6, |x, y| {
+            image::Rgba([(x * 17) as u8, (y * 29) as u8, (x + y) as u8, 255])
+        })
+        .save(scratch.join("primary.png"))
+        .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture", "schema_version":1,
+            "primary_layer":"primary.png", "parameters":[], "pixel_format":"argb32f",
+            "render_path":"smart",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"exr",
+            "checkpoints":[
+                {"id":"input_world","stage":"smart-input"},
+                {"id":"output_world","stage":"smart-output"}
+            ]
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+        let output = scratch.join("result");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("declarative fixture render");
+        assert_eq!(report["pixel_format"], "argb32f");
+        assert_eq!(report["final_artifact"]["compression"], "none");
+        assert!(output.join("final/output.exr").is_file());
+        for (id, stage) in [
+            ("input_world", "smart-input"),
+            ("output_world", "smart-output"),
+        ] {
+            let metadata: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.join("checkpoints").join(id).join("output.json")).unwrap(),
+            )
+            .unwrap();
+            let raw =
+                std::fs::read(output.join("checkpoints").join(id).join("output.bin")).unwrap();
+            assert_eq!(metadata["schema_version"], 2);
+            assert_eq!(metadata["checkpoint_identity"]["id"], id);
+            assert_eq!(metadata["checkpoint_identity"]["stage"], stage);
+            assert_eq!(
+                metadata["comparison_identity"]["checkpoint"],
+                metadata["checkpoint_identity"]
+            );
+            assert_eq!(metadata["pixel_format"], "argb32f");
+            assert_eq!(metadata["channel_order"], "ARGB");
+            assert_eq!(
+                metadata["component_representation"],
+                "ieee754_binary32_raw_words"
+            );
+            assert_eq!(metadata["data_size_bytes"], raw.len());
+            assert_eq!(
+                metadata["rowbytes"].as_u64().unwrap() * metadata["height"].as_u64().unwrap(),
+                raw.len() as u64
+            );
+        }
+        for (format, representation, component_bytes) in [
+            ("argb8", "unsigned_integer_0_255", 1u64),
+            ("argb16", "unsigned_integer_0_32768_ae_internal", 2u64),
+        ] {
+            let mut depth_fixture = fixture.clone();
+            depth_fixture["pixel_format"] = serde_json::json!(format);
+            depth_fixture["final_artifact"] = serde_json::json!("raw");
+            depth_fixture["checkpoints"] =
+                serde_json::json!([{"id":"input_world","stage":"smart-input"}]);
+            let path = scratch.join(format!("fixture-{format}.json"));
+            std::fs::write(&path, serde_json::to_vec_pretty(&depth_fixture).unwrap()).unwrap();
+            let depth_output = scratch.join(format!("result-{format}"));
+            render_declarative_fixture(&root, &aex, &sha, &path, &depth_output)
+                .unwrap_or_else(|error| panic!("{format} fixture render failed: {error}"));
+            let metadata: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(depth_output.join("checkpoints/input_world/output.json")).unwrap(),
+            )
+            .unwrap();
+            let raw =
+                std::fs::read(depth_output.join("checkpoints/input_world/output.bin")).unwrap();
+            assert_eq!(metadata["pixel_format"], format);
+            assert_eq!(metadata["component_bytes"], component_bytes);
+            assert_eq!(metadata["component_representation"], representation);
+            if format == "argb16" {
+                assert!(
+                    raw.chunks_exact(2)
+                        .all(|word| { u16::from_le_bytes([word[0], word[1]]) <= 32768 })
+                );
+            }
+        }
+        let mut missing_fixture = fixture.clone();
+        missing_fixture["pixel_format"] = serde_json::json!("argb8");
+        missing_fixture["final_artifact"] = serde_json::json!("raw");
+        missing_fixture["checkpoints"] =
+            serde_json::json!([{"id":"missing_layer","stage":"smart-layer-slot99"}]);
+        let missing_path = scratch.join("fixture-missing.json");
+        std::fs::write(
+            &missing_path,
+            serde_json::to_vec_pretty(&missing_fixture).unwrap(),
+        )
+        .unwrap();
+        let missing_output = scratch.join("missing-result");
+        assert!(
+            render_declarative_fixture(&root, &aex, &sha, &missing_path, &missing_output).is_err()
+        );
+        assert!(
+            !missing_output.exists(),
+            "a missing checkpoint published a partial fixture set"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn declarative_primary_world_layout_captures_smart_input() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex =
+            root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping smart world layout fixture: build worker and geometry probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-smart-primary-layout-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(8, 6, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png","parameters":[],"matrix":[],
+            "pixel_format":"argb8","render_path":"smart",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw","checkpoints":[{"id":"input","stage":"smart-input"}],
+            "worlds":{
+                "primary":{
+                    "pixel_format":"argb8","width":8,"height":6,"rowbytes":36,
+                    "row_padding":4,"padding_byte":0,"origin":{"x":2,"y":-1},
+                    "extent":{"left":1,"top":0,"right":8,"bottom":6}
+                },
+                "secondary":[]
+            }
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("smart primary layout must be captured");
+        let case = &report["cases"][0];
+        let case_output = output.join(case["artifact_directory"].as_str().unwrap());
+        assert!(
+            !std::fs::read(case_output.join("final/output.bin"))
+                .unwrap()
+                .is_empty()
+        );
+        let checkpoint_raw =
+            std::fs::read(case_output.join("checkpoints/input/output.bin")).unwrap();
+        assert_eq!(
+            checkpoint_raw.len(),
+            36 * 6,
+            "smart input stride was flattened"
+        );
+        for row in checkpoint_raw.chunks_exact(36) {
+            assert_eq!(&row[32..36], &[0; 4], "smart input padding was lost");
+        }
+        let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(case_output.join("checkpoints/input/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(checkpoint_metadata["rowbytes"], 36);
+        assert_eq!(checkpoint_metadata["row_padding"], 4);
+        assert_eq!(
+            checkpoint_metadata["origin"],
+            serde_json::json!({"x":2,"y":-1})
+        );
+        assert_eq!(
+            checkpoint_metadata["extent"],
+            serde_json::json!({"left":1,"top":0,"right":8,"bottom":6})
+        );
+        assert_eq!(
+            checkpoint_metadata["comparison_identity"]["fixture_case"]["sha256"],
+            case["case_identity"]["sha256"]
+        );
+        let mut mixed_primary = fixture.clone();
+        mixed_primary["worlds"]["primary"]["pixel_format"] = serde_json::json!("argb16");
+        mixed_primary["worlds"]["primary"]["rowbytes"] = serde_json::json!(72);
+        mixed_primary["worlds"]["primary"]["row_padding"] = serde_json::json!(8);
+        let mixed_path = scratch.join("smart-mixed-primary.json");
+        std::fs::write(&mixed_path, serde_json::to_vec(&mixed_primary).unwrap()).unwrap();
+        let mixed_output = scratch.join("smart-mixed-output");
+        let mixed_report =
+            render_declarative_fixture(&root, &aex, &sha, &mixed_path, &mixed_output)
+                .expect("SmartFX ARGB16 primary must render with ARGB8 final output");
+        let mixed_case = &mixed_report["cases"][0];
+        let mixed_case_output =
+            mixed_output.join(mixed_case["artifact_directory"].as_str().unwrap());
+        let mixed_raw =
+            std::fs::read(mixed_case_output.join("checkpoints/input/output.bin")).unwrap();
+        assert_eq!(mixed_raw.len(), 72 * 6);
+        let mixed_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(mixed_case_output.join("checkpoints/input/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mixed_metadata["pixel_format"], "argb16");
+        assert_eq!(mixed_metadata["rowbytes"], 72);
+        let mut empty_mixed = mixed_primary;
+        empty_mixed["timing"] = serde_json::json!({
+            "current_time":3,"time_step":1,"total_time":300,"time_scale":30
+        });
+        let empty_path = scratch.join("smart-empty-mixed-primary.json");
+        std::fs::write(&empty_path, serde_json::to_vec(&empty_mixed).unwrap()).unwrap();
+        let empty_output = scratch.join("smart-empty-mixed-output");
+        let empty_report =
+            render_declarative_fixture(&root, &aex, &sha, &empty_path, &empty_output)
+                .expect("empty SmartFX result must convert ARGB16 input to ARGB8 output");
+        let empty_case = &empty_report["cases"][0];
+        let empty_case_output =
+            empty_output.join(empty_case["artifact_directory"].as_str().unwrap());
+        let empty_raw = std::fs::read(empty_case_output.join("final/output.bin")).unwrap();
+        assert_eq!(empty_raw, [255, 40, 60, 80].repeat(8 * 6));
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn declarative_classic_fixture_carries_secondary_layer_and_scalar_parameter() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping declarative layer fixture: build classic worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-declarative-layer-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 20, 30, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        let secondary_pixels = image::RgbaImage::from_fn(4, 3, |x, y| {
+            image::Rgba([(x * 31) as u8, (y * 47) as u8, 93, 255])
+        });
+        secondary_pixels
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let render = |value: f64, name: &str| {
+            let parameters = vec![
+                layer_parameter(1, Path::new("secondary.png")),
+                float_parameter(2, value),
+            ];
+            let fixture = serde_json::json!({
+                "schema":"aexcompat.render_fixture", "schema_version":1,
+                "primary_layer":"primary.png", "parameters":parameters,
+                "pixel_format":"argb8", "render_path":"classic",
+                "premultiplication":"straight",
+                "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+                "final_artifact":"raw",
+                "checkpoints":[{"id":"secondary_world","stage":"classic-layer-slot1"}]
+            });
+            let fixture_path = scratch.join(format!("{name}.json"));
+            std::fs::write(&fixture_path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+            let output = scratch.join(name);
+            render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+                .unwrap_or_else(|error| panic!("classic layer fixture failed: {error}"));
+            output
+        };
+        let low = render(20.0, "low");
+        let high = render(200.0, "high");
+        let checkpoint = std::fs::read(low.join("checkpoints/secondary_world/output.bin")).unwrap();
+        let expected = secondary_pixels
+            .into_raw()
+            .chunks_exact(4)
+            .flat_map(|rgba| [rgba[3], rgba[0], rgba[1], rgba[2]])
+            .collect::<Vec<_>>();
+        assert_eq!(checkpoint, expected, "secondary checkpoint words changed");
+        assert_ne!(
+            std::fs::read(low.join("final/output.bin")).unwrap(),
+            std::fs::read(high.join("final/output.bin")).unwrap(),
+            "changing the fixture scalar parameter did not change the render"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn declarative_matrix_renders_distinct_cases_with_stable_artifact_identity() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping matrix fixture: build classic worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-matrix-fixture-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[layer_parameter(1, Path::new("secondary.png")),float_parameter(2, 20.0)],
+            "matrix":[{"slot":2,"values":[20.0,200.0]}],
+            "pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw",
+            "checkpoints":[{"id":"secondary","stage":"classic-layer-slot1"}]
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+
+        let mut runs = Vec::new();
+        for run in 0..2 {
+            let output = scratch.join(format!("result-{run}"));
+            let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+                .expect("two-case declarative fixture render");
+            let cases = report["cases"].as_array().expect("matrix case records");
+            assert_eq!(cases.len(), 2);
+            let mut outputs = Vec::new();
+            let mut identities = Vec::new();
+            for case in cases {
+                let case_id = case["case_identity"]["sha256"]
+                    .as_str()
+                    .expect("stable case identity");
+                let relative = case["artifact_directory"]
+                    .as_str()
+                    .expect("relative case directory");
+                let directory = output.join(relative);
+                let final_metadata: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(directory.join("final/output.json")).unwrap(),
+                )
+                .unwrap();
+                let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(directory.join("checkpoints/secondary/output.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    final_metadata["comparison_identity"]["fixture_case"]["sha256"],
+                    case_id
+                );
+                assert_eq!(
+                    checkpoint_metadata["comparison_identity"]["fixture_case"]["sha256"],
+                    case_id
+                );
+                outputs.push(std::fs::read(directory.join("final/output.bin")).unwrap());
+                identities.push(case_id.to_owned());
+            }
+            assert_ne!(
+                outputs[0], outputs[1],
+                "matrix value did not change the AEX output"
+            );
+            assert_ne!(identities[0], identities[1], "two cases share an identity");
+            runs.push((outputs, identities));
+        }
+        assert_eq!(runs[0], runs[1], "rerun changed bytes or case identities");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn declarative_popup_matrix_changes_the_classic_aex_output() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping popup matrix fixture: build worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-popup-matrix-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[
+                layer_parameter(1, Path::new("secondary.png")),
+                float_parameter(2, 20.0),
+                popup_parameter(3, 1.0)
+            ],
+            "matrix":[{"slot":3,"values":[1.0,2.0]}],
+            "pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw",
+            "checkpoints":[{"id":"input","stage":"classic-input"}]
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("popup matrix must render");
+        let cases = report["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 2);
+        let pixels = cases
+            .iter()
+            .map(|case| {
+                let directory = output.join(case["artifact_directory"].as_str().unwrap());
+                let raw = std::fs::read(directory.join("final/output.bin")).unwrap();
+                assert_eq!(raw.len(), 4 * 3 * 4);
+                [raw[0], raw[1], raw[2], raw[3]]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pixels[0][0], 255);
+        assert_eq!(pixels[1][0], 255);
+        assert_eq!(pixels[0][1..3], pixels[1][1..3]);
+        assert_eq!(u16::from(pixels[1][3]), u16::from(pixels[0][3]) + 17);
+        assert_ne!(
+            cases[0]["case_identity"]["sha256"],
+            cases[1]["case_identity"]["sha256"]
+        );
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn declarative_primary_world_layout_reaches_the_classic_aex() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping world-layout fixture: build worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-primary-layout-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[layer_parameter(1, Path::new("secondary.png")),float_parameter(2, 255.0)],
+            "matrix":[],"pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw","checkpoints":[{"id":"input","stage":"classic-input"}],
+            "worlds":{
+                "primary":{
+                    "pixel_format":"argb8","width":4,"height":3,"rowbytes":20,
+                    "row_padding":4,"padding_byte":0,"origin":{"x":2,"y":-1},
+                    "extent":{"left":1,"top":0,"right":4,"bottom":3}
+                },
+                "secondary":[]
+            }
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("primary layout must reach the AEX");
+        let case = &report["cases"][0];
+        let case_output = output.join(case["artifact_directory"].as_str().unwrap());
+        let raw = std::fs::read(case_output.join("final/output.bin")).unwrap();
+        assert_eq!(&raw[0..4], &[255, 4, 130, 127]);
+        assert_eq!(&raw[4..8], &[255, 1, 0, 4]);
+        assert_eq!(&raw[8..12], &[255, 3, 0, 128]);
+        let mut mixed_primary = fixture.clone();
+        mixed_primary["worlds"]["primary"]["pixel_format"] = serde_json::json!("argb16");
+        mixed_primary["worlds"]["primary"]["rowbytes"] = serde_json::json!(40);
+        mixed_primary["worlds"]["primary"]["row_padding"] = serde_json::json!(8);
+        let mixed_path = scratch.join("mixed-primary-fixture.json");
+        std::fs::write(&mixed_path, serde_json::to_vec(&mixed_primary).unwrap()).unwrap();
+        let mixed_output = scratch.join("mixed-primary-output");
+        let mixed_report =
+            render_declarative_fixture(&root, &aex, &sha, &mixed_path, &mixed_output)
+                .expect("ARGB16 primary must render with ARGB8 final output");
+        let mixed_case = &mixed_report["cases"][0];
+        let mixed_case_output =
+            mixed_output.join(mixed_case["artifact_directory"].as_str().unwrap());
+        let mixed_raw =
+            std::fs::read(mixed_case_output.join("checkpoints/input/output.bin")).unwrap();
+        assert_eq!(mixed_raw.len(), 40 * 3);
+        let mixed_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(mixed_case_output.join("checkpoints/input/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mixed_metadata["pixel_format"], "argb16");
+        assert_eq!(mixed_metadata["rowbytes"], 40);
+        assert!(
+            !std::fs::read(mixed_case_output.join("final/output.bin"))
+                .unwrap()
+                .is_empty()
+        );
+        let checkpoint_raw =
+            std::fs::read(case_output.join("checkpoints/input/output.bin")).unwrap();
+        assert_eq!(checkpoint_raw.len(), 20 * 3, "primary stride was flattened");
+        for row in checkpoint_raw.chunks_exact(20) {
+            assert_eq!(&row[16..20], &[0; 4], "primary padding was lost");
+        }
+        let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(case_output.join("checkpoints/input/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(checkpoint_metadata["rowbytes"], 20);
+        assert_eq!(checkpoint_metadata["row_padding"], 4);
+        assert_eq!(
+            checkpoint_metadata["origin"],
+            serde_json::json!({"x":2,"y":-1})
+        );
+        assert_eq!(
+            checkpoint_metadata["extent"],
+            serde_json::json!({"left":1,"top":0,"right":4,"bottom":3})
+        );
+        assert_eq!(
+            checkpoint_metadata["comparison_identity"]["fixture_case"]["sha256"],
+            case["case_identity"]["sha256"]
+        );
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn declarative_secondary_world_layout_reaches_the_classic_aex() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping secondary world-layout fixture: build worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-secondary-layout-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[layer_parameter(1, Path::new("secondary.png")),float_parameter(2, 255.0)],
+            "matrix":[],"pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw","checkpoints":[
+                {"id":"primary","stage":"classic-input"},
+                {"id":"secondary","stage":"classic-layer-slot1"}
+            ],
+            "worlds":{
+                "primary":{
+                    "pixel_format":"argb8","width":4,"height":3,"rowbytes":16,
+                    "row_padding":0,"padding_byte":90,"origin":{"x":0,"y":0},
+                    "extent":{"left":0,"top":0,"right":4,"bottom":3}
+                },
+                "secondary":[{
+                    "slot":1,"pixel_format":"argb8","width":4,"height":3,"rowbytes":24,
+                    "row_padding":8,"padding_byte":90,"origin":{"x":-2,"y":3},
+                    "extent":{"left":0,"top":0,"right":4,"bottom":3}
+                }]
+            }
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("secondary layout must reach the AEX");
+        let case = &report["cases"][0];
+        let case_output = output.join(case["artifact_directory"].as_str().unwrap());
+        let raw = std::fs::read(case_output.join("final/output.bin")).unwrap();
+        assert_eq!(&raw[0..4], &[255, 0, 128, 128]);
+        assert_eq!(&raw[8..12], &[255, 3, 8, 126]);
+        assert_eq!(&raw[12..16], &[255, 131, 4, 3]);
+        let final_metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(case_output.join("final/output.json")).unwrap())
+                .unwrap();
+        let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(case_output.join("checkpoints/secondary/output.json")).unwrap(),
+        )
+        .unwrap();
+        for metadata in [&final_metadata, &checkpoint_metadata] {
+            assert_eq!(
+                metadata["comparison_identity"]["fixture_case"]["sha256"],
+                case["case_identity"]["sha256"]
+            );
+        }
+        let checkpoint_raw =
+            std::fs::read(case_output.join("checkpoints/secondary/output.bin")).unwrap();
+        let primary_raw =
+            std::fs::read(case_output.join("checkpoints/primary/output.bin")).unwrap();
+        assert_eq!(primary_raw.len(), 16 * 3);
+        assert_eq!(
+            checkpoint_raw.len(),
+            24 * 3,
+            "secondary stride was flattened"
+        );
+        for row in checkpoint_raw.chunks_exact(24) {
+            assert_eq!(&row[16..24], &[90; 8], "secondary padding was lost");
+        }
+        assert_eq!(checkpoint_metadata["rowbytes"], 24);
+        assert_eq!(checkpoint_metadata["row_padding"], 8);
+        assert_eq!(
+            checkpoint_metadata["origin"],
+            serde_json::json!({"x":-2,"y":3})
+        );
+        assert_eq!(
+            checkpoint_metadata["extent"],
+            serde_json::json!({"left":0,"top":0,"right":4,"bottom":3})
+        );
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn declarative_mixed_depth_secondary_reaches_classic_aex() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping mixed-depth fixture: build worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-mixed-depth-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let mut fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[layer_parameter(1, Path::new("secondary.png")),float_parameter(2, 255.0)],
+            "matrix":[],"pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw",
+            "checkpoints":[{"id":"secondary","stage":"classic-layer-slot1"}],
+            "worlds":{
+                "primary":{
+                    "pixel_format":"argb8","width":4,"height":3,"rowbytes":16,
+                    "row_padding":0,"padding_byte":90,"origin":{"x":0,"y":0},
+                    "extent":{"left":0,"top":0,"right":4,"bottom":3}
+                },
+                "secondary":[{
+                    "slot":1,"pixel_format":"argb16","width":4,"height":3,"rowbytes":40,
+                    "row_padding":8,"padding_byte":90,"origin":{"x":-2,"y":3},
+                    "extent":{"left":0,"top":0,"right":4,"bottom":3}
+                }]
+            }
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("mixed-depth secondary must reach the AEX");
+        let case = &report["cases"][0];
+        let case_output = output.join(case["artifact_directory"].as_str().unwrap());
+        let final_raw = std::fs::read(case_output.join("final/output.bin")).unwrap();
+        assert_eq!(&final_raw[8..12], &[255, 3, 24, 126]);
+        let checkpoint_raw =
+            std::fs::read(case_output.join("checkpoints/secondary/output.bin")).unwrap();
+        assert_eq!(checkpoint_raw.len(), 40 * 3);
+        for row in checkpoint_raw.chunks_exact(40) {
+            assert_eq!(&row[32..40], &[90; 8]);
+        }
+        let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(case_output.join("checkpoints/secondary/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(checkpoint_metadata["pixel_format"], "argb16");
+        assert_eq!(checkpoint_metadata["rowbytes"], 40);
+        assert_eq!(checkpoint_metadata["row_padding"], 8);
+        assert_eq!(
+            checkpoint_metadata["origin"],
+            serde_json::json!({"x":-2,"y":3})
+        );
+        fixture["worlds"]["secondary"][0]["pixel_format"] = serde_json::json!("argb32f");
+        fixture["worlds"]["secondary"][0]["rowbytes"] = serde_json::json!(80);
+        fixture["worlds"]["secondary"][0]["row_padding"] = serde_json::json!(16);
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let float_output = scratch.join("output-32f");
+        let float_report =
+            render_declarative_fixture(&root, &aex, &sha, &fixture_path, &float_output)
+                .expect("ARGB32f secondary must reach the AEX independently of ARGB8 primary");
+        let float_case = &float_report["cases"][0];
+        let float_case_output =
+            float_output.join(float_case["artifact_directory"].as_str().unwrap());
+        let float_final = std::fs::read(float_case_output.join("final/output.bin")).unwrap();
+        assert_eq!(&float_final[8..12], &[255, 3, 64, 126]);
+        let float_checkpoint =
+            std::fs::read(float_case_output.join("checkpoints/secondary/output.bin")).unwrap();
+        assert_eq!(float_checkpoint.len(), 80 * 3);
+        assert!(
+            float_checkpoint
+                .chunks_exact(80)
+                .all(|row| row[64..] == [90; 16])
+        );
+        let float_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(float_case_output.join("checkpoints/secondary/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(float_metadata["pixel_format"], "argb32f");
+        assert_eq!(float_metadata["rowbytes"], 80);
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
     /// Three timed secondary layers at one slot, carried by the smart session's
     /// layer trailer (#294) at both Argb16 and Argb32f (#353). Verified by the
     /// layers reaching the plug-in rather than by agreeing with the one-shot
     /// (#361).
     #[test]
     fn smart_timed_multilayer_reaches_the_plug_in_at_every_depth() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "smart_timed_multilayer_reaches_the_plug_in_at_every_depth",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root
             .join("target/pf-smart-timed-multilayer-probe-build/Release")
             .join("pf_smart_timed_multilayer_probe.aex");
@@ -633,6 +1557,18 @@ mod windows_e2e {
         .expect("float parameter fixture")
     }
 
+    fn popup_parameter(slot: u32, value: f64) -> InteractiveParameter {
+        serde_json::from_value(serde_json::json!({
+            "slot": slot, "name": "mode", "kind": "popup",
+            "minimum": 1.0, "maximum": 2.0, "value": value,
+            "choices": ["Base", "Alternate"], "color": [0, 0, 0, 0],
+            "components": [0.0, 0.0, 0.0], "component_count": 0,
+            "layer_path": null, "enabled": true, "visible": true,
+            "supervised": false
+        }))
+        .expect("popup parameter fixture")
+    }
+
     /// Real-AEX coverage of the session wrapper's secondary-layer transport
     /// (issue #98 W1-4) for the case pf_sampling_probe cannot cover (issue
     /// #195): an AEX that declares a `PF_Param_LAYER` secondary layer (slot 1)
@@ -656,16 +1592,11 @@ mod windows_e2e {
     /// short-circuiting somewhere that also returns Ok.
     #[test]
     fn host_context_shapes_stay_on_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "host_context_shapes_stay_on_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping host-context shapes: build the worker and pf_sampling_probe.aex");
@@ -852,11 +1783,6 @@ mod windows_e2e {
     /// sensitivity assertion the geometry probe could not (#361).
     #[test]
     fn classic_render_is_healthy_deterministic_and_input_dependent() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "classic_render_is_healthy_deterministic_and_input_dependent",
-        ) {
-            return;
-        }
         // Still takes the route lock: the tests that assert on exact deltas of
         // RENDER_SESSION_WRAPPER_RENDERS are perturbed by a concurrent session
         // render, and the two fail-closed diagnostics set a process-global
@@ -865,11 +1791,11 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping classic session render: build aex_render_worker.exe and                  pf_sampling_probe.aex first"
+                "skipping classic session render: build aex_worker.exe and                  pf_sampling_probe.aex first"
             );
             return;
         }
@@ -972,20 +1898,15 @@ mod windows_e2e {
     /// agree", which held even when a parameter was ignored on both (#361).
     #[test]
     fn layer_and_slider_reach_the_plug_in_through_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "layer_and_slider_reach_the_plug_in_through_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping layer+slider render: build aex_render_worker.exe and                  pf_layer_param_probe.aex first"
+                "skipping layer+slider render: build aex_worker.exe and                  pf_layer_param_probe.aex first"
             );
             return;
         }
@@ -1046,12 +1967,12 @@ mod windows_e2e {
             Some(&serde_json::json!([{"slot": 1, "width": 64, "height": 32}])),
             "the secondary layer did not reach the report at its declared slot              and size: {base}"
         );
-        // The probe declares input + layer + slider; a count that drifts means
+        // The probe declares input + layer + slider + defaulted popup; a count that drifts means
         // the parameter table the worker saw is not the one that was sent.
         assert_eq!(
             base.get("in_data_num_params"),
-            Some(&serde_json::json!(3)),
-            "the plug-in did not see all three parameters: {base}"
+            Some(&serde_json::json!(4)),
+            "the plug-in did not see all four parameters: {base}"
         );
 
         let out_repeat = scratch.join("repeat.png");
@@ -1091,11 +2012,6 @@ mod windows_e2e {
 
     #[test]
     fn parameter_animation_drives_the_render_through_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "parameter_animation_drives_the_render_through_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1114,11 +2030,11 @@ mod windows_e2e {
             .nth(3)
             .expect("repository root")
             .to_path_buf();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping animation A/B: build aex_render_worker.exe and \
+                "skipping animation A/B: build aex_worker.exe and \
                  pf_layer_param_probe.aex first"
             );
             return;
@@ -1230,16 +2146,11 @@ mod windows_e2e {
     }
     #[test]
     fn audio_render_goes_through_the_session_and_transforms_its_input() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "audio_render_goes_through_the_session_and_transforms_its_input",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/sdk-fixtures/sdk-backwards/SDK_Backwards.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping audio render: build the worker and SDK_Backwards.aex");
@@ -1392,16 +2303,11 @@ mod windows_e2e {
     /// agreeing with the one-shot (#361).
     #[test]
     fn custom_ui_click_reaches_the_plug_in_and_changes_the_render() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "custom_ui_click_reaches_the_plug_in_and_changes_the_render",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-custom-ui-probe-build/Release/pf_custom_ui_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping custom UI click: build the worker and pf_custom_ui_probe.aex");
@@ -1543,16 +2449,11 @@ mod windows_e2e {
     /// one-shot (#361).
     #[test]
     fn custom_ui_draw_reaches_the_plug_in_and_completes_its_lifecycle() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "custom_ui_draw_reaches_the_plug_in_and_completes_its_lifecycle",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-custom-ui-probe-build/Release/pf_custom_ui_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping custom UI draw: build the worker and pf_custom_ui_probe.aex");
@@ -1648,21 +2549,258 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// The offer itself, through a real AEX rather than a recording fake.
+    ///
+    /// `pf_frame_origin_offered_probe` derives its FRAME_SETUP answer from what
+    /// it finds in `out_data->width/height` on entry, which is the shape issue
+    /// #984 is about (AE's Basic_3D does the same and answered 1x1 from zero),
+    /// and returns PF_Err_INTERNAL_STRUCT_DAMAGED if it finds zero. Every other
+    /// fixture derives its answer from the layer parameter, so without this a
+    /// regression that stopped the offer reaching a plug-in's out_data - the
+    /// classic layout losing `world_width`, say - would leave every AEX-backed
+    /// test green and only the native self-test, which drives `begin_frame`
+    /// directly, would notice.
+    #[test]
+    fn frame_setup_is_offered_the_output_extent_through_a_real_plugin() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root
+            .join("target/pf-frame-origin-probe-build/Release/pf_frame_origin_offered_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping offered-extent render: build the worker and pf_frame_origin_offered_probe.aex"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-offered-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        let output = scratch.join("out.png");
+        let report = render_experimental_image(&root, &aex, &sha, &input, &output, &[])
+            .expect("session-route offered-extent render");
+        assert_session_render_is_healthy(&report, "offered-extent render");
+        // 64x48 was offered and the probe added its delta to it. Had the offer
+        // not happened the probe would have refused the frame outright.
+        assert_eq!(report.get("width"), Some(&serde_json::json!(68)));
+        assert_eq!(report.get("height"), Some(&serde_json::json!(52)));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A classic expand that also states PF_OutData::origin has to come back
+    /// with the frame report's own convention, which is the negation of it.
+    ///
+    /// The resize probes never state an origin, so before this the classic
+    /// negation at `frame.origin_x = -classic_output.input_origin_x` had no
+    /// end-to-end coverage at all: a sign error would have placed every
+    /// expanded classic frame on the opposite side of the layer origin with the
+    /// whole suite green. The probe also fails its own RENDER with
+    /// PF_Err_INTERNAL_STRUCT_DAMAGED unless the host relayed the origin back
+    /// through `in_data->output_origin_x/y`, so a healthy render is itself the
+    /// evidence that the relay happened.
+    #[test]
+    fn a_classic_expand_reports_its_origin_in_layer_coordinates() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-frame-origin-probe-build/Release/pf_frame_origin_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping origin render: build the worker and pf_frame_origin_probe.aex");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-origin-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        let output = scratch.join("out.png");
+        let report = render_experimental_image(&root, &aex, &sha, &input, &output, &[])
+            .expect("session-route origin render");
+        assert_session_render_is_healthy(&report, "origin render");
+
+        // The probe grows by 4 on each axis and states origin (3,3).
+        assert_eq!(report.get("width"), Some(&serde_json::json!(68)));
+        assert_eq!(report.get("height"), Some(&serde_json::json!(52)));
+        // What the host put into in_data for the plug-in, in PF_OutData::origin's
+        // own convention. The probe already refuses to render unless it reads
+        // back what it stated; this pins it in the report too, so a relay that
+        // silently stopped happening is visible here and not only as a changed
+        // error code.
+        assert_eq!(
+            report.get("output_origin"),
+            Some(&serde_json::json!([3, 3])),
+            "the stated origin did not reach in_data: {report}"
+        );
+
+        // The negated, layer-relative origin never reaches the image report -
+        // `image_render::session` destructures FrameStatus::Rendered and drops it
+        // - so the conversion has to be read off the session frame directly.
+        // Without this the sign could be flipped in worker_render_session.cpp and
+        // nothing in the suite would notice: in_data holds 3 either way.
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &root,
+            plugin_path: &aex,
+            plugin_sha256: &sha,
+            parameters: None,
+            payload_override: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            camera_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            dependencies: Vec::new(),
+            companions: Vec::new(),
+            dependency_search_dirs: vec![aex.parent().unwrap().to_path_buf()],
+            width: 64,
+            height: 48,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 1,
+            time_scale: 1,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
+        })
+        .expect("open a classic session on the origin probe");
+        let frame = session
+            .render_frame(0, 0, &vec![0x7fu8; 64 * 48 * 4])
+            .expect("the origin probe renders one session frame");
+        match frame.status {
+            FrameStatus::Rendered {
+                width,
+                height,
+                origin_x,
+                origin_y,
+                ..
+            } => {
+                assert_eq!(
+                    (width, height),
+                    (68, 52),
+                    "the session frame did not expand"
+                );
+                // The input's top-left sits 3px inside the grown buffer, so the
+                // buffer's own top-left sits 3px outside the layer.
+                assert_eq!(
+                    (origin_x, origin_y),
+                    (-3, -3),
+                    "PF_OutData::origin was not negated into layer coordinates"
+                );
+            }
+            FrameStatus::FrameError { render_error, .. } => {
+                panic!("the origin probe frame failed with {render_error}")
+            }
+            FrameStatus::SmartOutputUntouched => {
+                panic!("the classic origin probe reported a Smart-only untouched output")
+            }
+        }
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The sibling of the expand test below, for the other direction. An effect
+    /// that declared PF_OutFlag_I_SHRINK_BUFFER and answers a smaller extent at
+    /// FRAME_SETUP must render at that extent rather than be refused by the
+    /// host's output validation.
+    ///
+    /// This exists because it was missing. The shrink fixture has been built
+    /// alongside the expand one since #262 with nothing consuming it, so when
+    /// issue #984's origin bound was first written as "the whole source has to
+    /// fit inside the output" - unsatisfiable for any shrink - every declared
+    /// shrink began failing output validation and tearing down the session, and
+    /// the whole suite stayed green.
+    #[test]
+    fn shrink_output_renders_at_the_smaller_extent() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex =
+            root.join("target/pf-frame-resize-probe-build/Release/pf_shrink_allowed_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping shrink render: build the worker and pf_shrink_allowed_probe.aex");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-shrink-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        let output = scratch.join("out.png");
+        let report = render_experimental_image(&root, &aex, &sha, &input, &output, &[])
+            .expect("session-route shrink render");
+        assert_session_render_is_healthy(&report, "shrink render");
+
+        // The probe answers `params[0]->u.ld.width + AEXCOMPAT_RESIZE_DELTA`
+        // with a negative delta of 4, so 64x48 becomes 60x44. The report has to
+        // describe the shrunk frame while still naming the full-size input.
+        assert_eq!(report.get("width"), Some(&serde_json::json!(60)));
+        assert_eq!(report.get("height"), Some(&serde_json::json!(44)));
+        assert_eq!(report.get("input_width"), Some(&serde_json::json!(64)));
+        assert_eq!(report.get("input_height"), Some(&serde_json::json!(48)));
+
+        let decoded = image::open(&output).expect("decode the shrunk PNG");
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (60, 44),
+            "the written PNG is not the shrunk frame"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// An effect that expands its output past the launch slot grows the shared
     /// section in place (#262). Verified by the lifecycle the grow must not
     /// replay, not by agreeing with the one-shot (#361).
     #[test]
     fn expand_output_grows_in_place_without_replaying_the_lifecycle() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "expand_output_grows_in_place_without_replaying_the_lifecycle",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-frame-resize-probe-build/Release/pf_expand_allowed_probe.aex");
         if !worker.is_file() || !aex.is_file() {
@@ -1755,11 +2893,11 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping fail-closed test: build aex_render_worker.exe and pf_sampling_probe.aex first"
+                "skipping fail-closed test: build aex_worker.exe and pf_sampling_probe.aex first"
             );
             return;
         }
@@ -1813,16 +2951,11 @@ mod windows_e2e {
     /// Verified against that property, not against the one-shot (#361).
     #[test]
     fn oversized_layer_is_carried_at_its_own_dimensions() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "oversized_layer_is_carried_at_its_own_dimensions",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping oversized-layer render: build the worker and the layer probe");
@@ -1939,20 +3072,15 @@ mod windows_e2e {
     /// rather than against the one-shot (#361).
     #[test]
     fn zero_duration_render_produces_the_single_frame_on_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "zero_duration_render_produces_the_single_frame_on_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping zero-duration render: build aex_render_worker.exe and                  pf_sampling_probe.aex first"
+                "skipping zero-duration render: build aex_worker.exe and                  pf_sampling_probe.aex first"
             );
             return;
         }
@@ -2038,20 +3166,15 @@ mod windows_e2e {
     /// than by agreeing with the one-shot (#361).
     #[test]
     fn conformance_render_settings_change_the_render_and_do_not_leak() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "conformance_render_settings_change_the_render_and_do_not_leak",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping conformance render: build aex_render_worker.exe and \
+                "skipping conformance render: build aex_worker.exe and \
                  pf_sampling_probe.aex first"
             );
             return;
@@ -2169,11 +3292,11 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/sdk-fixtures/sdk-backwards/SDK_Backwards.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping audio fail-closed test: build aex_render_worker.exe and \
+                "skipping audio fail-closed test: build aex_worker.exe and \
                  SDK_Backwards.aex (tools/build-sdk-backwards.ps1) first"
             );
             return;
@@ -2238,27 +3361,306 @@ mod windows_e2e {
             .find(|path| path.is_file())
     }
 
+    fn approved_image(path: &Path) -> ApprovedImageArtifact {
+        let bytes = std::fs::read(path).unwrap();
+        ApprovedImageArtifact {
+            path: path.to_path_buf(),
+            expected_sha256: Sha256::digest(&bytes).into(),
+            expected_size: bytes.len() as u64,
+        }
+    }
+
+    fn plain_windows_path(path: &Path) -> PathBuf {
+        let text = path.as_os_str().to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            PathBuf::from(format!(r"\\{rest}"))
+        } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+            PathBuf::from(rest)
+        } else {
+            path.to_path_buf()
+        }
+    }
+
+    fn open_visual_audio_cluster(
+        root: &Path,
+        plugins: [&Path; 2],
+    ) -> std::io::Result<RenderSession> {
+        let launch_sha = format!("{:x}", Sha256::digest(std::fs::read(plugins[0])?));
+        RenderSession::open_cluster(
+            SessionOpenRequest {
+                repository: root,
+                plugin_path: plugins[0],
+                plugin_sha256: &launch_sha,
+                parameters: None,
+                payload_override: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                camera_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                companions: Vec::new(),
+                dependency_search_dirs: vec![plugins[0].parent().unwrap().to_path_buf()],
+                width: 8,
+                height: 5,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 2,
+                time_scale: 1,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default(),
+            },
+            ClusterRenderPlugins {
+                plugins: plugins.into_iter().map(approved_image).collect(),
+                swap_payloads: vec![None, None],
+                module_bound: 64,
+            },
+        )
+    }
+
+    fn open_visual_audio_session(
+        root: &Path,
+        plugin: &Path,
+        pixel_format: RenderPixelFormat,
+    ) -> std::io::Result<RenderSession> {
+        let plugin_sha = format!("{:x}", Sha256::digest(std::fs::read(plugin)?));
+        RenderSession::open(SessionOpenRequest {
+            repository: root,
+            plugin_path: plugin,
+            plugin_sha256: &plugin_sha,
+            parameters: None,
+            payload_override: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            camera_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            layers: &[],
+            dependencies: Vec::new(),
+            companions: Vec::new(),
+            dependency_search_dirs: vec![plugin.parent().unwrap().to_path_buf()],
+            width: 8,
+            height: 5,
+            pixel_format,
+            time_step: 1,
+            total_time: 4,
+            time_scale: 1,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
+        })
+    }
+
+    fn rendered_pixels(
+        outcome: aexcompat_broker::render_session::FrameOutcome,
+        label: &str,
+    ) -> Vec<u8> {
+        match outcome.status {
+            FrameStatus::Rendered { pixels, .. } => pixels,
+            other => panic!("{label}: expected rendered frame, got {other:?}"),
+        }
+    }
+
+    /// A normal shipping session must bypass the render selector for an
+    /// AUDIO_EFFECT_ONLY effect at every supported image depth. The fixture's
+    /// render selector deliberately fails, so exact pixels prove passthrough;
+    /// a UI selector remains an explicit frame-local error and must not poison
+    /// the next plain frame.
+    #[test]
+    fn audio_only_session_passthrough_covers_all_depths_and_refuses_ui_actions() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = plain_windows_path(&repository_root());
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let Some(audio) = visual_audio_probe(&root, "pf_visual_audio_audio_only_probe") else {
+            eprintln!("skipping audio-only session: build pf-visual-audio-probe first");
+            return;
+        };
+        if !worker.is_file() {
+            eprintln!("skipping audio-only session: build aex_worker.exe first");
+            return;
+        }
+        let input = (0..8 * 5 * 4)
+            .map(|index| (index as u8).wrapping_mul(37).wrapping_add(11))
+            .collect::<Vec<_>>();
+        let expected_16 = input
+            .iter()
+            .flat_map(|channel| (((*channel as u32 * 32768 + 127) / 255) as u16).to_ne_bytes())
+            .collect::<Vec<_>>();
+        let expected_32f = input
+            .iter()
+            .flat_map(|channel| (*channel as f32 / 255.0).to_ne_bytes())
+            .collect::<Vec<_>>();
+
+        for (format, expected) in [
+            (RenderPixelFormat::Argb8, input.as_slice()),
+            (RenderPixelFormat::Argb16, expected_16.as_slice()),
+            (RenderPixelFormat::Argb32f, expected_32f.as_slice()),
+        ] {
+            let mut session = open_visual_audio_session(&root, &audio, format)
+                .unwrap_or_else(|error| panic!("open audio-only {format:?} session: {error}"));
+            assert_eq!(
+                rendered_pixels(
+                    session.render_frame(0, 0, &input).unwrap(),
+                    &format!("audio-only {format:?}"),
+                ),
+                expected,
+                "audio-only {format:?} session did not preserve the input"
+            );
+            let close = session.close();
+            assert_eq!(close["session_clean"], true);
+            assert_eq!(close["frames_ok"], 1);
+            assert_eq!(close["frames_errored"], 0);
+        }
+
+        let mut session = open_visual_audio_session(&root, &audio, RenderPixelFormat::Argb8)
+            .expect("open audio-only UI session");
+        let ui_action = RenderUiAction::Draw;
+        let refused = session
+            .render_frame_with_attributes(0, 0, &input, None, Some(&ui_action))
+            .expect("audio-only UI refusal is frame-local");
+        assert!(
+            matches!(
+                &refused.status,
+                FrameStatus::FrameError {
+                    render_error: -48,
+                    ..
+                }
+            ),
+            "audio-only UI action was not refused explicitly: {:?}",
+            refused.status
+        );
+        assert_eq!(
+            rendered_pixels(
+                session.render_frame(1, 1, &input).unwrap(),
+                "plain frame after audio-only UI refusal",
+            ),
+            input,
+            "audio-only UI refusal poisoned the following plain frame"
+        );
+        let close = session.close();
+        assert_eq!(close["session_clean"], true);
+        assert_eq!(close["frames_ok"], 1);
+        assert_eq!(close["frames_errored"], 1);
+    }
+
+    /// AUDIO_EFFECT_ONLY is state of the currently loaded cluster member, not
+    /// a property of the launch executable. Both directions exercise the
+    /// production broker manifest, native swap bootstrap, and native frame
+    /// loop. The video fixture writes 0x29; the audio-only fixture returns an
+    /// error if its render selector is ever called, so passthrough is proven by
+    /// the exact input pixels rather than by a fixed success report.
+    #[test]
+    fn cluster_swap_tracks_audio_only_state_of_the_current_plugin() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = plain_windows_path(&repository_root());
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let Some(video) = visual_audio_probe(&root, "pf_visual_audio_cluster_video_probe") else {
+            eprintln!("skipping audio-only cluster: build pf-visual-audio-probe first");
+            return;
+        };
+        let Some(audio) = visual_audio_probe(&root, "pf_visual_audio_audio_only_probe") else {
+            eprintln!("skipping audio-only cluster: build pf-visual-audio-probe first");
+            return;
+        };
+        if !worker.is_file() {
+            eprintln!("skipping audio-only cluster: build aex_worker.exe first");
+            return;
+        }
+        let first_input = (0..8 * 5 * 4)
+            .map(|index| (index as u8).wrapping_mul(37).wrapping_add(11))
+            .collect::<Vec<_>>();
+        let second_input = (0..8 * 5 * 4)
+            .map(|index| (index as u8).wrapping_mul(19).wrapping_add(7))
+            .collect::<Vec<_>>();
+        let video_pixels = vec![0x29; first_input.len()];
+
+        let mut audio_to_video = open_visual_audio_cluster(&root, [&audio, &video])
+            .expect("open cluster on audio-only member");
+        assert_eq!(
+            rendered_pixels(
+                audio_to_video.render_frame(0, 0, &first_input).unwrap(),
+                "audio launch",
+            ),
+            first_input,
+            "audio-only launch member did not passthrough its input"
+        );
+        assert!(matches!(
+            audio_to_video.swap_plugin(1).unwrap(),
+            SwapOutcome::Swapped
+        ));
+        assert_eq!(
+            rendered_pixels(
+                audio_to_video.render_frame(1, 1, &second_input).unwrap(),
+                "audio to video",
+            ),
+            video_pixels,
+            "video member kept the launch member's audio passthrough state"
+        );
+        assert_eq!(audio_to_video.close()["session_clean"], true);
+
+        let mut video_to_audio = open_visual_audio_cluster(&root, [&video, &audio])
+            .expect("open cluster on video member");
+        assert_eq!(
+            rendered_pixels(
+                video_to_audio.render_frame(0, 0, &first_input).unwrap(),
+                "video launch",
+            ),
+            video_pixels,
+            "video launch member did not dispatch its render selector"
+        );
+        assert!(matches!(
+            video_to_audio.swap_plugin(1).unwrap(),
+            SwapOutcome::Swapped
+        ));
+        assert_eq!(
+            rendered_pixels(
+                video_to_audio.render_frame(1, 1, &second_input).unwrap(),
+                "video to audio",
+            ),
+            second_input,
+            "audio-only member dispatched render instead of passthrough after swap"
+        );
+        assert_eq!(video_to_audio.close()["session_clean"], true);
+    }
+
     /// Image render + audio sidecar on the classic session (#339). Verified by
     /// the plug-in reading back exactly the window it asked for, rather than by
     /// agreeing with the one-shot (#361).
     #[test]
     fn image_audio_sidecar_reaches_the_plug_in_through_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "image_audio_sidecar_reaches_the_plug_in_through_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let Some(aex) = visual_audio_probe(&root, "pf_visual_audio_sidecar_probe") else {
             eprintln!("skipping image+audio: run tools/build-pf-visual-audio-probe.ps1 first");
             return;
         };
         if !worker.is_file() {
-            eprintln!("skipping image+audio: build aex_render_worker.exe first");
+            eprintln!("skipping image+audio: build aex_worker.exe first");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
@@ -2385,16 +3787,11 @@ mod windows_e2e {
     /// the former forced-one-shot assertion here has no transport left to name.
     #[test]
     fn image_audio_and_secondary_layer_are_jointly_consumed_by_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "image_audio_and_secondary_layer_are_jointly_consumed_by_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let Some(aex) = visual_audio_probe(&root, "pf_visual_audio_layer_sidecar_probe") else {
             eprintln!(
                 "skipping image+audio+layer session test: run \
@@ -2404,7 +3801,7 @@ mod windows_e2e {
             return;
         };
         if !worker.is_file() {
-            eprintln!("skipping image+audio+layer session test: build aex_render_worker.exe first");
+            eprintln!("skipping image+audio+layer session test: build aex_worker.exe first");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
@@ -2524,16 +3921,11 @@ mod windows_e2e {
     /// fixture does advertise audio and passes the gate either way.
     #[test]
     fn an_unadvertised_plugin_with_a_sidecar_is_refused_by_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "an_unadvertised_plugin_with_a_sidecar_is_refused_by_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         // pf_sampling_probe never advertises audio and never touches the audio
         // suite, so the rest of its report is clean and the only thing that can
         // refuse it is the audio gate itself. pf_visual_audio_unadvertised_probe
@@ -2543,7 +3935,7 @@ mod windows_e2e {
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping unadvertised-audio gate check: build aex_render_worker.exe and \
+                "skipping unadvertised-audio gate check: build aex_worker.exe and \
                  pf_sampling_probe.aex first"
             );
             return;

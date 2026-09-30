@@ -1,16 +1,20 @@
 #include "worker_request_parser.hpp"
 
 #include "render_subsystem.h"
+#include "worker_aegp_scene_runtime.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_parameter_runtime.hpp"
+#include "worker_parameter_limits.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <limits>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -26,7 +30,8 @@ using RequestedAssignments = aexcompat::worker_runtime::parameters::RequestedAss
 using RequestedKind = aexcompat::worker_runtime::parameters::RequestedKind;
 
 namespace {
-constexpr std::size_t kMaxParams = 1024;
+constexpr std::size_t kMaxParams =
+    aexcompat::worker_runtime::parameters::kMaxParameterCount;
 auto& g_render_context_state = aexcompat::render::render_context_state();
 auto& g_full_resolution_width = g_render_context_state.full_resolution_width;
 auto& g_full_resolution_height = g_render_context_state.full_resolution_height;
@@ -83,6 +88,7 @@ bool parse_mask_context_payload(const wchar_t* text) {
   const std::wstring encoded(text);
   if (encoded.size() < 3 || encoded.size() > 8192 || encoded.compare(0, 3, L"v2|") != 0)
     return false;
+  configure_mask_runtime_hooks();
   std::vector<HostMask> masks;
   std::size_t total_vertices = 0;
   const std::wstring payload = encoded.substr(3);
@@ -176,6 +182,97 @@ bool parse_spatial_context_payload(const wchar_t* text) {
   g_pre_effect_source_origin_x = version3 ? values[8] : 0;
   g_pre_effect_source_origin_y = version3 ? values[9] : 0;
   if (g_full_resolution_width > 32768 || g_full_resolution_height > 32768) return false;
+  return true;
+}
+
+bool parse_active_camera_payload(const wchar_t* text) {
+  if (!text) return false;
+  const std::wstring encoded(text);
+  constexpr wchar_t kPrefix[] = L"scene-camera:v1|";
+  if (encoded.compare(0, std::size(kPrefix) - 1, kPrefix) != 0 ||
+      encoded.size() > 512) return false;
+  std::array<uint64_t, 21> fields{};
+  const std::wstring payload = encoded.substr(std::size(kPrefix) - 1);
+  std::size_t start = 0;
+  for (std::size_t index = 0; index < fields.size(); ++index) {
+    const std::size_t comma = payload.find(L',', start);
+    const bool final = index + 1 == fields.size();
+    if ((final && comma != std::wstring::npos) ||
+        (!final && comma == std::wstring::npos)) return false;
+    const std::size_t end = final ? payload.size() : comma;
+    if (start == end) return false;
+    uint64_t value = 0;
+    for (std::size_t cursor = start; cursor < end; ++cursor) {
+      const wchar_t digit = payload[cursor];
+      if (digit < L'0' || digit > L'9') return false;
+      const uint64_t decimal = static_cast<uint64_t>(digit - L'0');
+      if (value > (std::numeric_limits<uint64_t>::max() - decimal) / 10)
+        return false;
+      value = value * 10 + decimal;
+    }
+    fields[index] = value;
+    start = end + 1;
+  }
+  if (fields[0] == 0 || fields[0] > INT32_MAX ||
+      fields[1] == 0 || fields[1] > INT32_MAX ||
+      fields[2] == 0 || fields[2] > UINT32_MAX ||
+      fields[3] >= 3 || fields[4] > 10'000'000 ||
+      fields[5] == 0 || fields[5] > 1'000'000 ||
+      fields[6] == 0 || fields[6] > 10'000'000 ||
+      fields[7] == 0 || fields[7] > 1'000'000 ||
+      fields[4] * fields[7] + fields[6] * fields[5] >
+          10 * fields[5] * fields[7]) return false;
+
+  std::array<double, 13> values{};
+  static_assert(sizeof(double) == sizeof(uint64_t));
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    std::memcpy(&values[index], &fields[index + 8], sizeof(double));
+    const double bound = index == 0 ? 1'000'000'000.0 :
+        index >= 10 ? 36'000.0 :
+        index >= 7 ? 10'000.0 : 1'000'000.0;
+    if (!std::isfinite(values[index]) || std::abs(values[index]) > bound)
+      return false;
+  }
+  if (values[0] <= 0.0 ||
+      values[7] < 0.01 || values[8] < 0.01 || values[9] < 0.01)
+    return false;
+  const double scale_determinant =
+      values[7] * values[8] * values[9] / 1'000'000.0;
+  if (!std::isfinite(scale_determinant) ||
+      scale_determinant <= 1.001e-12)
+    return false;
+
+  auto& state = aexcompat::scene_runtime::scene_runtime_state();
+  if (!state.scene_registry_initialized || state.authored_camera_live)
+    return false;
+  const std::size_t index = static_cast<std::size_t>(fields[3]);
+  scene_model::Identity identity{};
+  auto& registry = scene_model::registry();
+  if (!registry.identity_for_legacy(
+          &state.layers[index], scene_model::ObjectKind::layer, identity))
+    return false;
+  const scene_model::Identity authored{
+      fields[0], fields[1], static_cast<uint32_t>(fields[2]),
+      scene_model::ObjectKind::layer, {}};
+  if (!registry.bind_authored_layer_identity(identity, authored, identity))
+    return false;
+  aexcompat::scene_runtime::AegpLayerTransform transform{};
+  for (std::size_t component = 0; component < 3; ++component) {
+    transform.anchor[component] = values[1 + component];
+    transform.position[component] = values[4 + component];
+    transform.scale[component] = values[7 + component];
+    transform.rotation_degrees[component] = values[10 + component];
+  }
+  transform.is_3d = true;
+  state.layer_transforms[index] = transform;
+  state.layer_in_points[index] = {
+      static_cast<int32_t>(fields[4]), static_cast<uint32_t>(fields[5])};
+  state.layer_durations[index] = {
+      static_cast<int32_t>(fields[6]), static_cast<uint32_t>(fields[7])};
+  state.layer_camera_zoom[index] = values[0];
+  state.authored_camera_identity = identity;
+  state.authored_camera_live = true;
+  state.active_camera_layer_index = static_cast<int32_t>(index);
   return true;
 }
 

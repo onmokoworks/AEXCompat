@@ -14,6 +14,8 @@ int32_t __cdecl report_progress(void*, int32_t, int32_t);
 int32_t __cdecl register_custom_ui(void*, const void*);
 int32_t __cdecl adv_app_info_text(const char*, const char*);
 int32_t __cdecl adv_app_info_text3(const char*, const char*, const char*);
+int32_t __cdecl adv_app_info_text3_plus(const char*, const char*, const char*,
+                                        const char*, const char*);
 }
 double __cdecl ansi_atan(double);
 double __cdecl ansi_atan2(double, double);
@@ -115,6 +117,35 @@ struct StreamSuite {
 };
 static_assert(sizeof(StreamSuite) == 23 * sizeof(void*));
 
+// AEGP_StreamSuite4, acquired as numeric version 9 (frozen in AE 9).  Its
+// first 19 slots match the current suite.  Expression text is the legacy
+// A_char ABI at slots 19/20, and DuplicateStreamRef is its final slot.
+struct StreamSuite4 {
+  decltype(&is_stream_legal) is_stream_legal;
+  decltype(&can_vary_over_time) can_vary_over_time;
+  decltype(&get_valid_interpolations) get_valid_interpolations;
+  decltype(&unsupported_new_layer_stream) get_new_layer_stream;
+  decltype(&unsupported_effect_stream_count) get_effect_num_param_streams;
+  decltype(&unsupported_new_effect_stream) get_new_effect_stream_by_index;
+  decltype(&get_new_mask_stream) get_new_mask_stream;
+  decltype(&dispose_stream) dispose_stream;
+  decltype(&unsupported_stream_name) get_stream_name;
+  decltype(&get_stream_units_text) get_stream_units_text;
+  decltype(&get_stream_properties) get_stream_properties;
+  decltype(&is_stream_timevarying) is_stream_timevarying;
+  decltype(&get_stream_type) get_stream_type;
+  decltype(&get_new_stream_value) get_new_stream_value;
+  decltype(&dispose_stream_value) dispose_stream_value;
+  decltype(&set_stream_value) set_stream_value;
+  decltype(&unsupported_layer_stream_value) get_layer_stream_value;
+  decltype(&get_expression_state) get_expression_state;
+  decltype(&reject_expression_state) set_expression_state;
+  decltype(&reject_get_expression_ansi) get_expression;
+  decltype(&reject_set_expression_ansi) set_expression;
+  decltype(&duplicate_stream_ref) duplicate_stream_ref;
+};
+static_assert(sizeof(StreamSuite4) == 22 * sizeof(void*));
+
 struct KeyframeSuite {
   decltype(&get_stream_num_keyframes) get_stream_num_keyframes;
   decltype(&get_keyframe_time) get_keyframe_time;
@@ -140,6 +171,30 @@ struct KeyframeSuite {
   decltype(&set_keyframe_label) set_keyframe_label_color_index;
 };
 static_assert(sizeof(KeyframeSuite) == 22 * sizeof(void*));
+
+struct KeyframeSuite4 {
+  decltype(&get_stream_num_keyframes) get_stream_num_keyframes;
+  decltype(&get_keyframe_time) get_keyframe_time;
+  decltype(&insert_keyframe) insert_keyframe;
+  decltype(&delete_keyframe) delete_keyframe;
+  decltype(&get_new_keyframe_value) get_new_keyframe_value;
+  decltype(&set_keyframe_value) set_keyframe_value;
+  decltype(&get_stream_value_dimensionality) get_stream_value_dimensionality;
+  decltype(&get_stream_temporal_dimensionality) get_stream_temporal_dimensionality;
+  decltype(&get_new_keyframe_spatial_tangents) get_new_keyframe_spatial_tangents;
+  decltype(&set_keyframe_spatial_tangents) set_keyframe_spatial_tangents;
+  decltype(&get_keyframe_temporal_ease) get_keyframe_temporal_ease;
+  decltype(&set_keyframe_temporal_ease) set_keyframe_temporal_ease;
+  decltype(&get_keyframe_flags) get_keyframe_flags;
+  decltype(&set_keyframe_flag) set_keyframe_flag;
+  decltype(&get_keyframe_interpolation) get_keyframe_interpolation;
+  decltype(&set_keyframe_interpolation) set_keyframe_interpolation;
+  decltype(&start_add_keyframes) start_add_keyframes;
+  decltype(&add_keyframes) add_keyframes;
+  decltype(&set_add_keyframe) set_add_keyframe;
+  decltype(&end_add_keyframes) end_add_keyframes;
+};
+static_assert(sizeof(KeyframeSuite4) == 20 * sizeof(void*));
 
 struct DynamicStreamSuite {
   decltype(&get_new_dynamic_stream_for_layer) get_new_stream_ref_for_layer;

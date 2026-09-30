@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$TestedAex,
-    [string]$Worker = 'target\minihost-build\aex_smart_worker.exe',
+    [string]$Worker = 'target\minihost-build\aex_worker.exe',
     [string]$Probe = 'target\pf-smart-geometry-probe-build\Release\pf_smart_geometry_probe.aex',
     [string]$OutJson = 'analysis\SMARTFX_GEOMETRY_CONTRACT_RESULT_2026-07-19.json'
 )
@@ -74,7 +74,7 @@ function RunSmart([string]$Command, [string]$Plugin, [string]$PluginHash,
     # in Windows PowerShell, so the preference is relaxed for the invocation.
     $saved = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $json = & $workerPath $Command $Plugin $PluginHash 'v2|' $InputPath $OutputPath `
+    $json = & $workerPath '--kind' 'smart' $Command $Plugin $PluginHash 'v2|' $InputPath $OutputPath `
         $Width $Height $Time 1 4 1 2>$null
     $ErrorActionPreference = $saved
     if ($LASTEXITCODE -ne 0 -or -not $json) {

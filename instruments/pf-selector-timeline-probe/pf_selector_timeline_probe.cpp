@@ -449,7 +449,11 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       // (issue #98 W4 / #239 stage 0). Classic flavor only; the flag must also
       // be declared in the PiPL OutFlags (pf_selector_timeline_classic.rc) to
       // match, or the host rejects the GLOBAL_SETUP out_flags as inconsistent.
-      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_AUDIO_EFFECT_TOO;
+      // SEND_UPDATE_PARAMS_UI (issue #1156): advertise it so AE dispatches
+      // UPDATE_PARAMS_UI, letting a headless aerender record whether the real
+      // host issues that selector during a render with no Effect Controls panel.
+      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_AUDIO_EFFECT_TOO |
+          PF_OutFlag_SEND_UPDATE_PARAMS_UI;
       out_data->out_flags2 = 0;
 #endif
       log_event(cmd, in_data, nullptr, 0.0, false, nullptr);

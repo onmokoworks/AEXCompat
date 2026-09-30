@@ -3,6 +3,7 @@
 #include "worker_handle_runtime.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
+#include "worker_world_registry.hpp"
 #include <algorithm>
 #include <cstring>
 
@@ -12,7 +13,18 @@ template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
   T value{}; std::memcpy(&value, bytes.data() + offset, sizeof(value)); return value;
 }
+
+void record_output_extent_hint(
+    const aexcompat::world_safety::EffectWorldStorage& output_world,
+    smart_execution::Result& result) {
+  std::memcpy(result.output_extent_hint.data(), output_world.data() + 44,
+              sizeof(result.output_extent_hint));
+  if (result.output_allocation_failed ||
+      (result.empty_result_rect && !result.empty_result_passthrough))
+    result.output_extent_hint = {0, 0, 0, 0};
 }
+}
+
 bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result) {
   if (!r.entry || !r.input || !r.output || !r.parameters || !r.output_world ||
       !r.lifecycle || !r.source || !r.guarded || !r.pre_output || !h.close_ui ||
@@ -34,6 +46,13 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
   auto& state = smart::state();
   state.input_world = nullptr; state.output_world = nullptr;
   state.map_world = nullptr; state.hosted_layers.clear();
+  // The empty-layer world is the host's own allocation, so the host returns it.
+  // Leaving it live would read as an unbalanced world lifetime, which is the
+  // accounting that catches a plug-in leaking one.
+  if (state.empty_layer_world_live) {
+    world_registry::dispose_world(nullptr, state.empty_layer_world.data());
+    state.empty_layer_world_live = false;
+  }
   std::vector<unsigned char> logical_input, logical_output;
   if (!render::copy_packed_world(r.source->data(), r.rowbytes, r.width, r.height,
                                   r.pixel_bytes, logical_input) ||
@@ -48,22 +67,61 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
     *r.session->captured_argb = logical_output;
   h.dump_world("smart-output", logical_output.data(), result.output_width,
                result.output_height, r.pixel_bytes);
-  const bool untouched = !logical_output.empty() &&
-      std::all_of(logical_output.begin(), logical_output.end(),
-                  [](unsigned char value) { return value == 0xCC; });
-  const bool finite = r.pixel_bytes != 16 || render::finite_float_world(logical_output);
+  std::array<int32_t, 4> promised{0, 0, result.output_width, result.output_height};
+  const auto& diagnostic = render::diagnostic_world_layout();
+  if (diagnostic.enabled && diagnostic.has_extent_hint) {
+    const auto local = [](int32_t coordinate, int32_t origin, int32_t extent) {
+      return static_cast<int32_t>(std::clamp<int64_t>(
+          static_cast<int64_t>(coordinate) - origin, 0, extent));
+    };
+    promised = {
+        local(diagnostic.extent_hint[0], result.output_origin_x, result.output_width),
+        local(diagnostic.extent_hint[1], result.output_origin_y, result.output_height),
+        local(diagnostic.extent_hint[2], result.output_origin_x, result.output_width),
+        local(diagnostic.extent_hint[3], result.output_origin_y, result.output_height)};
+  }
+  if (!result.empty_result_rect && !result.output_coverage_external_world)
+    result.output_coverage = output_coverage::inspect(
+        logical_output.data(), logical_output.size(), result.output_width,
+        result.output_height, r.pixel_bytes, promised);
+  // External worlds have their own initialization contract (GPU device and
+  // VideoFrame adapter). Do not mistake their copied pixels for the host seed;
+  // retain the pre-existing whole-frame 0xCC fallback check for those routes.
+  const bool untouched = result.output_coverage_external_world
+      ? !logical_output.empty() && std::all_of(logical_output.begin(),
+          logical_output.end(), [](unsigned char byte) { return byte == 0xCC; })
+      : result.output_coverage.promised_pixels != 0 &&
+          result.output_coverage.unwritten_pixels == result.output_coverage.promised_pixels;
+  result.output_untouched = untouched;
+  // An 8/16bpc world cannot hold a non-finite value, so the check is on the
+  // float32 world; the Premiere GPU-filter route reports the same condition
+  // for the float32 frame it narrowed into an 8/16bpc world (issue #1271).
+  const bool finite =
+      (r.pixel_bytes != 16 || render::finite_float_world(logical_output)) &&
+      !result.output_non_finite;
   // A legally empty result promised no pixels; zero output bytes are the
   // correct fulfillment of that contract, not a validation failure.
   result.output_pixels_valid = result.empty_result_rect
-      ? true
-      : !logical_output.empty() && !untouched && finite;
-  if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
+      ? (!result.empty_result_passthrough || (!logical_output.empty() && finite))
+      : !logical_output.empty() && finite &&
+          (result.output_coverage_external_world ? !untouched :
+           result.output_coverage.geometry_valid &&
+           result.output_coverage.unwritten_pixels == 0);
+  result.output_coverage.host_validation_failed = result.pre_error == 0 &&
+      result.render_error == 0 &&
+      !result.empty_result_rect && !result.output_coverage_external_world &&
+      (!result.output_coverage.geometry_valid ||
+       result.output_coverage.unwritten_pixels != 0);
+  if (result.pre_error == 0 && result.render_error == 0 &&
+      !result.output_pixels_valid) result.render_error = -6;
   // The output world extent_hint is read back from the world the plug-in saw.
   // The empty answer never resized or dispatched the output world; reporting
   // the stale full-frame extent would claim pixels that were never promised.
-  std::memcpy(result.output_extent_hint.data(), r.output_world->data() + 44,
-              sizeof(result.output_extent_hint));
-  if (result.empty_result_rect) result.output_extent_hint = {0, 0, 0, 0};
+  // The passthrough did size and fill an output world, so its extent is the
+  // one the world carries. A promised-nothing frame and an allocation failure
+  // both report empty; the latter must not republish the previous world's
+  // stale extent.
+  record_output_extent_hint(*r.output_world, result);
   result.guards_intact = r.guarded->sentinels_intact();
   return true;
 }

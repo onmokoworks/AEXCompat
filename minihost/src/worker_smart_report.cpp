@@ -5,6 +5,7 @@
 #include "gpu_opencl_backend.hpp"
 #include "host_audio_runtime.hpp"
 #include "runtime_module_audit.hpp"
+#include "worker_bee_scene_facade.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
@@ -13,6 +14,7 @@
 #include "worker_render_report.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_suite_call_slot_probe.hpp"
+#include "worker_suite_registry.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "worker_world_registry.hpp"
 
@@ -75,6 +77,24 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   const auto mask_report = aexcompat::mask_runtime::snapshot();
   report::ReportSnapshot report_snapshot(std::cout);
   const auto& host_telemetry = aexcompat::worker_runtime::smart::host_telemetry();
+  // In a session the caller receives the slot, not the plug-in's own world: a
+  // plug-in dispatched at another depth than the session renders into a world
+  // that the frame loop converts into the slot before anyone sees it. The final
+  // report has to describe the same frame the per-frame message described.
+  const int32_t world_pixel_bytes = smart.runtime->pixel_format == "argb32f" ? 16 :
+      (smart.runtime->pixel_format == "argb16" ? 8 : 4);
+  const int32_t frame_pixel_bytes =
+      in.session_pixel_bytes != 0 ? in.session_pixel_bytes : world_pixel_bytes;
+  // A run that never built a world leaves the format empty, and it stays
+  // empty: naming a depth for a frame that does not exist would be a
+  // fabricated fact in a diagnostic.
+  const std::string frame_pixel_format = smart.runtime->pixel_format.empty()
+      ? smart.runtime->pixel_format
+      : (frame_pixel_bytes == 16 ? "argb32f"
+                                 : (frame_pixel_bytes == 8 ? "argb16" : "argb8"));
+  const int32_t frame_rowbytes = frame_pixel_bytes == world_pixel_bytes
+      ? smart.output_rowbytes
+      : smart.output_width * frame_pixel_bytes;
   const bool host_state_clean =
                 in.parameter_count_contract_valid &&
                 in.arbitrary_defaults_disposed && arbitrary.invalid_operations == 0 &&
@@ -113,7 +133,8 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
        host_telemetry.guid_mix_in_last_size.load(std::memory_order_relaxed),
        host_telemetry.guid_mix_in_max_size.load(std::memory_order_relaxed), kMaxGuidMixInBytes,
        host_telemetry.guid_mix_in_last_result.load(std::memory_order_relaxed)},
-      in.depth_supported,
+      in.depth_supported, in.advertised_depth_supported,
+      in.dispatch_pixel_bytes,
       {smart.pre_error, smart.render_error, smart.selector_error, smart.gpu_setup_error,
        smart.gpu_setdown_error, smart.gpu_setdown_exception_code},
       {smart.gpu_render_possible, smart.gpu_render_dispatched},
@@ -124,13 +145,29 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       smart.empty_checkout_pixel_denials, smart.returns_extra_pixels,
       smart.result_within_request, smart.extra_pixels_contract_violation,
       smart.empty_result_rect, smart.output_extent_hint,
-      in.setdown_error, in.case_id, smart.runtime->pixel_format,
-      {smart.output_width, smart.output_height, smart.output_rowbytes},
+      in.setdown_error, in.case_id, frame_pixel_format,
+      {smart.output_width, smart.output_height, frame_rowbytes},
       {in.external_size[0], in.external_size[1]},
-      smart.runtime->pixel_format == "argb32f" ? 16 :
-          (smart.runtime->pixel_format == "argb16" ? 8 : 4),
+      frame_pixel_bytes,
       smart.input_hash,
-      smart.output_hash, smart.rects_valid, world_debug_report_json()});
+      smart.output_hash, smart.rects_valid, world_debug_report_json(),
+      smart.empty_layer_param_checkouts,
+      smart.empty_layer_param_pixel_checkouts,
+      smart.empty_result_passthrough});
+  const auto& audio = audio_telemetry();
+  report::append_audio(report_snapshot, {
+      audio.usage_advertised, audio.checkout_allowed, audio.source_available,
+      audio.unadvertised_checkout_calls,
+      audio.rejected_unadvertised_checkouts, audio.rejected_format_requests,
+      audio.handle_exhaustions, audio.peak_live_handles,
+      audio.last_checkout_index, audio.checkout_calls, audio.checkin_calls,
+      audio.automatic_checkins, audio.get_data_calls, audio.invalid_operations,
+      audio.last_checkout_start_time, audio.last_checkout_duration,
+      audio.last_checkout_time_scale, audio.last_window_start_sample,
+      audio.last_window_sample_count, audio.last_window_silence_samples,
+      audio.last_output_rate, audio.last_output_bytes_per_sample,
+      audio.last_output_channels, audio.last_output_format,
+      audio.last_returned_sample_frames, audio_handle_lifetimes_balanced()});
   if (in.session_mode)
     report::append_smart_session(report_snapshot, {
         in.session_frames_attempted, in.session_sequence_setup_error,
@@ -155,6 +192,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       {in.context_zoom[0], in.context_zoom[1]},
       {in.context_origin[0], in.context_origin[1]},
       {in.context_extent[0], in.context_extent[1]}});
+  report::append_output_coverage(report_snapshot, smart.output_coverage);
   const auto handle_stats = worker_runtime::handles::statistics();
   const auto world_stats = aexcompat::world_registry::statistics();
   report::append_smart_lifetimes(report_snapshot, {
@@ -165,10 +203,20 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       {static_cast<int64_t>(suite_acquire_count()), static_cast<int64_t>(suite_release_count()), static_cast<int64_t>(live_suite_lease_count()),
        static_cast<int64_t>(live_suite_reference_count())},
       missing_suites_report_json() + unsupported_suite_calls_report_json() +
+          // Which BEE facade slots were actually taken, next to the slots
+          // nobody implemented: an empty `unsupported_suite_calls` alone
+          // cannot separate "the facade held" from "nothing reached it"
+          // (issue #1264).
+          aexcompat::worker_runtime::bee_facade::report_json() +
           suite_timeline_report_json() +
           aexcompat::worker_runtime::suite_call_slot_probe::report_json(),
       live_suite_lease_summary(),
-      in.suite_fault_observed, worker_runtime::handles::handle_lifetimes_balanced(),
+      // #1182 (owner-directed): a rejected suite release is contained as a no-op
+      // (see worker_render_report.cpp) and is a benign warning recorded in the
+      // suite_timeline, not a session-failing fault. Keep only genuine passed-in
+      // suite faults; handle/world double-dispose faults stay fail-closed.
+      in.suite_fault_observed,
+      worker_runtime::handles::handle_lifetimes_balanced(),
       {handle_stats.created, handle_stats.disposed},
       {arbitrary.copy_calls, arbitrary.dispose_calls, arbitrary.print_calls,
        arbitrary.print_failures, arbitrary.roundtrip_calls, arbitrary.roundtrip_failures,
@@ -189,6 +237,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   report::append_seh_diagnostics(report_snapshot, report::capture_seh_diagnostics());
   const auto directx_stats = directx_backend::diagnostics();
   const auto aegp_memory_stats = worker_runtime::handles::aegp_memory_statistics();
+  const auto pixel_format_stats = pixel_format_telemetry();
   report::append_smart_faults(report_snapshot, {
       {static_cast<int64_t>(gpu_transport::cuda_upload_bytes), static_cast<int64_t>(gpu_transport::cuda_download_bytes), static_cast<int64_t>(gpu_transport::cuda_sync_failures),
        gpu_transport::last_cuda_device_count, gpu_transport::last_cuda_device_index},
@@ -197,8 +246,10 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       {static_cast<int64_t>(directx_stats.device_count), static_cast<int64_t>(directx_stats.device_index), static_cast<int64_t>(directx_stats.upload_bytes),
        static_cast<int64_t>(directx_stats.download_bytes), static_cast<int64_t>(directx_stats.sync_failures)}, directx_stats.context_used,
       in.pixel_format_fault_observed,
-      {static_cast<int64_t>(g_pixel_format_add_calls), static_cast<int64_t>(g_pixel_format_clear_calls), static_cast<int64_t>(g_supported_pixel_formats.size()),
-       g_invalid_pixel_format_operations},
+      {static_cast<int64_t>(pixel_format_stats.add_calls),
+       static_cast<int64_t>(pixel_format_stats.clear_calls),
+       static_cast<int64_t>(pixel_format_stats.supported_count),
+       pixel_format_stats.invalid_operations},
       {in.outline_fault_observed, in.mask_attribute_fault_observed, in.stream_metadata_fault_observed,
        in.keyframe_fault_observed, in.dynamic_stream_fault_observed, in.aegp_memory_fault_observed, false},
       {mask_report.outline_mutations, mask_report.invalid_outline_operations,

@@ -5,6 +5,7 @@
 #include "worker_world_safety.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -47,6 +48,41 @@ bool verify_pf_path_data_hardening(aexcompat::pf_path_runtime::HostHooks path_ho
         (segments == 0 && aexcompat::pf_path_runtime::path_prepare_seg_length(
             nullptr, path, 0, 1, &prep) == 0) || prep != nullptr ||
         aexcompat::pf_path_runtime::checkin_path(effect_ref(), id, 0, path) != 0)
+      return false;
+  }
+
+  // Absent-path contract (issue #1253): PF_CheckoutPath of PF_PathID_NONE (0)
+  // or of an id that names no path answers PF_Err_NONE with a NULL path (the
+  // SDK's "can return NULL ptr if path doesn't exist"; Scribble aborts its
+  // render on any other answer), and PF_CheckinPath of that NULL for the same
+  // absent id answers PF_Err_NONE. Nothing that names host state loosens: a
+  // NULL checkin for an id that does resolve, a NULL checkin marked changed,
+  // a null out pointer, a non-positive step and a zero scale stay rejected.
+  {
+    const auto before = aexcompat::pf_path_runtime::snapshot();
+    void* absent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5a5a));
+    if (aexcompat::pf_path_runtime::checkout_path(effect_ref(), 0, 0, 1, 1, &absent) != 0 ||
+        absent != nullptr ||
+        aexcompat::pf_path_runtime::checkin_path(effect_ref(), 0, 0, nullptr) != 0 ||
+        (absent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5a5a)), false) ||
+        aexcompat::pf_path_runtime::checkout_path(effect_ref(), 99, 0, 1, 1, &absent) != 0 ||
+        absent != nullptr ||
+        aexcompat::pf_path_runtime::checkin_path(effect_ref(), 99, 0, nullptr) != 0 ||
+        aexcompat::pf_path_runtime::checkin_path(effect_ref(), 1, 0, nullptr) == 0 ||
+        aexcompat::pf_path_runtime::checkin_path(effect_ref(), 99, 1, nullptr) == 0 ||
+        aexcompat::pf_path_runtime::checkin_path(nullptr, 99, 0, nullptr) == 0 ||
+        aexcompat::pf_path_runtime::checkout_path(effect_ref(), 0, 0, 1, 1, nullptr) == 0 ||
+        aexcompat::pf_path_runtime::checkout_path(effect_ref(), 0, 0, 0, 1, &absent) == 0 ||
+        aexcompat::pf_path_runtime::checkout_path(effect_ref(), 0, 0, 1, 0, &absent) == 0 ||
+        aexcompat::pf_path_runtime::checkout_path(nullptr, 0, 0, 1, 1, &absent) == 0)
+      return false;
+    const auto after = aexcompat::pf_path_runtime::snapshot();
+    if (after.absent_checkouts != before.absent_checkouts + 2 ||
+        after.absent_checkins != before.absent_checkins + 2 ||
+        after.checkout_calls != before.checkout_calls ||
+        after.checkin_calls != before.checkin_calls ||
+        after.invalid_operations != before.invalid_operations + 7 ||
+        !aexcompat::pf_path_runtime::lifetimes_balanced())
       return false;
   }
 

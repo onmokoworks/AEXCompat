@@ -1,25 +1,59 @@
 use crate::runtime_module_policy::{AuthenticatedGpuModuleReport, RuntimeBackend};
-use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult};
+use crate::secure_launch::{LaunchEnvironment, SecureLaunchRequest, SecureLaunchResult};
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+/// Which route the worker process is asked to serve.
+///
+/// `Discovery` was called L2 until #1495, after the L0/L1/L2 staging plan whose
+/// L1 was deleted in #732. `Classic` was called Render, which did not separate
+/// it from Smart since both render.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerKind {
-    L2,
-    Render,
+    Discovery,
+    Classic,
     Smart,
 }
 
+/// The one worker image. Every route runs these bytes and picks its behaviour
+/// from `--kind`; there were three executables until #1495, and building one of
+/// them left the other two on an older build.
+pub const WORKER_RELATIVE_PROGRAM: &str = "target/minihost-build/aex_worker.exe";
+
 impl WorkerKind {
-    fn repository_relative_program(self) -> &'static str {
+    /// Value for the worker's leading `--kind` argument.
+    pub const fn kind_argument(self) -> &'static str {
         match self {
-            Self::L2 => "target/minihost-build/aex_l2_worker.exe",
-            Self::Render => "target/minihost-build/aex_render_worker.exe",
-            Self::Smart => "target/minihost-build/aex_smart_worker.exe",
+            Self::Discovery => "discovery",
+            Self::Classic => "classic",
+            Self::Smart => "smart",
         }
     }
+
+    /// Repository-relative worker image selected by production dispatch.
+    /// Diagnostic callers use the same candidate path for build-set boundary
+    /// snapshots. Such snapshots are not launch-admission receipts and do not
+    /// claim which bytes an individual worker process used.
+    pub const fn repository_relative_program(self) -> &'static str {
+        WORKER_RELATIVE_PROGRAM
+    }
+}
+
+/// Prepends the route selector to a caller's leading worker arguments (#1495).
+///
+/// Every dispatch goes through here rather than each caller remembering the
+/// pair. There is one worker image, so omitting it would not fail to find a
+/// binary; it would run the route the worker falls back to. The worker
+/// consumes the pair before its positional contract starts, so `rest` keeps
+/// the indices it had when the route was chosen by executable name.
+fn worker_arguments(kind: WorkerKind, rest: &[String]) -> Vec<String> {
+    let mut arguments = Vec::with_capacity(rest.len() + 2);
+    arguments.push("--kind".to_owned());
+    arguments.push(kind.kind_argument().to_owned());
+    arguments.extend_from_slice(rest);
+    arguments
 }
 
 /// A trust decision made before dispatch. This type never derives trust from
@@ -49,6 +83,9 @@ pub struct SecureImageDispatch<'a> {
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
     pub timeout: Option<Duration>,
+    /// Per-launch environment inputs (issue #910), forwarded verbatim to the
+    /// launch boundary. `Default` inherits the broker's environment.
+    pub launch_environment: LaunchEnvironment,
 }
 
 pub struct GpuRuntimeAuthorization<'a> {
@@ -105,6 +142,20 @@ pub fn dispatch_secure_image_session(
         input,
         session,
         crate::windows_process::WorkerDesktopPolicy::Dedicated,
+        crate::windows_process::SessionMemoryBudget::Render,
+    )
+}
+
+#[cfg(windows)]
+pub(crate) fn dispatch_secure_image_standard_session(
+    input: SecureImageDispatch<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<crate::secure_launch::SecureSessionProcess> {
+    dispatch_secure_image_session_with_policy(
+        input,
+        session,
+        crate::windows_process::WorkerDesktopPolicy::Dedicated,
+        crate::windows_process::SessionMemoryBudget::Standard,
     )
 }
 
@@ -117,6 +168,7 @@ pub(crate) fn dispatch_secure_image_session_on_current_desktop(
         input,
         session,
         crate::windows_process::WorkerDesktopPolicy::Current,
+        crate::windows_process::SessionMemoryBudget::Render,
     )
 }
 
@@ -125,6 +177,7 @@ fn dispatch_secure_image_session_with_policy(
     input: SecureImageDispatch<'_>,
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+    memory_budget: crate::windows_process::SessionMemoryBudget,
 ) -> io::Result<crate::secure_launch::SecureSessionProcess> {
     crate::trace_policy::validate_broker_trace_directory(input.repository)?;
     let worker_program = input
@@ -132,6 +185,8 @@ fn dispatch_secure_image_session_with_policy(
         .join(input.worker_kind.repository_relative_program());
     validate_in_place_input(&input.dependencies, &input.plugin)?;
     let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
+    let staged_worker_assets =
+        executable_relative_kernel_assets(&input.plugin.path, &input.dependency_search_dirs)?;
     let admitted = admit_local_worker(input.repository, &worker_program)?;
     let mut args_after_plugin = input.args_after_plugin.to_vec();
     args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
@@ -139,16 +194,19 @@ fn dispatch_secure_image_session_with_policy(
         worker_program: &worker_program,
         worker_expected_sha256: admitted.sha256,
         worker_expected_size: admitted.size,
-        args_before_plugin: input.args_before_plugin,
+        args_before_plugin: &worker_arguments(input.worker_kind, input.args_before_plugin),
         args_after_plugin: &args_after_plugin,
         repository: input.repository,
         require_module_audit: true,
+        launch_environment: input.launch_environment,
+        staged_worker_assets: &staged_worker_assets,
     };
     let mut process = crate::secure_launch::secure_launch_session_in_place(
         Some(&input.plugin.path),
         request,
         session,
         desktop_policy,
+        memory_budget,
     )?;
     process.record_worker_freshness_warning(admitted.freshness_warning);
     Ok(process)
@@ -187,6 +245,9 @@ pub struct SecureInPlaceClusterDispatch<'a> {
     pub module_bound: u32,
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
+    /// Per-launch environment inputs (issue #910); see
+    /// `SecureImageDispatch::launch_environment`.
+    pub launch_environment: LaunchEnvironment,
 }
 
 /// A launched in-place cluster session: the process, the validated manifest
@@ -268,19 +329,26 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
         worker_program: &worker_program,
         worker_expected_sha256: admitted.sha256,
         worker_expected_size: admitted.size,
-        args_before_plugin: input.args_before_plugin,
+        args_before_plugin: &worker_arguments(input.worker_kind, input.args_before_plugin),
         args_after_plugin: &args_after_plugin,
         repository: input.repository,
         // The in-place cluster audit is recorded at close
         // (`observe_in_place_cluster_audit`), not validated by the one-shot
         // validator at collection.
         require_module_audit: false,
+        launch_environment: input.launch_environment,
+        staged_worker_assets: &[],
     };
     let mut process = crate::secure_launch::secure_launch_session_in_place(
         positional,
         request,
         session,
         desktop_policy,
+        if input.positional_plugin {
+            crate::windows_process::SessionMemoryBudget::Render
+        } else {
+            crate::windows_process::SessionMemoryBudget::Standard
+        },
     )?;
     process.record_worker_freshness_warning(admitted.freshness_warning);
     Ok(SecureInPlaceClusterSessionLaunch {
@@ -389,6 +457,38 @@ fn validate_in_place_input(
     Ok(())
 }
 
+/// Adobe GPUFoundation resolves per-effect kernels relative to its executable
+/// directory, independently of the admitted DLL search directories. Select
+/// only files whose basename matches the admitted plug-in, and copy those
+/// dependency-owned files into the temporary worker root for this launch.
+fn executable_relative_kernel_assets(
+    plugin: &Path,
+    dependency_search_dirs: &[PathBuf],
+) -> io::Result<Vec<(PathBuf, PathBuf)>> {
+    let stem = plugin
+        .file_stem()
+        .ok_or_else(|| invalid("in-place plugin has no basename"))?;
+    let mut assets = Vec::new();
+    for root in dependency_search_dirs {
+        let root = std::fs::canonicalize(root)?;
+        for (backend, extension) in [("CUDA", "cubin"), ("CL", "clz"), ("HLSL", "csod")] {
+            let relative = PathBuf::from("PTX")
+                .join(backend)
+                .join(Path::new(stem).with_extension(extension));
+            let candidate = root.join(&relative);
+            if !candidate.is_file() {
+                continue;
+            }
+            let canonical = std::fs::canonicalize(&candidate)?;
+            if !canonical.starts_with(&root) {
+                return Err(invalid("kernel asset escaped dependency search directory"));
+            }
+            assets.push((canonical, relative));
+        }
+    }
+    Ok(assets)
+}
+
 fn dispatch_secure_image_impl(
     input: SecureImageDispatch<'_>,
     process_memory_limit: Option<usize>,
@@ -399,6 +499,8 @@ fn dispatch_secure_image_impl(
         .join(input.worker_kind.repository_relative_program());
     validate_in_place_input(&input.dependencies, &input.plugin)?;
     let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
+    let staged_worker_assets =
+        executable_relative_kernel_assets(&input.plugin.path, &input.dependency_search_dirs)?;
     let admitted = admit_local_worker(input.repository, &worker_program)?;
     let mut args_after_plugin = input.args_after_plugin.to_vec();
     args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
@@ -406,12 +508,14 @@ fn dispatch_secure_image_impl(
         worker_program: &worker_program,
         worker_expected_sha256: admitted.sha256,
         worker_expected_size: admitted.size,
-        args_before_plugin: input.args_before_plugin,
+        args_before_plugin: &worker_arguments(input.worker_kind, input.args_before_plugin),
         args_after_plugin: &args_after_plugin,
         // The repository is carried to the Windows launch boundary so the
         // optional minidump file handle is created there for every dispatch.
         repository: input.repository,
         require_module_audit: true,
+        launch_environment: input.launch_environment,
+        staged_worker_assets: &staged_worker_assets,
     };
     let mut result = crate::secure_launch::secure_launch_in_place(
         &input.plugin.path,
@@ -669,7 +773,7 @@ mod tests {
         let source = root.join("minihost/src/worker.cpp");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, b"source").unwrap();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
         fs::write(&worker, b"worker").unwrap();
         let now = SystemTime::now();
@@ -687,16 +791,16 @@ mod tests {
     #[test]
     fn worker_kind_uses_only_fixed_repository_paths() {
         assert_eq!(
-            WorkerKind::L2.repository_relative_program(),
-            "target/minihost-build/aex_l2_worker.exe"
+            WorkerKind::Discovery.repository_relative_program(),
+            "target/minihost-build/aex_worker.exe"
         );
         assert_eq!(
-            WorkerKind::Render.repository_relative_program(),
-            "target/minihost-build/aex_render_worker.exe"
+            WorkerKind::Classic.repository_relative_program(),
+            "target/minihost-build/aex_worker.exe"
         );
         assert_eq!(
             WorkerKind::Smart.repository_relative_program(),
-            "target/minihost-build/aex_smart_worker.exe"
+            "target/minihost-build/aex_worker.exe"
         );
     }
 
@@ -711,13 +815,14 @@ mod tests {
 
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin,
             dependencies: vec![],
             dependency_search_dirs: vec![root.clone()],
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
         assert_eq!(
@@ -744,13 +849,14 @@ mod tests {
         // bug and must not silently prefer either.
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin: plugin.clone(),
             dependencies: vec![dependency],
             dependency_search_dirs: vec![root.clone()],
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -758,7 +864,7 @@ mod tests {
 
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin: ApprovedImageArtifact {
                 path: PathBuf::from("relative.plugin"),
                 expected_sha256: plugin.expected_sha256,
@@ -769,6 +875,7 @@ mod tests {
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -830,7 +937,7 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         let plugin = artifact(&root, "plugin.plugin", b"plugin");
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
         fs::write(&worker, b"").unwrap();
         let source = root.join("minihost/src/worker.cpp");
@@ -842,13 +949,14 @@ mod tests {
 
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin,
             dependencies: vec![],
             dependency_search_dirs: vec![root.clone()],
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -898,7 +1006,7 @@ mod tests {
             rand::random::<u128>()
         ));
         fs::create_dir(&root).unwrap();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
         fs::write(&worker, b"worker").unwrap();
         let admitted = admit_local_worker(&root, &worker)
@@ -1173,6 +1281,7 @@ mod tests {
             args_before_plugin: &["--before".into()],
             args_after_plugin: &["--after".into()],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
 
@@ -1212,6 +1321,7 @@ mod tests {
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         };
 
         let Err(cpu) = dispatch_secure_gpu_image_session(

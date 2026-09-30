@@ -17,6 +17,10 @@ dumps, private assets/corpora, credentials, license keys, personal paths, or
 unredacted host diagnostics. A hash of a private binary can itself be sensitive;
 use a synthetic identity unless maintainers explicitly approve publication.
 
-The repository's overall public license is not implied by a component's package
-metadata. Do not copy, relicense, or redistribute a component until its license
-and provenance are documented for the public release.
+AEXCompat-authored source and documentation are contributed under MPL-2.0.
+This does not change the terms of third-party dependencies, Adobe SDK material,
+separately licensed fixtures, or private/commercial corpus files. Confirm the
+provenance and applicable upstream terms before copying or redistributing any
+such material. A guest executable combined with Unicorn must additionally meet
+the GPL-2.0 distribution conditions described in the README and public-release
+audit.

@@ -4,145 +4,1113 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # 03:00 UTC = 12:00 JST。
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: windows-clean-clone-${{ github.ref }}
+  cancel-in-progress: true
+
+# 単一 job だったものを独立producerへ割ってある (#720, #1479)。判断待ちだった「課金
+# runner-minutes が 1.5-2 倍」は public repository の standard runner が無料に
+# なったことで消えた。hosted (windows-latest, 4 vCPU) は self-hosted の
+# ワークステーションより CPU バウンドが 3-4 倍遅いので、横に広げる以外に
+# 縮める手が無い (larger runner は public でも課金)。
+#
+# rust-broker / bridges / native は互いに依存しないので同時に走る。
+# SDK由来の ABI / AEX / example fixture も別runnerで同時に作る。python-tests
+# だけが全成果物を要るため、critical path は最も遅いproducer + python-tests。
+env:
+  SDK_BUCKET: aexcompat-ci
+  SDK_OBJECT_KEY: sdk/AfterEffectsSDK-ae25.2-win.zip
+  SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
+  SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
+
 jobs:
-  source-reproducible:
+  license-audit:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
+        with:
+          tool: cargo-about@0.9.1
+      - name: Verify desktop third-party license bundle
+        env:
+          PYTHONUTF8: "1"
+        run: python tools/generate-third-party-licenses.py
+
+  # cargo build だけを先に済ませて実行ファイルを配る。python-tests は cargo test
+  # の結果ではなくこの成果物しか要らないので、テストの完走を待たせない。
+  rust-build:
+    # self-hosted は使わない (#1457)。public repository では fork PR が任意の
+    # コードを持ち込むので、物理ワークステーションに届く経路自体を残さない。
+    runs-on: windows-latest
+    timeout-minutes: 60
     env:
       PYTHONUTF8: "1"
-      # clean clone は mtime が毎回新しく、rust-cache だけでは workspace
-      # クレートが常に再コンパイルされる。sccache が内容ハッシュで吸収する (#664)。
+      # built_artifact テストの broker/harness を、この `cargo build --workspace`
+      # が作る debug から取る。release に戻すと同じクレートを二度作る (#945)。
+      AEXCOMPAT_CARGO_PROFILE: debug
+      # mtime 復元 (#935) が拾えなかった、実際に変更されたクレートを sccache が
+      # 内容ハッシュで吸収する (#664)。
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/ci-setup
         with:
-          components: rustfmt
-      - uses: mozilla/sccache-action@v0.0.11
-        with:
-          version: v0.17.0
-      - name: Check Rust formatting
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        shell: pwsh
-        run: |
-          $base = $env:BASE_SHA
-          if (-not $base -or $base -match '^0+$') {
-            $base = 'HEAD^'
-          }
-          $files = @(git diff --name-only --diff-filter=ACMR $base $env:GITHUB_SHA -- '*.rs')
-          if (-not $files) {
-            Write-Host 'No changed Rust files to format-check.'
-            exit 0
-          }
-          rustfmt --edition 2024 --check --config skip_children=true @files
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            broker
-            bridges/aviutl2
-            bridges/aviutl2-multifilter
-      # Python 版は .python-version (3.12) に従う。
-      # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
-      - uses: astral-sh/setup-uv@v8.3.2
-        with:
-          enable-cache: true
-      - name: Install Python test dependencies
-        run: uv sync --locked
-      - name: Check Rust workspace
-        working-directory: broker
-        run: cargo check --workspace --locked
-      - name: Check AviUtl2 bridge
-        run: cargo check --manifest-path bridges/aviutl2/Cargo.toml --all-targets --locked
-      - name: Check AviUtl2 multifilter bridge
-        run: cargo check --manifest-path bridges/aviutl2-multifilter/Cargo.toml --all-targets --locked
-      # Hosted runners execute as a service account whose restricted token cannot
-      # initialize even a static Rust worker (0xC0000142). The tests that drive a
-      # live worker detect that themselves now (broker/crates/broker/tests/common,
-      # issue #335) and report a skip line instead of failing. Rejection tests that
-      # never start a process keep running: RenderSession::open validates every
-      # argument before it launches, and secure_launch fails trusted worker staging
-      # before it spawns, so those refusals are still covered here. The old --skip
-      # list is gone because it did not follow the tests added after it was
-      # written, which left main red with 32 failures.
+          rust-workspaces: broker
+          cache-key: broker
+          save-cache: ${{ github.event_name == 'push' }}
+          python-environment: 'false'
+
+      # 追跡している .rs を全部見る。変更されたファイルだけに絞っていたときは、
+      # `cargo fmt` が辿れないファイル (guest の x64.rs と multifilter の lib.rs
+      # が `include!` で取り込む 20 ファイル) の未整形が誰にも見えないまま溜まり、
+      # そこに 1 行触れた PR が既存分ごと落ちるようになっていた (#1460)。
       #
-      # --show-output is required, not cosmetic: libtest captures stdout/stderr of
-      # passing tests, and a skipped test passes. Without it the skip lines are
-      # swallowed and a run that could not launch a single worker is
-      # indistinguishable from full coverage.
-      - name: Test Rust workspace
+      # 全体を見ておけば、溜まる前にそれを入れた PR で落ちる。181 ファイルを
+      # 1 回の呼び出しに渡して実測 3.3 秒なので、範囲を絞る意味はない。
+      - name: Check Rust formatting
+        shell: pwsh
+        run: |
+          $files = @(git ls-files '*.rs')
+          if (-not $files) { throw 'no tracked Rust files found' }
+          Write-Host "format-checking $($files.Count) tracked Rust files"
+          rustfmt --edition 2024 --check --config skip_children=true @files
+
+      # ここを `cargo check` に戻さない: rmeta は codegen に使い回されず、後続の
+      # build/test と同じコードを二度検査するだけになる (#940)。
+      - name: Build the workspace fixtures
         working-directory: broker
-        shell: pwsh
-        # The opt-in is what lets the probe suppress a worker-launching test at
-        # all. Only the two CI workflows set it (here and in ae-sdk-tests.yml for
-        # the pytest side), so a regression in the restricted token -- which
-        # produces the same 0xC0000142 the probe keys on -- fails loudly on a
-        # developer machine instead of skipping (issue #335).
-        env:
-          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"
-        run: |
-          cargo test --workspace --locked -- --show-output 2>&1 |
-            Tee-Object -FilePath "$env:GITHUB_WORKSPACE/cargo-test-output.txt"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      # Make the environment limitation visible in the run summary rather than
-      # leaving it as a passing test count. Reports either way, so "no skips" is
-      # an explicit statement instead of the absence of one.
-      - name: Report sealed-worker skips
-        shell: pwsh
-        if: always()
-        run: |
-          if (-not (Test-Path cargo-test-output.txt)) {
-            Write-Host 'cargo test produced no log; nothing to report.'
-            exit 0
-          }
-          $skips = Select-String -Path cargo-test-output.txt `
-            -Pattern 'cannot launch a sealed worker'
-          if ($skips) {
-            Write-Host "::warning::$($skips.Count) Rust tests did not run: this runner cannot launch a sealed worker (issue #335)"
-            $skips | ForEach-Object { $_.Line }
-          } else {
-            Write-Host 'Every worker-launching Rust test ran: no sealed-worker skips.'
-          }
-      - name: Validate Python collection and local-artifact manifest
-        run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
-      # worksteal: ビルドでブロックした worker の積み残しを他の worker が
-      # 引き取る。time_ns ファイル名の worker 間衝突は stamp への pid 付与で
-      # 解消済みなので、モジュール直列化 (loadscope) はもう要らない (#668)。
-      # dev_infra (レビュー運用スキルのテスト) は下の dev-infra job が担当 (#684)。
-      - name: Run source-reproducible Python tests
-        run: uv run python -m pytest -q -n auto --dist worksteal --durations=25 -m "not dev_infra"
+        run: cargo build --workspace --locked
+
+      # deps/ は要らない。python-tests が探すのは直下の実行ファイルと FFI dll。
+      - name: Publish broker binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: broker-debug-bins
+          path: |
+            broker/target/debug/*.exe
+            broker/target/debug/*.dll
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats
 
-  # 開発インフラ (codex-review-loop の bash/jq 関数) のテスト。中身は
-  # プラットフォーム非依存の bash+jq で、プロセス起動が速い ubuntu で回す
-  # 方が Windows 本体 job より数倍速い (#684)。
-  dev-infra:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  # gate 系テスト (tools/test-rust-host-core-scene-*.ps1) が 4 本それぞれ
+  # `cargo build --release -p aexcompat-host-core-ffi` を同じ target dir に叩き、
+  # cargo のファイルロックで直列化していた (phase5 が ~25s 保持)。release
+  # profile は debug を作る rust-build では出ないので独立 producer で 1 回だけ
+  # build し、python-tests は DLL を download して cargo を skip する (#1537)。
+  # workspace 全体ではなく依存 9 クレートだけの build なので rust-build より
+  # 短く、クリティカルパスには入らない。
+  rust-release-ffi:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: "1"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          enable-cache: true
-      - name: Install Python test dependencies
-        run: uv sync --locked
-      # skip はゲートする: bash/jq が見つからない環境ではこれらのテストは
-      # pytest.skip になるが、それを緑として扱うと job の存在意義が消える。
-      - name: Run dev-infra tests
-        shell: bash
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust-workspaces: broker
+          cache-key: broker-release-ffi
+          save-cache: 'false'
+          python-environment: 'false'
+
+      - name: Build the release host-core FFI
+        working-directory: broker
+        run: cargo build --package aexcompat-host-core-ffi --release --locked
+
+      - name: Publish release host-core FFI
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: broker-release-ffi
+          path: broker/target/release/aexcompat_host_core_ffi.dll
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # 全Rust test binaryを一度だけコンパイルし、2つの実行shardへ運ぶ。rust-buildへ
+  # 足すとbroker binaryのpublishとpython-testsを遅らせるため、独立producerにする。
+  rust-test-archive:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust-workspaces: broker
+          cache-key: broker-nextest-archive
+          python-environment: 'false'
+          # PRs only restore; trusted main pushes seed this job's isolated target cache.
+          # Do not reuse the nextest archive itself across revisions: broker/build.rs
+          # embeds the current Git revision in the test binaries.
+          save-cache: ${{ github.event_name == 'push' }}
+      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: Build the shared Rust test archive
+        working-directory: broker
+        run: cargo nextest archive --workspace --locked --archive-file target/nextest-archive.tar.zst
+
+      - name: Validate shared archive partition coverage
+        run: python tools/run-broker-rust-tests.py validate
+
+      - name: Publish the shared Rust test archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: broker-nextest-archive
+          path: broker/target/nextest-archive.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # nextest does not support doctests. Run that Cargo surface independently so
+  # the shared archive can reach its execution shards as soon as it is ready.
+  rust-doctest:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust-workspaces: broker
+          cache-key: broker-doctest
+          save-cache: 'false'
+          python-environment: 'false'
+      - name: Test broker doctests
+        working-directory: broker
+        run: cargo test -p aexcompat-broker --doc --locked
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # native成果物を読まないRust testsは共有archiveの到着直後に実行する。
+  rust-test-independent:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    needs: [rust-test-archive]
+    env:
+      PYTHONUTF8: "1"
+      AEXCOMPAT_CARGO_PROFILE: debug
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust: 'false'
+          save-cache: 'false'
+      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Download the shared Rust test archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: broker-nextest-archive
+          path: broker/target
+
+      - name: Test native-independent Rust partition
+        run: uv run python tools/run-broker-rust-tests.py independent
+
+  # native worker/probeを実行するRust targetsだけを成果物の後で走らせる。
+  # runnerはnocapture出力のskipをfailにするため、成果物欠如をcoverageと
+  # 取り違えない。残りは専用のrust-test-independent jobで並行実行する。
+  rust-test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    needs: [rust-test-archive, native-workers, native-probes]
+    env:
+      PYTHONUTF8: "1"
+      AEXCOMPAT_CARGO_PROFILE: debug
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust: 'false'
+          save-cache: 'false'
+      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Download the shared Rust test archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: broker-nextest-archive
+          path: broker/target
+
+      - name: Download native workers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-workers
+          path: target
+      - name: Download native probes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-probes-*
+          path: target
+          merge-multiple: true
+
+      - name: Test native-dependent Rust partition
+        run: uv run python tools/run-broker-rust-tests.py native
+
+  # broker 外の Cargo ルート (#899, #917)。互いに独立なので matrix で横に並べる。
+  bridges:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # args は分割前の workflow が root ごとに使っていたものをそのまま
+        # 持ってきている。guest だけ --workspace が付くのは元からで、
+        # 揃えると走るテストが変わる。
+        include:
+          - name: aviutl2-multifilter
+            args: --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
+            workspace: bridges/aviutl2-multifilter
+            libclang: 'false'
+          - name: ymm4-native
+            args: --manifest-path bridges/ymm4-native/Cargo.toml --locked
+            workspace: bridges/ymm4-native
+            libclang: 'false'
+          - name: guest
+            args: --manifest-path guest/Cargo.toml --workspace --locked
+            workspace: guest
+            libclang: 'true'
+    env:
+      PYTHONUTF8: "1"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust-workspaces: ${{ matrix.workspace }}
+          cache-key: bridge-${{ matrix.name }}
+          save-cache: ${{ github.event_name == 'push' }}
+          resolve-libclang: ${{ matrix.libclang }}
+          python-environment: 'false'
+
+      - name: Test ${{ matrix.name }}
+        run: cargo test ${{ matrix.args }}
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # worker と trace writer。SDK を要らないので (minihost は imports/ の凍結
+  # コントラクトでビルドする) SDK 取得も待たない。
+  native-workers:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      # minihost の 244 翻訳単位を実行間で使い回す (#1501)。runner は毎回
+      # まっさらなので、minihost/src に一切触れていない PR でも全部を一から
+      # コンパイルしていた (163 秒)。この job は rust-test と python-tests
+      # 両方の needs に入っているため、その 163 秒がそのまま wall clock の門。
+      SCCACHE_GHA_ENABLED: "true"
+      # sccache は常駐サーバが cl を起動する。サーバが継承するのは per-compile の
+      # `cmake -E env VSLANG=...` ではなく job の環境なので、同じ値をここにも
+      # 置いて両者を一致させる。ずれると configure 時に捕まえた
+      # msvc_deps_prefix と build 時の /showIncludes が食い違い、ninja が
+      # ヘッダ依存を 0 件記録する (#651/#657/#942)。判定は下の Verify が行う。
+      VSLANG: "1033"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      # この job は cmake しか呼ばない。sccache だけは C++ 用に要る。
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust: 'false'
+          compile-cache: 'true'
+          python-environment: 'false'
+
+      # 入口は tools\build-native.ps1 に一本化してある (#1495)。vswhere から
+      # vcvars64 を解決するのはあのスクリプトの仕事で、ここに 3 回複製されて
+      # いた。docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
+      # フラット配置する (single-config)。
+      - name: Build minihost workers
+        shell: pwsh
+        run: pwsh -File tools\build-native.ps1 -CompileCache sccache
+
+      # ヘッダ依存が実際に記録されているかを確認する (#657)。cl の /showIncludes
+      # はローカライズされるため、configure 時と build 時で言語が食い違うと
+      # ninja は依存を 0 件記録し、以後ヘッダを変えても再ビルドされない (#651)。
+      - name: Verify minihost header dependency tracking
+        shell: pwsh
+        run: pwsh -File tools\verify-minihost-build-deps.ps1
+
+      # trace writer の動的テスト (test_production_worker_trace.py /
+      # test_instruments_trace_writer.py の handle ベース検証) を実走させる (#250)。
+      # この target は trace_writer.cpp + windows.h のみで SDK 不要。
+      # instruments は Ninja だが CMakeLists に locale pin が無く、ここは
+      # 5 秒でクリティカルパスにも乗っていないので素のまま通す。
+      - name: Build trace writer selftest
+        shell: pwsh
+        run: pwsh -File tools\build-native.ps1 -Source instruments -Target trace_writer_selftest
+
+      - name: Show sccache stats
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats
+
+
+      # `aex_*.exe` に絞らない。minihost-build 直下には worker のほかに
+      # native selftest のラッパが 30 本以上あり、pytest がそれらを直接起動する。
+      # dll も要る: worker_session_detach_fixture.dll と dynamic suite の
+      # companion/consumer fixture は selftest がロードする側の入力で、
+      # exe だけ運ぶと "missing self-test binary" になる。
+      - name: Publish native workers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-workers
+          path: |
+            target/minihost-build/*.exe
+            target/minihost-build/*.dll
+            target/instruments-build/*.exe
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  # SDK が要る成果物。worker のビルドとは独立なので同時に走る。
+  #
+  # 旧 workflow にあった「Rebuild native AEX artifacts after the runtime
+  # harness」はここには無い。あれは同一 runner 上で `cargo test --workspace` が
+  # probe の出力を踏むのを取り消すためのもので、job が分かれた今は起こり得ない。
+  # assert_artifact_fresh (tests/_render_session.py) が要求する mtime 順序は
+  # python-tests 側で作り直す。
+  native-probes:
+    name: native-probes (${{ matrix.producer }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - producer: abi
+            artifact: native-probes-abi
+            artifact-path: |
+              target/instruments-build/abi_layout_probe.exe
+              target/.native-probe-artifact-root
+          - producer: aex
+            artifact: native-probes-aex
+            artifact-path: |
+              target/**/*.aex
+              target/gpu-effects/**
+              target/.native-probe-artifact-root
+          - producer: sdk-fixtures
+            artifact: native-probes-sdk-fixtures
+            artifact-path: |
+              target/sdk-fixtures/**
+              target/aegp-render-options-probe-build/Release/aegp_render_options_probe.exe
+              target/aegp-render-options-probe-build/aegp-render-options-result.json
+              target/pf-adv-time-probe-build/Release/pf_adv_time_probe.aex
+              target/.native-probe-artifact-root
+    env:
+      PYTHONUTF8: "1"
+      SDK_READY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      # probe ビルドを Ninja Multi-Config + sccache に通す (#1510)。VS generator
+      # のままだと CMAKE_<LANG>_COMPILER_LAUNCHER が効かず、python-tests 側での
+      # 作り直しが全部無キャッシュの再コンパイルになる。ここで温めたキャッシュを
+      # python-tests が拾う。Ninja Multi-Config は VS と同じく
+      # <build>\<config>\ 以下に出力するので、成果物パス契約は変わらない。
+      AEXCOMPAT_CMAKE_GENERATOR: 'Ninja Multi-Config'
+      AEXCOMPAT_COMPILE_CACHE: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # sccache サーバが cl を起動する環境と configure 時の環境で /showIncludes の
+      # ロケールを一致させる。ずれると ninja がヘッダ依存を 0 件記録する (#651)。
+      VSLANG: "1033"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust: 'false'
+          compile-cache: 'true'
+
+      # Ninja 系 generator は cl / link / rc / mt を PATH から解決する。
+      # VS generator は MSBuild が toolset を自分で解決するので不要だった環境を、
+      # この job の全 step (と pytest から spawn される build-*.ps1) へ配る。
+      - name: Export MSVC environment for Ninja probe builds
+        shell: pwsh
+        run: pwsh -File tools\export-msvc-dev-env.ps1
+
+      # SDK zip を置いた R2 バケットは非公開で、資格情報は secrets にしかない。
+      # fork PR は secrets を受け取れないので、fork PR はここから下の SDK 依存
+      # ステップに到達してはならない。job ごと落とすのではなく個々のステップを
+      # 条件付けし、source-only の検証は fork でも走らせる。
+      #
+      # 条件は repository の可視性ではなく secrets が渡るかどうかで書く。
+      # `github.event.repository.private` で書くと public 化した時点で常に false
+      # になり、SDK 取得と下流が丸ごと skip され、それを検出するはずのガードまで
+      # 同じ条件で skip されて、中身の抜けた CI が緑になる (#1457)。
+      - name: Fetch After Effects SDK
+        id: sdk
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: ./.github/actions/fetch-ae-sdk
+        with:
+          bucket: ${{ env.SDK_BUCKET }}
+          object-key: ${{ env.SDK_OBJECT_KEY }}
+          asset-name: ${{ env.SDK_ASSET }}
+          expected-sha256: ${{ env.SDK_SHA256 }}
+          r2-endpoint: ${{ secrets.R2_SDK_ENDPOINT }}
+          r2-access-key-id: ${{ secrets.R2_SDK_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SDK_SECRET_ACCESS_KEY }}
+
+      # abi_layout_probe の static_assert は、生成 ABI コントラクトのオフセットを
+      # 実 SDK の struct レイアウトに固定している唯一の照合で、ビルドしない限り
+      # 誰も照合しない。ビルドしてさらに実行することで、
+      # test_abi_layout_observation_matches_probe.py が
+      # analysis/AE_ABI_LAYOUT_OBSERVATION_2026-07-13.json を probe の出力に
+      # 突き合わせる (#981)。
+      #
+      # instruments の configure もここで済ませる。分割前は trace writer の
+      # ステップが同じ runner で先に configure していたが、あちらは SDK を
+      # 要らないので native-workers に移っており、この job の target\ は空で
+      # 始まる。
+      - name: Build ABI layout probe
+        if: matrix.producer == 'abi' && steps.sdk.outcome == 'success'
+        shell: pwsh
+        run: pwsh -File tools\build-native.ps1 -Source instruments -Target abi_layout_probe
+
+      # probe テストの入力 fixture (37x23 raw RGBA)。内容は決定論的に生成され、
+      # built_artifact テストは期待値を実行時に自己計算するため内容非依存。
+      - name: Generate probe input fixture
+        if: matrix.producer == 'aex'
+        shell: cmd
         run: |
-          set -o pipefail
-          uv run python -m pytest -q -m dev_infra | tee pytest-infra.txt
-          if grep -qE "[0-9]+ skipped" pytest-infra.txt; then
-            echo "::error::dev-infra tests were skipped instead of running"
-            exit 1
-          fi
+          mkdir target\gpu-effects 2>nul
+          uv run python tools\generate-oracle-rgba-input.py --width 37 --height 23 --alpha-mode opaque --out target\gpu-effects\opencl-input.png || exit /b 1
+          uv run python tools\png-to-rgba-raw.py --png target\gpu-effects\opencl-input.png --out target\gpu-effects\opencl-input.rgba || exit /b 1
+
+      # probe ごとに source (instruments\pf-*-probe) と build ディレクトリ
+      # (target\pf-*-probe-build) が独立し出力を共有しないので並列に走らせられる
+      # (#940)。並列だと出力が混ざるため probe 単位で捕まえ、最初の失敗で打ち
+      # 切らずに落ちたものだけまとめて出す。
+      - name: Build probe AEX set
+        if: matrix.producer == 'aex' && steps.sdk.outcome == 'success'
+        shell: pwsh
+        run: |
+          $repository = $PWD.Path
+          # pwsh の PSModulePath のままだと子の Windows PowerShell 5.1 が自分の
+          # モジュールを見つけられないので、5.1 用の 2 つを先頭に足す。
+          $env:PSModulePath = "$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules;$env:PSModulePath"
+          $probes = @(
+            'build-classic-failure-probes'
+            'build-pf-sampling-probe'
+            'build-pf-performance-probe'
+            'build-pf-aegp-async-layer-receipt-probe'
+            'build-pf-aegp-external-cache-roundtrip-probe'
+            'build-pf-aegp-fast-blur-probe'
+            'build-pf-aegp-layer-options-probe'
+            'build-pf-aegp-layer-receipt-probe'
+            'build-pf-aegp-owned-world-probe'
+            'build-pf-aegp-platform-world-probe'
+            'build-pf-aegp-render-options4-tail-probe'
+            'build-pf-aegp-render-suite5-probe'
+            'build-pf-convolve-depth-probe'
+            'build-pf-parameter-echo-probe'
+            'build-pf-layer-param-probe'
+            'build-pf-param-utils-animation-probe'
+            'build-pf-smart-geometry-probe'
+            'build-pf-empty-layer-contract-probe'
+            'build-pf-smart-param-time-probe'
+            'build-pf-transfer-mask-probe'
+            'build-pf-transfer-rect-probe'
+            'build-pf-transform-affine-probe'
+            'build-pf-custom-ui-probe'
+            'build-pf-frame-origin-probe'
+            'build-pf-frame-resize-probe'
+            'build-pf-visual-audio-probe'
+            'build-pf-color-settings-abi-probe'
+            'build-pf-transform-multimatrix-oracle'
+          )
+          $throttle = [Math]::Min([Environment]::ProcessorCount, $probes.Count)
+          Write-Host "building $($probes.Count) probes with throttle $throttle"
+          $results = $probes | ForEach-Object -Parallel {
+            $script = Join-Path $using:repository "tools\$_.ps1"
+            $started = [System.Diagnostics.Stopwatch]::GetTimestamp()
+            $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $script 2>&1 | Out-String
+            $elapsed = [System.Diagnostics.Stopwatch]::GetElapsedTime($started)
+            [pscustomobject]@{ Probe = $_; ExitCode = $LASTEXITCODE; Output = $output; Elapsed = $elapsed }
+          } -ThrottleLimit $throttle
+          $results | Sort-Object Elapsed -Descending | ForEach-Object {
+            Write-Host ('probe_build_elapsed_ms={0} probe={1} exit={2}' -f
+              [int][Math]::Round($_.Elapsed.TotalMilliseconds), $_.Probe, $_.ExitCode)
+          }
+          $failed = @($results | Where-Object { $_.ExitCode -ne 0 })
+          foreach ($failure in $failed) {
+            Write-Host "::group::probe build failed: $($failure.Probe) (exit $($failure.ExitCode))"
+            Write-Host $failure.Output
+            Write-Host "::endgroup::"
+          }
+          if ($failed.Count -gt 0) {
+            throw "probe builds failed: $(($failed.Probe) -join ', ')"
+          }
+
+      - name: Build SmartFX temporal primary probe
+        if: matrix.producer == 'aex' && steps.sdk.outcome == 'success'
+        shell: pwsh
+        run: |
+          $env:AE_SDK_ROOT = $env:AFTER_EFFECTS_SDK_ROOT
+          pwsh -File tools\build-native.ps1 -Source instruments -Target pf_smart_past_input_probe
+
+      # built_artifact テストが参照するSDK example fixtures。通常pytestでも
+      # 同じSDKを再buildしないよう、producerで一度だけ作って検証する。
+      - name: Build SDK example fixtures (built-artifact deps)
+        if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          if not exist target\sdk-fixtures\sdk-backwards mkdir target\sdk-fixtures\sdk-backwards
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 > target\sdk-fixtures\sdk-backwards\ci-build-output.txt 2>&1
+          set BACKWARDS_EXIT=%ERRORLEVEL%
+          type target\sdk-fixtures\sdk-backwards\ci-build-output.txt
+          if not %BACKWARDS_EXIT%==0 exit /b %BACKWARDS_EXIT%
+          if not exist target\sdk-fixtures\grabba mkdir target\sdk-fixtures\grabba
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-grabba.ps1 > target\sdk-fixtures\grabba\ci-build-output.txt 2>&1
+          set GRABBA_EXIT=%ERRORLEVEL%
+          type target\sdk-fixtures\grabba\ci-build-output.txt
+          exit /b %GRABBA_EXIT%
+
+      - name: Verify SDK Backwards fixture build
+        if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
+        env:
+          AEXCOMPAT_SDK_BACKWARDS_PREBUILT: "1"
+        run: >-
+          uv run python -m pytest -q -rs
+          tests/test_sdk_backwards_fixture_build.py::test_official_sdk_backwards_builds_unchanged_and_records_hash
+          --run-sdk-tests
+
+      - name: Verify SDK GrabbA fixture build
+        if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
+        env:
+          AEXCOMPAT_SDK_GRABBA_PREBUILT: "1"
+        run: >-
+          uv run python -m pytest -q -rs
+          tests/test_sdk_grabba_fixture_build.py::test_official_sdk_grabba_builds_unchanged_and_records_hash
+          --run-sdk-tests
+
+      - name: Build and exercise AEGP Render Options lifecycle fixture
+        if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          uv run python -m pytest -q -rs tests/test_aegp_render_options_probe.py::test_fixture_builds_and_exercises_lifecycle --run-sdk-tests
+
+      - name: Build PF Adv Time Release fixture
+        if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          uv run python -m pytest -q -rs tests/test_pf_adv_time_probe.py::test_pf_adv_time_probe_release_build --run-sdk-tests
+
+      # upload-artifact computes one common root across all listed paths. This
+      # zero-byte anchor keeps the original target-relative directories in each
+      # independently uploaded artifact without shipping CMake intermediates.
+      - name: Anchor native probe artifact paths
+        if: matrix.producer == 'aex' || steps.sdk.outcome == 'success'
+        shell: pwsh
+        run: New-Item -ItemType File -Force target/.native-probe-artifact-root | Out-Null
+
+      # SDK を取れない fork PR でも aex producer は gpu-effects fixture を生成し、
+      # source-only downstream用artifactを必ず出す。ABI/example producerはSDK成功時
+      # だけartifactを出し、downstreamも同じtrusted-PR条件で取得する。
+      #
+      # AEX は `target/**` で拾う。ビルドディレクトリの名前は
+      # `pf-*-probe-build` で揃っておらず、`classic-failure-probes-build` の
+      # ように複数形のものがある。名前の規則に賭けると、増えた probe が
+      # 黙って運ばれないまま「テストが成果物不在で skip」に化ける。
+      - name: Publish native probe producer output
+        if: matrix.producer == 'aex' || steps.sdk.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact-path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # The manifest-marked SDK/artifact cases need the producer outputs below.
+  # Run the remaining Python suite while those producers build (#1561).
+  python-tests-early:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      SDK_READY: "false"
+      AEXCOMPAT_CMAKE_GENERATOR: 'Ninja Multi-Config'
+      AEXCOMPAT_COMPILE_CACHE: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # If an unmarked test asks for a worker, fail instead of building one.
+      AEXCOMPAT_CANONICAL_WORKER: ${{ github.workspace }}\target\ci-early-no-worker.exe
+      VSLANG: "1033"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust: 'false'
+          compile-cache: 'true'
+      - name: Export MSVC environment for independent probe builds
+        shell: pwsh
+        run: pwsh -File tools\export-msvc-dev-env.ps1
+      - name: Run artifact-independent Python tests
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          uv run python tools/run-python-ci-tests.py early --output pytest-early-output.txt
+      - name: Fail if early tests skip anything other than platform-only cases
+        shell: pwsh
+        run: |
+          # Early has no SDK, worker, or probe artifacts. Only Windows-vs-POSIX/
+          # macOS skips are expected; all other skips need a dependency mark.
+          $leaks = Select-String -Path pytest-early-output.txt -Pattern 'SKIPPED \[\d+\]' |
+            Where-Object {
+              $_.Line -notmatch ':\d+: (?:POSIX dirfd race regression|POSIX process-group contract is macOS-only|the package (?:verifier|builder) requires macOS shell semantics|macOS behavior)$'
+            }
+          if ($leaks) {
+            $leaks | ForEach-Object { $_.Line }
+            throw 'an artifact-dependent Python test is missing its dependency marker'
+          }
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  python-tests:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    needs: [rust-build, rust-release-ffi, native-workers, native-probes]
+    env:
+      PYTHONUTF8: "1"
+      AEXCOMPAT_CARGO_PROFILE: debug
+      SDK_READY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      # pytest 内の build 検証テストが probe を作り直す。native-probes と同じ
+      # generator / flags なので、あちらが温めた sccache をそのまま拾う (#1510)。
+      AEXCOMPAT_CMAKE_GENERATOR: 'Ninja Multi-Config'
+      AEXCOMPAT_COMPILE_CACHE: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # gate 系テスト (tools/test-rust-host-core-scene-*.ps1) はこの DLL が
+      # あれば cargo build --release を skip する (#1537)。4 本が同じ target
+      # dir の cargo ロックで直列化するのを防ぐ。
+      AEXCOMPAT_HOST_CORE_FFI_DLL: ${{ github.workspace }}\broker\target\release\aexcompat_host_core_ffi.dll
+      VSLANG: "1033"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      # broker binary は rust-build、gate 系テストの release FFI DLL は
+      # rust-release-ffi の artifact を使う。Windows で収集される Python
+      # tests は cargo を呼ばないので Rust toolchain/cache は復元しない
+      # (#1556)。C++ probe の sccache は引き続き必要。
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust: 'false'
+          compile-cache: 'true'
+
+      - name: Export MSVC environment for Ninja probe builds
+        shell: pwsh
+        run: pwsh -File tools\export-msvc-dev-env.ps1
+
+      # pytest が起動するテストの一部は SDK ヘッダを要るビルドを自前で走らせる。
+      # native-probes が取ったのと同じ zip を取り直す (4.6 MiB、実測 4 秒)。
+      - name: Fetch After Effects SDK
+        id: sdk
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: ./.github/actions/fetch-ae-sdk
+        with:
+          bucket: ${{ env.SDK_BUCKET }}
+          object-key: ${{ env.SDK_OBJECT_KEY }}
+          asset-name: ${{ env.SDK_ASSET }}
+          expected-sha256: ${{ env.SDK_SHA256 }}
+          r2-endpoint: ${{ secrets.R2_SDK_ENDPOINT }}
+          r2-access-key-id: ${{ secrets.R2_SDK_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SDK_SECRET_ACCESS_KEY }}
+
+      - name: Download broker binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: broker-debug-bins
+          path: broker/target/debug
+      - name: Download release host-core FFI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: broker-release-ffi
+          path: broker/target/release
+      - name: Download native workers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-workers
+          path: target
+      - name: Download native probes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-probes-*
+          path: target
+          merge-multiple: true
+
+      # 一部の built_artifact テストは worker を multi-config 時代の固定パスから
+      # 探す。frozen hash を照合しないので同一バイナリの複製で満たせる。
+      - name: Mirror workers into expected build layouts
+        shell: cmd
+        run: |
+          for %%d in ("target\minihost-build-v18" "target\minihost-build-v18\Release" "target\minihost-build\Release" "target\minihost-timed-layers\Release") do (
+            mkdir %%d 2>nul
+            copy /y target\minihost-build\aex_*.exe %%d\ >nul || exit /b 1
+          )
+
+      # assert_artifact_fresh (tests/_render_session.py) は probe AEX が harness
+      # や worker より新しいことを要求する。ローカル開発で「harness を作り直した
+      # のに probe が古いまま」を弾くための規則で、判定は mtime。
+      #
+      # artifact の転送は mtime を保たないので、この順序は download の順で決まる
+      # 偶然になる。同じ commit から同じ run で作られたことは job の DAG が
+      # 保証しているので、規則が見たい実体 (この checkout の産物か) は満たして
+      # いる。転送で失われた順序だけをここで作り直す。
+      - name: Restore built-artifact freshness ordering
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Get-Date
+          $inputs = @()
+          $inputs += Get-ChildItem 'broker\target\debug' -File -ErrorAction SilentlyContinue
+          $inputs += Get-ChildItem 'target' -Recurse -File -Include '*.exe' -ErrorAction SilentlyContinue
+          if ($inputs.Count -eq 0) { throw 'no runtime inputs were downloaded' }
+          foreach ($item in $inputs) { $item.LastWriteTime = $base }
+          $artifacts = @(Get-ChildItem 'target' -Recurse -File -Include '*.aex' -ErrorAction SilentlyContinue)
+          $later = $base.AddSeconds(5)
+          foreach ($item in $artifacts) { $item.LastWriteTime = $later }
+          Write-Host "freshness_runtime_inputs=$($inputs.Count) freshness_artifacts=$($artifacts.Count)"
+          if ($env:SDK_READY -eq 'true' -and $artifacts.Count -eq 0) {
+            throw 'the native job built probe AEX artifacts but none arrived here'
+          }
+
+      # #356: parameter-animation の統合テストは native worker と AEX fixture を
+      # これらの正確なパスから探し、無ければ黙って return する。成果物の不在を
+      # カバレッジと取り違えないよう fail-closed で検査する。job 分割後は
+      # artifact の転送漏れもここで捕まる。
+      - name: Check native parameter-animation coverage inputs
+        if: env.SDK_READY == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $required = @(
+            (Join-Path $root 'target\minihost-build\aex_worker.exe'),
+            (Join-Path $root 'target\pf-layer-param-probe-build\Release\pf_layer_param_probe.aex'),
+            (Join-Path $root 'target\pf-param-utils-animation-probe-build\Release\pf_param_utils_animation_probe.aex')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "#356 native coverage prerequisite is missing: $path"
+            }
+            $file = Get-Item -LiteralPath $path
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "coverage_artifact=$($file.FullName) size=$($file.Length) sha256=$hash"
+          }
+          $commit = git -C $root rev-parse HEAD
+          Write-Host "coverage_source_commit=$commit"
+
+      - name: Check audio-only passthrough coverage inputs
+        if: env.SDK_READY == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $required = @(
+            (Join-Path $root 'target\minihost-build\aex_worker.exe'),
+            (Join-Path $root 'target\pf-visual-audio-probe-build\pf-visual-audio-probe\Release\pf_visual_audio_audio_only_probe.aex')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "#1050 native coverage prerequisite is missing: $path"
+            }
+            $file = Get-Item -LiteralPath $path
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "audio_only_coverage_artifact=$($file.FullName) size=$($file.Length) sha256=$hash"
+          }
+          $commit = git -C $root rev-parse HEAD
+          Write-Host "audio_only_coverage_source_commit=$commit"
+
+      - name: Validate Python collection and local-artifact manifest
+        run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
+
+      # SDK/built-artifact/local-artifact marksだけをproducer後に実行する。
+      # 無印テストはproducerと並行するpython-tests-earlyが担当する (#1561)。
+      # cmd で実行する: pwsh の step から spawn すると、テストが起動する
+      # powershell.exe (5.1) が pwsh 用の PSModulePath を継承してしまい、
+      # Get-FileHash 等の組み込み cmdlet を解決できなくなる。
+      - name: Run Python tests
+        shell: cmd
+        env:
+          # native-workers job がビルド済みの worker を canonical_release_worker fixture に
+          # 渡し、二重ビルドを避ける (#681)。
+          AEXCOMPAT_CANONICAL_WORKER: ${{ github.workspace }}\target\minihost-build\aex_worker.exe
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          uv run python tools/run-python-ci-tests.py main --output pytest-output.txt
+
+      # AFTER_EFFECTS_SDK_ROOT が通っていれば SDK 由来の skip は 1 件も出ないはず。
+      # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
+      # 不在の inline skip で黙って skip されたら fail。
+      - name: Fail if SDK or built-artifact tests were skipped
+        if: env.SDK_READY == 'true'
+        shell: pwsh
+        run: |
+          $leaks = Select-String -Path pytest-output.txt -Pattern 'SKIPPED' |
+            Where-Object { $_.Line -match 'set AFTER_EFFECTS_SDK_ROOT|is not built|are not present' }
+          if ($leaks) {
+            $leaks | ForEach-Object { $_.Line }
+            throw 'SDK or built-artifact tests were skipped even though their prerequisites are provisioned'
+          }
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # classic hang のdeadline evidenceは実時間で約35秒かかる。trusted runでは
+  # 通常Python suiteからexact nodeを外し、既存artifactだけで並行再生する。
+  classic-failure-evidence:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-latest
+    timeout-minutes: 10
+    needs: [rust-build, native-workers, native-probes]
+    env:
+      PYTHONUTF8: "1"
+      SDK_READY: "true"
+      AEXCOMPAT_CARGO_PROFILE: debug
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust: 'false'
+          cache-key: classic-failure-evidence
+          save-cache: 'false'
+
+      - name: Download broker binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: broker-debug-bins
+          path: broker/target/debug
+      - name: Download native workers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-workers
+          path: target
+      - name: Download classic failure probes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-probes-aex
+          path: target
+
+      - name: Replay classic failure evidence
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          uv run python tools/run-python-ci-tests.py classic-evidence
+
+  # #1625: 独立した Cargo workspace の Release build を並列に進める。
+  macos-guest-build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '3'
+      SCCACHE_GHA_ENABLED: 'true'
+      SCCACHE_GHA_VERSION: macos-guest-release-v1
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: '1.93.1'
+      - uses: mozilla/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+      - name: Build shipping macOS guest
+        run: cargo build --release --locked --manifest-path guest/Cargo.toml -p aex-guest-worker
+      - name: Show sccache stats
+        run: sccache --show-stats
+      - name: Package guest binary with executable mode and checksum
+        run: |
+          (cd guest/target/release && shasum -a 256 aex-guest-worker > aex-guest-worker.sha256)
+          mkdir -p target
+          tar -czf target/macos-guest.tar.gz -C guest/target/release aex-guest-worker aex-guest-worker.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-guest-release
+          path: target/macos-guest.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-harness-build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '3'
+      SCCACHE_GHA_ENABLED: 'true'
+      SCCACHE_GHA_VERSION: macos-harness-release-v1
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: '1.93.1'
+      - uses: mozilla/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+      - name: Build shipping macOS harness
+        run: cargo build --release --locked --manifest-path broker/Cargo.toml -p aexcompat-harness
+      - name: Test macOS harness Release binary
+        run: cargo test --release --locked --manifest-path broker/Cargo.toml -p aexcompat-harness --bin aexcompat-harness -- --test-threads=1
+      - name: Show sccache stats
+        run: sccache --show-stats
+      - name: Package harness binary with executable mode and checksum
+        run: |
+          (cd broker/target/release && shasum -a 256 aexcompat-harness > aexcompat-harness.sha256)
+          mkdir -p target
+          tar -czf target/macos-harness.tar.gz -C broker/target/release aexcompat-harness aexcompat-harness.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-harness-release
+          path: target/macos-harness.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # #1164: Windows でビルドした公開 x86_64 AEX を Apple Silicon の Unicorn
+  # worker 経由で実行する。matrix、独立 world layout、3 depth と両 render path。
+  macos-fixture-smoke:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15
+    timeout-minutes: 45
+    needs: [native-probes, macos-guest-build, macos-harness-build]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Download public x86_64 AEX probe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-probes-aex
+          path: target
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-guest-release
+          path: target/macos-guest-release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-harness-release
+          path: target/macos-harness-release
+      - name: Restore and verify shipping macOS binaries
+        run: |
+          mkdir -p guest/target/release broker/target/release
+          tar -xzf target/macos-guest-release/macos-guest.tar.gz -C guest/target/release
+          tar -xzf target/macos-harness-release/macos-harness.tar.gz -C broker/target/release
+          (cd guest/target/release && shasum -a 256 -c aex-guest-worker.sha256)
+          (cd broker/target/release && shasum -a 256 -c aexcompat-harness.sha256)
+          test -x guest/target/release/aex-guest-worker
+          test -x broker/target/release/aexcompat-harness
+      - name: Verify matrix and world layout through real AEX
+        run: |
+          python3 tools/verify-macos-fixture-matrix.py \
+            broker/target/release/aexcompat-harness \
+            target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex
+          python3 tools/verify-macos-fixture-depth-paths.py \
+            broker/target/release/aexcompat-harness \
+            target/pf-custom-ui-probe-build/Release/pf_custom_ui_probe.aex \
+            target/pf-smart-param-time-probe-build/Release/pf_smart_param_time_probe.aex
+
+  # 旧monolithic Python jobと同じく、全Python coverageがgreenのときだけ
+  # public probeをverifiedとしてpublishする。
+  publish-public-probe:
+    if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    needs: [python-tests, classic-failure-evidence, native-probes]
+    steps:
+      - name: Download public PF layer parameter probe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-probes-aex
+          path: target
+
+      - name: Record public PF layer parameter probe identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'target\pf-layer-param-probe-build\Release\pf_layer_param_probe.aex'
+          if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+            throw "verified PF layer parameter probe is missing: $artifact"
+          }
+          $file = Get-Item -LiteralPath $artifact
+          $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = Join-Path $file.DirectoryName 'pf_layer_param_probe.aex.sha256'
+          Set-Content -LiteralPath $checksum -Value "$hash  $($file.Name)" -Encoding ascii -NoNewline
+          Write-Host "published_probe_source_commit=$env:GITHUB_SHA"
+          Write-Host "published_probe_configuration=Release"
+          Write-Host "published_probe_architecture=x86_64"
+          Write-Host "published_probe_size=$($file.Length)"
+          Write-Host "published_probe_sha256=$hash"
+
+      - name: Publish verified public PF layer parameter probe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pf-layer-param-probe-windows-x86_64-${{ github.sha }}
+          path: |
+            target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex
+            target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

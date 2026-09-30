@@ -1,4 +1,5 @@
 #pragma once
+#include "worker_output_coverage.hpp"
 
 #include <array>
 #include <cstddef>
@@ -6,6 +7,8 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#include "worker_world_safety.hpp"
 
 // Render dispatch is deliberately opaque to the command-line worker.  The
 // runtime owns PF world, parameter, suite, and module-audit state; this
@@ -54,6 +57,30 @@ struct ImageRequest {
   bool partial_extent_hint{};
 };
 
+// Bounded host-controlled transforms used only by metamorphic render sessions.
+// The launch option is parsed before any plug-in load; ordinary renders retain
+// this disabled default. Rectangles are layer-space [left, top, right, bottom].
+struct DiagnosticWorldLayout {
+  bool enabled{};
+  int32_t input_row_padding{};
+  uint8_t input_padding_byte{0x5a};
+  int32_t input_pixel_bytes{};
+  int32_t output_row_padding{};
+  int32_t input_origin_x{};
+  int32_t input_origin_y{};
+  bool has_request_rect{};
+  std::array<int32_t, 4> request_rect{};
+  bool has_extent_hint{};
+  std::array<int32_t, 4> extent_hint{};
+};
+DiagnosticWorldLayout& diagnostic_world_layout();
+bool parse_diagnostic_world_layout(const wchar_t* encoded);
+
+// The fixed image cases shared by the Classic and Smart diagnostic adapters.
+// Keep admission beside the common request/profile shaping so the two worker
+// paths cannot drift on which named cases are renderable.
+bool is_fixed_image_case(const std::string& case_id);
+
 // PF_World is a host ABI blob, but the bounded layout we expose to an effect
 // is common to Classic and SmartFX.  Keeping the raw-byte preparation here
 // makes its dimensions, row stride, and extent checks independent of either
@@ -66,14 +93,41 @@ struct WorldLayout {
   int32_t rowbytes{};
 };
 
-bool prepare_world_layout(std::array<std::byte, 120>& world,
+bool prepare_world_layout(aexcompat::world_safety::EffectWorldStorage& world,
                           const WorldLayout& layout, void* pixels);
+
+// Snapshot the bytes and geometry of a host-owned world, including row padding.
+// This is the bounded payload for a broker-owned checkpoint HANDLE; the caller
+// must pass the allocation base it owns, not a plug-in-supplied data pointer.
+struct CapturedWorld {
+  int32_t width{};
+  int32_t height{};
+  int32_t pixel_bytes{};
+  int32_t rowbytes{};
+  int32_t origin_x{};
+  int32_t origin_y{};
+  std::array<int32_t, 4> extent{};
+  std::vector<unsigned char> raw_argb;
+};
+bool capture_host_world(const aexcompat::world_safety::EffectWorldStorage& world,
+                        const unsigned char* owned_pixels, std::size_t owned_size,
+                        int32_t pixel_bytes,
+                        CapturedWorld& captured);
+// Versioned 56-byte header (magic, ten signed geometry words, u64 byte count)
+// followed by the exact ARGB world allocation, written to a broker-owned
+// inherited HANDLE. Never resolves or opens a worker-side pathname.
+bool write_captured_world_handle(uint64_t handle_value, const CapturedWorld& captured);
+bool parse_world_capture_target(const wchar_t* encoded);
+bool capture_requested_world(const std::string& stage,
+                             const aexcompat::world_safety::EffectWorldStorage& world,
+                             const unsigned char* owned_pixels, std::size_t owned_size,
+                             int32_t pixel_bytes);
 
 struct MapWorld {
   int32_t width{};
   int32_t height{};
   std::vector<unsigned char> pixels;
-  std::array<std::byte, 120> world{};
+  aexcompat::world_safety::EffectWorldStorage world{};
 };
 
 // Construct the bounded ARGB8 map world used by the connected-map Classic
@@ -101,6 +155,101 @@ ParameterProfile prepare_parameter_profile(const std::string& case_id);
 bool validate_output_extent(int32_t current_width, int32_t current_height,
                             int32_t requested_width, int32_t requested_height,
                             uint32_t output_flags);
+
+// The two ways an effect declines to resize: leaving the extent at zero, and
+// restating the extent it was offered before FRAME_SETUP (issue #984). Both
+// mean the host keeps the output world it already laid out - re-laying it would
+// repack a padded stride and swap the guarded buffer out from under a pointer
+// the plug-in may have taken during FRAME_SETUP.
+//
+// Deliberately exact. Anything else, including a negative extent or one axis
+// zeroed, is a malformed answer that `validate_output_extent` must still refuse
+// as a reproducible diagnostic rather than being absorbed as "no resize".
+bool output_extent_unchanged(int32_t current_width, int32_t current_height,
+                             int32_t requested_width, int32_t requested_height);
+
+// Plausibility of PF_OutData::origin, which AE_Effect.h defines (on
+// PF_InData::output_origin_x/y, the field it is copied into) as "the position
+// of the top left corner of the input buffer in the output buffer". So it is
+// positive when the effect expanded - the input is inset inside a bigger buffer
+// - and negative when it cropped, because the output is then a window taken out
+// of the input and the input's corner sits above/left of it (issue #984).
+//
+// Deliberately weak, and not a host-protection bound. The host never indexes
+// with this value; it writes it into in_data for the plug-in that stated it,
+// and the plug-in's own writes are contained by the guarded buffer's sentinels
+// and guard page. Two tighter rules were tried and both were wrong: requiring
+// the whole source to fit is unsatisfiable for any declared shrink, and
+// requiring a non-negative origin refuses the canonical crop answer. What
+// remains is what a stated origin cannot be: absurd in magnitude, or placing
+// the input rectangle entirely off the output so that nothing it describes is
+// in the buffer.
+bool validate_output_origin(int32_t origin_x, int32_t origin_y,
+                            int32_t source_width, int32_t source_height,
+                            int32_t output_width, int32_t output_height);
+
+// What the host learned about a Classic frame's output while dispatching it.
+//
+// One bundle rather than parallel out-parameters: the classic entry point's
+// signature is hand-mirrored across three translation units, so every new
+// out-parameter is three edits plus a fourth (threading it to the code that
+// fills it) that nothing forces. Issue #984 first added the origin as two
+// out-params and the fourth edit was missed - the parameters linked, and were
+// dropped on the floor inside the entry point. Growing this struct cannot
+// repeat that, because the pointer is already threaded.
+struct ClassicFrameOutput {
+  // The host refused or failed the plug-in's requested output resize. Lets a
+  // caller tell host-side output validation apart from selector errors that
+  // share the same numeric codes.
+  bool validation_failed{};
+  aexcompat::worker_runtime::output_coverage::Result output_coverage{};
+  // PF_OutData::origin as the effect stated it, in the plug-in's own
+  // convention: the position of the input buffer's top-left corner in the
+  // output buffer, so positive when the effect expanded and negative when it
+  // cropped. Deliberately NOT the layer-relative origin the frame report
+  // carries (SessionFrameOutput::origin_x, which is negative when the output
+  // grew) - the conversion is the reporting side's, and keeping the plug-in's
+  // own convention here is what makes the sign visible at it.
+  //
+  // Filled only when the host accepted a resize, and only after it accepted
+  // one: AE_Effect.h says this is "non-zero only when effect changes buffer
+  // size", so an origin stated without a resize is not the frame's geometry and
+  // a refused resize leaves none behind. Zero on every other path.
+  int32_t input_origin_x{};
+  int32_t input_origin_y{};
+};
+
+// `PF_InData::extent_hint` brought inside an output buffer that just shrank.
+//
+// The hint is written from the source extent before the lifecycle runs, and an
+// accepted shrink leaves it naming more rows and columns than the new buffer
+// holds. The SDK invites an effect to iterate exactly this rect ("copying just
+// this rectangle from the source image to the destination image is sufficient"),
+// so a hint left too large is an invitation to write past the guarded buffer
+// into its sentinel band (issue #984).
+//
+// Only ever shrinks, and never below an empty rect at the origin it already
+// had: growing it would name rows the input never had, and moving its top-left
+// would put it in a different coordinate frame than the one the effect was
+// handed. Which frame AE states the hint in after a resize is issue #997.
+std::array<int32_t, 4> extent_hint_within(const std::array<int32_t, 4>& hint,
+                                          int32_t output_width, int32_t output_height);
+
+// The frame report's origin from the one the plug-in stated. The two describe
+// the same geometry from opposite ends: PF_OutData::origin is where the input
+// buffer's top-left sits in the output buffer, while the report's origin is
+// where the output buffer's top-left sits relative to the layer. An effect that
+// grew its output by 4 and placed the input 3px inside it stated 3 and is
+// reported at -3, which is where its buffer starts.
+//
+// A named function rather than a `-` at the call site because it is the one
+// place the two conventions meet, the SmartFX path reaches the same field from
+// the other direction (`result_rect`'s top-left, already layer-relative), and a
+// sign error here places every resized classic frame on the wrong side of the
+// layer origin without failing anything (issue #984).
+constexpr int32_t layer_origin_from_input_origin(int32_t input_origin) {
+  return -input_origin;
+}
 
 struct SmartOutputBounds {
   bool valid{};
@@ -179,6 +328,10 @@ struct RenderContextState {
   SpatialRatio pixel_aspect_ratio;
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
+  // Actual input frame extent for classic sessions, whose SmartFX extent is
+  // otherwise unavailable to scene callbacks when no spatial trailer exists.
+  int32_t frame_width{};
+  int32_t frame_height{};
   int32_t pre_effect_source_origin_x{};
   int32_t pre_effect_source_origin_y{};
   int32_t render_quality{1};

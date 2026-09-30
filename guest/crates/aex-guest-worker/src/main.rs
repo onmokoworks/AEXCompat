@@ -447,6 +447,31 @@ fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let fixture_layers = match extract_single_path_option(&mut arguments, "--fixture-layers-v1") {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let fixture_smart = match extract_single_string_option(&mut arguments, "--fixture-render-path")
+    {
+        Ok(None) => None,
+        Ok(Some(value)) if value == "classic" => Some(false),
+        Ok(Some(value)) if value == "smart" => Some(true),
+        Ok(Some(_)) => {
+            eprintln!("aex_guest_error: --fixture-render-path requires classic or smart");
+            return ExitCode::from(2);
+        }
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if fixture_layers.is_some() && fixture_smart.is_none() {
+        eprintln!("aex_guest_error: --fixture-layers-v1 requires --fixture-render-path");
+        return ExitCode::from(2);
+    }
     if arguments.len() != 6 {
         usage();
         return ExitCode::from(2);
@@ -487,6 +512,8 @@ fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
                 time_scale,
                 pixel_format,
                 effect_selector.as_deref(),
+                fixture_layers.as_deref(),
+                fixture_smart,
                 stdin.lock(),
                 stdout.lock(),
             )
@@ -499,6 +526,39 @@ fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn extract_single_string_option(
+    arguments: &mut Vec<std::ffi::OsString>,
+    option: &str,
+) -> Result<Option<String>, String> {
+    let mut found = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] != option {
+            index += 1;
+            continue;
+        }
+        if found.is_some() || index + 1 >= arguments.len() {
+            return Err(format!("{option} must be specified once with a value"));
+        }
+        let value = arguments[index + 1]
+            .to_str()
+            .ok_or_else(|| format!("{option} value must be UTF-8"))?;
+        if value.is_empty() {
+            return Err(format!("{option} value must not be empty"));
+        }
+        found = Some(value.to_owned());
+        arguments.drain(index..=index + 1);
+    }
+    Ok(found)
+}
+
+fn extract_single_path_option(
+    arguments: &mut Vec<std::ffi::OsString>,
+    option: &str,
+) -> Result<Option<PathBuf>, String> {
+    extract_single_string_option(arguments, option).map(|value| value.map(PathBuf::from))
 }
 
 fn render_png(
@@ -643,6 +703,7 @@ fn parse_trace_watches(
         let mut register = None;
         let mut size = None;
         let mut occurrence = None;
+        let mut dereference_offset = None;
         for field in specification.split(',') {
             let (key, value) = field
                 .split_once('=')
@@ -670,6 +731,18 @@ fn parse_trace_watches(
                             .parse::<usize>()
                             .map_err(|error| format!("invalid watch size: {error}"))?,
                     )
+                }
+                "deref" => {
+                    if dereference_offset.is_some() {
+                        return Err("duplicate watch dereference offset".into());
+                    }
+                    let parsed = parse_watch_number(value)?;
+                    if parsed > 4096 {
+                        return Err(
+                            "watch dereference offset must be between 0 and 4096 bytes".into()
+                        );
+                    }
+                    dereference_offset = Some(parsed);
                 }
                 "occurrence" => {
                     if occurrence.is_some() {
@@ -707,6 +780,7 @@ fn parse_trace_watches(
             instruction_rva,
             absolute_address: None,
             register,
+            dereference_offset,
             size,
             occurrence,
             image_coordinate: None,
@@ -805,6 +879,8 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
             value: numeric,
             color,
             point,
+            angle: None,
+            point3d: None,
         });
     }
     Ok(parsed)
@@ -998,11 +1074,29 @@ mod tests {
         assert_eq!(watches.len(), 2);
         assert_eq!(watches[0].function_rva, Some(0xcce0));
         assert_eq!(watches[0].register, "rcx");
+        assert_eq!(watches[0].dereference_offset, None);
         assert_eq!(watches[0].occurrence, Some(2113));
         assert_eq!(watches[1].instruction_rva, Some(0x350b));
         assert_eq!(watches[1].occurrence, None);
         assert_eq!(output_pixel, Some([92, 841]));
         assert_eq!(values, [OsString::from("Amount=2.5")]);
+    }
+
+    #[test]
+    fn trace_watch_accepts_bounded_pointer_dereference() {
+        let mut values = vec![OsString::from(
+            "--watch=function=0xcce0,arg=rdx,deref=0x10,size=748",
+        )];
+        let (watches, _) = parse_trace_watches(&mut values).unwrap();
+        assert_eq!(watches[0].dereference_offset, Some(0x10));
+
+        for specification in [
+            "--watch=function=0xcce0,arg=rdx,deref=4097,size=4",
+            "--watch=function=0xcce0,arg=rdx,deref=0,deref=8,size=4",
+        ] {
+            let mut values = vec![OsString::from(specification)];
+            assert!(parse_trace_watches(&mut values).is_err(), "{specification}");
+        }
     }
 
     #[test]

@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "operation": "describe",
-  "plugin_path": "D:/AviUtlas/local/NotAllowlisted.aex",
-  "allowlist": "aex_image_probe_allowlist.empty.json",
-  "pixel_format": "rgba8",
-  "params": {}
-}

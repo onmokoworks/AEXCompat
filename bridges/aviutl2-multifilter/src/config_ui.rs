@@ -19,9 +19,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_WIDTH, LVCOLUMNW,
-    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMCOUNT, LVM_GETITEMSTATE,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE,
-    LVS_EX_CHECKBOXES,
+    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMCOUNT, LVM_GETITEMSTATE, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVS_EX_CHECKBOXES,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DialogBoxIndirectParamW, EndDialog, GetClientRect, GetDlgItem, GetSystemMetrics,
@@ -32,7 +31,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// The values shown in (and read back from) the dialog, all as text. List
 /// fields hold one entry per line. A pure model, so the text⇄config mapping is
 /// testable without a window.
-#[derive(Default, PartialEq, Debug)]
+#[derive(PartialEq, Debug)]
 struct ConfigForm {
     /// `dir` + `dirs` folded together (the dialog has no reason to preserve the
     /// single-folder spelling; a save rewrites it as `dirs`).
@@ -43,6 +42,23 @@ struct ConfigForm {
     /// Empty means "no ceiling", matching the absent TOML key.
     module_limit: String,
     byte_limit: String,
+    /// Menu-category display language (issue #876): true = 日本語.
+    japanese_categories: bool,
+}
+
+impl Default for ConfigForm {
+    fn default() -> Self {
+        Self {
+            dirs: String::new(),
+            dependency_dirs: String::new(),
+            ignore: String::new(),
+            repository: String::new(),
+            module_limit: String::new(),
+            byte_limit: String::new(),
+            // The absent-key default: Japanese category names.
+            japanese_categories: true,
+        }
+    }
 }
 
 /// A validated edit, ready to merge into the TOML document.
@@ -54,6 +70,7 @@ struct ConfigEdit {
     repository: Option<String>,
     dependency_module_limit: Option<usize>,
     dependency_byte_limit: Option<u64>,
+    category_language: Option<String>,
 }
 
 /// One known effect in the ignore checklist (issue #858).
@@ -173,6 +190,7 @@ fn form_from_config(config: &Config) -> ConfigForm {
             .dependency_byte_limit
             .map(|limit| limit.to_string())
             .unwrap_or_default(),
+        japanese_categories: config.category_language.as_deref() != Some("en"),
     }
 }
 
@@ -186,7 +204,10 @@ fn parse_form(form: &ConfigForm) -> Result<ConfigEdit, String> {
     // whole file — a "saved" config that ignores every setting (issue #655's
     // shape, created by the dialog itself).
     if module_limit.is_some_and(|limit| limit as u64 > i64::MAX as u64) {
-        return Err(format!("依存 DLL 数の上限が大きすぎます ({} 以下)", i64::MAX));
+        return Err(format!(
+            "依存 DLL 数の上限が大きすぎます ({} 以下)",
+            i64::MAX
+        ));
     }
     if byte_limit.is_some_and(|limit| limit > i64::MAX as u64) {
         return Err(format!(
@@ -202,6 +223,8 @@ fn parse_form(form: &ConfigForm) -> Result<ConfigEdit, String> {
         repository: (!repository.is_empty()).then(|| repository.to_owned()),
         dependency_module_limit: module_limit,
         dependency_byte_limit: byte_limit,
+        // Only the non-default is written; an absent key already means 日本語.
+        category_language: (!form.japanese_categories).then(|| "en".to_owned()),
     })
 }
 
@@ -236,6 +259,11 @@ fn apply_edit(existing: &str, edit: &ConfigEdit) -> Result<String, toml_edit::To
         &mut doc,
         "dependency_byte_limit",
         edit.dependency_byte_limit.map(|limit| limit as i64),
+    );
+    set_optional(
+        &mut doc,
+        "category_language",
+        edit.category_language.as_deref(),
     );
     Ok(doc.to_string())
 }
@@ -360,6 +388,7 @@ const IDC_MODULE_LIMIT: u16 = 1005;
 const IDC_BYTE_LIMIT: u16 = 1006;
 const IDC_ENV_NOTE: u16 = 1007;
 const IDC_IGNORE_LIST: u16 = 1008;
+const IDC_CATEGORY_LANG: u16 = 1009;
 const IDC_OK: u16 = 1; // IDOK
 const IDC_CANCEL: u16 = 2; // IDCANCEL
 
@@ -473,6 +502,7 @@ fn handle_dialog_message(dialog: WsHWND, message: u32, wparam: WPARAM, lparam: L
             set_item_text(dialog, IDC_BYTE_LIMIT, &init.form.byte_limit);
             set_item_text(dialog, IDC_ENV_NOTE, &init.env_note);
             fill_ignore_list(dialog, &init.rows);
+            fill_category_language(dialog, init.form.japanese_categories);
             1
         }
         WM_COMMAND => match (wparam & 0xFFFF) as u16 {
@@ -541,6 +571,7 @@ fn save_from_dialog(dialog: WsHWND) -> bool {
         repository: item_text(dialog, IDC_REPOSITORY),
         module_limit: item_text(dialog, IDC_MODULE_LIMIT),
         byte_limit: item_text(dialog, IDC_BYTE_LIMIT),
+        japanese_categories: category_language_is_japanese(dialog),
     };
     let edit = match parse_form(&form) {
         Ok(edit) => edit,
@@ -608,7 +639,12 @@ fn fill_ignore_list(dialog: WsHWND, rows: &[IgnoreRow]) {
         let mut column: LVCOLUMNW = std::mem::zeroed();
         column.mask = LVCF_WIDTH;
         column.cx = client.right - client.left - GetSystemMetrics(SM_CXVSCROLL);
-        SendMessageW(list, LVM_INSERTCOLUMNW, 0, &column as *const LVCOLUMNW as LPARAM);
+        SendMessageW(
+            list,
+            LVM_INSERTCOLUMNW,
+            0,
+            &column as *const LVCOLUMNW as LPARAM,
+        );
         for (index, row) in rows.iter().enumerate() {
             let mut name: Vec<u16> = row.name.encode_utf16().chain([0]).collect();
             let mut item: LVITEMW = std::mem::zeroed();
@@ -671,6 +707,40 @@ fn ignore_list_checked(dialog: WsHWND, index: usize) -> bool {
     }
 }
 
+const CB_ADDSTRING: u32 = 0x0143;
+const CB_GETCURSEL: u32 = 0x0147;
+const CB_SETCURSEL: u32 = 0x014E;
+
+/// Fills the category-language dropdown: index 0 = 日本語, 1 = English.
+fn fill_category_language(dialog: WsHWND, japanese: bool) {
+    // SAFETY: `dialog` is the live dialog; the strings are null-terminated
+    // and alive for each call.
+    unsafe {
+        let combo = GetDlgItem(dialog, IDC_CATEGORY_LANG as i32);
+        if combo.is_null() {
+            return;
+        }
+        for label in ["日本語", "English"] {
+            let text: Vec<u16> = label.encode_utf16().chain([0]).collect();
+            SendMessageW(combo, CB_ADDSTRING, 0, text.as_ptr() as LPARAM);
+        }
+        SendMessageW(combo, CB_SETCURSEL, usize::from(!japanese), 0);
+    }
+}
+
+/// Whether the dropdown selects 日本語. A missing selection reads as the
+/// default (日本語), matching the absent TOML key.
+fn category_language_is_japanese(dialog: WsHWND) -> bool {
+    // SAFETY: `dialog` is the live dialog; the message carries no pointers.
+    unsafe {
+        let combo = GetDlgItem(dialog, IDC_CATEGORY_LANG as i32);
+        if combo.is_null() {
+            return true;
+        }
+        SendMessageW(combo, CB_GETCURSEL, 0, 0) != 1
+    }
+}
+
 fn message_box(owner: WsHWND, text: &str, icon: u32) {
     let text: Vec<u16> = text.encode_utf16().chain([0]).collect();
     let caption: Vec<u16> = "AEXCompat multi-filter".encode_utf16().chain([0]).collect();
@@ -723,6 +793,7 @@ const ES_WANTRETURN: u32 = 0x1000;
 const ES_NUMBER: u32 = 0x2000;
 const SS_NOPREFIX: u32 = 0x0080;
 const BS_DEFPUSHBUTTON: u32 = 0x0001;
+const CBS_DROPDOWNLIST: u32 = 0x0003;
 const LVS_REPORT: u32 = 0x0001;
 const LVS_SINGLESEL: u32 = 0x0004;
 const LVS_NOCOLUMNHEADER: u32 = 0x4000;
@@ -730,6 +801,7 @@ const LVS_NOCOLUMNHEADER: u32 = 0x4000;
 const ATOM_BUTTON: u16 = 0x0080;
 const ATOM_EDIT: u16 = 0x0081;
 const ATOM_STATIC: u16 = 0x0082;
+const ATOM_COMBOBOX: u16 = 0x0085;
 
 /// A dialog item's window class: one of the predefined class atoms, or a
 /// registered class by name (the checklist's `SysListView32`).
@@ -747,11 +819,14 @@ fn build_dialog_template() -> Vec<u32> {
 
     // Header: style, exstyle, item count (patched below), x, y, cx, cy,
     // no menu, default dialog class, title, then DS_SETFONT's point size + face.
-    push_u32(&mut words, DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU);
+    push_u32(
+        &mut words,
+        DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU,
+    );
     push_u32(&mut words, 0);
     let count_at = words.len();
     words.push(0);
-    for value in [0i16, 0, 340, 333] {
+    for value in [0i16, 0, 340, 345] {
         words.push(value as u16);
     }
     words.push(0);
@@ -777,7 +852,13 @@ fn build_dialog_template() -> Vec<u32> {
         ItemClass::Atom(ATOM_STATIC),
         "スキャンフォルダ (1行に1つ / 空欄なら After Effects と MediaCore の既定フォルダ)",
     );
-    item(multiline, [7, 17, 326, 38], IDC_DIRS, ItemClass::Atom(ATOM_EDIT), "");
+    item(
+        multiline,
+        [7, 17, 326, 38],
+        IDC_DIRS,
+        ItemClass::Atom(ATOM_EDIT),
+        "",
+    );
 
     item(
         SS_NOPREFIX,
@@ -803,21 +884,21 @@ fn build_dialog_template() -> Vec<u32> {
     );
     item(
         LVS_REPORT | LVS_SINGLESEL | LVS_NOCOLUMNHEADER | WS_BORDER | WS_TABSTOP,
-        [7, 115, 326, 48],
+        [7, 115, 326, 44],
         IDC_IGNORE_LIST,
         ItemClass::Named("SysListView32"),
         "",
     );
     item(
         SS_NOPREFIX,
-        [7, 169, 326, 8],
+        [7, 165, 326, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "一覧に無いエフェクトを手動指定 (1行に1つ / .aex 拡張子は省略可)",
     );
     item(
         multiline,
-        [7, 179, 326, 16],
+        [7, 175, 326, 16],
         IDC_IGNORE,
         ItemClass::Atom(ATOM_EDIT),
         "",
@@ -825,14 +906,14 @@ fn build_dialog_template() -> Vec<u32> {
 
     item(
         SS_NOPREFIX,
-        [7, 201, 326, 8],
+        [7, 197, 326, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "worker リポジトリ (通常は空欄: プラグインと同じフォルダの worker を使用)",
     );
     item(
         single,
-        [7, 211, 326, 13],
+        [7, 207, 326, 13],
         IDC_REPOSITORY,
         ItemClass::Atom(ATOM_EDIT),
         "",
@@ -840,44 +921,59 @@ fn build_dialog_template() -> Vec<u32> {
 
     item(
         SS_NOPREFIX,
-        [7, 230, 170, 8],
+        [7, 226, 170, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "依存 DLL 数の上限 (空欄 = 無制限)",
     );
     item(
         number,
-        [181, 228, 60, 13],
+        [181, 224, 60, 13],
         IDC_MODULE_LIMIT,
         ItemClass::Atom(ATOM_EDIT),
         "",
     );
     item(
         SS_NOPREFIX,
-        [7, 246, 170, 8],
+        [7, 242, 170, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "依存 DLL 合計バイト数の上限 (空欄 = 無制限)",
     );
     item(
         number,
-        [181, 244, 90, 13],
+        [181, 240, 90, 13],
         IDC_BYTE_LIMIT,
         ItemClass::Atom(ATOM_EDIT),
+        "",
+    );
+    item(
+        SS_NOPREFIX,
+        [7, 258, 170, 8],
+        0xFFFF,
+        ItemClass::Atom(ATOM_STATIC),
+        "カテゴリの表示言語 (メニュー階層の初期値)",
+    );
+    // The rect height covers the drop-down list, not just the closed box.
+    item(
+        CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
+        [181, 256, 90, 48],
+        IDC_CATEGORY_LANG,
+        ItemClass::Atom(ATOM_COMBOBOX),
         "",
     );
 
     // Tall enough for every env-override line at once (four are possible).
     item(
         SS_NOPREFIX,
-        [7, 262, 326, 34],
+        [7, 272, 326, 34],
         IDC_ENV_NOTE,
         ItemClass::Atom(ATOM_STATIC),
         "",
     );
     item(
         SS_NOPREFIX,
-        [7, 300, 326, 8],
+        [7, 310, 326, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "変更は AviUtl2 の再起動後に反映されます。",
@@ -885,14 +981,14 @@ fn build_dialog_template() -> Vec<u32> {
 
     item(
         BS_DEFPUSHBUTTON | WS_TABSTOP,
-        [222, 312, 50, 14],
+        [222, 322, 50, 14],
         IDC_OK,
         ItemClass::Atom(ATOM_BUTTON),
         "OK",
     );
     item(
         WS_TABSTOP,
-        [277, 312, 56, 14],
+        [277, 322, 56, 14],
         IDC_CANCEL,
         ItemClass::Atom(ATOM_BUTTON),
         "キャンセル",

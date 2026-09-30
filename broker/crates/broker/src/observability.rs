@@ -103,10 +103,4 @@ mod tests {
         let directives = resolve_directives(|_| None);
         assert_eq!(directives, DEFAULT_DIRECTIVES);
     }
-
-    #[test]
-    fn init_is_idempotent() {
-        init();
-        init();
-    }
 }

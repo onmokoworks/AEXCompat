@@ -14,6 +14,7 @@ struct Hooks {
 
 void configure(Hooks hooks);
 bool verify_pf_adv_app_suite_versions();
+bool verify_pf_pixel_format_suite_versions();
 bool verify_render_output_safety();
 uint32_t cleanup_safety_selftest_calls();
 

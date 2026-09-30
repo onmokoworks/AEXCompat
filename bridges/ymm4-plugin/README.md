@@ -12,9 +12,9 @@ cargo build --release --manifest-path bridges\ymm4-native\Cargo.toml
 dotnet build bridges\ymm4-plugin\AEXCompat.Ymm4.csproj -c Release -p:YMM4DirPath="$ymm4\"
 ```
 
-The installed plugin resolves the native bridge and bundled render workers
-relative to its own assembly directory. Environment variables are optional
-development fallbacks only:
+The installed plugin resolves the native bridge and the bundled worker
+executable relative to its own assembly directory. Environment variables are
+optional development fallbacks only:
 
 ```powershell
 $env:AEXCOMPAT_YMM4_PLUGIN = 'C:\path\to\your\effect.aex'
@@ -38,8 +38,8 @@ provided.
 
 ## Install
 
-Install the managed/native plugin and the render workers into YMM4's plugin
-directory:
+Install the managed/native plugin and the worker executable into YMM4's
+plugin directory:
 
 ```powershell
 $pluginDir = Join-Path $ymm4 'user\plugin'
@@ -47,9 +47,7 @@ $workerDir = Join-Path $pluginDir 'target\minihost-build'
 New-Item -ItemType Directory -Force -Path $workerDir | Out-Null
 Copy-Item bridges\ymm4-plugin\bin\Release\net10.0-windows10.0.19041.0\AEXCompat.Ymm4.dll $pluginDir -Force
 Copy-Item bridges\ymm4-native\target\release\aexcompat_ymm4_native.dll $pluginDir -Force
-Copy-Item target\minihost-build\aex_render_worker.exe $workerDir -Force
-Copy-Item target\minihost-build\aex_smart_worker.exe $workerDir -Force
-Copy-Item target\minihost-build\aex_l2_worker.exe $workerDir -Force
+Copy-Item target\minihost-build\aex_worker.exe $workerDir -Force
 ```
 
 The bridge leaves the frame unchanged when the selected AEX is missing,

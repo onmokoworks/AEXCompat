@@ -1,9 +1,12 @@
 #include "worker_fixed_selftest_routing.hpp"
 
+#include "l2_cli_dispatch.h"
 #include "worker_smart_dispatch.hpp"
+#include "worker_smart_setup.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 
 #include "worker_aegp_compat_selftests.hpp"
+#include "worker_aegp_init_report.hpp"
 #include "worker_aegp_utility_suite.hpp"
 #include "worker_compute_cache_suite.hpp"
 #include "worker_host_guard_selftests.hpp"
@@ -69,6 +72,45 @@ int selftest_crash_no_minidump(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+__declspec(noinline) DWORD WINAPI unhandled_thread_fault(void*) {
+  *reinterpret_cast<volatile int*>(static_cast<uintptr_t>(1)) = 1;
+  return 0;
+}
+
+int selftest_unhandled_thread_crash(int, wchar_t**) {
+  SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+  HANDLE thread = CreateThread(nullptr, 0, unhandled_thread_fault, nullptr, 0, nullptr);
+  if (!thread) return 3;
+  const DWORD wait = WaitForSingleObject(thread, 5'000);
+  CloseHandle(thread);
+  // The process should have terminated with the unhandled thread exception.
+  // Reaching this line is a self-test failure, including a hung thread.
+  return wait == WAIT_OBJECT_0 ? 4 : 5;
+}
+
+int selftest_unhandled_module_thread_crash(int, wchar_t**) {
+  SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+  wchar_t executable[MAX_PATH]{};
+  const DWORD length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+  if (length == 0 || length >= MAX_PATH) return 2;
+  std::wstring path(executable, length);
+  const auto separator = path.find_last_of(L"\\/");
+  if (separator == std::wstring::npos) return 3;
+  path.resize(separator + 1);
+  path += L"worker_unhandled_thread_fault_fixture.dll";
+  HMODULE fixture = LoadLibraryExW(path.c_str(), nullptr,
+      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+  if (!fixture) return 4;
+  const auto entry = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+      GetProcAddress(fixture, "worker_unhandled_thread_fault"));
+  if (!entry) return 5;
+  HANDLE thread = CreateThread(nullptr, 0, entry, nullptr, 0, nullptr);
+  if (!thread) return 6;
+  const DWORD wait = WaitForSingleObject(thread, 5'000);
+  CloseHandle(thread);
+  return wait == WAIT_OBJECT_0 ? 7 : 8;
+}
+
 int selftest_pf_adv_time(int, wchar_t**) {
   const bool passed = pf_adv_time::verify_suite_versions();
   std::cout << "{\"pf_adv_time_suite_versions\":\"" << (passed ? "passed" : "failed")
@@ -83,6 +125,8 @@ int selftest_suite_entry_utility13(int, wchar_t**) {
   std::cout << "{\"suite_entry_utility13\":\"" << (result.passed ? "passed" : "failed")
             << "\",\"utility_v7_acquired\":"
             << (result.utility_v7_acquired ? "true" : "false")
+            << ",\"utility_v5_acquired\":"
+            << (result.utility_v5_acquired ? "true" : "false")
             << ",\"unsupported_slots_diagnosed\":"
             << (result.unsupported_slots_diagnosed ? "true" : "false")
             << ",\"normal_effect_available\":true"
@@ -102,6 +146,18 @@ int selftest_pf_adv_app(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+int selftest_pf_pixel_format(int, wchar_t**) {
+  const bool passed =
+      aexcompat::host_guard_selftests::verify_pf_pixel_format_suite_versions();
+  std::cout << "{\"pf_pixel_format_suite_versions\":\""
+            << (passed ? "passed" : "failed")
+            << "\",\"v1_slots\":8,\"v2_slots\":2,"
+               "\"independent_identity\":true,\"shared_registration_slots\":true,"
+               "\"world_lifecycle_balanced\":true,\"suite_leases_balanced\":"
+            << (g_host->suite_leases_balanced() ? "true" : "false") << "}\n";
+  return passed ? 0 : 1;
+}
+
 int selftest_effect_param_union(int, wchar_t**) {
   const bool passed = aexcompat::l2_detail::verify_aegp_effect_param_union_suite4();
   std::cout << "{\"aegp_effect_param_union_suite4\":\""
@@ -117,7 +173,10 @@ int selftest_effect_param_union(int, wchar_t**) {
 // agreeing with themselves (issue #699).
 int selftest_smart_selector_inputs(int, wchar_t**) {
   namespace smart_dispatch = aexcompat::worker_runtime::smart_dispatch;
-  const bool passed = smart_dispatch::verify_selector_inputs();
+  const bool selector_inputs = smart_dispatch::verify_selector_inputs();
+  const bool pr_gpu_admission = smart_dispatch::verify_pr_gpu_route_admission();
+  const bool video_frame_abi = smart_dispatch::verify_video_frame_runtime_abi();
+  const bool passed = selector_inputs && pr_gpu_admission && video_frame_abi;
   const auto layout = smart_dispatch::selector_input_layout();
   std::cout << "{\"smart_selector_inputs\":\"" << (passed ? "passed" : "failed")
             << "\",\"render_request_bytes\":" << layout.render_request_bytes
@@ -125,6 +184,10 @@ int selftest_smart_selector_inputs(int, wchar_t**) {
             << ",\"channel_mask_offset\":" << layout.channel_mask_offset
             << ",\"bitdepth_offset\":" << layout.bitdepth_offset
             << ",\"pre_render_data_offset\":" << layout.pre_render_data_offset
+            << ",\"pr_gpu_pf_first_all_depths\":"
+            << (pr_gpu_admission ? "true" : "false")
+            << ",\"video_frame_runtime_abi\":"
+            << (video_frame_abi ? "true" : "false")
             << "}\n";
   return passed ? 0 : 1;
 }
@@ -138,21 +201,100 @@ int selftest_compute_cache(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+int selftest_aegp_borrowed_handle_report(int, wchar_t**) {
+  return aexcompat::l2_detail::emit_aegp_borrowed_handle_report_selftest()
+      ? 0
+      : 1;
+}
+
+int selftest_smart_diagnostic_auxiliary_admission(int, wchar_t**) {
+  const bool auxiliary =
+      aexcompat::l2cli::verify_smart_diagnostic_auxiliary_admission();
+  const bool fixed_case =
+      aexcompat::worker_runtime::smart_setup::verify_fixed_image_case_admission();
+  const bool gpu_snapshot =
+      aexcompat::worker_runtime::smart_setup::verify_gpu_advertisement_snapshot();
+  const bool passed = auxiliary && fixed_case && gpu_snapshot;
+  std::cout << "{\"smart_diagnostic_auxiliary_admission\":\""
+            << (passed ? "passed" : "failed")
+            << "\",\"uses_effective_argc\":"
+            << (auxiliary ? "true" : "false")
+            << ",\"fixed_image_case_admitted\":"
+            << (fixed_case ? "true" : "false")
+            << ",\"gpu_advertisement_snapshot\":"
+            << (gpu_snapshot ? "true" : "false")
+            << ",\"commands_checked\":20}\n";
+  return passed ? 0 : 1;
+}
+
+int selftest_selector_fault_unwind(int, wchar_t**) {
+  const SelectorFaultUnwindProbe probe = verify_selector_fault_unwind();
+  std::cout << "{\"selector_fault_unwind\":\""
+            << (probe.passed ? "passed" : "failed")
+            << "\",\"frames\":" << probe.frame_count
+            << ",\"fault_site_is_null\":"
+            << (probe.fault_site_is_null ? "true" : "false")
+            << ",\"call_site_frame_identified\":"
+            << (probe.call_site_frame_identified ? "true" : "false")
+            << ",\"caller_frame_identified\":"
+            << (probe.caller_frame_identified ? "true" : "false")
+            << ",\"reference_identities_resolved\":"
+            << (probe.reference_identities_resolved ? "true" : "false")
+            << "}\n";
+  return probe.passed ? 0 : 1;
+}
+
+int selftest_selector_fault_attribution(int, wchar_t**) {
+  const SelectorFaultAttributionProbe probe =
+      verify_selector_fault_attribution();
+  const auto flag = [](bool value) { return value ? "true" : "false"; };
+  std::cout << "{\"selector_fault_attribution\":\""
+            << (probe.passed ? "passed" : "failed")
+            << "\",\"first_fault_named\":" << flag(probe.first_fault_named)
+            << ",\"own_512_not_charged_to_a_later_fault\":"
+            << flag(probe.own_512_not_charged_to_a_later_fault)
+            << ",\"non_seh_substitute_decides_first\":"
+            << flag(probe.non_seh_substitute_decides_first)
+            << ",\"zero_answer_leaves_fault_attributable\":"
+            << flag(probe.zero_answer_leaves_fault_attributable)
+            << ",\"discarded_cleanup_fault_skipped\":"
+            << flag(probe.discarded_cleanup_fault_skipped)
+            << ",\"reset_clears_previous_frame\":"
+            << flag(probe.reset_clears_previous_frame)
+            << ",\"paused_calls_leave_no_trace\":"
+            << flag(probe.paused_calls_leave_no_trace)
+            << ",\"recorded_fault_named\":" << flag(probe.recorded_fault_named)
+            << "}\n";
+  return probe.passed ? 0 : 1;
+}
+
 }  // namespace
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 9> host_commands{{
+  const std::array<selftest::HostCommand, 16> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
+      {L"--self-test-selector-fault-unwind", 2, &selftest_selector_fault_unwind},
+      {L"--self-test-selector-fault-attribution", 2,
+       &selftest_selector_fault_attribution},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
+      {L"--self-test-unhandled-thread-crash", 2,
+       &selftest_unhandled_thread_crash},
+      {L"--self-test-unhandled-module-thread-crash", 2,
+       &selftest_unhandled_module_thread_crash},
       {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
       {L"--self-test-suite-entry-utility13", 2, &selftest_suite_entry_utility13},
       {L"--self-test-pf-adv-app-suite", 2, &selftest_pf_adv_app},
+      {L"--self-test-pf-pixel-format-suite", 2, &selftest_pf_pixel_format},
       {L"--self-test-aegp-effect-param-union-suite4", 2,
        &selftest_effect_param_union},
       {L"--self-test-compute-cache", 2, &selftest_compute_cache},
+      {L"--self-test-aegp-borrowed-handle-report", 2,
+       &selftest_aegp_borrowed_handle_report},
       {L"--self-test-smart-selector-inputs", 2, &selftest_smart_selector_inputs},
+      {L"--self-test-smart-diagnostic-auxiliary-admission", 2,
+       &selftest_smart_diagnostic_auxiliary_admission},
   }};
   if (const auto exit = selftest::dispatch_host(
           request.argc, request.argv, host_commands.data(), host_commands.size()))
@@ -165,13 +307,17 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 26> simple_commands{{
+  const std::array<selftest::SimpleCommand, 46> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
        hooks.simple.aegp_layer_suite1_slots},
+      {L"--self-test-aegp-loaded-plugin-streams", "aegp_loaded_plugin_effect_streams",
+       hooks.simple.aegp_loaded_plugin_effect_streams},
       {L"--self-test-parameter-animation", "parameter_animation_transport",
        hooks.simple.parameter_animation},
+      {L"--self-test-parameter-registry-capacity", "parameter_registry_capacity",
+       hooks.simple.parameter_registry_capacity},
       {L"--self-test-pf-param-utils-suite", "pf_param_utils_suite3",
        hooks.simple.pf_param_utils},
       {L"--self-test-pf-pre-checkout-result", "pf_pre_checkout_result",
@@ -200,6 +346,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        hooks.simple.world_transform_affine},
       {L"--self-test-world-transform-blend", "world_transform_blend",
        hooks.simple.world_transform_blend},
+      {L"--self-test-world-transform-convolve", "world_transform_convolve",
+       hooks.simple.world_transform_convolve},
       {L"--self-test-world-transform-transfer-mask", "world_transform_transfer_mask",
        hooks.simple.world_transform_transfer_mask},
       {L"--self-test-aegp-world-suite3", "aegp_world_suite3",
@@ -216,10 +364,105 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-pf-utils-handle-callbacks", "pf_utils_handle_callbacks",
        hooks.simple.pf_utils_handle_callbacks, 1,
        ",\"reached_via_in_data_utils\":true,\"offsets\":[160,168,176,184,440,464]"},
+      // The production callback-table wiring: every generated offset the host
+      // installs has a pointer behind it (issue #981). No metadata - a width
+      // written here by hand is a number an operator would read as "this many
+      // slots were checked" with nothing able to fail when it drifts, and the
+      // offsets that matter are the holes, which the check itself puts on
+      // stderr.
+      {L"--self-test-utility-callback-table", "utility_callback_table",
+       hooks.simple.utility_callback_table},
+      {L"--self-test-pf-utils-iterate-slots", "pf_utils_iterate_slots",
+       hooks.simple.pf_utils_iterate_slots, 1,
+       ",\"reached_via_in_data_utils\":true"},
+      // PF_UtilCallbacks.composite_rect called through the installed
+      // in_data->utils block (issue #1252): the slot the table check above
+      // proves non-null is the composite the transfer modes describe, and a
+      // malformed call fails closed with the destination untouched.
+      {L"--self-test-pf-utils-composite-rect", "pf_utils_composite_rect",
+       hooks.simple.pf_utils_composite_rect, 1,
+       ",\"reached_via_in_data_utils\":true"},
+      // PF_UtilCallbacks.gaussian_kernel called through the installed
+      // in_data->utils block (issue #1253): AE's PF_GaussianKernel values for
+      // the 1D NORMALIZED kernel Inner/Outer Key builds, and malformed calls
+      // fail closed with the buffer untouched.
+      {L"--self-test-pf-utils-gaussian-kernel", "pf_utils_gaussian_kernel",
+       hooks.simple.pf_utils_gaussian_kernel, 1,
+       ",\"reached_via_in_data_utils\":true"},
+      // PF_InteractCallbacks.checkout_param through the installed in_data
+      // block asked for slots past the published table (issue #1251): AE
+      // answers PF_Err_NONE with an empty layer def and takes the checkin;
+      // negative slots and an unpublished table stay refused.
+      {L"--self-test-checkout-param-beyond-table", "checkout_param_beyond_table",
+       hooks.simple.checkout_param_beyond_table, 1,
+       ",\"reached_via_in_data_inter\":true"},
+      // AE's private get_callback_addr ids -5 (PFp_GaussianValue) and -2 (the
+      // FLT.dll in-place blur) reached through the installed in_data->utils
+      // get_callback_addr slot (issue #985): the answers AE 2026's own
+      // dispatcher gave, and malformed blur calls failing closed.
+      {L"--self-test-pf-private-callbacks", "pf_private_callbacks",
+       hooks.simple.pf_private_callbacks, 1,
+       ",\"reached_via_in_data_utils\":true"},
+      // The BEE.dll-compatible scene object behind AEGP_GetEffectLayer's handle
+      // and the "AE Timecode Helper Suite" v1 gate suite (issue #1210): the
+      // production hand-out publishes the observed BEE_AVLayer / BEE_Item /
+      // BEE_Project layout, and every unobserved vtable slot traps by index.
+      {L"--self-test-bee-scene-facade", "bee_scene_facade",
+       hooks.simple.bee_scene_facade, 1,
+       ",\"reached_via_aegp_pf_interface_suite\":true"},
+      // The PF_ProgressInfo-shaped object behind in_data->effect_ref (issue
+      // #1275): the production hand-out publishes {refcon, abort, progress}
+      // and both slots, read the way PF.dll / CannedWarp read them, forward to
+      // the host's abort / progress callbacks.
+      {L"--self-test-pf-progress-info", "pf_progress_info",
+       hooks.simple.pf_progress_info, 1,
+       ",\"reached_via_in_data_effect_ref\":true"},
+      // The PF_World-shaped object behind every registered world's
+      // reserved_long4 (issue #1276): vtable slot 1 answers the world's depth,
+      // the LayerDef mirror follows the hand-out, every other slot traps by
+      // index, and PF_NewWorld's world carries the same object.
+      {L"--self-test-pf-world-facade", "pf_world_facade",
+       hooks.simple.pf_world_facade, 1,
+       ",\"reached_via_reserved_long4\":true"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",
        hooks.simple.aefx_ace_suite1},
+      // AE's `PF AE Private Effect Suite` (issues #1283, #1295): the
+      // implemented slots' conversions and bounds - slot 2's UTF-16 to narrow
+      // and slot 3's ZString to UTF-16, including the ZString split
+      // `dvacore::GetNonLocalizedString` performs - and the diagnosed refusal
+      // on every other slot of the published table.
+      {L"--self-test-pf-private-effect-suite", "pf_private_effect_suite",
+       hooks.simple.pf_private_effect_suite, 1,
+       ",\"versions\":[3,5,6],\"published_slots\":32,\"host_table_slots\":10"
+       ",\"implemented_slots\":[2,3]"},
+      {L"--self-test-aegp-persistent-data-suite3",
+       "aegp_persistent_data_suite3",
+       hooks.simple.aegp_persistent_data_suite3},
+      {L"--self-test-native-stdout-routing", "native_stdout_routing",
+       hooks.simple.native_stdout_routing},
+      {L"--self-test-aegp-persistent-data-suite4",
+       "aegp_persistent_data_suite4",
+       hooks.simple.aegp_persistent_data_suite4},
+      {L"--self-test-headless-system-sound-suppression",
+       "headless_system_sound_suppression",
+       hooks.simple.headless_system_sound_suppression, 1,
+       ",\"process_local\":true,\"dialog_containment_unchanged\":true"},
+      // The 8/16bpc <-> float32 ARGB conversion the Premiere GPU-filter route
+      // (VR family) widens its input through and narrows its output through
+      // when the session is not float32 (issue #1271): exact round trip at
+      // both integer depths, bounded narrowing, float32 pass-through.
+      {L"--self-test-argb32f-depth-conversion", "argb32f_depth_conversion",
+       hooks.simple.argb32f_depth_conversion, 1, ",\"depths\":[8,16,32]"},
+      // Conforming a captured frame to the session slot's depth: the step a
+      // session runs after dispatching a plug-in at a depth it advertises
+      // rather than at the session's own.
+      {L"--self-test-pixel-depth-conform", "pixel_depth_conform",
+       hooks.simple.pixel_depth_conform, 1, ",\"depths\":[8,16,32]"},
+      // Which depth a session dispatches at, from the two advertised bits.
+      {L"--self-test-dispatch-pixel-depth-rule", "dispatch_pixel_depth_rule",
+       hooks.simple.dispatch_pixel_depth_rule, 1, ",\"depths\":[8,16,32]"},
   }};
   if (const auto exit = selftest::dispatch_simple(
           request.argc, request.argv, simple_commands.data(), simple_commands.size()))

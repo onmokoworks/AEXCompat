@@ -111,7 +111,7 @@ worker 側パースは `trace_writer.cpp:16-28` の型)。worker はパス文字
 可能な限り踏襲する:
 
 ```
-aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
+aex_worker.exe --kind classic --render-session-v1 <plugin> <plugin_sha256> <payload>
     <max_width> <max_height> <time_step> <total_time> <time_scale>
     [session-layers:v2|<slot,w,h,handle | slot,w,h,time,scale,handle;...>]
     [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
@@ -251,7 +251,7 @@ one-shot との差分:
 - 深度はコマンド語で表現する (one-shot の `--render-image` /
   `--render-image16` / `--render-image32` に倣い、`--render-session-v1` /
   `--render-session16-v1` / `--render-session32-v1`)。
-- SmartFX セッション (v1.1) は smart worker (`aex_smart_worker.exe`) の
+- SmartFX セッション (v1.1) は smart route (`aex_worker.exe --kind smart`) の
   コマンド語で、位置引数の契約は同一: `--smart-session-v1` /
   `--smart-session16-v1` / `--smart-session32-v1`。ARGB32f は one-shot の
   `--smart-image32[-cpu|-opencl|-directx]` に倣い GPU backend をコマンド語で
@@ -369,10 +369,42 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
 {"v":1,"type":"frame_done","frame_index":0,"status":"ok",
  "output":{"width":1920,"height":1080,"rowbytes":7680,
            "pixel_format":"argb8","packed_bytes":8294400,
+           "advertised_out_flags":0,"advertised_out_flags2":0,
+           "advertised_depth_supported":true,
+           "planned_dispatch_pixel_bytes":4,"dispatch_pixel_bytes":4,
            "guards_intact":true},
  "render_error":0,
  "generation":1}
 ```
+
+The worker may add an advisory `performance` object on a successful frame:
+`worker_setup_ns`, `worker_render_ns`, `render_selector_ns`, and
+`worker_finalize_ns`. Missing measurements are JSON `null`, not zero. The
+selector duration sums audited `RENDER`/`SMART_RENDER`/`SMART_RENDER_GPU`
+calls; it includes the host audit boundary and is not pure plug-in CPU time.
+`worker_setup_ns` starts after request/header validation and ends immediately
+before `render_frame`; the finalize duration starts immediately after it and
+ends while forming `frame_done`. Audio-only passthrough has no render phase and
+uses nulls. These fields never affect `status`, output validation, or the
+existing frame deadline. The broker accepts an older worker's missing object
+as unavailable and records its own input-write, output-verification, wall,
+current process commit, process peak and Job peak observations separately.
+The clocks are monotonic but independent; only elapsed durations, never
+timestamps, are compared. The bounded ladder report is described in
+`docs/PERFORMANCE_DIAGNOSTICS.md`.
+
+- `depth_code` in the launch and shared-section header is the requested output
+  depth, not necessarily the depth handed to the plug-in. On a rendered image
+  frame, `output` also records `advertised_out_flags` and
+  `advertised_out_flags2` from the active plug-in's GLOBAL_SETUP snapshot,
+  `advertised_depth_supported` (whether that snapshot selects the requested
+  depth), `planned_dispatch_pixel_bytes` (4/8/16 bytes per pixel handed to the
+  plug-in), and `dispatch_pixel_bytes` (4/8/16 bytes per pixel actually captured
+  before conversion into the section's requested output depth). GPU transport
+  may capture 16-byte pixels even when the plan is narrower; CPU capture at an
+  unplanned depth is an invariant failure. A successful cluster swap changes
+  this provenance starting with the swapped member's frames. Empty results and
+  audio-only passthroughs have no pixel dispatch and omit these fields.
 
 - `status`: `"ok"` | `"error"`。`"error"` のうち**フレーム局所の互換性診断**
   (selector 非 0、`render_error` 非 0、時刻 scale 不一致) のみセッション
@@ -395,6 +427,16 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   送信した後、以降の `render_frame` を受理せず終了列 (§7) に入る。broker は
   該当 frame_done (または worker 死) を観測した時点でセッションを無効化
   する。壊れた可能性のある worker 状態を次フレームへ引き回さない。
+- **AUDIO_EFFECT_ONLY passthrough (#1048)**: `PF_OutFlag_AUDIO_EFFECT_ONLY`
+  (bit 31) を宣言したプラグインの classic セッションは、AE と同様に映像へ
+  一切手を触れない。worker は映像セレクタを発行せず、各フレームを入力の
+  複製 (深度 16/32f では RGBA8 transport を `build_argb_input` と同じ
+  スケーリングで展開) として `status:"ok"` で返す。SEQUENCE lifecycle は
+  通常どおり発行され、その失敗は上の -47 のままセッションを無効化する。
+  passthrough フレームに `ui_action` が載っていた場合は、イベントを黙って
+  落とす代わりにフレーム局所の専用コード **-48** の error 応答を返す
+  (セッションは継続可能)。cluster swap セッションは passthrough の対象外
+  (launch プラグイン固定の状態のため、per-plugin 化は #1049)。
 - `status:"error"` の応答は `output` と `generation` を持たない専用形:
 
 ```json
@@ -497,6 +539,11 @@ publish_effect_sequence) →
 - フレームループ中の suite/handle ownership・出力 bounds・pixel 検証は
   one-shot と同一の fail-closed を per-frame 適用する (host-protection
   invariant、常時オン)。
+- レンダー前に GLOBAL_SETUP の depth advertisement から各 member の
+  dispatch depth を選ぶ。requested `depth_code` と異なる場合はフレームの
+  出力を requested depth へ変換し、変換前の depth と広告 snapshot は
+  `frame_done.output` に記録する。最終 stdout report は session 集計であり、
+  cluster swap 後を含む各フレームの depth provenance は `frame_done` が正本。
 
 ## 6. データチャネル: 共有メモリレイアウト
 
@@ -735,7 +782,7 @@ one-shot audio (`--render-audio`、`worker_audio_execution.cpp` の
 足す:
 
 ```
-aex_render_worker.exe --render-audio-session-v1 <plugin> <plugin_sha256>
+aex_worker.exe --kind classic --render-audio-session-v1 <plugin> <plugin_sha256>
     <payload> <max_samples> <channels> <time_scale>
     [--parameter-animation-v1 <path>] [--minidump-v1 <dir>]
     [--dependency-dirs-v1 <dir;dir;...>]

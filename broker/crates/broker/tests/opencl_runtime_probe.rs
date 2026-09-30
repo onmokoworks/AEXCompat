@@ -1,5 +1,3 @@
-mod common;
-
 #[cfg(windows)]
 mod windows {
     use aexcompat_broker::opencl_runtime_probe::{ProbeLaunchStatus, launch_system_opencl_probe};
@@ -8,11 +6,6 @@ mod windows {
 
     #[test]
     fn restricted_worker_probe_is_bounded_and_never_claims_readiness() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "restricted_worker_probe_is_bounded_and_never_claims_readiness",
-        ) {
-            return;
-        }
         let worker = Path::new(env!("CARGO_BIN_EXE_opencl-runtime-probe-worker"));
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -34,14 +27,21 @@ mod windows {
                 .as_ref()
                 .expect("observed worker returns aggregate");
             assert_eq!(report.compute_ready, aggregate.compute_ready);
+            // Mirror the production rule in opencl_runtime_probe.rs exactly. Both
+            // extra terms matter on a runner with no OpenCL platforms: Iterator::all
+            // is vacuously true over an empty platform list, so dropping them made
+            // this expectation true while compute_ready was false (#1461).
             assert_eq!(
                 aggregate.compute_ready,
-                aggregate.platforms.iter().all(|platform| {
-                    platform.devices.iter().all(|device| {
-                        device.compute.stage
-                            == aexcompat_broker::opencl_runtime_probe::ComputeStage::Passed
+                aggregate.status
+                    == aexcompat_broker::opencl_runtime_probe::AggregateStatus::Observed
+                    && aggregate.platforms.iter().all(|platform| {
+                        !platform.devices.is_empty()
+                            && platform.devices.iter().all(|device| {
+                                device.compute.stage
+                                    == aexcompat_broker::opencl_runtime_probe::ComputeStage::Passed
+                            })
                     })
-                })
             );
         } else {
             assert!(report.aggregate_loader_observation.is_none());

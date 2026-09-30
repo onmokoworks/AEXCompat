@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -26,6 +27,8 @@ enum class Callback : std::size_t {
   Copy,
   Fill,
   Premultiply,
+  CompositeRect,
+  GaussianKernel,
   TransferRect,
   TransformWorld,
   NewWorld,
@@ -37,6 +40,8 @@ enum class Callback : std::size_t {
   Ansi,
   CheckoutParam,
   CheckinParam,
+  IterateGeneric,
+  EffectSequenceData,
   Count,
 };
 
@@ -53,12 +58,24 @@ enum class Reason : std::size_t {
   AlreadyCheckedOut,
   NotCheckedOut,
   EmptyResult,
+  // For area_sample this counts radius refusals only: the `area` field is not
+  // validated at all since #1033 (nothing uses it), so the name is narrower
+  // than it reads. The per-term `stage:callback_denied` marker carries which
+  // radius check refused.
   InvalidArea,
   PixelCallback,
   ProgressCallback,
   AbortCallback,
   Unsupported,
   CallbackError,
+  // A numeric ANSI callback returned the host's finite 0.0 fallback because
+  // its input, domain, or computed result was non-finite.
+  Clamped,
+  // Not a refusal: checkout_param answered a slot past the published table
+  // with an empty layer definition, the AE-observed shape (issue #1251). It
+  // rides on a result-0 history entry so the report shows which checkouts
+  // resolved to nothing.
+  BeyondParamTable,
   Count,
 };
 
@@ -66,16 +83,18 @@ inline constexpr std::array<const char*, static_cast<std::size_t>(Callback::Coun
     CALLBACK_NAMES{{"pre_checkout_layer", "checkout_pixels", "checkin_pixels",
                     "checkout_output", "iterate", "iterate_origin", "sampling",
                     "begin_sampling", "end_sampling", "get_callback_addr", "blend", "convolve", "copy",
-                    "fill", "premultiply", "transfer_rect", "transform_world",
+                    "fill", "premultiply", "composite_rect", "gaussian_kernel", "transfer_rect", "transform_world",
                     "new_world", "dispose_world", "handle", "platform_data", "pixel_data",
-                    "app", "ansi", "checkout_param", "checkin_param"}};
+                    "app", "ansi", "checkout_param", "checkin_param",
+                    "iterate_generic", "effect_sequence_data"}};
 inline constexpr std::array<const char*, static_cast<std::size_t>(Reason::Count)>
     REASON_NAMES{{"none", "no_active_state", "invalid_arguments",
                   "temporal_checkout_denied", "malformed_request", "capacity_exceeded",
                   "unknown_layer", "unknown_checkout", "missing_world",
                   "already_checked_out", "not_checked_out", "empty_result",
                   "invalid_area", "pixel_callback", "progress_callback",
-                  "abort_callback", "unsupported", "callback_error"}};
+                  "abort_callback", "unsupported", "callback_error",
+                  "clamped", "beyond_param_table"}};
 
 struct Entry {
   std::atomic<uint32_t> calls{};
@@ -84,6 +103,22 @@ struct Entry {
   std::atomic<int32_t> last_result{};
   std::array<std::atomic<uint32_t>, static_cast<std::size_t>(Reason::Count)> reasons{};
 };
+
+struct HistoryEntry {
+  uint64_t sequence{};
+  Callback callback{};
+  int32_t result{};
+  Reason reason{};
+};
+
+inline constexpr std::size_t HISTORY_CAPACITY = 32;
+inline std::array<HistoryEntry, HISTORY_CAPACITY>& history_entries() {
+  static std::array<HistoryEntry, HISTORY_CAPACITY> value{};
+  return value;
+}
+inline std::mutex& history_mutex() { static std::mutex value; return value; }
+inline uint64_t& history_next_sequence() { static uint64_t value{}; return value; }
+inline std::size_t& history_count() { static std::size_t value{}; return value; }
 
 inline std::array<Entry, static_cast<std::size_t>(Callback::Count)>& entries() {
   static std::array<Entry, static_cast<std::size_t>(Callback::Count)> value{};
@@ -98,6 +133,10 @@ inline void reset() noexcept {
     entry.last_result.store(0, std::memory_order_relaxed);
     for (auto& reason : entry.reasons) reason.store(0, std::memory_order_relaxed);
   }
+  std::lock_guard<std::mutex> lock(history_mutex());
+  history_entries() = {};
+  history_next_sequence() = 0;
+  history_count() = 0;
 }
 
 inline void increment_saturating(std::atomic<uint32_t>& value) noexcept {
@@ -108,7 +147,8 @@ inline void increment_saturating(std::atomic<uint32_t>& value) noexcept {
                                       std::memory_order_relaxed)) {}
 }
 
-inline int32_t record(Callback callback, int32_t result, Reason reason = Reason::None) noexcept {
+inline int32_t record_counters(Callback callback, int32_t result,
+                               Reason reason = Reason::None) noexcept {
   auto& entry = entries()[static_cast<std::size_t>(callback)];
   increment_saturating(entry.calls);
   entry.last_result.store(result, std::memory_order_relaxed);
@@ -119,6 +159,36 @@ inline int32_t record(Callback callback, int32_t result, Reason reason = Reason:
     increment_saturating(entry.reasons[static_cast<std::size_t>(reason)]);
   }
   return result;
+}
+
+inline int32_t record(Callback callback, int32_t result, Reason reason = Reason::None) noexcept {
+  record_counters(callback, result, reason);
+  {
+    std::lock_guard<std::mutex> lock(history_mutex());
+    const uint64_t sequence = history_next_sequence()++;
+    history_entries()[sequence % HISTORY_CAPACITY] =
+        {sequence, callback, result, reason};
+    if (history_count() < HISTORY_CAPACITY) ++history_count();
+  }
+  return result;
+}
+
+inline std::string history_json() {
+  std::lock_guard<std::mutex> lock(history_mutex());
+  std::ostringstream out;
+  out << '[';
+  const uint64_t next = history_next_sequence();
+  const uint64_t first = next - history_count();
+  for (uint64_t sequence = first; sequence < next; ++sequence) {
+    if (sequence != first) out << ',';
+    const auto& entry = history_entries()[sequence % HISTORY_CAPACITY];
+    out << "{\"sequence\":" << entry.sequence << ",\"callback\":\""
+        << CALLBACK_NAMES[static_cast<std::size_t>(entry.callback)]
+        << "\",\"result\":" << entry.result << ",\"reason\":\""
+        << REASON_NAMES[static_cast<std::size_t>(entry.reason)] << "\"}";
+  }
+  out << ']';
+  return out.str();
 }
 
 inline std::string snapshot_json() {
@@ -151,7 +221,8 @@ inline std::string snapshot_json() {
 }
 
 inline std::string report_field_json() {
-  return ",\"callback_diagnostics\":" + snapshot_json();
+  return ",\"callback_diagnostics\":" + snapshot_json() +
+      ",\"callback_history\":" + history_json();
 }
 
 }  // namespace aexcompat::callback_diagnostics

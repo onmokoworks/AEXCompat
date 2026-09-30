@@ -3,14 +3,48 @@ fn load_preview(
     texture_name: &str,
     path: &Path,
 ) -> Result<egui::TextureHandle, String> {
-    let image = image::open(path).map_err(|error| error.to_string())?;
+    let image = decode_preview_image(path)?;
+    Ok(ctx.load_texture(texture_name, image, egui::TextureOptions::LINEAR))
+}
+
+fn decode_preview_image(path: &Path) -> Result<egui::ColorImage, String> {
+    let image = image::open(path).map_err(|error| format!("image decode failed: {error}"))?;
     let rgba = image.into_rgba8();
+    if rgba.width() == 0 || rgba.height() == 0 {
+        return Err("decoded image has zero width or height".into());
+    }
     let size = [rgba.width() as usize, rgba.height() as usize];
-    Ok(ctx.load_texture(
-        texture_name,
-        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
-        egui::TextureOptions::LINEAR,
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        rgba.as_raw(),
     ))
+}
+
+fn is_supported_input_image(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "png" | "jpg" | "jpeg" | "bmp" | "tif" | "tiff" | "webp"
+                )
+            })
+}
+
+fn canonical_deverbatim(path: &Path) -> Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("path could not be resolved: {error}"))?;
+    let text = canonical.as_os_str().to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        Ok(PathBuf::from(format!(r"\\{rest}")))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        Ok(PathBuf::from(rest))
+    } else {
+        Ok(canonical)
+    }
 }
 
 fn show_preview(ui: &mut egui::Ui, label: &str, texture: Option<&egui::TextureHandle>) {
@@ -83,16 +117,14 @@ fn inspect_dependency_roots(
     requested_roots: &[std::ffi::OsString],
 ) -> Result<Vec<PathBuf>, String> {
     const MAX_ROOTS: usize = aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
-    let plugin = plugin
-        .canonicalize()
+    let plugin = canonical_deverbatim(plugin)
         .map_err(|error| format!("selected AEX could not be resolved: {error}"))?;
     let mut roots = Vec::with_capacity(requested_roots.len() + 1);
     if let Some(parent) = plugin.parent() {
         roots.push(parent.to_path_buf());
     }
     for requested in requested_roots {
-        let root = PathBuf::from(requested)
-            .canonicalize()
+        let root = canonical_deverbatim(&PathBuf::from(requested))
             .map_err(|error| format!("dependency root could not be resolved: {error}"))?;
         if !root.is_dir() {
             return Err(format!(
@@ -205,21 +237,36 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
             return path;
         }
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.parent()?
-                .parent()?
-                .parent()?
-                .parent()
-                .map(Path::to_path_buf)
-        })
+    repository_root_from_runtime_paths(std::env::current_dir().ok(), std::env::current_exe().ok())
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../..")
                 .canonicalize()
                 .unwrap()
         })
+}
+
+fn repository_root_from_runtime_paths(
+    current_dir: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let starts = current_dir
+        .into_iter()
+        .chain(current_exe.and_then(|path| path.parent().map(Path::to_path_buf)));
+    repository_root_from_starts(starts)
+}
+
+fn repository_root_from_starts(starts: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    for start in starts {
+        for ancestor in start.ancestors() {
+            if ancestor.join("guest/Cargo.toml").is_file()
+                && ancestor.join("broker/Cargo.toml").is_file()
+            {
+                return Some(ancestor.to_path_buf());
+            }
+        }
+    }
+    None
 }
 
 fn cli_contract() -> serde_json::Value {
@@ -279,9 +326,43 @@ fn cli_contract() -> serde_json::Value {
                 "note": "The final slot/value pair is required only for --render-experimental-session-param."
             },
             {
+                "name": "--render-differential",
+                "argv": ["--render-differential", "<aex>", "<input-image>", "argb8|argb16|argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>"],
+                "result": "bounded-native-render-differential-json",
+                "note": "Runs one full frame plus stride, origin, extent and supported two-tile variants on CPU. Unsupported transforms are explicit and make passed false."
+            },
+            {
+                "name": "--render-performance-diagnostics",
+                "argv": ["--render-performance-diagnostics", "<aex>", "classic|smart", "argb8|argb16|argb32f", "<slot>", "<value>"],
+                "result": "advisory-performance-diagnostics-json",
+                "note": "The slot/value pair is optional. Four resolutions and four frames per fresh worker; no image artifacts are saved."
+            },
+            {
+                "name": "--render-raw",
+                "argv": ["--render-raw", "<aex>", "<input-image>", "<output-directory>", "argb8|argb16|argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>"],
+                "result": "native-argb-raw-artifact-report-json"
+            },
+            {
+                "name": "--render-exr",
+                "argv": ["--render-exr", "<aex>", "<input-image>", "<output-directory>", "argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>"],
+                "result": "uncompressed-scanline-float32-exr-artifact-report-json"
+            },
+            {
+                "name": "--render-fixture",
+                "argv": ["--render-fixture", "<aex>", "<fixture.json>", "<output-directory>"],
+                "result": "declarative-render-fixture-report-json",
+                "note": "Fixture asset paths are relative to fixture.json; plug-in path and hash are never embedded."
+            },
+            {
                 "name": "--render-experimental",
                 "argv": ["--render-experimental|--render-experimental-auto|--render-experimental-16|--render-experimental-16-deep|--render-experimental-32|--render-experimental-smart|--render-experimental-smart-16|--render-experimental-smart-16-deep|--render-experimental-smart-32|--render-experimental-smart-32-cpu", "<aex>", "<input-image>", "<output-image>"],
                 "result": "render-report-json"
+            },
+            {
+                "name": "--render-experimental-smart-32-gpu-auto-policy",
+                "argv": ["--render-experimental-smart-32-gpu-auto-policy", "<aex>", "<input-image>", "<output-image>", "opencl"],
+                "result": "render-report-json",
+                "note": "Generates a short-lived active-driver-bound OpenCL policy and requires an authenticated GPU preflight. No runtime folder or policy file is selected manually."
             },
             {
                 "name": "experimental-probes",
@@ -329,6 +410,51 @@ fn cli_contract() -> serde_json::Value {
     })
 }
 
+#[cfg(test)]
+mod artifact_cli_contract_tests {
+    use super::cli_contract;
+
+    #[test]
+    fn raw_and_exr_commands_publish_exact_argument_and_result_contracts() {
+        let contract = cli_contract();
+        let commands = contract["commands"].as_array().unwrap();
+        let command = |name: &str| {
+            commands
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name} command"))
+        };
+        assert_eq!(command("--render-raw")["argv"].as_array().unwrap().len(), 9);
+        assert_eq!(
+            command("--render-raw")["result"],
+            "native-argb-raw-artifact-report-json"
+        );
+        assert_eq!(command("--render-exr")["argv"][4], "argb32f");
+        assert_eq!(
+            command("--render-exr")["result"],
+            "uncompressed-scanline-float32-exr-artifact-report-json"
+        );
+        assert_eq!(
+            command("--render-differential")["argv"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        assert_eq!(
+            command("--render-differential")["result"],
+            "bounded-native-render-differential-json"
+        );
+        assert_eq!(
+            command("--render-fixture")["argv"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+}
+
 fn read_plugin_hash(plugin: &Path) -> Result<String, std::io::Error> {
     let bytes = fs::read(plugin)?;
     Ok(format!("{:X}", Sha256::digest(bytes)))
@@ -370,15 +496,149 @@ fn cli_inspection_failure_document(message: &str) -> serde_json::Value {
     })
 }
 
-fn required_plugin_parameters(
+fn registered_cli_runtime_roots(plugin: &Path) -> Result<Vec<PathBuf>, String> {
+    let plugin = canonical_deverbatim(plugin)?;
+    let unresolved: Vec<String> = discover_adjacent_imports(&plugin)?
+        .warnings
+        .into_iter()
+        .map(|warning| warning.basename)
+        .collect();
+    registered_cli_runtime_roots_for_unresolved(&plugin, &unresolved)
+}
+
+fn registered_cli_runtime_roots_for_unresolved(
+    plugin: &Path,
+    unresolved: &[String],
+) -> Result<Vec<PathBuf>, String> {
+    use aexcompat_broker::installed_runtime_roots::{
+        RegisteredRuntimeLookup, associated_registered_install_roots,
+        matching_registered_runtime_roots, matching_registered_runtime_roots_by_basename,
+    };
+
+    let parent = plugin
+        .parent()
+        .ok_or("AEX has no parent folder")?
+        .to_path_buf();
+    if unresolved.is_empty() {
+        return Ok(vec![parent]);
+    }
+    let associated = associated_registered_install_roots(plugin);
+    let lookup = if associated.is_empty() {
+        matching_registered_runtime_roots(unresolved)
+    } else {
+        matching_registered_runtime_roots_by_basename(unresolved, &associated)
+    };
+    let found = match lookup {
+        RegisteredRuntimeLookup::Found(found) => found,
+        RegisteredRuntimeLookup::IndexTruncated => {
+            return Err("Registered runtime index was truncated".into());
+        }
+    };
+    admit_cli_runtime_roots(plugin, unresolved, &found, associated.is_empty())
+}
+
+fn admit_cli_runtime_roots(
+    plugin: &Path,
+    unresolved: &[String],
+    found: &std::collections::BTreeMap<String, Vec<PathBuf>>,
+    require_ancestor: bool,
+) -> Result<Vec<PathBuf>, String> {
+    use aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
+
+    let parent = plugin
+        .parent()
+        .ok_or("AEX has no parent folder")?
+        .to_path_buf();
+    let mut roots = vec![parent];
+    for basename in unresolved {
+        let candidates = found
+            .get(&basename.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default();
+        let candidates = cli_runtime_candidates_for_plugin(plugin, candidates, require_ancestor);
+        if let Some(candidate) = unique_cli_runtime_candidate(basename, candidates)? {
+            if !roots.iter().any(|root| same_windows_path(root, &candidate)) {
+                if roots.len() == MAX_SEARCH_ROOTS {
+                    return Err("CLI dependency search folder limit exceeded".into());
+                }
+                roots.push(candidate);
+            }
+        }
+    }
+    Ok(roots)
+}
+
+fn cli_runtime_candidates_for_plugin(
+    plugin: &Path,
+    candidates: Vec<PathBuf>,
+    require_ancestor: bool,
+) -> Vec<PathBuf> {
+    if !require_ancestor {
+        return candidates;
+    }
+    candidates
+        .into_iter()
+        .filter(|root| {
+            canonical_runtime_dependency_root(root).is_ok_and(|root| plugin.starts_with(&root))
+        })
+        .collect()
+}
+
+fn unique_cli_runtime_candidate(
+    basename: &str,
+    candidates: Vec<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    if candidates.len() > 1 {
+        return Err(format!(
+            "Ambiguous registered runtime dependency: {basename}"
+        ));
+    }
+    let Some(candidate) = candidates.into_iter().next() else {
+        return Ok(None);
+    };
+    let root = canonical_runtime_dependency_root(&candidate)?;
+    let path = root.join(basename);
+    if !fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(format!(
+            "Registered runtime candidate disappeared: {basename}"
+        ));
+    }
+    Ok(Some(root))
+}
+
+fn inspected_plugin_parameters_with_roots(
+    repository: &Path,
+    plugin: &Path,
+    hash: &str,
+    dependency_search_dirs: Vec<PathBuf>,
+) -> Result<Vec<aexcompat_broker::image_render::InteractiveParameter>, std::io::Error> {
+    let plugin = canonical_deverbatim(plugin).map_err(std::io::Error::other)?;
+    let expected_size = fs::metadata(&plugin)?.len();
+    let expected_sha256 = decode_sha256(hash).map_err(std::io::Error::other)?;
+    aexcompat_broker::image_render::inspect_experimental_via_discovery_in_place(
+        repository,
+        aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
+            path: plugin,
+            expected_sha256,
+            expected_size,
+        },
+        dependency_search_dirs,
+    )
+    .map(|(parameters, _)| parameters)
+}
+
+fn required_inspected_plugin_parameters(
     repository: &Path,
     plugin: &Path,
     hash: &str,
 ) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
-    match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
-        repository, plugin, hash,
-    ) {
-        Ok((parameters, _)) => parameters,
+    let inspected = (|| {
+        let plugin = canonical_deverbatim(plugin).map_err(std::io::Error::other)?;
+        let dependency_search_dirs = plugin.parent().map(Path::to_path_buf).into_iter().collect();
+        inspected_plugin_parameters_with_roots(repository, &plugin, hash, dependency_search_dirs)
+    })();
+    match inspected {
+        Ok(parameters) => parameters,
         Err(error) => {
             eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
             std::process::exit(1);
@@ -386,9 +646,19 @@ fn required_plugin_parameters(
     }
 }
 
+fn required_plugin_parameters(
+    repository: &Path,
+    plugin: &Path,
+    hash: &str,
+) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
+    aexcompat_broker::image_render::normalize_default_interactive_parameters(
+        &required_inspected_plugin_parameters(repository, plugin, hash),
+    )
+}
+
 fn print_cli_help() {
     println!(
-        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-experimental-smart-32-gpu-auto-policy <aex> <input> <output> opencl\n  --render-differential <aex> <input> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-performance-diagnostics <aex> <classic|smart> <argb8|argb16|argb32f>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
     );
 }
 
@@ -408,6 +678,24 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let repository = repository_root(&args);
+    if args.len() == 5 && args[1] == "--render-fixture" {
+        let plugin = Path::new(&args[2]);
+        let hash = required_plugin_hash(plugin);
+        match aexcompat_broker::image_render::render_declarative_fixture(
+            &repository,
+            plugin,
+            &hash,
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+        ) {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 4 && args[1] == "--compare-images" {
         match compare_images(Path::new(&args[2]), Path::new(&args[3])) {
             Ok(comparison) => {
@@ -560,7 +848,9 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    if args.len() == 7 && args[1] == "--render-experimental-smart-32-gpu-policy" {
+    if (args.len() == 7 && args[1] == "--render-experimental-smart-32-gpu-policy")
+        || (args.len() == 6 && args[1] == "--render-experimental-smart-32-gpu-auto-policy")
+    {
         // GPU single-image render routed through the length-one session (#290):
         // parse the runtime-module policy JSON, run the GPU module-audit preflight
         // to assemble the authenticated policy input, then render an Argb32f smart
@@ -579,51 +869,137 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
         };
-        let policy = match fs::read(&args[6])
-            .and_then(|bytes| aexcompat_broker::runtime_module_policy::parse_and_validate(&bytes))
-        {
-            Ok(policy) => policy,
-            Err(error) => {
-                eprintln!("runtime module policy rejected: {error}");
+        let policy = if args.len() == 6 {
+            if gpu_backend != RenderGpuBackend::OpenCl {
+                eprintln!("automatic GPU policy currently supports only opencl");
                 std::process::exit(1);
             }
+            None
+        } else {
+            Some(
+                match fs::read(&args[6]).and_then(|bytes| {
+                    aexcompat_broker::runtime_module_policy::parse_and_validate(&bytes)
+                }) {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        eprintln!("runtime module policy rejected: {error}");
+                        std::process::exit(1);
+                    }
+                },
+            )
         };
-        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         // The preflight seals the same approved dependency artifacts the render
         // dispatches with, so a plug-in that imports one loads in both.
-        let render_dependencies: Vec<
-            aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact,
-        > = Vec::new();
-        let prepared = match aexcompat_broker::image_render::prepare_gpu_runtime_policy(
-            &repository,
-            plugin,
-            &hash,
-            gpu_backend,
-            policy,
-            render_dependencies.clone(),
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                eprintln!("GPU runtime policy preparation failed: {error}");
-                std::process::exit(1);
+        let mut dependency_roots = std::env::var_os("AEXCOMPAT_MULTIFILTER_DEPENDENCY_DIRS")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut auto_discovered_roots = false;
+        if policy.is_none() && dependency_roots.is_empty() {
+            let discovered = match registered_cli_runtime_roots(plugin) {
+                Ok(roots) => roots,
+                Err(error) => {
+                    eprintln!("{}", cli_inspection_failure_document(&error));
+                    std::process::exit(1);
+                }
+            };
+            if discovered.len() > 1 {
+                dependency_roots = discovered;
+                auto_discovered_roots = true;
+            }
+        }
+        let render_dependencies = if dependency_roots.is_empty() {
+            Vec::new()
+        } else {
+            match aexcompat_broker::plugin_dependency_closure::resolve_dependency_closure(
+                aexcompat_broker::plugin_dependency_closure::DependencyClosureRequest::new(
+                    plugin,
+                    &dependency_roots,
+                ),
+            ) {
+                Ok(closure) => closure.dependencies().to_vec(),
+                Err(error) => {
+                    eprintln!("GPU dependency closure resolution failed: {error}");
+                    std::process::exit(1);
+                }
             }
         };
-        let report = aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy(
-            &repository,
-            plugin,
-            &hash,
-            Path::new(&args[3]),
-            Path::new(&args[4]),
-            &parameters,
-            RenderTiming::default(),
-            true,
-            RenderPixelFormat::Argb32f,
-            None,
-            None,
-            gpu_backend,
-            render_dependencies,
-            Some(prepared.as_input()),
-        );
+        let parameters = if dependency_roots.is_empty() {
+            required_plugin_parameters(&repository, plugin, &hash)
+        } else if auto_discovered_roots {
+            match inspected_plugin_parameters_with_roots(
+                &repository,
+                plugin,
+                &hash,
+                dependency_roots.clone(),
+            ) {
+                Ok(parameters) => parameters,
+                Err(error) => {
+                    eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            match aexcompat_broker::image_render::inspect_experimental_in_place(
+                &repository,
+                plugin,
+                &hash,
+                dependency_roots.clone(),
+            ) {
+                Ok((parameters, _)) => parameters,
+                Err(error) => {
+                    eprintln!("GPU parameter inspection failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        };
+        let parameters =
+            aexcompat_broker::image_render::normalize_default_interactive_parameters(&parameters);
+        let report = if let Some(policy) = policy {
+            let prepared = match aexcompat_broker::image_render::prepare_gpu_runtime_policy(
+                &repository,
+                plugin,
+                &hash,
+                gpu_backend,
+                policy,
+                render_dependencies.clone(),
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    eprintln!("GPU runtime policy preparation failed: {error}");
+                    std::process::exit(1);
+                }
+            };
+            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                RenderTiming::default(),
+                true,
+                RenderPixelFormat::Argb32f,
+                None,
+                None,
+                gpu_backend,
+                render_dependencies,
+                Some(prepared.as_input()),
+            )
+        } else {
+            aexcompat_broker::image_render::render_experimental_image_with_auto_opencl_policy(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                RenderTiming::default(),
+                None,
+                None,
+                render_dependencies,
+                dependency_roots,
+            )
+        };
         match report {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
             Err(error) => {
@@ -676,9 +1052,134 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    if (args.len() == 5 || args.len() == 7) && args[1] == "--render-performance-diagnostics" {
+        use aexcompat_broker::image_render::RenderPixelFormat;
+        use aexcompat_broker::performance_diagnostics::{RunRequest, run};
+        let plugin = match canonical_deverbatim(Path::new(&args[2])) {
+            Ok(plugin) => plugin,
+            Err(error) => {
+                eprintln!("performance plug-in path rejected: {error}");
+                std::process::exit(1);
+            }
+        };
+        let plugin = plugin.as_path();
+        let hash = required_plugin_hash(plugin);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
+        if args.len() == 7 {
+            let slot = args[5].to_string_lossy().parse::<u32>().unwrap_or(0);
+            let value = args[6].to_string_lossy().parse::<f64>().unwrap_or(f64::NAN);
+            let Some(parameter) = parameters.iter_mut().find(|item| item.slot == slot) else {
+                eprintln!("performance parameter slot was not discovered");
+                std::process::exit(1);
+            };
+            if !value.is_finite() || value < parameter.minimum || value > parameter.maximum {
+                eprintln!("performance parameter value is outside the discovered range");
+                std::process::exit(1);
+            }
+            parameter.value = value;
+        }
+        let smart = match args[3].to_string_lossy().as_ref() {
+            "classic" => false,
+            "smart" => true,
+            _ => {
+                eprintln!("render kind must be classic or smart");
+                std::process::exit(1);
+            }
+        };
+        let pixel_format = match args[4].to_string_lossy().as_ref() {
+            "argb8" => RenderPixelFormat::Argb8,
+            "argb16" => RenderPixelFormat::Argb16,
+            "argb32f" => RenderPixelFormat::Argb32f,
+            _ => {
+                eprintln!("pixel format must be argb8, argb16, or argb32f");
+                std::process::exit(1);
+            }
+        };
+        let resolutions = [(320, 180), (640, 360), (1280, 720), (1920, 1080)];
+        let report = run(RunRequest {
+            repository: &repository,
+            plugin_path: plugin,
+            plugin_sha256: &hash,
+            parameters: &parameters,
+            smart,
+            pixel_format,
+            resolutions: &resolutions,
+            frames_per_resolution: 4,
+            timeout_ms: 30_000,
+        });
+        match report {
+            Ok(value) => {
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+                if value["status"] != "available" {
+                    std::process::exit(2);
+                }
+            }
+            Err(error) => {
+                eprintln!("performance diagnostic failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    if args.len() == 9 && args[1] == "--render-differential" {
+        use aexcompat_broker::image_render::{RenderPixelFormat, RenderTiming};
+        let format = match args[4].to_string_lossy().as_ref() {
+            "argb8" => RenderPixelFormat::Argb8,
+            "argb16" => RenderPixelFormat::Argb16,
+            "argb32f" => RenderPixelFormat::Argb32f,
+            _ => {
+                eprintln!("pixel format must be argb8, argb16, or argb32f");
+                std::process::exit(1);
+            }
+        };
+        let smart = match args[5].to_string_lossy().as_ref() {
+            "classic" => false,
+            "smart" => true,
+            _ => {
+                eprintln!("render kind must be classic or smart");
+                std::process::exit(1);
+            }
+        };
+        let timing = RenderTiming {
+            current_time: args[6].to_string_lossy().parse().unwrap_or(-1),
+            time_step: 1,
+            total_time: args[7].to_string_lossy().parse().unwrap_or(-1),
+            time_scale: args[8].to_string_lossy().parse().unwrap_or(0),
+        };
+        let plugin = Path::new(&args[2]);
+        let hash = required_plugin_hash(plugin);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
+        let report = aexcompat_broker::render_differential::run_native_differential(
+            aexcompat_broker::render_differential::DifferentialRequest {
+                repository: &repository,
+                plugin_path: plugin,
+                plugin_sha256: &hash,
+                input_path: Path::new(&args[3]),
+                parameters: &parameters,
+                timing,
+                smart,
+                format,
+            },
+        );
+        match report {
+            Ok(report) => {
+                println!("{report}");
+                if report["passed"] != true {
+                    std::process::exit(1);
+                }
+            }
+            Err(error) => {
+                eprintln!("render differential failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     let session_command = args.get(1).and_then(|value| value.to_str());
     let session_with_parameter = session_command == Some("--render-experimental-session-param");
-    if (args.len() == 10 && session_command == Some("--render-experimental-session"))
+    let artifact_command = matches!(session_command, Some("--render-raw" | "--render-exr"));
+    if (args.len() == 10
+        && (session_command == Some("--render-experimental-session") || artifact_command))
         || (args.len() == 12 && session_with_parameter)
     {
         // Built-artifact probes use this explicit session-only adapter.  The
@@ -757,17 +1258,38 @@ fn main() -> eframe::Result {
             }
             parameter.value = value;
         }
-        let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
-            &repository,
-            plugin,
-            &hash,
-            Path::new(&args[3]),
-            Path::new(&args[4]),
-            &parameters,
-            timing,
-            smart,
-            pixel_format,
-        );
+        let report = if artifact_command {
+            use aexcompat_broker::image_render::RenderArtifactKind;
+            let kind = if session_command == Some("--render-exr") {
+                RenderArtifactKind::Float32Exr
+            } else {
+                RenderArtifactKind::Raw
+            };
+            aexcompat_broker::image_render::render_experimental_artifact_at_time(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                timing,
+                smart,
+                pixel_format,
+                kind,
+            )
+        } else {
+            aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                timing,
+                smart,
+                pixel_format,
+            )
+        };
         match report {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
             Err(error) => {
@@ -805,16 +1327,50 @@ fn main() -> eframe::Result {
         };
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let approved_dependencies = match approved_adjacent_dependencies(plugin, &hash) {
-            Ok(dependencies) => dependencies,
-            Err(error) if auto_path => {
-                eprintln!("automatic dependency approval failed: {error}");
-                std::process::exit(1);
+        let dependency_roots = std::env::var_os("AEXCOMPAT_MULTIFILTER_DEPENDENCY_DIRS")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let approved_dependencies = if dependency_roots.is_empty() {
+            match approved_adjacent_dependencies(plugin, &hash) {
+                Ok(dependencies) => dependencies,
+                Err(error) if auto_path => {
+                    eprintln!("automatic dependency approval failed: {error}");
+                    std::process::exit(1);
+                }
+                Err(_) => Vec::new(),
             }
-            Err(_) => Vec::new(),
+        } else {
+            match aexcompat_broker::plugin_dependency_closure::resolve_dependency_closure(
+                aexcompat_broker::plugin_dependency_closure::DependencyClosureRequest::new(
+                    plugin,
+                    &dependency_roots,
+                ),
+            ) {
+                Ok(closure) => closure.dependencies().to_vec(),
+                Err(error) => {
+                    eprintln!("dependency closure resolution failed: {error}");
+                    std::process::exit(1);
+                }
+            }
         };
         let use_approved_dependencies = auto_path || !approved_dependencies.is_empty();
-        let (parameters, inspection) = if use_approved_dependencies {
+        let (parameters, inspection) = if !dependency_roots.is_empty() {
+            match aexcompat_broker::image_render::inspect_experimental_in_place(
+                &repository,
+                plugin,
+                &hash,
+                dependency_roots.clone(),
+            ) {
+                Ok(inspected) => inspected,
+                Err(error) => {
+                    eprintln!(
+                        "automatic render-path selection needs a successful parameter \
+                         inspection: {error}"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        } else if use_approved_dependencies {
             match aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
                 &repository,
                 plugin,
@@ -840,6 +1396,8 @@ fn main() -> eframe::Result {
                 Err(_) => Default::default(),
             }
         };
+        let parameters =
+            aexcompat_broker::image_render::normalize_default_interactive_parameters(&parameters);
         let smart_advertised = inspection["smart_render_advertised"]
             .as_bool()
             .unwrap_or(false);
@@ -1399,13 +1957,22 @@ fn main() -> eframe::Result {
     if args.len() == 3 && args[1] == "--inspect-experimental" {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        match aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash) {
-            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+        let roots = match registered_cli_runtime_roots(plugin) {
+            Ok(roots) => roots,
             Err(error) => {
-                eprintln!("{error}");
+                eprintln!("{}", cli_inspection_failure_document(&error));
                 std::process::exit(1);
             }
-        }
+        };
+        let parameters =
+            match inspected_plugin_parameters_with_roots(&repository, plugin, &hash, roots) {
+                Ok(parameters) => parameters,
+                Err(error) => {
+                    eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
+                    std::process::exit(1);
+                }
+            };
+        println!("{}", serde_json::to_string_pretty(&parameters).unwrap());
         return Ok(());
     }
     if args.len() == 5 && args[1] == "--inspect-experimental-runtime-policy" {

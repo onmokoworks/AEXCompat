@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aexcompat_broker::after_effects_install::newest_versioned;
 
     const META: Option<((u64, u32), u64)> = Some(((5, 0), 64));
     /// The AEX could not be stat'd this pass (transient: AV scanner, replacement).
@@ -19,8 +20,13 @@ mod tests {
             mtime: (mtime_secs, 0),
             len,
             ok: true,
+            plugin_kind: DiscoveredPluginKind::Effect,
+            provided_suites: Vec::new(),
+            demanded_suites: Vec::new(),
+            companion_demand_probe_complete: false,
             sha: "aa".into(),
             smart: true,
+            out_flags2: 1 << 10,
             params: Vec::new(),
             build,
             stale: false,
@@ -28,10 +34,15 @@ mod tests {
             attempts: 0,
             closure: CachedClosure::default(),
             failure_classification: None,
+            failure_diagnostics: None,
             alias_fallback: false,
             alias_target: None,
             closure_identity: None,
             cluster_fallback: None,
+            category: None,
+            registered_name: None,
+            plugin_data_effect: None,
+            additional_effects: Vec::new(),
         }
     }
 
@@ -42,6 +53,492 @@ mod tests {
             smart: false,
             ..discovered(mtime_secs, len, build)
         }
+    }
+
+    fn plugin_data_identity(index: u32, match_name: &str) -> PluginDataIdentity {
+        PluginDataIdentity {
+            index,
+            name_hex: format!("{:x}", index + 0x41),
+            match_name_hex: match_name
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            category_hex: "456666656374".to_owned(),
+            entrypoint: format!("effect_{index}"),
+        }
+    }
+
+    fn cached_plugin_data_effect(
+        index: u32,
+        match_name: &str,
+        registered_name: Option<&str>,
+    ) -> CachedPluginDataEffect {
+        CachedPluginDataEffect {
+            identity: plugin_data_identity(index, match_name),
+            smart: index.is_multiple_of(2),
+            out_flags2: if index.is_multiple_of(2) { 1 << 10 } else { 0 },
+            params: Vec::new(),
+            registered_name: registered_name.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn clean_provider_free_probe_does_not_require_optional_missing_suite() {
+        let clean = serde_json::json!({
+            "session_clean": true,
+            "final_report": {
+                "missing_suites": [{"name": "Optional Preview Suite", "version": 1}],
+                "missing_suites_truncated": false
+            }
+        });
+        assert_eq!(companion_demand_from_probe_report(&clean), Some(Vec::new()));
+
+        let failed = serde_json::json!({
+            "session_clean": false,
+            "final_report": {
+                "missing_suites": [{"name": "Required Runtime Suite 2026.1", "version": 2}],
+                "missing_suites_truncated": false
+            }
+        });
+        let demanded = companion_demand_from_probe_report(&failed).unwrap();
+        assert_eq!(demanded.len(), 1);
+        assert_eq!(demanded[0].name, "Required Runtime Suite 2026.1");
+        assert_eq!(demanded[0].api_version, 2);
+
+        let truncated = serde_json::json!({
+            "session_clean": false,
+            "final_report": {
+                "missing_suites": [],
+                "missing_suites_truncated": true
+            }
+        });
+        assert_eq!(companion_demand_from_probe_report(&truncated), None);
+    }
+
+    #[test]
+    fn companion_probe_targets_use_the_combined_cache_across_save_chunks() {
+        let root = std::env::temp_dir().join("aexcompat-demand-probe-chunks");
+        let package = root.join("package");
+        let mut cache = HashMap::new();
+        for index in 0..DISCOVERY_SAVE_CHUNK {
+            cache.insert(
+                root.join(format!("filler-{index}.aex"))
+                    .to_string_lossy()
+                    .into_owned(),
+                discovered(1, 7, build(1)),
+            );
+        }
+        let effect = package.join("consumer.aex");
+        cache.insert(
+            effect.to_string_lossy().into_owned(),
+            discovered(1, 7, build(1)),
+        );
+        let mut provider = discovered(1, 7, build(1));
+        provider.plugin_kind = DiscoveredPluginKind::Aegp;
+        provider.provided_suites = vec![ProvidedSuite {
+            name: "Package Runtime Suite".into(),
+            api_version: 1,
+            internal_version: 1,
+        }];
+        cache.insert(
+            package.join("provider.aex").to_string_lossy().into_owned(),
+            provider,
+        );
+
+        assert_eq!(
+            companion_demand_probe_targets(&cache),
+            vec![effect.to_string_lossy().into_owned()]
+        );
+    }
+
+    #[test]
+    fn companion_association_uses_discovered_aegp_suites_in_exact_install_dir() {
+        let root = TempRoot::from_path(std::env::temp_dir().join(format!(
+            "aexcompat-mf-companions-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let package = root.join("package");
+        let other = root.join("other");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let effect = package.join("effect.aex");
+        let provider = package.join("effect-helper.aex");
+        let unrelated_provider = package.join("unrelated-provider.aex");
+        let arbitrary = package.join("arbitrary.aex");
+        let remote_provider = other.join("provider.aex");
+        for path in [
+            &effect,
+            &provider,
+            &unrelated_provider,
+            &arbitrary,
+            &remote_provider,
+        ] {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let mut provider_entry = discovered(1, 7, build(1));
+        provider_entry.plugin_kind = DiscoveredPluginKind::Aegp;
+        provider_entry.sha = "11".repeat(32);
+        provider_entry.provided_suites = vec![ProvidedSuite {
+            name: "Opaque Runtime Service 2026.1".into(),
+            api_version: 1,
+            internal_version: 2,
+        }];
+        let mut effect_entry = discovered(1, 7, build(1));
+        let primary_report = serde_json::json!({"missing_suites": []});
+        let secondary_report = serde_json::json!({
+            "missing_suites": [{
+                "name": "Opaque Runtime Service 2026.1",
+                "version": 1
+            }]
+        });
+        assert!(merge_demanded_suites_from_report(
+            &mut effect_entry.demanded_suites,
+            &primary_report
+        ));
+        assert!(merge_demanded_suites_from_report(
+            &mut effect_entry.demanded_suites,
+            &secondary_report
+        ));
+        let mut optional_entry = effect_entry.clone();
+        assert!(finish_companion_demand_probe(
+            &mut optional_entry,
+            Vec::new()
+        ));
+        assert!(
+            optional_entry.demanded_suites.is_empty(),
+            "an unconfirmed secondary miss must not load a provider"
+        );
+        assert!(finish_companion_demand_probe(
+            &mut effect_entry,
+            vec![ProvidedSuite {
+                name: "Opaque Runtime Service 2026.1".into(),
+                api_version: 1,
+                internal_version: 0,
+            }]
+        ));
+        assert_eq!(
+            effect_entry.demanded_suites,
+            vec![ProvidedSuite {
+                name: "Opaque Runtime Service 2026.1".into(),
+                api_version: 1,
+                internal_version: 0,
+            }],
+            "a provider-confirmed secondary demand must survive association"
+        );
+        let mut arbitrary_entry = provider_entry.clone();
+        arbitrary_entry.plugin_kind = DiscoveredPluginKind::Effect;
+        let mut cache = HashMap::new();
+        cache.insert(effect.to_string_lossy().into_owned(), effect_entry);
+        cache.insert(
+            provider.to_string_lossy().into_owned(),
+            provider_entry.clone(),
+        );
+        let mut unrelated_entry = provider_entry.clone();
+        unrelated_entry.provided_suites[0].name = "Aftereffect Runtime Service".into();
+        cache.insert(
+            unrelated_provider.to_string_lossy().into_owned(),
+            unrelated_entry,
+        );
+        cache.insert(arbitrary.to_string_lossy().into_owned(), arbitrary_entry);
+        cache.insert(
+            remote_provider.to_string_lossy().into_owned(),
+            provider_entry,
+        );
+
+        let associated = companion_providers_for(&effect, &cache).unwrap();
+        assert_eq!(associated.len(), 1);
+        assert_eq!(associated[0].artifact.path, provider);
+        assert_eq!(
+            associated[0].suites[0].name,
+            "Opaque Runtime Service 2026.1"
+        );
+        assert_eq!(associated[0].suites[0].api_version, 1);
+        assert_eq!(associated[0].suites[0].internal_version, 2);
+
+        let duplicate = package.join("duplicate-provider.aex");
+        std::fs::write(&duplicate, b"fixture").unwrap();
+        let duplicate_entry = cache
+            .get(&provider.to_string_lossy().into_owned())
+            .unwrap()
+            .clone();
+        cache.insert(duplicate.to_string_lossy().into_owned(), duplicate_entry);
+        assert_eq!(
+            companion_providers_for(&effect, &cache),
+            Err("ambiguous_companion_suite_provider")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_load_resolves_one_registered_runtime_provider_fail_closed() {
+        let root = TempRoot::from_path(std::env::temp_dir().join(format!(
+            "aexcompat-mf-runtime-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let plugin_root = root.join("plugins");
+        let registered_install = root.join("registered-install");
+        let runtime = registered_install.join("redist").join("intel64");
+        let transitive_runtime = registered_install.join("redist").join("shared");
+        let unrelated = registered_install.join("unrelated");
+        std::fs::create_dir_all(&plugin_root).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::create_dir_all(&transitive_runtime).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let plugin = plugin_root.join("effect.aex");
+        std::fs::write(
+            &plugin,
+            aexcompat_broker::test_pe::pe64_importing(&["libmmd.dll", "sibling.dll"]),
+        )
+        .unwrap();
+        std::fs::write(
+            runtime.join("libmmd.dll"),
+            aexcompat_broker::test_pe::pe64_importing(&["shared-runtime.dll", "common.dll"]),
+        )
+        .unwrap();
+        let common = aexcompat_broker::test_pe::pe64_importing(&[]);
+        std::fs::write(runtime.join("common.dll"), &common).unwrap();
+        std::fs::write(
+            runtime.join("sibling.dll"),
+            aexcompat_broker::test_pe::pe64_importing(&[]),
+        )
+        .unwrap();
+        std::fs::write(transitive_runtime.join("common.dll"), &common).unwrap();
+        std::fs::write(
+            transitive_runtime.join("shared-runtime.dll"),
+            aexcompat_broker::test_pe::pe64_importing(&[]),
+        )
+        .unwrap();
+        std::fs::write(unrelated.join("other.dll"), b"unrelated fixture").unwrap();
+
+        let roots = vec![plugin_root.canonicalize().unwrap()];
+        let mut resolved_sets = Vec::new();
+        let resolved = registered_runtime_retry_roots(&plugin, &roots, |wanted| {
+            resolved_sets.push(wanted.to_owned());
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                wanted
+                    .iter()
+                    .map(|basename| {
+                        (
+                            basename.to_ascii_lowercase(),
+                            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
+                                std::slice::from_ref(basename),
+                                [registered_install.clone()],
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+        });
+        assert_eq!(
+            resolved,
+            RuntimeRootResolution::Resolved(vec![
+                plugin_root.canonicalize().unwrap(),
+                runtime.canonicalize().unwrap(),
+                transitive_runtime.canonicalize().unwrap()
+            ])
+        );
+        assert_eq!(resolved_sets.first().map(Vec::len), Some(2));
+        assert!(
+            resolved_sets
+                .iter()
+                .flatten()
+                .any(|name| name == "sibling.dll")
+        );
+        assert_eq!(
+            resolved_sets.len(),
+            2,
+            "one indexed lookup per fixed-point pass"
+        );
+
+        std::fs::write(
+            transitive_runtime.join("common.dll"),
+            aexcompat_broker::test_pe::pe64_importing(&["different.dll"]),
+        )
+        .unwrap();
+        let conflicting = registered_runtime_retry_roots(&plugin, &roots, |wanted| {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                wanted
+                    .iter()
+                    .map(|basename| {
+                        (
+                            basename.to_ascii_lowercase(),
+                            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
+                                std::slice::from_ref(basename),
+                                [registered_install.clone()],
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+        });
+        assert!(matches!(
+            conflicting,
+            RuntimeRootResolution::Ambiguous { ref basename, .. } if basename == "common.dll"
+        ));
+        std::fs::write(transitive_runtime.join("common.dll"), &common).unwrap();
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cluster_load_failure_enters_the_registered_runtime_retry_gate() {
+        let error = std::io::Error::other(
+            "diagnostics={\"classification\":\"nonzero_exit\",\"cluster_error_kind\":\"load_failed\",\"exit_code\":11}",
+        );
+        assert!(inspection_is_load_failure(&error));
+        assert!(!inspection_is_load_failure(&std::io::Error::other(
+            "unclassified failure"
+        )));
+    }
+
+    #[test]
+    fn registered_runtime_retry_fails_closed_when_dependency_diagnostics_truncate() {
+        let root = TempRoot::from_path(std::env::temp_dir().join(format!(
+            "aexcompat-mf-runtime-truncated-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let names: Vec<String> = (0..65)
+            .map(|index| format!("missing-{index}.dll"))
+            .collect();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        let plugin = root.join("effect.aex");
+        std::fs::write(
+            &plugin,
+            aexcompat_broker::test_pe::pe64_importing(&borrowed),
+        )
+        .unwrap();
+        let result = registered_runtime_retry_roots(&plugin, &[root.to_path_buf()], |_| {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                std::collections::BTreeMap::new(),
+            )
+        });
+        assert_eq!(result, RuntimeRootResolution::DiagnosticsTruncated);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registered_runtime_retry_checks_every_provider_before_choosing_a_root() {
+        let root = TempRoot::from_path(std::env::temp_dir().join(format!(
+            "aexcompat-mf-runtime-provider-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let plugin = root.join("effect.aex");
+        std::fs::write(
+            &plugin,
+            aexcompat_broker::test_pe::pe64_importing(&["common.dll"]),
+        )
+        .unwrap();
+        let mut providers = Vec::new();
+        for index in 0..16 {
+            let directory = root.join(format!("provider-{index:02}"));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join("common.dll"),
+                if index == 15 {
+                    b"different".as_slice()
+                } else {
+                    b"same".as_slice()
+                },
+            )
+            .unwrap();
+            providers.push(directory);
+        }
+        let result = registered_runtime_retry_roots(&plugin, &[root.to_path_buf()], |_| {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                std::collections::BTreeMap::from([("common.dll".into(), providers.clone())]),
+            )
+        });
+        assert!(matches!(
+            result,
+            RuntimeRootResolution::Ambiguous {
+                ref basename,
+                candidate_count: 16,
+            } if basename == "common.dll"
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_readable_aegp_is_cached_but_never_registered_as_an_effect() {
+        let mut entry = discovered(5, 64, build(9));
+        entry.plugin_kind = DiscoveredPluginKind::Aegp;
+
+        assert!(entry.ok, "AEGP initialization is a successful discovery");
+        assert!(!is_registerable_effect(&entry));
+        assert_eq!(discovery_result_kind(&entry), DiscoveryResultKind::Aegp);
+        assert_eq!(
+            classify(Some(&entry), META, build(9)),
+            LoadDecision {
+                register: false,
+                discover: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_readable_aegp_does_not_hide_an_all_effects_rejected_alarm() {
+        let mut aegp = discovered(5, 64, build(9));
+        aegp.plugin_kind = DiscoveredPluginKind::Aegp;
+        let rejected_effect = failed(5, 64, build(9));
+        let results = [aegp, rejected_effect];
+        let effects = results
+            .iter()
+            .filter(|entry| discovery_result_kind(entry) == DiscoveryResultKind::Effect)
+            .count();
+        let rejected = results
+            .iter()
+            .filter(|entry| discovery_result_kind(entry) == DiscoveryResultKind::Rejected)
+            .count();
+
+        assert_eq!(effects, 0);
+        assert_eq!(rejected, 1);
+        assert!(discovery_is_alarming(effects, rejected));
+    }
+
+    #[test]
+    fn a_pre_kind_cache_entry_defaults_to_an_effect() {
+        let mut value = serde_json::to_value(discovered(5, 64, build(9))).unwrap();
+        value.as_object_mut().unwrap().remove("plugin_kind");
+        let entry: CacheEntry = serde_json::from_value(value).unwrap();
+
+        assert_eq!(entry.plugin_kind, DiscoveredPluginKind::Effect);
+        assert!(is_registerable_effect(&entry));
+    }
+
+    #[test]
+    fn smart_route_rejects_mutable_sequence_without_threading() {
+        const SMART: u32 = 1 << 10;
+        const THREADED: u32 = 1 << 27;
+        const MUTABLE: u32 = 1 << 28;
+        assert!(smart_render_route_supported(true, SMART));
+        assert!(smart_render_route_supported(true, SMART | THREADED));
+        assert!(smart_render_route_supported(
+            true,
+            SMART | THREADED | MUTABLE
+        ));
+        assert!(!smart_render_route_supported(true, SMART | MUTABLE));
+        assert!(!smart_render_route_supported(false, SMART | MUTABLE));
+        assert!(
+            smart_render_route_supported(true, 0),
+            "an older cache keeps its previous Smart route until reinspection"
+        );
     }
 
     // --- keep_best: never lose a working effect to a transient failure -------
@@ -120,6 +617,120 @@ mod tests {
                 register: true,
                 discover: true
             }
+        );
+    }
+
+    /// A plug-in whose metadata is readable but whose contents cannot be read
+    /// produces a bare negative entry with no recorded closure. That mismatch
+    /// is a retry trigger, so the negative-to-negative merge must retain the
+    /// attempt ledger instead of resetting it on every launch (issue #658).
+    #[test]
+    fn an_unreadable_negative_entry_converges_after_the_retry_budget() {
+        let root = temp_root("unreadable-negative-budget");
+        let plugin = root.join("locked.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+        let meta = file_meta(&plugin).expect("fixture metadata");
+        let roots = search_roots_for(&plugin, &[], false);
+        let mut entry = negative_entry(&plugin, build(1));
+        assert!(needs_closure_recheck(&entry, build(1), &roots));
+
+        for attempt in 1..=RETRY_BUDGET {
+            let unreadable = negative_entry(&plugin, build(1));
+            entry = keep_best(Some(&entry), unreadable, Some(meta)).unwrap();
+            assert_eq!(entry.attempts, attempt);
+            assert_eq!(
+                needs_closure_recheck(&entry, build(1), &roots),
+                attempt < RETRY_BUDGET
+            );
+        }
+
+        let replacement_meta = (meta.0, meta.1 + 1);
+        let replacement = keep_best(
+            Some(&entry),
+            negative_entry(&plugin, build(1)),
+            Some(replacement_meta),
+        )
+        .unwrap();
+        assert_eq!(replacement.attempts, 0, "new bytes get a fresh ledger");
+        assert!(
+            needs_closure_recheck(&replacement, build(1), &roots),
+            "replacement bytes remain eligible for discovery"
+        );
+
+        assert!(
+            needs_closure_recheck(&entry, build(2), &roots),
+            "a different host build gets a fresh retry budget"
+        );
+        entry = keep_best(Some(&entry), negative_entry(&plugin, build(2)), Some(meta)).unwrap();
+        assert_eq!(entry.checked, build(2));
+        assert_eq!(entry.attempts, 1, "the new host starts its own ledger");
+    }
+
+    #[test]
+    fn default_runtime_follows_the_installed_ae_plugin_version() {
+        let root = temp_root("ae-versioned-runtime-root");
+        let adobe = root.join("Adobe");
+        let old_support = adobe.join("Adobe After Effects 2025").join("Support Files");
+        let new_support = adobe.join("Adobe After Effects 2026").join("Support Files");
+        let effect_dir = old_support.join("Plug-ins").join("Effects");
+        std::fs::create_dir_all(&effect_dir).unwrap();
+        std::fs::create_dir_all(&new_support).unwrap();
+        let plugin = effect_dir.join("Timecode.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+        let expected_old = old_support.canonicalize().unwrap();
+        let expected_new = new_support.canonicalize().unwrap();
+
+        let defaults = search_roots_for(&plugin, &[new_support.clone()], true);
+        assert_eq!(
+            defaults,
+            vec![effect_dir.canonicalize().unwrap(), expected_old]
+        );
+
+        let explicit = search_roots_for(&plugin, &[new_support], false);
+        assert_eq!(
+            explicit,
+            vec![effect_dir.canonicalize().unwrap(), expected_new]
+        );
+    }
+
+    #[test]
+    fn registration_preserves_discovery_retry_roots_for_render() {
+        let root = temp_root("ae-retried-runtime-root");
+        let adobe = root.join("Adobe");
+        let original = adobe.join("Adobe After Effects 2025").join("Support Files");
+        let retry = root.join("Registered Runtime");
+        let effect_dir = original.join("Plug-ins").join("Effects");
+        std::fs::create_dir_all(&effect_dir).unwrap();
+        std::fs::create_dir_all(&retry).unwrap();
+        let plugin = effect_dir.join("Timecode.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+        let mut entry = discovered(1, 1, build(1));
+        entry.closure.roots = vec![
+            effect_dir.to_string_lossy().into_owned(),
+            retry.to_string_lossy().into_owned(),
+        ];
+        let defaults = DependencyConfig {
+            dirs: vec![original.clone()],
+            default_runtime: true,
+            module_limit: None,
+            byte_limit: None,
+        };
+
+        let resolved = dependency_for_discovered_entry(&defaults, &entry);
+        assert!(!resolved.default_runtime);
+        assert_eq!(
+            search_roots_for(&plugin, &resolved.dirs, resolved.default_runtime),
+            vec![
+                effect_dir.canonicalize().unwrap(),
+                retry.canonicalize().unwrap()
+            ],
+        );
+        assert_eq!(
+            search_roots_for(&plugin, &defaults.dirs, defaults.default_runtime),
+            vec![
+                effect_dir.canonicalize().unwrap(),
+                original.canonicalize().unwrap()
+            ],
         );
     }
 
@@ -477,14 +1088,143 @@ mod tests {
         );
     }
 
+    /// The ok-over-negative arm is asymmetric on purpose and must not fire in
+    /// reverse: a local known-good survives an on-disk same-meta negative.
+    #[test]
+    fn a_concurrent_cache_save_keeps_a_local_known_good_over_a_disk_negative() {
+        let key = "same.aex";
+        let mut local = HashMap::from([(key.to_string(), discovered(5, 64, build(2)))]);
+        let on_disk = HashMap::from([(key.to_string(), failed(5, 64, build(1)))]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert!(local[key].ok, "the local good entry stays authoritative");
+        assert_eq!(local[key].build, build(2), "and keeps its own provenance");
+    }
+
+    /// Issue #840, pinned against a real file: `save_cache` passed the
+    /// on-disk snapshot as the authoritative merge side, so an update to an
+    /// existing key — here a re-verification by a newer host — never
+    /// persisted, and no unit test of the merge function alone could see the
+    /// swapped call site.
+    #[test]
+    fn a_saved_update_to_an_existing_key_persists() {
+        let dir = TempRoot::from_path(std::env::temp_dir().join(format!(
+            "aexcompat-mf-savecache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let path = dir.join("discovery-cache.json");
+        let key = "effect.aex".to_string();
+
+        let first = HashMap::from([(key.clone(), discovered(5, 64, build(1)))]);
+        assert!(save_cache_at(&path, &first), "the seed save reaches disk");
+
+        // The same bytes re-verified by a newer host: same meta, new build.
+        let updated = HashMap::from([(key.clone(), discovered(5, 64, build(2)))]);
+        assert!(
+            save_cache_at(&path, &updated),
+            "the update save reaches disk"
+        );
+
+        let reloaded = load_cache_at(&path);
+        assert_eq!(
+            reloaded[&key].build,
+            build(2),
+            "the existing key's update survived the on-disk merge"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_registered_name_survives_cache_save_reload_and_concurrent_merge() {
+        let dir = TempRoot::from_path(std::env::temp_dir().join(format!(
+            "aexcompat-mf-saved-name-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let path = dir.join("discovery-cache.json");
+        let key = "effect.aex".to_owned();
+        let mut named = discovered(5, 64, build(1));
+        named.registered_name = Some("Threshold (Effects)".to_owned());
+        assert!(save_cache_at(&path, &HashMap::from([(key.clone(), named)])));
+
+        // A concurrently running older build can write the same entry without
+        // the additive field. It must not erase the stable project identity.
+        assert!(save_cache_at(
+            &path,
+            &HashMap::from([(key.clone(), discovered(5, 64, build(1)))])
+        ));
+        assert_eq!(
+            load_cache_at(&path)[&key].registered_name.as_deref(),
+            Some("Threshold (Effects)")
+        );
+
+        let mut conflicting = discovered(5, 64, build(1));
+        conflicting.registered_name = Some("Threshold".to_owned());
+        assert!(save_cache_at(
+            &path,
+            &HashMap::from([(key.clone(), conflicting)])
+        ));
+        assert_eq!(
+            load_cache_at(&path)[&key].registered_name.as_deref(),
+            Some("Threshold (Effects)"),
+            "the first valid persisted identity wins a concurrent save race"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The concurrent-launch half still holds through the file: disjoint
+    /// keys from an earlier save survive a later one, and an on-disk
+    /// same-meta known-good beats a later transient negative.
+    #[test]
+    fn a_save_unions_disjoint_keys_and_keeps_known_good_on_disk() {
+        let dir = TempRoot::from_path(std::env::temp_dir().join(format!(
+            "aexcompat-mf-savecache2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let path = dir.join("discovery-cache.json");
+
+        let other_launch = HashMap::from([
+            ("other.aex".to_string(), discovered(3, 32, build(1))),
+            ("same.aex".to_string(), discovered(5, 64, build(1))),
+        ]);
+        assert!(save_cache_at(&path, &other_launch));
+
+        // This launch never saw other.aex and failed same.aex transiently.
+        let this_launch = HashMap::from([("same.aex".to_string(), failed(5, 64, build(1)))]);
+        assert!(save_cache_at(&path, &this_launch));
+
+        let reloaded = load_cache_at(&path);
+        assert!(
+            reloaded.contains_key("other.aex"),
+            "the other launch's disjoint discovery survived"
+        );
+        assert!(
+            reloaded["same.aex"].ok,
+            "the on-disk known-good beat the transient negative"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // --- scan completeness ---------------------------------------------------
 
     #[test]
     fn a_readable_folder_scans_completely() {
-        let dir = std::env::temp_dir().join(format!("aexcompat-mf-{}-scan", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-        let limits = collect_aex(&[dir], &[]).limits;
+        let dir = TempRoot::from_path(
+            std::env::temp_dir().join(format!("aexcompat-mf-{}-scan", std::process::id())),
+        );
+        let limits = collect_aex(&[dir.path().to_path_buf()], &[]).limits;
         assert!(limits.authoritative(), "{limits:?}");
     }
 
@@ -674,11 +1414,9 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn temp_root(tag: &str) -> PathBuf {
+    fn temp_root(tag: &str) -> TempRoot {
         let dir = std::env::temp_dir().join(format!("aexcompat-mf-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp root");
-        dir
+        TempRoot::from_path(dir)
     }
 
     #[test]
@@ -833,13 +1571,13 @@ mod tests {
         let root = temp_root("ignored");
         std::fs::write(root.join("keep.aex"), b"x").unwrap();
         std::fs::write(root.join("skip.aex"), b"x").unwrap();
-        let scan = collect_aex(std::slice::from_ref(&root), &["skip".into()]);
+        let scan = collect_aex(std::slice::from_ref(&root.0), &["skip".into()]);
         assert_eq!(scan.plugins.len(), 1, "the ignored one is not registered");
         assert_eq!(scan.seen.len(), 2, "but it was seen");
 
         let key = root.join("skip.aex").to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
-        prune_cache(&mut cache, &scan.seen, &[root], true);
+        prune_cache(&mut cache, &scan.seen, &[root.to_path_buf()], true);
         assert!(cache.contains_key(&key), "an ignored AEX is not gone");
     }
 
@@ -1088,7 +1826,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("only.aex"), b"x").unwrap();
         junction(&root.join("loop"), &root);
-        let scan = collect_aex(std::slice::from_ref(&root), &[]);
+        let scan = collect_aex(std::slice::from_ref(&root.0), &[]);
         assert_eq!(scan.seen.len(), 1, "one AEX, seen once: {:?}", scan.seen);
     }
 
@@ -1124,7 +1862,7 @@ mod tests {
         std::fs::write(real.join("foo.aex"), b"x").unwrap();
         junction(&root.join("AAA-link"), &real);
 
-        let scan = collect_aex(std::slice::from_ref(&root), &[]);
+        let scan = collect_aex(std::slice::from_ref(&root.0), &[]);
         assert_eq!(scan.seen.len(), 1, "walked once: {:?}", scan.seen);
 
         // Key the cache by the spelling the scan did NOT keep.
@@ -1135,7 +1873,12 @@ mod tests {
         };
         let key = other.to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
-        prune_cache(&mut cache, &scan.seen, &[root], scan.limits.authoritative());
+        prune_cache(
+            &mut cache,
+            &scan.seen,
+            &[root.to_path_buf()],
+            scan.limits.authoritative(),
+        );
         assert!(
             cache.contains_key(&key),
             "the file is still there, so is its entry"
@@ -1148,7 +1891,7 @@ mod tests {
         let root = temp_root("deleted");
         let key = root.join("gone.aex").to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
-        prune_cache(&mut cache, &[], &[root], true);
+        prune_cache(&mut cache, &[], &[root.to_path_buf()], true);
         assert!(
             cache.is_empty(),
             "the file does not exist, so the entry goes"
@@ -1168,7 +1911,7 @@ mod tests {
         std::fs::write(real.join("foo.aex"), b"x").unwrap();
         junction(&root.join("AAA-link"), &real);
 
-        let scan = collect_aex(std::slice::from_ref(&root), &[]);
+        let scan = collect_aex(std::slice::from_ref(&root.0), &[]);
         assert_eq!(scan.seen.len(), 1);
         let walked = &scan.seen[0];
         // Key the cache by the other spelling, as an earlier launch would have.
@@ -1183,13 +1926,52 @@ mod tests {
             !cache.contains_key(&walked.to_string_lossy().into_owned()),
             "the exact key really does miss"
         );
-        let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
         let found = walked
             .canonicalize()
             .ok()
             .and_then(|real| index.get(&real))
             .and_then(|candidates| cache.get(&candidates[0]));
         assert!(found.is_some(), "but the real path finds it");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_alias_rekey_uses_the_old_registered_name_before_registration() {
+        let root = temp_root("alias-registered-name");
+        let real = root.join("Effects");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("Threshold.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+
+        let walked = root.join("link").join("Threshold.aex");
+        let old_key = real.join("Threshold.aex");
+        let meta = file_meta(&walked).unwrap();
+        let mut old_entry = discovered(meta.0.0, meta.1, build(1));
+        old_entry.mtime = meta.0;
+        old_entry.registered_name = Some("Threshold (Effects)".to_owned());
+        let cache = peer_cache(&[(old_key.to_str().unwrap(), old_entry)]);
+        let walked_key = walked.to_string_lossy().into_owned();
+        let roots = vec![root.path().to_path_buf()];
+        let mut aliases = None;
+
+        let (resolved, alias) = resolve_cached(
+            &cache,
+            &walked_key,
+            &walked,
+            Some(meta),
+            build(1),
+            &roots,
+            true,
+            &mut aliases,
+        );
+        assert_eq!(alias.as_deref(), Some(old_key.to_string_lossy().as_ref()));
+        let remembered = vec![resolved.and_then(|entry| entry.registered_name.clone())];
+        assert_eq!(
+            stable_filter_names(std::slice::from_ref(&walked), &[], &remembered),
+            vec!["Threshold (Effects)".to_owned()],
+            "the old saved-project identity is chosen before registration"
+        );
     }
 
     /// After an aliased hit the entry must also be reachable under the spelling
@@ -1211,6 +1993,26 @@ mod tests {
         assert!(merged.ok, "the demotion guard applies again");
     }
 
+    #[test]
+    fn alias_copies_count_as_one_owner_during_registered_name_merge() {
+        let mut named = discovered(5, 64, build(1));
+        named.registered_name = Some("Threshold (Effects)".to_owned());
+        let mut on_disk = peer_cache(&[("old.aex", named)]);
+        apply_rekey(
+            &mut on_disk,
+            vec![("old.aex".to_owned(), "walked.aex".to_owned())],
+        );
+        let mut local = on_disk.clone();
+        local.get_mut("walked.aex").unwrap().registered_name = Some("Threshold".to_owned());
+
+        merge_cache_entries(&mut local, &on_disk);
+        assert_eq!(
+            local["walked.aex"].registered_name.as_deref(),
+            Some("Threshold (Effects)"),
+            "the retained alias must not make one disk identity look duplicated"
+        );
+    }
+
     /// The alias index only covers the folders this launch scanned, so a leftover
     /// key elsewhere (a disconnected drive) is never resolved at startup.
     #[test]
@@ -1223,7 +2025,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let cache = cache_of(&[&inside, &outside]);
-        let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
         assert_eq!(index.len(), 1, "only the key under the scanned root");
         assert!(index.values().any(|keys| keys.contains(&inside)));
     }
@@ -1288,7 +2090,7 @@ mod tests {
             let mut cache = HashMap::new();
             cache.insert(negative.clone(), failed(5, 64, build(1)));
             cache.insert(positive.clone(), discovered(5, 64, build(1)));
-            let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+            let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
             assert_eq!(index.len(), 1, "both spellings resolved to one file");
             let winner = &index.values().next().unwrap()[0];
             assert!(cache[winner].ok, "the registering entry won");
@@ -1326,7 +2128,7 @@ mod tests {
             b.sha = "bbb".into();
             cache.insert(direct.clone(), a);
             cache.insert(via_link.clone(), b);
-            let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+            let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
             assert_eq!(index.len(), 1);
             winners.insert(cache[&index.values().next().unwrap()[0]].sha.clone());
         }
@@ -1358,7 +2160,7 @@ mod tests {
             fresh.sha = "new".into();
             cache.insert(stale_key.clone(), stale);
             cache.insert(fresh_key.clone(), fresh);
-            let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(2));
+            let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(2));
             let winner = &index.values().next().unwrap()[0];
             assert_eq!(cache[winner].sha, "new", "the current build's entry won");
         }
@@ -1395,7 +2197,7 @@ mod tests {
             !classify(direct, META, build(1)).register,
             "the direct hit alone would not register"
         );
-        let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
         let candidates = index
             .get(&real.join("foo.aex").canonicalize().unwrap())
             .expect("the file is in the index");
@@ -1441,7 +2243,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -1453,6 +2255,52 @@ mod tests {
             alias.as_deref(),
             Some(other.as_str()),
             "and reports the re-key"
+        );
+    }
+
+    /// A legacy alias can deserialize without `plugin_kind` and therefore look
+    /// like an Effect. It must never override a current direct AEGP result for
+    /// the same canonical file.
+    #[cfg(windows)]
+    #[test]
+    fn a_direct_aegp_never_adopts_a_registerable_effect_alias() {
+        let root = temp_root("resolve-aegp-terminal");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = real.join("foo.aex");
+        let other = root
+            .join("link")
+            .join("foo.aex")
+            .to_string_lossy()
+            .into_owned();
+
+        let mut aegp = discovered(5, 64, build(1));
+        aegp.plugin_kind = DiscoveredPluginKind::Aegp;
+        let mut cache = HashMap::new();
+        cache.insert(walked.to_string_lossy().into_owned(), aegp);
+        cache.insert(other, discovered(5, 64, build(1)));
+
+        let mut aliases = None;
+        let (entry, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            META,
+            build(1),
+            std::slice::from_ref(&root.0),
+            true,
+            &mut aliases,
+        );
+        assert_eq!(
+            entry.map(|entry| entry.plugin_kind),
+            Some(DiscoveredPluginKind::Aegp)
+        );
+        assert_eq!(alias, None);
+        assert!(
+            aliases.is_none(),
+            "the conflicting alias was never consulted"
         );
     }
 
@@ -1573,7 +2421,7 @@ mod tests {
                 &real.join("foo.aex"),
                 META,
                 build(1),
-                std::slice::from_ref(&root),
+                std::slice::from_ref(&root.0),
                 true,
                 &mut aliases,
             );
@@ -1616,7 +2464,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -1756,12 +2604,51 @@ mod tests {
     #[test]
     fn inspection_errors_preserve_the_broker_failure_classification() {
         let error = std::io::Error::other(
-            r#"inspection failed: diagnostics={"classification":"crashed","exit_code":3221225477}"#,
+            r#"AEX parameter inspection worker failed safely: {"classification":"crashed","exit_code":3221225477}"#,
         );
         assert_eq!(
             inspection_failure_classification(&error).as_deref(),
             Some("crashed")
         );
+        assert_eq!(
+            inspection_failure_diagnostics(&error).and_then(|value| value
+                .get("exit_code")
+                .and_then(serde_json::Value::as_u64)
+                .map(|code| code as u32)),
+            Some(3_221_225_477)
+        );
+    }
+
+    #[test]
+    fn inspection_errors_parse_diagnostics_before_a_trailing_report() {
+        let error = std::io::Error::other(
+            r#"AEX parameter inspection worker failed safely: {"classification":"nonzero_exit","exit_code":12,"plugin_kind":"aegp_candidate"}, report={"status":"failed"}"#,
+        );
+        let diagnostics = inspection_failure_diagnostics(&error).expect("diagnostics");
+        assert_eq!(diagnostics["exit_code"], 12);
+        assert_eq!(diagnostics["plugin_kind"], "aegp_candidate");
+    }
+
+    #[test]
+    fn aegp_worker_failures_preserve_the_broker_diagnostics() {
+        let error = std::io::Error::other(
+            r#"AEGP initialization failed safely: {"classification":"nonzero_exit","exit_code":23,"failure_stage":"aegp_init"}"#,
+        );
+        let diagnostics = inspection_failure_diagnostics(&error).expect("diagnostics");
+        assert_eq!(diagnostics["classification"], "nonzero_exit");
+        assert_eq!(diagnostics["exit_code"], 23);
+        assert_eq!(diagnostics["failure_stage"], "aegp_init");
+    }
+
+    #[test]
+    fn aegp_contract_failures_preserve_init_error_and_stage() {
+        let error = std::io::Error::other(
+            r#"AEGP initialization contract failed safely: {"classification":"aegp_init_contract","stage":"aegp_init","init_error":4,"suite_leases_balanced":true}"#,
+        );
+        let diagnostics = inspection_failure_diagnostics(&error).expect("diagnostics");
+        assert_eq!(diagnostics["classification"], "aegp_init_contract");
+        assert_eq!(diagnostics["stage"], "aegp_init");
+        assert_eq!(diagnostics["init_error"], 4);
     }
 
     /// The same entry does converge as soon as a re-check succeeds.
@@ -1815,7 +2702,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -1859,7 +2746,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -1906,7 +2793,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -2009,6 +2896,500 @@ mod tests {
                 "Levels".to_owned(),
                 "Threshold (Effects)".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn installing_a_same_stem_plugin_does_not_rename_the_existing_filter() {
+        let existing = PathBuf::from(r"C:\AE\Plug-ins\Effects\Threshold.aex");
+        let added = PathBuf::from(r"C:\AE\Plug-ins\Effects\CycoreFXHD\Threshold.aex");
+        let mut cache = peer_cache(&[(existing.to_str().unwrap(), discovered(5, 64, build(1)))]);
+
+        let first_names = stable_filter_names(
+            std::slice::from_ref(&existing),
+            &[],
+            &remembered_filter_names(std::slice::from_ref(&existing), &cache),
+        );
+        assert_eq!(first_names, ["Threshold"]);
+        assert!(remember_filter_names(
+            &mut cache,
+            std::slice::from_ref(&existing),
+            &first_names
+        ));
+
+        cache.insert(
+            added.to_string_lossy().into_owned(),
+            discovered(5, 64, build(1)),
+        );
+        let plugins = vec![existing, added];
+        assert_eq!(
+            stable_filter_names(&plugins, &[], &remembered_filter_names(&plugins, &cache)),
+            vec!["Threshold".to_owned(), "Threshold (CycoreFXHD)".to_owned()],
+            "the newly installed peer moves aside from the saved-project name"
+        );
+    }
+
+    #[test]
+    fn uninstalling_a_same_stem_plugin_keeps_the_qualified_name() {
+        let existing = PathBuf::from(r"C:\AE\Plug-ins\Effects\Threshold.aex");
+        let removed = PathBuf::from(r"C:\AE\Plug-ins\Effects\CycoreFXHD\Threshold.aex");
+        let plugins = vec![existing.clone(), removed.clone()];
+        let mut cache = peer_cache(&[
+            (existing.to_str().unwrap(), discovered(5, 64, build(1))),
+            (removed.to_str().unwrap(), discovered(5, 64, build(1))),
+        ]);
+        let collision_names =
+            stable_filter_names(&plugins, &[], &remembered_filter_names(&plugins, &cache));
+        assert_eq!(
+            collision_names,
+            vec![
+                "Threshold (Effects)".to_owned(),
+                "Threshold (CycoreFXHD)".to_owned()
+            ]
+        );
+        assert!(remember_filter_names(
+            &mut cache,
+            &plugins,
+            &collision_names
+        ));
+
+        cache.remove(removed.to_str().unwrap());
+        assert_eq!(
+            stable_filter_names(
+                std::slice::from_ref(&existing),
+                &[],
+                &remembered_filter_names(std::slice::from_ref(&existing), &cache)
+            ),
+            vec!["Threshold (Effects)".to_owned()],
+            "removing the peer must not invalidate saved-project objects"
+        );
+    }
+
+    #[test]
+    fn rediscovery_preserves_the_registered_name() {
+        let mut cached = discovered(5, 64, build(1));
+        cached.registered_name = Some("Threshold (Effects)".to_owned());
+        let refreshed = discovered(5, 64, build(2));
+
+        assert_eq!(
+            keep_best(Some(&cached), refreshed, META)
+                .unwrap()
+                .registered_name
+                .as_deref(),
+            Some("Threshold (Effects)")
+        );
+    }
+
+    #[test]
+    fn rediscovery_preserves_secondary_names_by_logical_identity_after_reorder() {
+        let mut cached = discovered(5, 64, build(1));
+        cached.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+        let mut refreshed = discovered(5, 64, build(2));
+        let mut reordered = cached_plugin_data_effect(1, "second", None);
+        reordered.identity.index = 2;
+        refreshed.additional_effects = vec![reordered];
+
+        let merged = keep_best(Some(&cached), refreshed, META).unwrap();
+        assert_eq!(merged.additional_effects[0].identity.index, 2);
+        assert_eq!(
+            merged.additional_effects[0].registered_name.as_deref(),
+            Some("Bundle — Second"),
+            "registration order may change, but the exact match/export identity owns the saved-project name"
+        );
+    }
+
+    #[test]
+    fn primary_secondary_reorder_keeps_each_saved_project_name_with_its_effect() {
+        let mut old = discovered(5, 64, build(1));
+        old.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        old.registered_name = Some("Bundle".to_owned());
+        old.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+
+        let mut refreshed = discovered(5, 64, build(2));
+        let mut new_primary = plugin_data_identity(1, "second");
+        new_primary.index = 0;
+        refreshed.plugin_data_effect = Some(new_primary);
+        let mut new_secondary = cached_plugin_data_effect(0, "first", None);
+        new_secondary.identity.index = 1;
+        refreshed.additional_effects = vec![new_secondary];
+
+        let merged = keep_best(Some(&old), refreshed, META).unwrap();
+        assert_eq!(merged.registered_name.as_deref(), Some("Bundle — Second"));
+        assert_eq!(
+            merged.additional_effects[0].registered_name.as_deref(),
+            Some("Bundle")
+        );
+    }
+
+    #[test]
+    fn concurrent_merge_maps_primary_secondary_names_by_effect_not_slot() {
+        let key = r"C:\AE\Bundle.aex".to_owned();
+        let mut disk = discovered(5, 64, build(1));
+        disk.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        disk.registered_name = Some("Bundle".to_owned());
+        disk.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+
+        let mut local = discovered(5, 64, build(1));
+        let mut local_primary = plugin_data_identity(1, "second");
+        local_primary.index = 0;
+        local.plugin_data_effect = Some(local_primary);
+        local.registered_name = Some("wrong-primary".to_owned());
+        let mut local_secondary = cached_plugin_data_effect(0, "first", Some("wrong-secondary"));
+        local_secondary.identity.index = 1;
+        local.additional_effects = vec![local_secondary];
+        let on_disk = HashMap::from([(key.clone(), disk)]);
+        let mut local_cache = HashMap::from([(key.clone(), local)]);
+
+        merge_cache_entries(&mut local_cache, &on_disk);
+
+        assert_eq!(
+            local_cache[&key].registered_name.as_deref(),
+            Some("Bundle — Second")
+        );
+        assert_eq!(
+            local_cache[&key].additional_effects[0]
+                .registered_name
+                .as_deref(),
+            Some("Bundle")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn alias_resolved_entry_plans_every_secondary_filter_on_first_launch() {
+        let root = temp_root("alias-multi-effect-plan");
+        let real = root.join("Effects");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("Bundle.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = root.join("link").join("Bundle.aex");
+        let old_key = real.join("Bundle.aex");
+        let meta = file_meta(&walked).unwrap();
+        let mut entry = discovered(meta.0.0, meta.1, build(1));
+        entry.mtime = meta.0;
+        entry.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+        let cache = HashMap::from([(old_key.to_string_lossy().into_owned(), entry)]);
+        let roots = vec![root.path().to_path_buf()];
+        let mut aliases = None;
+        let (resolved, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            Some(meta),
+            build(1),
+            &roots,
+            true,
+            &mut aliases,
+        );
+        assert_eq!(alias.as_deref(), Some(old_key.to_string_lossy().as_ref()));
+        let resolved_entries = vec![resolved.cloned()];
+        let names = plan_secondary_filter_names(
+            std::slice::from_ref(&walked),
+            &["Bundle".to_owned()],
+            &resolved_entries,
+        );
+        assert_eq!(
+            names.get(&(walked.to_string_lossy().into_owned(), 1)),
+            Some(&"Bundle — Second".to_owned())
+        );
+        let plans = virtual_effect_registrations(
+            resolved_entries[0].as_ref().unwrap(),
+            "Bundle",
+            &HashMap::from([(1, names.values().next().unwrap().clone())]),
+        );
+        assert_eq!(plans.len(), 2);
+        assert_eq!(
+            cache.len(),
+            1,
+            "the alias need not be rekeyed before planning"
+        );
+    }
+
+    #[test]
+    fn concurrent_cache_save_keeps_the_first_secondary_project_name() {
+        let key = r"C:\AE\Bundle.aex".to_owned();
+        let mut disk_entry = discovered(5, 64, build(1));
+        disk_entry.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+        let mut local_entry = discovered(5, 64, build(1));
+        local_entry.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Conflicting"),
+        )];
+        let on_disk = HashMap::from([(key.clone(), disk_entry)]);
+        let mut local = HashMap::from([(key.clone(), local_entry)]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert_eq!(
+            local[&key].additional_effects[0].registered_name.as_deref(),
+            Some("Bundle — Second")
+        );
+    }
+
+    #[test]
+    fn plugin_data_inventory_requires_exact_bounded_sequential_identities() {
+        let identity0 = plugin_data_identity(0, "first");
+        let identity1 = plugin_data_identity(1, "second");
+        let report = serde_json::json!({
+            "plugin_data": {
+                "selected_index": 1,
+                "registrations": [identity0, identity1]
+            }
+        });
+        let parsed = plugin_data_identities(&report).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(selected_plugin_data_identity_matches(&report, &parsed[1]));
+
+        for malformed in [
+            serde_json::json!({"plugin_data": {"selected_index": 0, "registrations": []}}),
+            serde_json::json!({"plugin_data": {"selected_index": 0, "registrations": [plugin_data_identity(1, "wrong-index")]}}),
+            serde_json::json!({"plugin_data": {"selected_index": 0, "registrations": [{"index": 0, "name_hex": "41", "match_name_hex": "6669727374", "category_hex": "45", "entrypoint": "effect_0", "extra": true}]}}),
+        ] {
+            assert!(plugin_data_identities(&malformed).is_err());
+        }
+        let overflow = (0..65)
+            .map(|index| plugin_data_identity(index, &format!("effect-{index}")))
+            .collect::<Vec<_>>();
+        assert!(
+            plugin_data_identities(&serde_json::json!({
+                "plugin_data": {"selected_index": 0, "registrations": overflow}
+            }))
+            .is_err()
+        );
+
+        let opaque = serde_json::json!({
+            "plugin_data": {
+                "selected_index": 0,
+                "registrations": [{
+                    "index": 0,
+                    "name_hex": "82a0",
+                    "match_name_hex": "82a1",
+                    "category_hex": "836583588367",
+                    "entrypoint": "EffectMain"
+                }]
+            }
+        });
+        let parsed = plugin_data_identities(&opaque).expect("opaque metadata stays selectable");
+        assert_eq!(parsed[0].match_name_hex, "82a1");
+        assert!(parsed[0].display_name().is_some());
+        assert!(parsed[0].category().is_some());
+    }
+
+    #[test]
+    fn plugin_data_bundle_flattens_to_distinct_exact_registration_plans() {
+        let mut entry = discovered(5, 64, build(1));
+        entry.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        entry.closure_identity = Some("shared-dll-closure".to_owned());
+        entry.additional_effects = vec![cached_plugin_data_effect(1, "second", None)];
+        let plans = virtual_effect_registrations(
+            &entry,
+            "Bundle",
+            &HashMap::from([(1, "Bundle — Second".to_owned())]),
+        );
+
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].name, "Bundle");
+        assert!(plans[0].selector.is_none());
+        assert_eq!(
+            plans[0].entry.closure_identity.as_deref(),
+            Some("shared-dll-closure")
+        );
+        assert_eq!(plans[1].name, "Bundle — Second");
+        assert_eq!(
+            plans[1].selector,
+            Some(PluginDataEffectSelector {
+                index: 1,
+                match_name_hex: "7365636f6e64".to_owned(),
+            })
+        );
+        assert_eq!(plans[1].entry.plugin_data_effect.as_ref().unwrap().index, 1);
+        assert!(plans[1].entry.closure_identity.is_none());
+        assert!(plans[1].entry.additional_effects.is_empty());
+    }
+
+    #[test]
+    fn failed_secondary_inspection_makes_the_whole_bundle_unregistrationable() {
+        let mut entry = discovered(5, 64, build(1));
+        entry.ok = true;
+        entry.closure_identity = Some("cluster-primary".to_owned());
+        entry.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        entry.additional_effects = vec![cached_plugin_data_effect(1, "second", None)];
+
+        reject_plugin_data_bundle(&mut entry);
+
+        assert!(!is_registerable_effect(&entry));
+        assert!(entry.plugin_data_effect.is_none());
+        assert!(entry.additional_effects.is_empty());
+        assert!(entry.closure_identity.is_none());
+    }
+
+    #[test]
+    fn companion_probe_confirms_each_secondary_on_its_exact_selector() {
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        let effects = vec![(None, false, 0), (Some(selector.clone()), true, 1 << 10)];
+        for repaired in [false, true] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let confirmed = confirmed_plugin_data_demands(
+                &effects,
+                |selected, _, _| {
+                    calls.borrow_mut().push(("without", selected.cloned()));
+                    Some(if selected.is_some() {
+                        vec![ProvidedSuite {
+                            name: "Secondary Effect Suite".to_owned(),
+                            api_version: 2,
+                            internal_version: 0,
+                        }]
+                    } else {
+                        Vec::new()
+                    })
+                },
+                |candidates| {
+                    assert_eq!(candidates[0].name, "Secondary Effect Suite");
+                    Some("provider")
+                },
+                |selected, smart, out_flags2, provider| {
+                    calls.borrow_mut().push(("with", selected.cloned()));
+                    assert_eq!(selected, Some(&selector));
+                    assert!(smart);
+                    assert_eq!(out_flags2, 1 << 10);
+                    assert_eq!(provider, "provider");
+                    repaired
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                calls.into_inner(),
+                vec![
+                    ("without", None),
+                    ("without", Some(selector.clone())),
+                    ("with", Some(selector.clone())),
+                ]
+            );
+            assert_eq!(confirmed.len(), usize::from(repaired));
+        }
+    }
+
+    #[test]
+    fn secondary_filter_context_routes_both_render_paths_to_the_exact_selector() {
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        for route in ["resident", "classic-fallback"] {
+            let selected = route_plugin_data_session(
+                route,
+                Some(&selector),
+                |_| -> Result<_, ()> { panic!("secondary effect used the default entrypoint") },
+                |request, selected| Ok((request, selected.index, selected.match_name_hex.clone())),
+            )
+            .unwrap();
+            assert_eq!(
+                selected,
+                (route, 1, "7365636f6e64".to_owned()),
+                "{route} must retain the virtual filter's exact selector"
+            );
+        }
+        let default = route_plugin_data_session(
+            "primary",
+            None,
+            |request| Ok::<_, ()>(request),
+            |_, _| panic!("legacy primary unexpectedly selected a secondary"),
+        )
+        .unwrap();
+        assert_eq!(default, "primary");
+    }
+
+    #[test]
+    fn plugin_data_labels_use_the_adobe_localization_fallback() {
+        let encoded = |text: &str| {
+            text.as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let identity = PluginDataIdentity {
+            index: 1,
+            name_hex: encoded("$$$/AE/Effect/Name/RollingShutter=Rolling Shutter Repair"),
+            match_name_hex: encoded("ADBE Rolling Shutter"),
+            category_hex: encoded("$$$/MediaCore/FiltersAndEffects/Category/Distort=Distort"),
+            entrypoint: "RollingShutterMain".to_owned(),
+        };
+        assert_eq!(
+            identity.display_name().as_deref(),
+            Some("Rolling Shutter Repair")
+        );
+        assert_eq!(identity.category().as_deref(), Some("Distort"));
+    }
+
+    #[test]
+    fn invalid_or_duplicate_cached_names_are_repaired_deterministically() {
+        let plugins = vec![
+            PathBuf::from(r"C:\AE\A\Threshold.aex"),
+            PathBuf::from(r"C:\AE\B\Threshold.aex"),
+            PathBuf::from(r"C:\AE\C\Levels.aex"),
+        ];
+        let repaired = stable_filter_names(
+            &plugins,
+            &[],
+            &[
+                Some("Threshold".to_owned()),
+                Some("threshold".to_owned()),
+                Some("bad\0name".to_owned()),
+            ],
+        );
+        assert_eq!(
+            repaired,
+            vec![
+                "Threshold".to_owned(),
+                "Threshold (B)".to_owned(),
+                "Levels".to_owned()
+            ]
+        );
+
+        let mut on_disk = peer_cache(&[
+            (plugins[0].to_str().unwrap(), discovered(5, 64, build(1))),
+            (plugins[1].to_str().unwrap(), discovered(5, 64, build(1))),
+        ]);
+        for entry in on_disk.values_mut() {
+            entry.registered_name = Some("Threshold".to_owned());
+        }
+        let mut local = on_disk.clone();
+        assert!(remember_filter_names(
+            &mut local,
+            &plugins[..2],
+            &repaired[..2]
+        ));
+        merge_cache_entries(&mut local, &on_disk);
+        assert_eq!(
+            local[plugins[1].to_str().unwrap()]
+                .registered_name
+                .as_deref(),
+            Some("Threshold (B)"),
+            "two logical owners on disk must not block duplicate repair"
         );
     }
 
@@ -2358,6 +3739,249 @@ mod tests {
         );
     }
 
+    // --- PiPL category → menu label (issue #871) --------------------------
+
+    /// A PiPL blob in the compiled layout: u32 version 1, u16 zero, u32
+    /// count, then per property "MIB8", the byte-swapped key, u32 zero, u32
+    /// data length, and the data padded to four bytes (writers store the
+    /// padded length, as the probe `.rc` fixtures do).
+    fn pipl_blob(properties: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend(1u32.to_le_bytes());
+        blob.extend(0u16.to_le_bytes());
+        blob.extend((properties.len() as u32).to_le_bytes());
+        for (key, data) in properties {
+            let padded = data.len().next_multiple_of(4);
+            blob.extend(b"MIB8");
+            blob.extend(*key);
+            blob.extend(0u32.to_le_bytes());
+            blob.extend((padded as u32).to_le_bytes());
+            blob.extend(*data);
+            blob.resize(blob.len() + padded - data.len(), 0);
+        }
+        blob
+    }
+
+    /// The 'catg' Pascal string is found behind other properties, and the
+    /// padded storage length does not leak padding into the value.
+    #[test]
+    fn pipl_category_reads_the_catg_pascal_string() {
+        let blob = pipl_blob(&[
+            (b"dnik", b"TKFe"),
+            (b"gtac", b"\x07Stylize"),
+            (b"4668", b"EffectMain\0\0"),
+        ]);
+        assert_eq!(pipl_category_of_blob(&blob).as_deref(), Some("Stylize"));
+        let padded = pipl_blob(&[(b"gtac", b"\x10AEXCompat Probes")]);
+        assert_eq!(
+            pipl_category_of_blob(&padded).as_deref(),
+            Some("AEXCompat Probes")
+        );
+    }
+
+    /// A writer that stores the exact (unpadded) length still parses: the
+    /// walk advances by the length rounded up to four, and a non-UTF-8
+    /// category yields no label rather than replacement characters.
+    #[test]
+    fn pipl_category_handles_unpadded_lengths_and_bad_encodings() {
+        // "\x06Warp!!" is 7 bytes; store length 7 but pad the stream to 4.
+        let mut blob = Vec::new();
+        blob.extend(1u32.to_le_bytes());
+        blob.extend(0u16.to_le_bytes());
+        blob.extend(2u32.to_le_bytes());
+        blob.extend(b"MIB8dnik");
+        blob.extend(0u32.to_le_bytes());
+        blob.extend(7u32.to_le_bytes());
+        blob.extend(b"\x06Warp!!\0");
+        blob.extend(b"MIB8gtac");
+        blob.extend(0u32.to_le_bytes());
+        blob.extend(8u32.to_le_bytes());
+        blob.extend(b"\x07Stylize");
+        assert_eq!(pipl_category_of_blob(&blob).as_deref(), Some("Stylize"));
+
+        let shift_jis = pipl_blob(&[(b"gtac", b"\x04\x89\xE6\x91\x9C")]);
+        assert_eq!(pipl_category_of_blob(&shift_jis), None);
+    }
+
+    /// Adobe's own effects store the category as a ZString; the display name
+    /// after the last `=` is what the menu wants. A ZString without one has
+    /// no usable name and fails closed.
+    #[test]
+    fn pipl_category_unwraps_adobe_zstrings() {
+        let zstring = pipl_blob(&[(
+            b"gtac",
+            b"\x3E$$$/MediaCore/FiltersAndEffects/Category/Simulation=Simulation",
+        )]);
+        assert_eq!(
+            pipl_category_of_blob(&zstring).as_deref(),
+            Some("Simulation")
+        );
+        let nameless = pipl_blob(&[(b"gtac", b"\x08$$$/Abcd")]);
+        assert_eq!(pipl_category_of_blob(&nameless), None);
+    }
+
+    /// Malformed blobs yield no category, never a wrong one: a missing
+    /// 'catg', a foreign vendor code, a truncation mid-property, and an
+    /// overlong Pascal length all fail closed.
+    #[test]
+    fn pipl_category_fails_closed_on_malformed_blobs() {
+        assert_eq!(pipl_category_of_blob(&[]), None);
+        let no_catg = pipl_blob(&[(b"dnik", b"TKFe")]);
+        assert_eq!(pipl_category_of_blob(&no_catg), None);
+        let mut bad_vendor = pipl_blob(&[(b"gtac", b"\x07Stylize")]);
+        bad_vendor[10] = b'X';
+        assert_eq!(pipl_category_of_blob(&bad_vendor), None);
+        let mut truncated = pipl_blob(&[(b"gtac", b"\x07Stylize")]);
+        truncated.truncate(truncated.len() - 4);
+        assert_eq!(pipl_category_of_blob(&truncated), None);
+        // Pascal length claiming more than the property holds.
+        let overlong = pipl_blob(&[(b"gtac", b"\x40ab")]);
+        assert_eq!(pipl_category_of_blob(&overlong), None);
+    }
+
+    /// A minimal PE32+ image with one `.rsrc` section holding a named "PiPL"
+    /// resource (name dir → id dir → language dir → leaf), so the full
+    /// walk — headers, section mapping, named-entry match, three levels,
+    /// data entry — is pinned end to end.
+    fn synthetic_pe_with_pipl(blob: &[u8]) -> Vec<u8> {
+        const SECTION_RVA: u32 = 0x1000;
+        const SECTION_RAW: u32 = 0x200;
+        let mut pe = vec![0u8; SECTION_RAW as usize];
+        pe[0] = b'M';
+        pe[1] = b'Z';
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        // COFF: machine x64, one section, optional header size 240.
+        pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        pe[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+        pe[0x94..0x96].copy_from_slice(&240u16.to_le_bytes());
+        // Optional header (PE32+): magic, then the resource data directory
+        // (index 2) at +112 pointing at the section RVA.
+        let optional = 0x98;
+        pe[optional..optional + 2].copy_from_slice(&0x20Bu16.to_le_bytes());
+        let resource_dir = optional + 112 + 2 * 8;
+        pe[resource_dir..resource_dir + 4].copy_from_slice(&SECTION_RVA.to_le_bytes());
+        pe[resource_dir + 4..resource_dir + 8].copy_from_slice(&0x1000u32.to_le_bytes());
+        // Section table: ".rsrc" mapping RVA 0x1000 to file offset 0x200.
+        let section = optional + 240;
+        pe[section..section + 5].copy_from_slice(b".rsrc");
+        pe[section + 8..section + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        pe[section + 12..section + 16].copy_from_slice(&SECTION_RVA.to_le_bytes());
+        pe[section + 16..section + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+        pe[section + 20..section + 24].copy_from_slice(&SECTION_RAW.to_le_bytes());
+
+        // Resource section layout, offsets relative to the section start:
+        // root dir (24) → "PiPL" string (12) → id dir (24) → lang dir (24)
+        // → leaf (16) → blob.
+        let mut rsrc = Vec::new();
+        let (root, name_str, id_dir, lang_dir, leaf, data) =
+            (0u32, 24u32, 36u32, 60u32, 84u32, 100u32);
+        let mut dir = |entries: &[(u32, u32)], named: u16| {
+            let mut out = vec![0u8; 12];
+            out.extend(named.to_le_bytes());
+            out.extend(((entries.len() as u16) - named).to_le_bytes());
+            for (name, data) in entries {
+                out.extend(name.to_le_bytes());
+                out.extend(data.to_le_bytes());
+            }
+            out
+        };
+        let _ = root;
+        rsrc.extend(dir(&[(0x8000_0000 | name_str, 0x8000_0000 | id_dir)], 1));
+        rsrc.extend(4u16.to_le_bytes());
+        for unit in "PiPL".encode_utf16() {
+            rsrc.extend(unit.to_le_bytes());
+        }
+        rsrc.extend([0, 0]); // pad to id_dir at 36
+        rsrc.extend(dir(&[(16000, 0x8000_0000 | lang_dir)], 0));
+        rsrc.extend(dir(&[(1033, leaf)], 0));
+        rsrc.extend((SECTION_RVA + data).to_le_bytes());
+        rsrc.extend((blob.len() as u32).to_le_bytes());
+        rsrc.extend([0u8; 8]);
+        assert_eq!(rsrc.len() as u32, data, "fixture layout drifted");
+        rsrc.extend_from_slice(blob);
+
+        pe.extend_from_slice(&rsrc);
+        pe
+    }
+
+    /// End to end over a synthetic PE: the category comes out of the image
+    /// bytes, and images without the resource fail closed.
+    #[test]
+    fn pipl_category_walks_a_pe_image() {
+        let blob = pipl_blob(&[(b"dnik", b"TKFe"), (b"gtac", b"\x07Distort")]);
+        let pe = synthetic_pe_with_pipl(&blob);
+        assert_eq!(pipl_category(&pe).as_deref(), Some("Distort"));
+        assert_eq!(pipl_category(b"not a pe"), None);
+        let truncated = &pe[..0x150];
+        assert_eq!(pipl_category(truncated), None);
+    }
+
+    /// The registered label nests the category under AEXCompat and falls
+    /// back to the bare brand without one; the standard AE categories
+    /// localize per the configured language (issue #876), and a third-party
+    /// category passes through untranslated.
+    #[test]
+    fn filter_labels_nest_the_category_under_the_brand() {
+        assert_eq!(filter_label(Some("Stylize"), false), "AEXCompat\\Stylize");
+        assert_eq!(
+            filter_label(Some("Stylize"), true),
+            "AEXCompat\\スタイライズ"
+        );
+        assert_eq!(
+            filter_label(Some("RG Universe Transitions"), true),
+            "AEXCompat\\RG Universe Transitions"
+        );
+        assert_eq!(filter_label(None, true), "AEXCompat");
+    }
+
+    /// The bundled-effect table fills the PiPL gap (issue #876): AE's own
+    /// Effects files carry no PiPL, so their stems resolve here, matched
+    /// case-insensitively; anything unknown stays uncategorized.
+    #[test]
+    fn ae_builtin_stems_resolve_to_their_menu_category() {
+        assert_eq!(ae_builtin_category("Gaussian_Blur"), Some("Blur & Sharpen"));
+        assert_eq!(ae_builtin_category("gaussian_blur"), Some("Blur & Sharpen"));
+        assert_eq!(ae_builtin_category("Card Dance"), Some("Simulation"));
+        assert_eq!(ae_builtin_category("TotallyUnknown"), None);
+    }
+
+    /// The production registration planner combines virtual-effect category
+    /// propagation, the bundled-effect fallback, and the configured language.
+    #[test]
+    fn registration_labels_cover_primary_secondary_and_unknown_effects() {
+        let mut entry = discovered(5, 64, build(1));
+        entry.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        let mut secondary = cached_plugin_data_effect(1, "second", None);
+        secondary.identity.category_hex = "5374796c697a65".to_owned(); // Stylize
+        entry.additional_effects = vec![secondary];
+        let plans = virtual_effect_registrations(
+            &entry,
+            "Bundle",
+            &HashMap::from([(1, "Bundle — Second".to_owned())]),
+        );
+
+        let builtin = Path::new("Gaussian_Blur.aex");
+        assert_eq!(
+            registration_label(builtin, &plans[0].entry, true),
+            "AEXCompat\\ブラー＆シャープ"
+        );
+        assert_eq!(
+            registration_label(builtin, &plans[0].entry, false),
+            "AEXCompat\\Blur & Sharpen"
+        );
+        assert_eq!(
+            registration_label(builtin, &plans[1].entry, true),
+            "AEXCompat\\スタイライズ",
+            "the secondary identity category overrides the module stem fallback"
+        );
+        let unknown = discovered(5, 64, build(1));
+        assert_eq!(
+            registration_label(Path::new("ThirdParty.aex"), &unknown, true),
+            "AEXCompat"
+        );
+    }
+
     // --- cluster sessions (issue #405) ---
 
     fn artifact(name: &str, sha_byte: u8) -> ApprovedImageArtifact {
@@ -2384,10 +4008,9 @@ mod tests {
         assert_ne!(closure_identity_of(&first), closure_identity_of(&missing));
     }
 
-    fn planned(identity: Option<&str>, dependency_count: usize) -> PlannedMember {
+    fn planned(identity: Option<&str>, _dependency_count: usize) -> PlannedMember {
         PlannedMember {
             identity: identity.map(str::to_owned),
-            dependency_count,
         }
     }
 
@@ -2401,23 +4024,19 @@ mod tests {
             planned(Some("cluster"), 2),
         ];
         let tasks = plan_tasks(&members);
-        // One cluster over members 0/1/4 (first-seen), then singles in scan
-        // order for the singleton identity and the failed resolution.
+        // One shared cluster, one authenticated singleton session, then the
+        // unresolved member on the per-plugin path.
         assert_eq!(tasks.len(), 3);
         match &tasks[0] {
             DiscoveryTask::Cluster(members) => assert_eq!(members, &[0, 1, 4]),
             _ => panic!("first task must be the cluster"),
         }
-        for (task, expected) in tasks[1..].iter().zip([2usize, 3usize]) {
-            match task {
-                DiscoveryTask::Single(index) => assert_eq!(*index, expected),
-                _ => panic!("expected a singleton task"),
-            }
-        }
+        assert!(matches!(&tasks[1], DiscoveryTask::Cluster(indices) if indices == &[2]));
+        assert!(matches!(&tasks[2], DiscoveryTask::Single(3)));
     }
 
     #[test]
-    fn plan_tasks_keeps_oversized_clusters_on_the_per_plugin_path() {
+    fn plan_tasks_splits_oversized_groups_into_authenticated_singletons() {
         let members: Vec<PlannedMember> = (0..=MAX_CLUSTER_PLUGINS)
             .map(|_| planned(Some("huge"), 2))
             .collect();
@@ -2425,16 +4044,13 @@ mod tests {
         assert!(
             tasks
                 .iter()
-                .all(|task| matches!(task, DiscoveryTask::Single(_)))
+                .all(|task| matches!(task, DiscoveryTask::Cluster(indices) if indices.len() == 1))
         );
         assert_eq!(tasks.len(), MAX_CLUSTER_PLUGINS + 1);
     }
 
     #[test]
-    fn plan_tasks_routes_oversized_singleton_closures_to_a_one_member_cluster() {
-        // The threshold: deps + the measured system tail past the one-shot
-        // 512-module audit cap. 446 deps still fits (446 + 66 = 512, not
-        // over); 447 does not (issue #362/#478).
+    fn plan_tasks_routes_all_validated_singletons_to_one_member_sessions() {
         let members = vec![
             planned(Some("small"), 446),
             planned(Some("large"), 447),
@@ -2447,10 +4063,7 @@ mod tests {
             DiscoveryTask::Cluster(members) => members.clone(),
             _ => panic!("task {index} must be a cluster"),
         };
-        match &tasks[0] {
-            DiscoveryTask::Single(index) => assert_eq!(*index, 0),
-            _ => panic!("446 deps stays on the one-shot path"),
-        }
+        assert_eq!(cluster_of(0), vec![0]);
         assert_eq!(cluster_of(1), vec![1]);
         assert_eq!(cluster_of(2), vec![2]);
         // A failed closure resolution never clusters, however large the walk
@@ -2459,10 +4072,7 @@ mod tests {
             DiscoveryTask::Single(index) => assert_eq!(*index, 3),
             _ => panic!("an unresolved closure stays on the one-shot path"),
         }
-        match &tasks[4] {
-            DiscoveryTask::Single(index) => assert_eq!(*index, 4),
-            _ => panic!("a zero-dependency singleton stays on the one-shot path"),
-        }
+        assert_eq!(cluster_of(4), vec![4]);
     }
 
     #[test]
@@ -2504,12 +4114,102 @@ mod tests {
         assert_eq!(entry.params[2].choices, vec!["A", "B", "C"]);
         assert_eq!(entry.params[3].color, [255, 10, 20, 30]);
 
-        // PARAMS_SETUP rejection is a plugin-local failure, not a discovery.
-        let rejected = serde_json::json!({"params_setup_error": 25, "parameters": []});
+        // PARAMS_SETUP rejection is a plugin-local failure, not a discovery,
+        // and the entry says so (issue #1063) instead of staying a bare
+        // negative.
+        let rejected = serde_json::json!({
+            "status": "selector_error", "params_setup_error": 25, "parameters": []
+        });
         let mut entry = negative_entry(Path::new("effect.aex"), build(1));
         fill_entry_from_inspect_report(&mut entry, &rejected);
         assert!(!entry.ok);
         assert!(entry.params.is_empty());
+        assert!(
+            entry.failure_classification.is_none(),
+            "unclassified: retried"
+        );
+        let diagnostics = entry
+            .failure_diagnostics
+            .expect("an unusable report is recorded");
+        assert_eq!(diagnostics["classification"], serde_json::Value::Null);
+        assert_eq!(
+            diagnostics["cluster_error_kind"],
+            "inspected_report_unusable"
+        );
+        assert_eq!(diagnostics["reason"], "params_setup_rejected");
+        assert_eq!(diagnostics["params_setup_error"], 25);
+        assert_eq!(diagnostics["inspection_status"], "selector_error");
+        assert_eq!(diagnostics["parameter_count"], 0);
+
+        // A report the conversion cannot read is recorded with its reason.
+        let unreadable = serde_json::json!({"params_setup_error": 0});
+        let mut entry = negative_entry(Path::new("effect.aex"), build(1));
+        fill_entry_from_inspect_report(&mut entry, &unreadable);
+        assert!(!entry.ok);
+        let diagnostics = entry.failure_diagnostics.expect("recorded");
+        assert_eq!(
+            diagnostics["cluster_error_kind"],
+            "inspected_report_unusable"
+        );
+        assert_eq!(diagnostics["reason"], "inspection report has no parameters");
+    }
+
+    /// The session-path failure record (issue #1063): every `InspectError`
+    /// carries diagnostics, classified or not, and a partial worker report's
+    /// selector fields ride along.
+    #[test]
+    fn cluster_inspect_error_diagnostics_carry_the_partial_report() {
+        let report = serde_json::json!({
+            "status": "selector_error",
+            "global_setup_error": 0,
+            "params_setup_error": 13,
+            "global_setdown_error": 0,
+            "reported_num_params": 0,
+            "parameters": [],
+            "missing_suites": [{"name": "PF AE Private Effect Suite", "version": 5}],
+            "missing_suites_truncated": false,
+            "host_callback_timeline": {"records": [1, 2, 3]}
+        });
+        let diagnostics = cluster_inspect_error_diagnostics(
+            Some("nonzero_exit"),
+            "selector_error",
+            Some(20),
+            None,
+            Some(&report),
+        );
+        assert_eq!(diagnostics["classification"], "nonzero_exit");
+        assert_eq!(diagnostics["cluster_error_kind"], "selector_error");
+        assert_eq!(diagnostics["exit_code"], 20);
+        assert_eq!(diagnostics["inspection_status"], "selector_error");
+        assert_eq!(diagnostics["params_setup_error"], 13);
+        assert_eq!(diagnostics["global_setup_error"], 0);
+        assert_eq!(diagnostics["reported_num_params"], 0);
+        assert_eq!(diagnostics["parameter_count"], 0);
+        assert_eq!(diagnostics["missing_suites"][0]["version"], 5);
+        assert!(
+            diagnostics.get("host_callback_timeline").is_none(),
+            "only the bounded selector fields travel, not the whole report"
+        );
+        assert!(diagnostics.get("plugin_kind").is_none());
+
+        // Unclassified by design (the #309 state transition) still names why.
+        let diagnostics =
+            cluster_inspect_error_diagnostics(None, "identity_changed", None, None, None);
+        assert_eq!(diagnostics["classification"], serde_json::Value::Null);
+        assert_eq!(diagnostics["cluster_error_kind"], "identity_changed");
+        assert!(diagnostics.get("exit_code").is_none());
+        assert!(diagnostics.get("inspection_status").is_none());
+
+        // The entrypoint case keeps its plugin_kind for the AEGP router.
+        let diagnostics = cluster_inspect_error_diagnostics(
+            Some("nonzero_exit"),
+            "entrypoint_unresolved",
+            Some(12),
+            Some("invalid_pipl"),
+            Some(&serde_json::json!({"plugin_kind": "invalid_pipl"})),
+        );
+        assert_eq!(diagnostics["exit_code"], 12);
+        assert_eq!(diagnostics["plugin_kind"], "invalid_pipl");
     }
 
     // --- cluster session smoke tests against the protocol fixture (issue #405) ---
@@ -2522,38 +4222,60 @@ mod tests {
         /// is selected through the inherited process environment.
         static BEHAVIOR_LOCK: Mutex<()> = Mutex::new(());
 
+        /// Locates the session-protocol fixture, building it only when the
+        /// broker workspace has not produced it yet.
+        ///
+        /// Shelling out unconditionally was expensive twice over (#940): the
+        /// nested build ran once per test that needed a fixture, and its
+        /// `-p dummy-workers` selection resolves features differently from the
+        /// `--workspace` build that owns the same `broker/target/debug`, so the
+        /// two kept invalidating each other's fingerprints. Prefer whatever is
+        /// already there; the build stays as a fallback so a bare `cargo test`
+        /// against this bridge alone still works.
         fn build_session_fixture() -> PathBuf {
+            static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../broker/Cargo.toml");
-            let status = std::process::Command::new(env!("CARGO"))
-                .args(["build", "--manifest-path"])
-                .arg(&manifest)
-                .args(["-p", "dummy-workers", "--bin", "session_protocol_worker"])
-                .status()
-                .expect("run cargo build for the session protocol fixture");
-            assert!(status.success(), "session protocol fixture build failed");
-            manifest
+            let fixture = manifest
                 .parent()
                 .expect("workspace root")
-                .join("target/debug/session_protocol_worker.exe")
+                .join("target/debug/session_protocol_worker.exe");
+            if fixture.is_file() {
+                return fixture;
+            }
+            BUILT.get_or_init(|| {
+                let status = std::process::Command::new(env!("CARGO"))
+                    .args(["build", "--manifest-path"])
+                    .arg(&manifest)
+                    .args(["-p", "dummy-workers", "--bin", "session_protocol_worker"])
+                    .status()
+                    .expect("run cargo build for the session protocol fixture");
+                assert!(status.success(), "session protocol fixture build failed");
+            });
+            assert!(
+                fixture.is_file(),
+                "session protocol fixture was not produced: {}",
+                fixture.display()
+            );
+            fixture
         }
 
-        /// A temp repository whose `target/minihost-build/aex_render_worker.exe`
+        /// A temp repository whose `target/minihost-build/aex_worker.exe`
         /// is the protocol fixture and whose two "plug-ins" are two copies of
         /// one real PE image, so the closure resolver sees identical import
         /// sets — one shared closure identity, exactly the cluster shape. The
         /// L2 worker is deliberately absent: the one-shot inspect cannot
         /// succeed here, so a successful entry proves the cluster session
         /// path produced it.
-        fn cluster_repository() -> (PathBuf, PathBuf, PathBuf) {
+        fn cluster_repository() -> (TempRoot, PathBuf, PathBuf) {
             let fixture = build_session_fixture();
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = std::env::temp_dir().join(format!(
+            let root = TempRoot::from_path(std::env::temp_dir().join(format!(
                 "aexcompat-mf-cluster-{}-{nonce:032x}",
                 std::process::id()
-            ));
+            )));
             // The broker's worker-freshness check (#613, a recorded warning
             // rather than a gate since #729) walks `<repository>/minihost/src`
             // and flags a worker older than the newest source file. Give the
@@ -2575,7 +4297,7 @@ mod tests {
                 .unwrap();
             let worker_dir = root.join("target/minihost-build");
             std::fs::create_dir_all(&worker_dir).unwrap();
-            std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+            std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
             let one = root.join("one.aex");
             let two = root.join("two.aex");
             std::fs::copy(&fixture, &one).unwrap();
@@ -2586,6 +4308,7 @@ mod tests {
         fn dependency() -> DependencyConfig {
             DependencyConfig {
                 dirs: Vec::new(),
+                default_runtime: false,
                 module_limit: None,
                 byte_limit: None,
             }
@@ -2644,7 +4367,20 @@ mod tests {
                 std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
             }
             let (root, one, two) = cluster_repository();
-            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            let completed = Mutex::new(Vec::<PathBuf>::new());
+            let results = discover_all_with_progress(
+                &root,
+                &[one.clone(), two.clone()],
+                &dependency(),
+                build(1),
+                false,
+                &|batch| {
+                    completed
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .extend(batch.iter().map(|(path, _)| path.clone()));
+                },
+            );
             assert_eq!(results.len(), 2, "every plug-in gets a result");
             for (path, entry) in &results {
                 assert!(
@@ -2665,6 +4401,11 @@ mod tests {
                     "in-place discovery walks no closure"
                 );
             }
+            let mut completed = completed
+                .into_inner()
+                .unwrap_or_else(|error| error.into_inner());
+            completed.sort();
+            assert_eq!(completed, vec![one.clone(), two.clone()]);
             std::fs::remove_dir_all(&root).unwrap();
         }
 
@@ -2679,56 +4420,136 @@ mod tests {
                 std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "crash_on_inspect");
                 std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
             }
-                let (root, one, two) = cluster_repository();
-                let results =
-                    discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
-                unsafe {
-                    std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
-                    std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
-                }
-                assert_eq!(results.len(), 2, "every plug-in gets a result");
-                let first = results
-                    .iter()
-                    .find(|(path, _)| path == &one)
-                    .map(|(_, entry)| entry)
-                    .expect("the first member has an entry");
-                let second = results
-                    .iter()
-                    .find(|(path, _)| path == &two)
-                    .map(|(_, entry)| entry)
-                    .expect("the second member has an entry");
-                // The member the session died on is a structured failure...
-                assert_eq!(
-                    first.failure_classification.as_deref(),
-                    Some("cluster_session_invalidated"),
-                    "in-place session failure"
+            let (root, one, two) = cluster_repository();
+            let completed = Mutex::new(Vec::<(PathBuf, bool)>::new());
+            let results = discover_all_with_progress(
+                &root,
+                &[one.clone(), two.clone()],
+                &dependency(),
+                build(1),
+                false,
+                &|batch| {
+                    completed
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .extend(batch.iter().map(|(path, entry)| (path.clone(), entry.ok)));
+                },
+            );
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+                std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+            }
+            assert_eq!(results.len(), 2, "every plug-in gets a result");
+            let first = results
+                .iter()
+                .find(|(path, _)| path == &one)
+                .map(|(_, entry)| entry)
+                .expect("the first member has an entry");
+            let second = results
+                .iter()
+                .find(|(path, _)| path == &two)
+                .map(|(_, entry)| entry)
+                .expect("the second member has an entry");
+            // The member the session died on is a structured failure...
+            assert_eq!(
+                first.failure_classification.as_deref(),
+                Some("cluster_session_invalidated"),
+                "in-place session failure"
+            );
+            let fallback = first.cluster_fallback.as_ref().expect("fallback note");
+            assert_eq!(fallback.at_member, 0);
+            assert_eq!(fallback.resolution, "invalidated");
+            assert!(!first.ok, "a dead session is never rounded to success");
+            // ...and the remaining member was re-inspected per-plugin,
+            // which fails here (no L2 worker by design) but carries the
+            // note.
+            let fallback = second.cluster_fallback.as_ref().expect("fallback note");
+            assert_eq!(fallback.at_member, 0);
+            assert_eq!(fallback.resolution, "one_shot_fallback");
+            let mut completed = completed
+                .into_inner()
+                .unwrap_or_else(|error| error.into_inner());
+            completed.sort_by(|left, right| left.0.cmp(&right.0));
+            assert_eq!(completed, vec![(one.clone(), false), (two.clone(), false)]);
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        /// A member whose inspect column ran and whose selector refused
+        /// (issue #1063): the session continues, the member is a classified
+        /// negative (`nonzero_exit`, the one-shot exit-20 equivalent), and its
+        /// diagnostics carry the worker's partial report — which selector,
+        /// what code, which suite it could not acquire — instead of nothing.
+        #[test]
+        fn in_place_cluster_selector_error_keeps_the_worker_report_as_diagnostics() {
+            let _guard = BEHAVIOR_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            unsafe {
+                std::env::set_var(
+                    "AEXCOMPAT_TEST_SESSION_BEHAVIOR",
+                    "inspect_selector_error_report_plugin_1",
                 );
-                let fallback = first.cluster_fallback.as_ref().expect("fallback note");
-                assert_eq!(fallback.at_member, 0);
-                assert_eq!(fallback.resolution, "invalidated");
-                assert!(!first.ok, "a dead session is never rounded to success");
-                // ...and the remaining member was re-inspected per-plugin,
-                // which fails here (no L2 worker by design) but carries the
-                // note.
-                let fallback = second.cluster_fallback.as_ref().expect("fallback note");
-                assert_eq!(fallback.at_member, 0);
-                assert_eq!(fallback.resolution, "one_shot_fallback");
+                std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+            }
+            let (root, one, two) = cluster_repository();
+            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+            }
+            assert_eq!(results.len(), 2, "every plug-in gets a result");
+            let entry_of = |wanted: &PathBuf| {
+                results
+                    .iter()
+                    .find(|(path, _)| path == wanted)
+                    .map(|(_, entry)| entry)
+                    .expect("member has an entry")
+            };
+            let first = entry_of(&one);
+            assert!(first.ok, "the member before the failure still discovers");
+            assert!(first.failure_diagnostics.is_none());
+            let second = entry_of(&two);
+            assert!(!second.ok, "a refused selector is never rounded to success");
+            assert!(
+                second.cluster_fallback.is_none(),
+                "plug-in-local: the session was not invalidated"
+            );
+            assert_eq!(
+                second.failure_classification.as_deref(),
+                Some("nonzero_exit"),
+                "converges like the one-shot exit-20 path"
+            );
+            let diagnostics = second
+                .failure_diagnostics
+                .as_ref()
+                .expect("a selector_error records diagnostics");
+            assert_eq!(diagnostics["classification"], "nonzero_exit");
+            assert_eq!(diagnostics["cluster_error_kind"], "selector_error");
+            assert_eq!(diagnostics["exit_code"], 20);
+            assert_eq!(diagnostics["inspection_status"], "selector_error");
+            assert_eq!(diagnostics["global_setup_error"], 14);
+            assert_eq!(diagnostics["params_setup_error"], -1);
+            assert_eq!(diagnostics["global_setdown_error"], -1);
+            assert_eq!(diagnostics["reported_num_params"], 0);
+            assert_eq!(diagnostics["parameter_count"], 0);
+            assert_eq!(
+                diagnostics["missing_suites"],
+                serde_json::json!([{"name": "PF AE Private Effect Suite", "version": 3}])
+            );
             std::fs::remove_dir_all(&root).unwrap();
         }
 
         #[test]
-        fn in_place_cluster_sharding_keeps_membership_and_degrades_singletons() {
+        fn in_place_cluster_sharding_keeps_singleton_tails_authenticated() {
             let cluster = |indices: &[usize]| DiscoveryTask::Cluster(indices.to_vec());
             let members: Vec<usize> = (0..7).collect();
-            // parallelism 3 over 7 members: 3 chunks (3/3/1), the remainder
-            // degrading to a per-plugin task; membership is preserved.
+            // parallelism 3 over 7 members: 3 chunks (3/3/1), with the tail
+            // remaining a one-member session; membership is preserved.
             let sharded = shard_in_place_clusters(vec![cluster(&members)], 3);
             let mut seen = Vec::new();
             let mut cluster_count = 0;
             for task in &sharded {
                 match task {
                     DiscoveryTask::Cluster(chunk) => {
-                        assert!(chunk.len() >= 2, "no one-member cluster chunks");
                         cluster_count += 1;
                         seen.extend(chunk.iter().copied());
                     }
@@ -2736,7 +4557,7 @@ mod tests {
                 }
             }
             assert_eq!(seen, members, "sharding preserves order and membership");
-            assert_eq!(cluster_count, 2);
+            assert_eq!(cluster_count, 3);
             // Two-member clusters and singles pass through untouched.
             let untouched = shard_in_place_clusters(vec![cluster(&[0, 1])], 8);
             assert!(matches!(&untouched[0], DiscoveryTask::Cluster(chunk) if chunk.len() == 2));
@@ -2745,6 +4566,27 @@ mod tests {
             let three = shard_in_place_clusters(vec![cluster(&[0, 1, 2])], 8);
             assert_eq!(three.len(), 1);
             assert!(matches!(&three[0], DiscoveryTask::Cluster(chunk) if chunk.len() == 3));
+        }
+
+        #[test]
+        fn diagnostic_one_shot_uses_same_members_but_no_cluster_tasks() {
+            let planned: Vec<PlannedMember> = (0..7)
+                .map(|_| PlannedMember {
+                    identity: Some("same-roots".to_owned()),
+                })
+                .collect();
+            let clustered = plan_discovery_tasks(&planned, 3, false);
+            assert_eq!(clustered.len(), 3);
+            assert!(
+                clustered
+                    .iter()
+                    .all(|task| matches!(task, DiscoveryTask::Cluster(_)))
+            );
+            let one_shot = plan_discovery_tasks(&planned, 3, true);
+            assert_eq!(one_shot.len(), planned.len());
+            for (index, task) in one_shot.iter().enumerate() {
+                assert!(matches!(task, DiscoveryTask::Single(slot) if *slot == index));
+            }
         }
 
         #[test]
@@ -2765,12 +4607,12 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner())
                 .clear();
             let session = open_mf_session(MfSessionConfig {
-                repository: root.clone(),
+                repository: root.to_path_buf(),
                 plugin: one.clone(),
                 dependency: dependency(),
                 sha: sha_of(&one),
                 smart: false,
-                defaults: Vec::new(),
+                plugin_data_selector: None,
                 identity: GeomIdentity {
                     width: 8,
                     height: 4,
@@ -2779,6 +4621,7 @@ mod tests {
                     time_scale: 30,
                 },
                 layers: Vec::new(),
+                companions: Vec::new(),
                 cluster: Some(ClusterLaunch {
                     plugins: vec![(one.clone(), sha_of(&one)), (two.clone(), sha_of(&two))],
                     swap_payloads: vec![None, None],
@@ -2870,6 +4713,107 @@ mod tests {
         );
     }
 
+    fn tagged_pixel(tag: u8) -> PIXEL_RGBA {
+        PIXEL_RGBA {
+            r: tag,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+    }
+
+    fn red_tags(pixels: &[PIXEL_RGBA]) -> Vec<u8> {
+        pixels.iter().map(|pixel| pixel.r).collect()
+    }
+
+    fn tagged_pixels(tag: u8, count: usize) -> Vec<PIXEL_RGBA> {
+        (0..count).map(|_| tagged_pixel(tag)).collect()
+    }
+
+    #[test]
+    fn rendered_frame_origin_places_and_clips_at_every_object_edge() {
+        let source = [
+            tagged_pixel(1),
+            tagged_pixel(2),
+            tagged_pixel(3),
+            tagged_pixel(4),
+        ];
+
+        let mut zero = tagged_pixels(9, 16);
+        assert_eq!(
+            place_frame_at_origin(&mut zero, 4, 4, &source, 2, 2, 0, 0),
+            Ok(true)
+        );
+        assert_eq!(
+            red_tags(&zero),
+            vec![1, 2, 9, 9, 3, 4, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]
+        );
+
+        for (origin, expected) in [
+            ((-1, 1), vec![(4, 2), (8, 4)]),
+            ((3, 1), vec![(7, 1), (11, 3)]),
+            ((1, -1), vec![(1, 3), (2, 4)]),
+            ((1, 3), vec![(13, 1), (14, 2)]),
+        ] {
+            let mut destination = tagged_pixels(9, 16);
+            assert_eq!(
+                place_frame_at_origin(&mut destination, 4, 4, &source, 2, 2, origin.0, origin.1,),
+                Ok(true)
+            );
+            for (index, tag) in expected {
+                assert_eq!(destination[index].r, tag, "origin={origin:?} index={index}");
+            }
+            assert_eq!(
+                destination.iter().filter(|pixel| pixel.r != 9).count(),
+                2,
+                "only the clipped overlap is written for origin={origin:?}"
+            );
+        }
+
+        let mut corner = tagged_pixels(9, 16);
+        assert_eq!(
+            place_frame_at_origin(&mut corner, 4, 4, &source, 2, 2, 3, 3),
+            Ok(true)
+        );
+        assert_eq!(corner[15].r, 1);
+        assert_eq!(corner.iter().filter(|pixel| pixel.r != 9).count(), 1);
+    }
+
+    #[test]
+    fn rendered_frame_origin_fails_closed_without_an_object_overlap() {
+        let source = tagged_pixels(1, 4);
+        for origin in [(4, 0), (-2, 0), (0, 4), (0, -2)] {
+            let mut destination = tagged_pixels(9, 16);
+            assert_eq!(
+                place_frame_at_origin(&mut destination, 4, 4, &source, 2, 2, origin.0, origin.1,),
+                Ok(false)
+            );
+            assert_eq!(red_tags(&destination), vec![9; 16]);
+        }
+
+        let mut destination = tagged_pixels(9, 16);
+        assert_eq!(
+            place_frame_at_origin(&mut destination, 4, 4, &source, 3, 2, 0, 0),
+            Err(()),
+            "a source geometry/length mismatch is never copied"
+        );
+        assert_eq!(
+            place_frame_at_origin(
+                &mut destination,
+                u32::MAX,
+                u32::MAX,
+                &source,
+                2,
+                2,
+                i32::MAX,
+                i32::MAX,
+            ),
+            Err(()),
+            "an unrepresentable destination geometry fails before indexing"
+        );
+        assert_eq!(red_tags(&destination), vec![9; 16]);
+    }
+
     /// The virtual-buffer wiring reads layer slots from the RAW discovery
     /// parameters. Extracting from the registered config defaults instead is
     /// the bug this pins: `build_item` maps only float/integer/color, so a
@@ -2915,13 +4859,100 @@ mod tests {
         assert!(layer_slots_of(&survivors).is_empty());
     }
 
+    #[test]
+    fn exposed_defaults_match_the_values_the_ui_can_send() {
+        let parameter = InteractiveParameter {
+            slot: 1,
+            name: "Amount".into(),
+            kind: "float".into(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 5.0,
+            choices: Vec::new(),
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        };
+        let (_, _, sent) = build_item(&parameter, "Amount").expect("float is exposed");
+        assert_eq!(sent.value, 1.0);
+        assert_eq!(
+            aexcompat_broker::image_render::encode_interactive_payload(&[sent])
+                .expect("the exposed value is sendable"),
+            "v2|param_1@1:f64=1"
+        );
+
+        let popup = InteractiveParameter {
+            slot: 2,
+            name: "Mode".into(),
+            kind: "integer".into(),
+            minimum: 0.0,
+            maximum: 3.0,
+            value: 0.5,
+            choices: vec!["One".into(), "Two".into(), "Three".into()],
+            ..parameter
+        };
+        let (_, _, sent) = build_item(&popup, "Mode").expect("popup is exposed");
+        assert_eq!(sent.value, 1.0);
+        assert_eq!(
+            aexcompat_broker::image_render::encode_interactive_payload(&[sent])
+                .expect("the selected popup value is sendable"),
+            "v2|param_2@2:i32=1"
+        );
+    }
+
+    #[test]
+    fn untouched_defaults_are_not_render_assignments() {
+        let default = InteractiveParameter {
+            slot: 1,
+            name: "Amount".into(),
+            kind: "float".into(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 0.5,
+            choices: Vec::new(),
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        };
+        let mut metadata_only = default.clone();
+        metadata_only.visible = false;
+        assert!(
+            changed_interactive_parameters(std::slice::from_ref(&default), &[metadata_only])
+                .is_empty()
+        );
+
+        let mut changed = default.clone();
+        changed.value = 0.75;
+        assert_eq!(
+            changed_interactive_parameters(&[default], &[changed.clone()])
+                .into_iter()
+                .map(|item| item.slot)
+                .collect::<Vec<_>>(),
+            vec![changed.slot]
+        );
+    }
+
     // --- worker root resolution (issue #650) ---------------------------------
 
-    /// Lays out `<root>/target/minihost-build/aex_l2_worker.exe`.
+    /// Lays out `<root>/target/minihost-build/aex_worker.exe`.
     fn place_worker(root: &Path) {
         let dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("aex_l2_worker.exe"), b"MZ").unwrap();
+        std::fs::write(dir.join("aex_worker.exe"), b"MZ").unwrap();
     }
 
     /// A temp directory removed when the guard drops, so the suite does not
@@ -2929,12 +4960,16 @@ mod tests {
     struct TempRoot(PathBuf);
 
     impl TempRoot {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("aexcompat-mf-root-{}-{tag}", std::process::id()));
+        fn from_path(dir: PathBuf) -> Self {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
+        }
+
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("aexcompat-mf-root-{}-{tag}", std::process::id()));
+            Self::from_path(dir)
         }
 
         fn path(&self) -> &Path {
@@ -2946,6 +4981,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    impl std::ops::Deref for TempRoot {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.path()
+        }
+    }
+
+    impl AsRef<Path> for TempRoot {
+        fn as_ref(&self) -> &Path {
+            self.path()
+        }
+    }
+
+    #[test]
+    fn temp_root_is_removed_during_unwind() {
+        let path = std::env::temp_dir().join(format!(
+            "aexcompat-mf-root-{}-drop-on-unwind",
+            std::process::id()
+        ));
+        let unwind = std::panic::catch_unwind(|| {
+            let root = TempRoot::from_path(path.clone());
+            std::fs::write(root.join("fixture"), b"x").unwrap();
+            panic!("exercise panic cleanup");
+        });
+        assert!(unwind.is_err());
+        assert!(!path.exists(), "TempRoot::drop removed the fixture tree");
     }
 
     /// A deployed plugin finds its workers next to itself, with no setting at
@@ -3465,11 +5529,13 @@ mod tests {
             "an interrupted pass has to admit it"
         );
         assert!(
-            !discovery_summary(12, 3, false, DiscoveryPassKind::Background).contains("stopped early"),
+            !discovery_summary(12, 3, false, DiscoveryPassKind::Background)
+                .contains("stopped early"),
             "a complete pass must not claim it"
         );
         assert!(
-            discovery_summary(0, 576, true, DiscoveryPassKind::Background).contains("stopped early"),
+            discovery_summary(0, 576, true, DiscoveryPassKind::Background)
+                .contains("stopped early"),
             "the all-rejected wording carries it too"
         );
     }
@@ -3502,7 +5568,8 @@ mod tests {
         for (effects, rejected) in [(0usize, 576usize), (570, 6), (0, 0), (12, 0)] {
             assert_eq!(
                 discovery_is_alarming(effects, rejected),
-                discovery_summary(effects, rejected, false, DiscoveryPassKind::Background).contains("worker is likely failing"),
+                discovery_summary(effects, rejected, false, DiscoveryPassKind::Background)
+                    .contains("worker is likely failing"),
                 "({effects}, {rejected})"
             );
         }
@@ -3533,7 +5600,10 @@ mod tests {
         // that wording belongs to the background pass alone.
         let sync_cut = discovery_summary(12, 3, true, DiscoveryPassKind::FirstLaunch);
         assert!(sync_cut.contains("stopped early"), "{sync_cut}");
-        assert!(sync_cut.contains("continues in the background"), "{sync_cut}");
+        assert!(
+            sync_cut.contains("continues in the background"),
+            "{sync_cut}"
+        );
         assert!(!sync_cut.contains("next launch"), "{sync_cut}");
         assert!(
             discovery_summary(12, 3, true, DiscoveryPassKind::Background)
@@ -3694,14 +5764,51 @@ mod tests {
     #[test]
     fn known_pf_errors_are_named_and_unknown_ones_are_not() {
         assert_eq!(pf_error_name(4), Some("PF_Err_OUT_OF_MEMORY"));
+        assert_eq!(pf_error_name(13), Some("A_Err_MISSING_SUITE"));
         assert_eq!(pf_error_name(512), Some("PF_Err_INTERNAL_STRUCT_DAMAGED"));
         assert_eq!(
             pf_error_name(518),
             Some("PF_Err_CANNOT_PARSE_KEYFRAME_TEXT")
         );
         assert_eq!(pf_error_name(0), None);
+        // A_Err's own ordinals are what a suite call answers, not a selector.
+        // Naming them here would label a plug-in's own small code as a host
+        // failure it never had.
+        assert_eq!(pf_error_name(2), None);
+        assert_eq!(pf_error_name(7), None);
+        assert_eq!(pf_error_name(12), None);
+        assert_eq!(pf_error_name(24), None);
         assert_eq!(pf_error_name(-3), None);
         assert_eq!(pf_error_name(519), None);
+    }
+
+    /// A sweep report names each plug-in twice, and both spellings are joined
+    /// on by something (issue #957): a basename, and a `/`-separated path
+    /// relative to the scan folder that tells two same-named AEX apart. The
+    /// separator is not the platform's, so a report written on Windows joins
+    /// against the same key anywhere.
+    #[test]
+    fn a_swept_plugin_is_named_by_basename_and_by_its_path_under_the_scan_folder() {
+        let root = PathBuf::from(r"C:\Plug-ins");
+        let nested = plugin_name(&root.join(r"Effects\Cyco\Glow.aex"), &[root.clone()]);
+        assert_eq!(nested.basename, "Glow.aex");
+        assert_eq!(nested.relative, "Effects/Cyco/Glow.aex");
+
+        // Same file name, different folder: the relative spelling separates
+        // them where the basename alone would collapse two rows into one.
+        let sibling = plugin_name(&root.join(r"Effects\Other\Glow.aex"), &[root.clone()]);
+        assert_eq!(sibling.basename, nested.basename);
+        assert_ne!(sibling.relative, nested.relative);
+
+        // Directly in the scan folder, and under no scan folder at all: both
+        // fall back to the file name rather than to an empty or absolute one.
+        assert_eq!(
+            plugin_name(&root.join("Glow.aex"), &[root.clone()]).relative,
+            "Glow.aex"
+        );
+        let foreign = plugin_name(Path::new(r"D:\Elsewhere\Glow.aex"), &[root]);
+        assert_eq!(foreign.relative, "Glow.aex");
+        assert_eq!(foreign.basename, "Glow.aex");
     }
 
     /// One line when the trouble starts, then one every
@@ -3823,6 +5930,7 @@ mod tests {
             repository: "  C:\\repo  ".into(),
             module_limit: " 40 ".into(),
             byte_limit: "1073741824".into(),
+            japanese_categories: false,
         }
     }
 
@@ -3895,6 +6003,7 @@ mod tests {
             dependency_module_limit: Some(7),
             dependency_byte_limit: None,
             ignore: vec!["Noisy".into()],
+            category_language: None,
         };
         let form = form_from_config(&config);
         assert_eq!(form.dirs, "C:\\single\r\nC:\\more");
@@ -3902,6 +6011,12 @@ mod tests {
         assert_eq!(form.module_limit, "7");
         assert_eq!(form.byte_limit, "");
         assert_eq!(form.ignore, "Noisy");
+        assert!(form.japanese_categories, "an absent key reads as 日本語");
+        let english = Config {
+            category_language: Some("en".into()),
+            ..config
+        };
+        assert!(!form_from_config(&english).japanese_categories);
     }
 
     /// A dialog save must not destroy what it does not manage: comments and
@@ -3922,15 +6037,18 @@ mod tests {
             toml::Value::Array(vec!["C:\\plugins".into(), "D:\\more".into()]),
             "{text}"
         );
-        assert_eq!(reloaded["dependency_module_limit"], toml::Value::Integer(40));
+        assert_eq!(
+            reloaded["dependency_module_limit"],
+            toml::Value::Integer(40)
+        );
     }
 
     /// Clearing a field removes its key: an absent key already means "use the
     /// default", and a lingering stale value would override it.
     #[test]
     fn a_cleared_field_removes_its_key() {
-        let existing =
-            "dirs = ['C:\\plugins']\nrepository = 'C:\\repo'\ndependency_byte_limit = 9\n";
+        let existing = "dirs = ['C:\\plugins']\nrepository = 'C:\\repo'\n\
+                        dependency_byte_limit = 9\ncategory_language = 'en'\n";
         let edit = parse_form(&ConfigForm::default()).expect("an empty form is valid");
         let (text, backed_up) = merged_config_text(existing, &edit);
         assert!(!backed_up);
@@ -3965,6 +6083,7 @@ mod tests {
         assert_eq!(config.repository, Some(PathBuf::from("C:\\repo")));
         assert_eq!(config.dependency_byte_limit, Some(1 << 30));
         assert_eq!(config.ignore, vec!["Noisy.aex", "Slow"]);
+        assert_eq!(config.category_language.as_deref(), Some("en"));
         // And the reload shows in the dialog what was typed (modulo trimming).
         let form = form_from_config(&config);
         assert_eq!(form.dirs, "C:\\plugins\r\nD:\\more");
@@ -4100,12 +6219,15 @@ mod tests {
     #[test]
     fn the_dialog_template_is_well_formed() {
         let template = build_dialog_template();
-        let words: &[u16] = unsafe {
-            std::slice::from_raw_parts(template.as_ptr().cast(), template.len() * 2)
-        };
+        let words: &[u16] =
+            unsafe { std::slice::from_raw_parts(template.as_ptr().cast(), template.len() * 2) };
         // Header: style, exstyle, then the item count at u16 index 4.
         let style = (words[0] as u32) | ((words[1] as u32) << 16);
-        assert_ne!(style & DS_SETFONT, 0, "the font block below is only read with DS_SETFONT");
+        assert_ne!(
+            style & DS_SETFONT,
+            0,
+            "the font block below is only read with DS_SETFONT"
+        );
         let declared = words[4] as usize;
         // Count the DLGITEMTEMPLATE headers by walking the stream: after the
         // header (menu=0, class=0, title, pointsize, face), each item starts
@@ -4150,5 +6272,239 @@ mod tests {
         }
         assert_eq!(found, declared);
         assert!(at <= words.len());
+    }
+
+    #[test]
+    fn classic_fallback_selects_the_active_pooled_member() {
+        let cluster = ClusterLaunch {
+            plugins: vec![
+                (PathBuf::from("first.aex"), "first-sha".to_owned()),
+                (PathBuf::from("second.aex"), "second-sha".to_owned()),
+            ],
+            swap_payloads: vec![None, None],
+        };
+        let selected =
+            classic_fallback_identity(Path::new("opener.aex"), "opener-sha", Some(&cluster), 1)
+                .expect("the active nonzero cluster member is selectable");
+        assert_eq!(selected, (PathBuf::from("second.aex"), "second-sha".into()));
+        assert!(
+            classic_fallback_identity(Path::new("opener.aex"), "opener-sha", Some(&cluster), 2,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn classic_fallback_retains_request_bytes_and_requires_clean_close() {
+        let (reply, _rx) = channel();
+        let request = RenderReq {
+            current_time: 37,
+            rgba: vec![1, 2, 3, 4],
+            parameters: Some(vec![InteractiveParameter {
+                slot: 1,
+                kind: "float".into(),
+                name: "amount".into(),
+                value: 0.25,
+                minimum: 0.0,
+                maximum: 1.0,
+                choices: Vec::new(),
+                color: [0; 4],
+                components: [0.0; 3],
+                component_count: 0,
+                layer_path: None,
+                enabled: true,
+                visible: true,
+                supervised: false,
+                debug_summary: None,
+                custom_ui_events: 0,
+                control_size: [0; 2],
+            }]),
+            layer: Some((2, vec![9, 8, 7, 6])),
+            plugin_index: 1,
+            reply,
+        };
+        let retained = retain_frame_request(&request);
+        assert_eq!(retained.current_time, request.current_time);
+        assert_eq!(retained.rgba, request.rgba);
+        let retained_parameter = &retained.parameters.as_ref().unwrap()[0];
+        let request_parameter = &request.parameters.as_ref().unwrap()[0];
+        assert_eq!(retained_parameter.slot, request_parameter.slot);
+        assert_eq!(retained_parameter.name, request_parameter.name);
+        assert_eq!(retained_parameter.value, request_parameter.value);
+        assert_eq!(retained.layer, request.layer);
+
+        let frame = || RenderedFrame {
+            pixels: vec![4, 3, 2, 1],
+            width: 1,
+            height: 1,
+            origin_x: 0,
+            origin_y: 0,
+        };
+        assert!(matches!(
+            completed_classic_fallback_reply(Some(frame()), false),
+            FrameReply::SessionLost(_)
+        ));
+        assert!(matches!(
+            completed_classic_fallback_reply(None, true),
+            FrameReply::SessionLost(_)
+        ));
+        assert!(matches!(
+            completed_classic_fallback_reply(Some(frame()), true),
+            FrameReply::RenderedClassicFallback(_)
+        ));
+    }
+
+    #[test]
+    fn classic_fallback_orchestrator_launches_once_only_after_smart_authorization() {
+        let smart_close = serde_json::json!({
+            "invalidated": false,
+            "worker": { "classification": "ok" },
+            "frames_ok": 0,
+            "frames_errored": 1,
+            "smart_output_untouched_frames": 1,
+            "final_report": {
+                "status": "render_completed", "global_setdown_error": 0,
+                "guard_bytes_intact": true, "suite_leases_balanced": true,
+                "handle_lifetimes_balanced": true, "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true, "session_mode": true,
+                "session_render_error": 0, "session_sequence_setup_error": 0,
+                "session_sequence_setdown_error": 0, "pre_render_error": 0,
+                "smart_render_selector_error": 0, "smart_render_error": -6,
+                "output_pixels_valid": false, "empty_result_rect": false,
+                "result_rects_valid": true
+            }
+        });
+        let classic_close = serde_json::json!({
+            "invalidated": false,
+            "worker": { "classification": "ok" },
+            "final_report": {
+                "status": "render_completed", "global_setdown_error": 0,
+                "guard_bytes_intact": true, "suite_leases_balanced": true,
+                "handle_lifetimes_balanced": true, "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true, "render_error": 0,
+                "persistent_sequence_setup_error": 0,
+                "persistent_sequence_setdown_error": 0
+            }
+        });
+        let launches = std::cell::Cell::new(0);
+        let rejected = orchestrate_classic_fallback(
+            &serde_json::json!({}),
+            SmartFallbackEvidence::UntouchedOutput,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((None, classic_close.clone()))
+            },
+        );
+        assert!(!rejected.smart_authorized);
+        assert_eq!(launches.get(), 0, "invalid Smart close launches no Classic");
+
+        let frame = || RenderedFrame {
+            pixels: vec![1, 2, 3, 4],
+            width: 1,
+            height: 1,
+            origin_x: 0,
+            origin_y: 0,
+        };
+        let accepted = orchestrate_classic_fallback(
+            &smart_close,
+            SmartFallbackEvidence::UntouchedOutput,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((Some(frame()), classic_close.clone()))
+            },
+        );
+        assert!(accepted.smart_authorized);
+        assert_eq!(launches.get(), 1, "authorized Smart close launches once");
+        assert!(matches!(
+            accepted.reply,
+            FrameReply::RenderedClassicFallback(_)
+        ));
+
+        let mut unclean_classic = classic_close;
+        *unclean_classic
+            .pointer_mut("/final_report/global_setdown_error")
+            .unwrap() = serde_json::json!(4);
+        let rejected_classic = orchestrate_classic_fallback(
+            &smart_close,
+            SmartFallbackEvidence::UntouchedOutput,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((Some(frame()), unclean_classic))
+            },
+        );
+        assert_eq!(
+            launches.get(),
+            2,
+            "each authorization permits exactly one launch"
+        );
+        assert!(matches!(rejected_classic.reply, FrameReply::SessionLost(_)));
+    }
+
+    #[test]
+    fn heap_corruption_fallback_requires_exact_smart_close_and_clean_classic() {
+        let smart_close = serde_json::json!({
+            "render_path": "smart",
+            "session_clean": false,
+            "invalidated": true,
+            "invalidated_reason": { "reason": "worker_exited_during_close" },
+            "frames_ok": 2,
+            "frames_errored": 0,
+            "final_report": null,
+            "worker": {
+                "classification": "crashed",
+                "exit_code": 0xC000_0374u64,
+                "diagnostics": { "failure_stage": "smart_render" }
+            }
+        });
+        let classic_close = serde_json::json!({
+            "invalidated": false,
+            "worker": { "classification": "ok" },
+            "final_report": {
+                "status": "render_completed", "global_setdown_error": 0,
+                "guard_bytes_intact": true, "suite_leases_balanced": true,
+                "handle_lifetimes_balanced": true, "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true, "render_error": 0,
+                "persistent_sequence_setup_error": 0,
+                "persistent_sequence_setdown_error": 0
+            }
+        });
+        let launches = std::cell::Cell::new(0);
+        let frame = || RenderedFrame {
+            pixels: vec![1, 2, 3, 4],
+            width: 1,
+            height: 1,
+            origin_x: 0,
+            origin_y: 0,
+        };
+
+        let accepted = orchestrate_classic_fallback(
+            &smart_close,
+            SmartFallbackEvidence::HeapCorruption,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((Some(frame()), classic_close.clone()))
+            },
+        );
+        assert!(accepted.smart_authorized);
+        assert_eq!(launches.get(), 1);
+        assert!(matches!(
+            accepted.reply,
+            FrameReply::RenderedClassicFallback(_)
+        ));
+
+        let mut wrong_stage = smart_close;
+        *wrong_stage
+            .pointer_mut("/worker/diagnostics/failure_stage")
+            .unwrap() = serde_json::json!("frame_setdown");
+        let rejected = orchestrate_classic_fallback(
+            &wrong_stage,
+            SmartFallbackEvidence::HeapCorruption,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((Some(frame()), classic_close))
+            },
+        );
+        assert!(!rejected.smart_authorized);
+        assert_eq!(launches.get(), 1, "rejected evidence launches no Classic");
+        assert!(matches!(rejected.reply, FrameReply::SessionLost(_)));
     }
 }

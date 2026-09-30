@@ -23,7 +23,7 @@
       "parameter_value": 2,
       "classification": "crashed",
       "exit_code": 3221225477,
-      "failure_stage": "render",
+      "failure_stage": "classic_render",
       "output_created": false
     },
     {
@@ -32,7 +32,7 @@
       "parameter_value": 3,
       "classification": "timeout_killed",
       "exit_code": 57005,
-      "failure_stage": "render",
+      "failure_stage": "classic_render",
       "output_created": false
     },
     {

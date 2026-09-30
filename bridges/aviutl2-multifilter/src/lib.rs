@@ -19,25 +19,32 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
+use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use aexcompat_broker::after_effects_install::{
+    ae_support_files_for_plugin, latest_after_effects_plugins, latest_after_effects_support_files,
+    mediacore_dir,
+};
+use aexcompat_broker::companion_manifest::{ApprovedCompanion, CompanionSuiteIdentity};
 use aexcompat_broker::image_render::{
-    InteractiveParameter, RenderGpuBackend, RenderPixelFormat, encode_interactive_payload,
-    inspect_experimental_in_place,
+    InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
+    initialize_experimental_aegp_in_place, inspect_experimental_cleanup_contained_in_place,
+    inspect_experimental_in_place, inspect_experimental_in_place_plugin_data_effect,
 };
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyProvenance, survey_dependency_closure,
 };
 use aexcompat_broker::render_session::{
     ClusterRenderPlugins, DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest,
-    InspectOutcome, RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome,
+    InspectOutcome, PluginDataEffectSelector, RenderSession, SessionLayer, SessionOpenRequest,
+    SwapOutcome, validate_abandoned_smart_heap_corruption_close,
+    validate_abandoned_smart_untouched_close, validate_completed_session_close,
 };
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
-use aexcompat_broker::worker_module_audit::MAX_AUDITED_MODULES as ONESHOT_AUDIT_MODULE_LIMIT;
 use aviutl2_sys::filter2::{
     FILTER_ITEM_CHECKBOX, FILTER_ITEM_COLOR, FILTER_ITEM_COLOR_VALUE, FILTER_ITEM_SELECT,
     FILTER_ITEM_SELECT_ITEM, FILTER_ITEM_TRACK, FILTER_PLUGIN_TABLE, FILTER_PROC_VIDEO,
@@ -94,21 +101,10 @@ const MAX_CLUSTER_MODULE_BOUND: usize = 4096;
 /// open (issue #751).
 const MAX_CLUSTER_ADMITTED_DIRS: usize =
     aexcompat_broker::cluster_manifest::MAX_CLUSTER_ADMITTED_DIRS;
-/// The one-shot module-audit cap (the broker's `MAX_AUDITED_MODULES`): total
-/// modules across every category in one snapshot. A singleton whose closure
-/// cannot fit it is exactly the case the cluster session's declared-set
-/// audit exists for (issue #362), so discovery routes it to a one-member
-/// cluster session instead of the one-shot inspect.
-/// Estimated non-declared modules in a one-shot audit snapshot (the worker
-/// image plus the System32/WinSxS tail), measured ~65 for built-in AE
-/// effects. A singleton with `deps + SYSTEM_TAIL_ESTIMATE` over the one-shot
-/// cap would fail the audit there, so it goes to a one-member cluster
-/// session whose module bound is declared instead (issue #362).
-const SYSTEM_TAIL_ESTIMATE: usize = 66;
 /// Per-inspect watchdog deadline for a cluster discovery session (design §7).
-/// The one-shot inspect carries no deadline (#354: mapping a large closure
-/// must not be decided by wall-clock), so this stays generous — its job is to
-/// catch a hung resident worker, not to time a plugin.
+/// Every validated identity now takes this session route, including singleton
+/// and sharded-tail members. The bound stays generous: its job is to catch a
+/// hung worker, not to classify an otherwise slow plug-in as incompatible.
 const CLUSTER_INSPECT_DEADLINE: Duration = Duration::from_secs(300);
 
 /// References to every registered filter's session map, so `UninitializePlugin`
@@ -119,13 +115,13 @@ static SESSION_MAPS: Mutex<Vec<&'static SessionMap>> = Mutex::new(Vec::new());
 
 /// One registered AEX in a closure-identity cluster (issue #405): what the
 /// render pool needs to put the member into a cluster manifest — its path,
-/// its discovered SHA-256, and its exposed defaults (the swap payload).
+/// its discovered SHA-256, and its supported render route.
 #[derive(Clone)]
 struct ClusterMember {
     plugin: PathBuf,
     sha: String,
     smart: bool,
-    defaults: Vec<InteractiveParameter>,
+    companions: Vec<ApprovedCompanion>,
 }
 
 /// Registered AEXes grouped by dependency-closure identity (issue #405),
@@ -444,6 +440,8 @@ fn log_warn(message: &str) {
 }
 
 include!("config_ui.rs");
+include!("pipl_category.rs");
+include!("ae_builtin_categories.rs");
 include!("discovery_cache.rs");
 include!("discovery_inspection.rs");
 include!("runtime.rs");

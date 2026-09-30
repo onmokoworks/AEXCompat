@@ -14,6 +14,9 @@ namespace {
 constexpr std::size_t kCheckoutResultBytes = 76;
 constexpr std::size_t kMaxPixelCheckouts = 64;
 thread_local State g_default_state;
+// Counts what `--self-test-pf-checkout-intersection`'s stub allocator did; the
+// stub is a plain function pointer, so it needs somewhere to record that.
+thread_local int g_empty_layer_allocations_for_self_test;
 thread_local State* g_active_state{};
 
 int32_t finish_callback(callback_diagnostics::Callback callback, int32_t result,
@@ -45,11 +48,30 @@ void write_world_extent_hint(void* world, const std::array<int32_t, 4>& rect) {
   if (world) std::memcpy(static_cast<std::byte*>(world) + 44, rect.data(), sizeof(rect));
 }
 
+// The `extended_diag:pre_checkout_layer` line carried only the index, the
+// checkout id and the time. Which rect the plug-in asked for and which one the
+// host answered is what actually decides a SmartFX output extent, and having to
+// infer it from the two `input_checkout_*` report fields (each holding only the
+// last index-0 call) is how a multi-checkout PreRender stayed unreadable
+// (issue #1285).
+void trace_checkout_rect(const char* label, const std::array<int32_t, 4>& rect) {
+  if (!aexcompat::l2_detail::extended_diag_enabled()) return;
+  std::cerr << ' ' << label << "=[" << rect[0] << ',' << rect[1] << ','
+            << rect[2] << ',' << rect[3] << ']';
+}
+
 void write_checkout_result(void* destination,
                            const std::array<int32_t, 4>& result_rect,
                            const std::array<int32_t, 4>& max_result_rect,
                            int32_t reference_width,
                            int32_t reference_height) {
+  if (aexcompat::l2_detail::extended_diag_enabled()) {
+    std::cerr << "extended_diag:pre_checkout_answer";
+    trace_checkout_rect("result", result_rect);
+    trace_checkout_rect("max_result", max_result_rect);
+    std::cerr << " reference=" << reference_width << 'x' << reference_height
+              << "\n" << std::flush;
+  }
   auto* bytes = static_cast<unsigned char*>(destination);
   std::memset(bytes, 0, kCheckoutResultBytes);
   std::memcpy(bytes, result_rect.data(), sizeof(result_rect));
@@ -137,6 +159,15 @@ void State::clear_transient() {
   map_checkout_result_rect.fill(-1);
   malformed_checkout_requests = 0;
   empty_checkout_pixel_denials = 0;
+  empty_layer_param_checkouts = 0;
+  empty_layer_param_pixel_checkouts = 0;
+  empty_layer_world = {};
+  empty_layer_world_live = false;
+  allocate_empty_layer = nullptr;
+  // Set fresh by every dispatch, but a session that ends before that would
+  // otherwise carry the previous one's declared count into the range
+  // `pre_checkout_layer` accepts.
+  param_count = 0;
   gpu_render_dispatched = false;
 }
 
@@ -168,6 +199,9 @@ Session::~Session() {
   snapshot_->map_checkout_result_rect = state_.map_checkout_result_rect;
   snapshot_->malformed_checkout_requests = state_.malformed_checkout_requests;
   snapshot_->empty_checkout_pixel_denials = state_.empty_checkout_pixel_denials;
+  snapshot_->empty_layer_param_checkouts = state_.empty_layer_param_checkouts;
+  snapshot_->empty_layer_param_pixel_checkouts =
+      state_.empty_layer_param_pixel_checkouts;
   snapshot_->pixel_checkouts_balanced = pixel_checkouts_balanced();
   state_.clear_transient();
   g_active_state = previous_;
@@ -181,32 +215,57 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   // made on a thread other than the selector thread cannot be bound safely.
   using callback_diagnostics::Callback;
   using callback_diagnostics::Reason;
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:pre_checkout_layer index=" << index
+              << " id=" << checkout_id << " time=" << what_time << "/"
+              << time_scale << " step=" << time_step << "\n" << std::flush;
   if (!g_active_state)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::NoActiveState);
-  if (time_step <= 0 || time_scale == 0)
+  // time_step == 0 is accepted, same acceptance as checkout_param: ForceMB and
+  // WideTime (AE-shipped) request their input layer with a zero step and
+  // render in AE (the #777 inference form). The step is recorded for
+  // diagnostics only; negative stays refused.
+  if (time_step < 0 || time_scale == 0)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::InvalidArguments);
   auto& runtime = *g_active_state;
   const bool current_time =
       static_cast<int64_t>(what_time) * runtime.current_time_scale ==
       static_cast<int64_t>(runtime.current_time) * time_scale;
-  if (!current_time && !runtime.wide_time_checkout_allowed) {
+  auto hosted = runtime.hosted_layers.end();
+  // A repeated timestamp may have a newer input than the retained history.
+  // Its current slot-0 checkout must always use this dispatch's input world.
+  if (!(index == 0 && current_time)) {
+    hosted = std::find_if(runtime.hosted_layers.begin(),
+        runtime.hosted_layers.end(), [index, what_time, time_scale](const auto& layer) {
+          return layer.slot == index && layer.timed &&
+              same_rational_time(layer.time, layer.time_scale, what_time, time_scale);
+        });
+    if (hosted == runtime.hosted_layers.end())
+      hosted = std::find_if(runtime.hosted_layers.begin(), runtime.hosted_layers.end(),
+          [index](const auto& layer) { return layer.slot == index && !layer.timed; });
+  }
+  // WIDE_TIME_INPUT describes a cache dependency; it cannot conjure pixels for
+  // another time. Serve an exact hosted frame (or a time-invariant layer), but
+  // never alias the current input world for an unavailable temporal request.
+  if (!current_time && hosted == runtime.hosted_layers.end()) {
     ++runtime.rejected_temporal_checkouts;
     return finish_callback(
         Callback::PreCheckoutLayer, 4, Reason::TemporalCheckoutDenied);
   }
-  auto hosted = std::find_if(runtime.hosted_layers.begin(),
-      runtime.hosted_layers.end(), [index, what_time, time_scale](const auto& layer) {
-        return layer.slot == index && layer.timed &&
-            same_rational_time(layer.time, layer.time_scale, what_time, time_scale);
-      });
-  if (hosted == runtime.hosted_layers.end())
-    hosted = std::find_if(runtime.hosted_layers.begin(), runtime.hosted_layers.end(),
-        [index](const auto& layer) { return layer.slot == index && !layer.timed; });
   const bool timed_slot = std::any_of(runtime.hosted_layers.begin(),
       runtime.hosted_layers.end(),
       [index](const auto& layer) { return layer.slot == index && layer.timed; });
   std::array<int32_t, 4> request_rect{};
   const CheckoutRequestState request_state = parse_checkout_request(request, request_rect);
+  if (aexcompat::l2_detail::extended_diag_enabled()) {
+    std::cerr << "extended_diag:pre_checkout_request state="
+              << (request_state == CheckoutRequestState::Full ? "full"
+                  : request_state == CheckoutRequestState::Rect ? "rect"
+                                                                : "malformed");
+    if (request_state != CheckoutRequestState::Full)
+      trace_checkout_rect("rect", request_rect);
+    std::cerr << "\n" << std::flush;
+  }
   if (request_state == CheckoutRequestState::Malformed) {
     ++runtime.malformed_checkout_requests;
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::MalformedRequest);
@@ -242,23 +301,25 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         hosted->view_world, hosted->checkout_rect, false});
     return finish_callback(Callback::PreCheckoutLayer, 0);
   }
-  if (timed_slot)
+  // Slot 0's current frame is the dedicated input_world, not a member of the
+  // retained history. Timed history for that slot must not hide this frame.
+  if (timed_slot && index != 0)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::UnknownLayer);
-  if (request && index == 0 && checkout_id == 0)
+  if (request && index == 0)
     std::memcpy(runtime.input_checkout_request.data(), request,
                 sizeof(runtime.input_checkout_request));
   if (request && index == runtime.secondary_layer_slot) {
     std::memcpy(runtime.map_checkout_request.data(), request,
                 sizeof(runtime.map_checkout_request));
   }
-  if (index == 0 && checkout_id == 0) {
+  if (index == 0) {
     runtime.checkout_time = what_time;
     runtime.checkout_time_step = time_step;
     runtime.checkout_time_scale = time_scale;
   }
   if (!result)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::InvalidArguments);
-  if (index == 0 && checkout_id == 0) {
+  if (index == 0) {
     // No `input_world` check: PreRender answers geometry, and a plug-in is
     // entitled to ask before any world exists to hand it. `checkout_pixels`
     // fails closed on a registration with no world, which is where a missing
@@ -295,6 +356,38 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         false});
     return finish_callback(Callback::PreCheckoutLayer, 0);
   }
+  // This slot is not an arbitrary unset layer parameter: the render request
+  // designates it as the external secondary input. If no world was supplied,
+  // registering a synthetic transparent layer changes the plug-in's control
+  // flow from "secondary unavailable" to "real transparent footage". Refuse
+  // the checkout so effects with a procedural no-secondary fallback can use it;
+  // other declared layer parameters still receive the empty-layer contract
+  // below (issue #1243).
+  if (index == runtime.secondary_layer_slot)
+    return finish_callback(Callback::PreCheckoutLayer, 4, Reason::MissingWorld);
+  // A layer parameter this host has no world for.
+  //
+  // The SDK admits this answer directly: PF_CheckoutResult::result_rect is
+  // documented as "the rectangle actually available from this request (can be
+  // empty)", and checkout_layer's index is "0 = input, 1..n = param", so
+  // asking about a parameter is expected and an empty answer is a real one. A
+  // plug-in reads the empty rect as "no layer here" and carries on; refusing
+  // the call instead ends its PreRender, which is what happened to DeepGlow2
+  // when it asked about a layer parameter its project leaves unset (issue
+  // #898).
+  //
+  // The registration carries no world of its own; `checkout_pixels` answers the
+  // follow-up from the dispatch's shared empty layer - see the paragraph there
+  // for what shape that is and why (issues #958, #962).
+  if (index >= 1 && index <= runtime.param_count) {
+    ++runtime.empty_layer_param_checkouts;
+    const std::array<int32_t, 4> empty{0, 0, 0, 0};
+    write_checkout_result(result, empty, empty, runtime.width, runtime.height);
+    forget_checkout(runtime, checkout_id);
+    runtime.pixel_checkouts.push_back(
+        {checkout_id, nullptr, nullptr, empty, false, true});
+    return finish_callback(Callback::PreCheckoutLayer, 0);
+  }
   return finish_callback(Callback::PreCheckoutLayer, 4, Reason::UnknownLayer);
 }
 
@@ -314,17 +407,68 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
       });
   if (checkout == runtime.pixel_checkouts.end())
     return finish_callback(Callback::CheckoutPixels, 4, Reason::UnknownCheckout);
+  checkout->checkout_attempted = true;
+  // A checkout PreRender already answered as empty. The plug-in was told there
+  // are no pixels here (an empty result_rect, which the SDK documents as a real
+  // answer), and asking for them anyway is not a fault on either side: AE hands
+  // an effect a layer parameter with no source as an empty layer, not as a
+  // failed call. Refusing instead ended DeepGlow2's SmartRender (issue #898).
+  //
+  // What comes back is an empty *layer*, not an empty answer: a real
+  // PF_EffectWorld at the session's geometry with every pixel zero. A layer
+  // parameter with no layer is transparent, not absent, and the two shapes that
+  // tried to say "absent" each broke a real plug-in - a null pointer behind
+  // PF_Err_NONE (3DGlasses answered PF_Err_BAD_CALLBACK_PARAM) and a 120-byte
+  // zeroed world describing a 0x0 layer (DeepGlow2 answered
+  // PF_Err_INTERNAL_STRUCT_DAMAGED). Both were shipped, in that order, and each
+  // was measured only against the plug-in it was written for (issues #958,
+  // #962).
+  //
+  // One world for all of a dispatch's empty parameters, handed out as many
+  // times as it is asked for and not re-cleared between checkouts. Checked-out
+  // layer pixels are the host's to read from, not the plug-in's to write to, so
+  // sharing them is the same thing AE does with one "None" layer; a plug-in
+  // that writes through this would see its own writes on the next empty
+  // parameter, which is recorded on #962 rather than paid for with a
+  // full-frame clear per checkout.
+  //
+  // The geometry deliberately does not match the empty rect PreRender answered
+  // for the same checkout. Answering the session rect there instead was tried
+  // and is worse: 3DGlasses fails at both, where with the empty rect it renders.
+  // Why a plug-in reads the pair that way is an oracle question (#962).
+  if (checkout->empty_layer_param) {
+    // Allocated on first need, through the hook the dispatch installs: the
+    // world comes out of the same bounded registry a plug-in's own
+    // PF_NEW_WORLD draws from, so a frame that never asks for an empty layer
+    // must not hold a full frame's worth of it. Without one there is nothing to
+    // hand back that the host's other callbacks would accept, so fail closed.
+    if (!runtime.empty_layer_world_live && runtime.allocate_empty_layer)
+      runtime.empty_layer_world_live =
+          runtime.allocate_empty_layer(runtime.empty_layer_world.data());
+    if (!runtime.empty_layer_world_live)
+      return finish_callback(Callback::CheckoutPixels, 4, Reason::MissingWorld);
+    if (checkout->checked_out) {
+      *world = runtime.empty_layer_world.data();
+      return finish_callback(Callback::CheckoutPixels, 0);
+    }
+    ++runtime.empty_layer_param_pixel_checkouts;
+    checkout->checked_out = true;
+    checkout->ever_checked_out = true;
+    *world = runtime.empty_layer_world.data();
+    return finish_callback(Callback::CheckoutPixels, 0);
+  }
   if (!checkout->world)
     return finish_callback(Callback::CheckoutPixels, 4, Reason::MissingWorld);
-  if (checkout->checked_out)
-    return finish_callback(Callback::CheckoutPixels, 4, Reason::AlreadyCheckedOut);
   if (checkout_promised_no_pixels(checkout->rect)) {
     ++runtime.empty_checkout_pixel_denials;
     return finish_callback(Callback::CheckoutPixels, 4, Reason::EmptyResult);
   }
   *world = use_views && checkout->view_world
       ? checkout->view_world : checkout->world;
+  if (checkout->checked_out)
+    return finish_callback(Callback::CheckoutPixels, 0);
   checkout->checked_out = true;
+  checkout->ever_checked_out = true;
   return finish_callback(Callback::CheckoutPixels, 0);
 }
 
@@ -340,8 +484,20 @@ int32_t __cdecl checkin_pixels(void*, int32_t checkout_id) {
       });
   if (checkout == runtime.pixel_checkouts.end())
     return finish_callback(Callback::CheckinPixels, 4, Reason::UnknownCheckout);
-  if (!checkout->checked_out)
+  if (!checkout->checked_out &&
+      (checkout->ever_checked_out || checkout->checkout_attempted))
     return finish_callback(Callback::CheckinPixels, 4, Reason::NotCheckedOut);
+  // Some effects retire every successful PreRender checkout id even when
+  // SmartRender did not need that id's pixels. PathArray does this for an
+  // empty alternate layer: rejecting the first checkin makes the otherwise
+  // valid render fail. Consume the unused registration exactly once. Erasing
+  // it keeps a second checkin and any later checkout fail-closed as stale,
+  // while the ordinary checkout/checkin/re-checkout lifecycle below remains
+  // reusable.
+  if (!checkout->checked_out) {
+    runtime.pixel_checkouts.erase(checkout);
+    return finish_callback(Callback::CheckinPixels, 0);
+  }
   checkout->checked_out = false;
   return finish_callback(Callback::CheckinPixels, 0);
 }
@@ -428,7 +584,7 @@ bool checkout_intersection_self_test() {
   runtime.height = 360;
   runtime.current_time = 7;
   runtime.current_time_scale = 30;
-  std::array<std::byte, 120> input_world{}, input_view{};
+  aexcompat::world_safety::EffectWorldStorage input_world{}, input_view{};
   runtime.input_world = input_world.data();
   runtime.input_checkout_view_world = input_view.data();
   const auto verify = [&](const std::array<int32_t, 4>* requested,
@@ -464,7 +620,7 @@ bool checkout_intersection_self_test() {
   const uint32_t malformed_before = runtime.malformed_checkout_requests;
   passed = verify(&inverted, 4, {}) &&
       runtime.malformed_checkout_requests == malformed_before + 1 && passed;
-  std::array<std::byte, 120> hosted_world{}, hosted_view{};
+  aexcompat::world_safety::EffectWorldStorage hosted_world{}, hosted_view{};
   runtime.hosted_layers.push_back({3, 0, 1, false, 50, 40, -1,
       hosted_world.data(), hosted_view.data(), {-1, -1, -1, -1}});
   const std::array<int32_t, 4> hosted_request_rect{10, 10, 60, 60};
@@ -481,6 +637,39 @@ bool checkout_intersection_self_test() {
   passed = hosted_answer == std::array<int32_t, 4>{10, 10, 50, 40} &&
       hosted_maximum == std::array<int32_t, 4>{0, 0, 50, 40} &&
       runtime.hosted_layers.front().checkout_rect == hosted_answer && passed;
+  // The resident session has supplied an actual earlier primary-input world.
+  // A valid timed checkout must resolve that world even without WIDE_TIME_INPUT;
+  // a different, unsupplied time must still fail rather than alias the current.
+  aexcompat::world_safety::EffectWorldStorage prior_input{}, prior_view{};
+  runtime.hosted_layers.push_back({0, 6, 30, true, 640, 360, -1,
+      prior_input.data(), prior_view.data(), {-1, -1, -1, -1}});
+  // A resident session can render the same timestamp twice with different
+  // pixels. The old hosted world must not supersede the current input.
+  aexcompat::world_safety::EffectWorldStorage stale_input{}, stale_view{};
+  runtime.hosted_layers.push_back({0, 7, 30, true, 640, 360, -1,
+      stale_input.data(), stale_view.data(), {-1, -1, -1, -1}});
+  const uint32_t rejected_before_prior = runtime.rejected_temporal_checkouts;
+  passed = pre_checkout_layer(nullptr, 0, 10, nullptr, 6, 1, 30,
+                              hosted_result.data()) == 0 && passed;
+  void* prior_pixels{};
+  passed = checkout_pixels(nullptr, 10, &prior_pixels) == 0 &&
+      prior_pixels == prior_view.data() && checkin_pixels(nullptr, 10) == 0 &&
+      runtime.rejected_temporal_checkouts == rejected_before_prior && passed;
+  forget_checkout(runtime, 10);
+  void* current_pixels{};
+  passed = pre_checkout_layer(nullptr, 0, 11, nullptr, 7, 1, 30,
+                              hosted_result.data()) == 0 &&
+      checkout_pixels(nullptr, 11, &current_pixels) == 0 &&
+      current_pixels == input_view.data() &&
+      checkin_pixels(nullptr, 11) == 0 && passed;
+  forget_checkout(runtime, 11);
+  passed = pre_checkout_layer(nullptr, 0, 10, nullptr, 5, 1, 30,
+                              hosted_result.data()) == 4 &&
+      runtime.rejected_temporal_checkouts == rejected_before_prior + 1 &&
+      pre_checkout_layer(nullptr, 0, 10, nullptr, 6, 1, 0,
+                         hosted_result.data()) == 4 && passed;
+  runtime.hosted_layers.pop_back();
+  runtime.hosted_layers.pop_back();
   void* checked_out{};
   // Re-checking out an id answers the NEW geometry, leaves exactly one
   // registration, and that registration carries the new answer. Refusing the
@@ -501,6 +690,14 @@ bool checkout_intersection_self_test() {
   passed = pre_checkout_layer(nullptr, 9, 7, hosted_request.data(), 7, 1, 30,
                               hosted_result.data()) == 4 &&
       registration_for(7) != runtime.pixel_checkouts.end() && passed;
+  // A non-empty registration without an admitted world remains a hard
+  // failure; repeated-checkout idempotency must not turn missing backing into
+  // a successful null answer.
+  runtime.pixel_checkouts.push_back({99, nullptr, nullptr, partial, false, false});
+  checked_out = input_world.data();
+  passed = checkout_pixels(nullptr, 99, &checked_out) == 4 &&
+      checked_out == nullptr && checkin_pixels(nullptr, 99) == 4 && passed;
+  forget_checkout(runtime, 99);
   passed = pre_checkout_layer(nullptr, 3, 7, narrower_request.data(), 7, 1, 30,
                               hosted_result.data()) == 0 &&
       runtime.pixel_checkouts.size() == registrations_before &&
@@ -512,7 +709,8 @@ bool checkout_intersection_self_test() {
       checkin_pixels(nullptr, 999) == 4 &&
       checkout_pixels(nullptr, 7, &checked_out) == 0 &&
       checked_out == hosted_view.data() &&
-      checkout_pixels(nullptr, 7, &checked_out) == 4 &&
+      checkout_pixels(nullptr, 7, &checked_out) == 0 &&
+      checked_out == hosted_view.data() &&
       !pixel_checkouts_balanced() &&
       checkin_pixels(nullptr, 7) == 0 &&
       pixel_checkouts_balanced() &&
@@ -545,6 +743,105 @@ bool checkout_intersection_self_test() {
       checked_out == input_world.data() &&
       checkin_pixels(nullptr, 0) == 0 &&
       pixel_checkouts_balanced() && passed;
+
+  // A layer parameter this host has no world for: PreRender answers an empty
+  // rect and SmartRender hands back the session's empty layer. Both halves are
+  // pinned because both are what a plug-in reads, and the pair decides whether
+  // a real effect renders. Two other shapes stood here and each broke one:
+  // a null pointer behind PF_Err_NONE (3DGlasses) and a 120-byte zeroed world
+  // describing a 0x0 layer (DeepGlow2 answered PF_Err_INTERNAL_STRUCT_DAMAGED
+  // for the whole frame). Nothing pinned the shape while it changed twice
+  // (issues #958, #962).
+  runtime.gpu_render_dispatched = false;
+  runtime.param_count = 9;
+  std::array<std::byte, kCheckoutResultBytes> empty_result{};
+  const uint32_t empty_before = runtime.empty_layer_param_checkouts;
+  const uint32_t empty_pixels_before = runtime.empty_layer_param_pixel_checkouts;
+  passed = pre_checkout_layer(nullptr, 5, 21, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 &&
+      runtime.empty_layer_param_checkouts == empty_before + 1 && passed;
+  std::array<int32_t, 4> empty_answer{1, 1, 1, 1}, empty_maximum{1, 1, 1, 1};
+  std::memcpy(empty_answer.data(), empty_result.data(), sizeof(empty_answer));
+  std::memcpy(empty_maximum.data(), empty_result.data() + 16,
+              sizeof(empty_maximum));
+  const std::array<int32_t, 4> nothing{0, 0, 0, 0};
+  // No hook and no layer - the dispatch installs the one and it allocates the
+  // other - so the checkout fails closed rather than answering with a pointer
+  // to an uninitialized struct.
+  checked_out = input_world.data();
+  passed = empty_answer == nothing && empty_maximum == nothing &&
+      !runtime.empty_layer_world_live && !runtime.allocate_empty_layer &&
+      checkout_pixels(nullptr, 21, &checked_out) == 4 && passed;
+  // With the hook, the checkout allocates on first need and spends the checkout
+  // like any other: an empty layer is an answer, not a skipped call. The hook
+  // stands in for the dispatch's allocation here; what it does with the storage
+  // is the registry's business, and what this pins is that the runtime asks for
+  // one exactly once and hands back what came of it.
+  g_empty_layer_allocations_for_self_test = 0;
+  runtime.allocate_empty_layer = +[](void* storage) {
+    ++g_empty_layer_allocations_for_self_test;
+    std::memset(storage, 0, 120);
+    return true;
+  };
+  checked_out = nullptr;
+  passed = checkout_pixels(nullptr, 21, &checked_out) == 0 &&
+      checked_out == runtime.empty_layer_world.data() &&
+      runtime.empty_layer_world_live &&
+      g_empty_layer_allocations_for_self_test == 1 &&
+      runtime.empty_layer_param_pixel_checkouts == empty_pixels_before + 1 &&
+      checkout_pixels(nullptr, 21, &checked_out) == 0 &&
+      checked_out == runtime.empty_layer_world.data() &&
+      runtime.empty_layer_param_pixel_checkouts == empty_pixels_before + 1 &&
+      !pixel_checkouts_balanced() &&
+      checkin_pixels(nullptr, 21) == 0 &&
+      pixel_checkouts_balanced() && passed;
+  // The configured secondary input is not an arbitrary unset parameter. When
+  // no secondary world was supplied, refusing its checkout leaves the effect
+  // free to use its own procedural fallback instead of presenting a synthetic
+  // transparent input as real footage.
+  checked_out = input_world.data();
+  passed = pre_checkout_layer(nullptr, 6, 24, nullptr, 7, 1, 30,
+                              empty_result.data()) == 4 &&
+      checkout_pixels(nullptr, 24, &checked_out) == 4 && !checked_out && passed;
+  // A second ordinary empty parameter reuses the lazily allocated world rather
+  // than allocating again: the registry it comes from is bounded and shared
+  // with the plug-in's own worlds.
+  passed = pre_checkout_layer(nullptr, 8, 24, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 &&
+      checkout_pixels(nullptr, 24, &checked_out) == 0 &&
+      g_empty_layer_allocations_for_self_test == 1 &&
+      checkin_pixels(nullptr, 24) == 0 && passed;
+  // A successful PreRender registration may be retired without a pixel
+  // checkout. This is the exact PathArray shape: it registers an empty
+  // alternate layer, uses only its other layers in SmartRender, then checks
+  // every registered id back in. The first checkin consumes the registration;
+  // a duplicate checkin and a later checkout remain stale failures, and no
+  // empty world was allocated for pixels that were never requested.
+  const int allocations_before_unused_checkin =
+      g_empty_layer_allocations_for_self_test;
+  passed = pre_checkout_layer(nullptr, 9, 26, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 &&
+      checkin_pixels(nullptr, 26) == 0 &&
+      checkin_pixels(nullptr, 26) == 4 &&
+      checkout_pixels(nullptr, 26, &checked_out) == 4 &&
+      g_empty_layer_allocations_for_self_test ==
+          allocations_before_unused_checkin &&
+      passed;
+  // A hook that cannot allocate leaves the checkout refused, not answered.
+  runtime.empty_layer_world_live = false;
+  runtime.allocate_empty_layer = +[](void*) { return false; };
+  checked_out = input_world.data();
+  passed = pre_checkout_layer(nullptr, 7, 25, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 &&
+      checkout_pixels(nullptr, 25, &checked_out) == 4 && passed;
+  runtime.allocate_empty_layer = nullptr;
+  runtime.empty_layer_world_live = false;
+  // A parameter index past what the plug-in declared is still unknown; the
+  // empty answer is for the range it did declare, not for anything asked.
+  passed = pre_checkout_layer(nullptr, 5, 22, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 &&
+      pre_checkout_layer(nullptr, 10, 23, nullptr, 7, 1, 30,
+                         empty_result.data()) == 4 && passed;
   return passed;
 }
 

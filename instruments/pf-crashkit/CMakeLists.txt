@@ -1,4 +1,4 @@
-add_library(pf_crashkit MODULE pf_crashkit.cpp)
+add_library(pf_crashkit MODULE pf_crashkit.cpp pf_crashkit.rc)
 target_include_directories(pf_crashkit PRIVATE
   "$ENV{AE_SDK_ROOT}/Examples/Headers"
   "$ENV{AE_SDK_ROOT}/Examples/Headers/SP"

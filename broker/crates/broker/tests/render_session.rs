@@ -7,8 +7,6 @@
 //! demand, so per-frame validation, the frame-deadline watchdog, and crash
 //! invalidation are exercised without a native minihost build.
 
-mod common;
-
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
@@ -17,42 +15,29 @@ mod windows_e2e {
     use aexcompat_broker::render_session::{
         AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, ClusterRenderPlugins,
         DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest, InspectOutcome,
-        RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome, run_video_batch,
+        PluginDataEffectSelector, RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome,
+        run_video_batch, validate_abandoned_smart_heap_corruption_close,
+        validate_abandoned_smart_untouched_close,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
+    use aexcompat_broker::secure_launch::LaunchEnvironment;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const WIDTH: u32 = 8;
     const HEIGHT: u32 = 4;
 
-    // The fixture behavior is selected through the inherited environment, so
-    // tests that configure it must not interleave.
-    static BEHAVIOR_LOCK: Mutex<()> = Mutex::new(());
-
-    struct BehaviorGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-    impl BehaviorGuard {
-        fn set(behavior: Option<&str>) -> Self {
-            let guard = BEHAVIOR_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            unsafe {
-                match behavior {
-                    Some(value) => std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", value),
-                    None => std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR"),
-                }
-            }
-            Self(guard)
-        }
-    }
-    impl Drop for BehaviorGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
-            }
-        }
+    /// Selects one of the fixture worker's misbehaviors for a single session.
+    ///
+    /// The selector rides that session's own launch (issue #910) instead of
+    /// the broker's process environment, which is what used to force every
+    /// test in this file behind one mutex: `std::env::set_var` is
+    /// process-global, so two concurrent sessions could not disagree about the
+    /// fixture behavior. Nothing here touches process state, so these tests run
+    /// concurrently.
+    fn behavior(value: &str) -> LaunchEnvironment {
+        LaunchEnvironment::default().with_child_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", value)
     }
 
     struct TempRepository(PathBuf);
@@ -62,39 +47,47 @@ mod windows_e2e {
         }
     }
 
-    /// Sets the process-global opt-in minidump directory env for the duration
-    /// of a test and removes it on drop (panic-safe). Callers hold the behavior
-    /// lock, which serializes every session test that touches process-global
-    /// env, so the window cannot interleave with another behavior test.
-    struct MinidumpDirGuard;
-    impl MinidumpDirGuard {
-        fn set(value: &str) -> Self {
-            unsafe { std::env::set_var("AEXCOMPAT_MINIDUMP_DIR", value) };
-            Self
+    /// Resolve a dummy-workers fixture binary.
+    ///
+    /// The build directory already holds it when the workspace was built as a
+    /// whole, which is what CI does. Shelling out to `cargo build -p ...` from
+    /// inside a running test resolves features for that one package instead of
+    /// the workspace, so the differing fingerprint makes cargo rebuild crates
+    /// the outer `cargo test` had just built -- and the next test flips them
+    /// back, at roughly 50s a turn (#937). Build it here only when it is
+    /// missing, which is the local `cargo test --test ...` case.
+    fn fixture_binary(name: &str) -> PathBuf {
+        static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        let path = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!("{name}.exe"));
+        if path.is_file() {
+            return path;
         }
-    }
-    impl Drop for MinidumpDirGuard {
-        fn drop(&mut self) {
-            unsafe { std::env::remove_var("AEXCOMPAT_MINIDUMP_DIR") };
-        }
+        BUILT.get_or_init(|| {
+            let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+            let status = std::process::Command::new(env!("CARGO"))
+                .args(["build", "--manifest-path"])
+                .arg(manifest)
+                .args(["-p", "dummy-workers", "--bins"])
+                .status()
+                .expect("run cargo build for the dummy-workers fixtures");
+            assert!(status.success(), "dummy-workers fixture build failed");
+        });
+        assert!(
+            path.is_file(),
+            "fixture binary was not produced: {}",
+            path.display()
+        );
+        path
     }
 
     fn build_fixture() -> PathBuf {
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(manifest)
-            .args(["-p", "dummy-workers", "--bin", "session_protocol_worker"])
-            .status()
-            .expect("run cargo build for the session protocol fixture");
-        assert!(status.success(), "session protocol fixture build failed");
-        std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("session_protocol_worker.exe")
+        fixture_binary("session_protocol_worker")
     }
 
     fn write_freshness_source_marker(root: &Path) {
@@ -112,7 +105,7 @@ mod windows_e2e {
             .unwrap();
     }
 
-    /// A temp repository whose `target/minihost-build/aex_render_worker.exe`
+    /// A temp repository whose `target/minihost-build/aex_worker.exe`
     /// is the protocol fixture; the "plugin" is inert bytes sealed and staged
     /// like a real AEX.
     fn temp_repository() -> (TempRepository, PathBuf, String) {
@@ -125,11 +118,11 @@ mod windows_e2e {
         write_freshness_source_marker(&root);
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
         // The smart session dispatches the smart worker binary; the fixture
         // serves both roles and keys its final-report contract off the
         // session command word.
-        std::fs::copy(&fixture, worker_dir.join("aex_smart_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
         let plugin = root.join("plugin.plugin");
         let plugin_bytes = b"render session dummy plugin";
         std::fs::write(&plugin, plugin_bytes).unwrap();
@@ -137,13 +130,24 @@ mod windows_e2e {
         (TempRepository(root), plugin, sha)
     }
 
+    fn fixture_dependency_search_dirs(plugin: &Path) -> Vec<PathBuf> {
+        vec![
+            plugin
+                .parent()
+                .expect("fixture plugin has a parent directory")
+                .to_path_buf(),
+        ]
+    }
+
     fn open_session(
         repository: &Path,
         plugin: &Path,
         sha: &str,
         frame_deadline: Duration,
+        launch_environment: LaunchEnvironment,
     ) -> RenderSession {
         RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository,
             plugin_path: plugin,
             plugin_sha256: sha,
@@ -155,13 +159,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -172,14 +177,136 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment,
         })
         .expect("open render session")
+    }
+
+    fn open_smart_session(
+        repository: &Path,
+        plugin: &Path,
+        sha: &str,
+        launch_environment: LaunchEnvironment,
+    ) -> RenderSession {
+        RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
+            repository,
+            plugin_path: plugin,
+            plugin_sha256: sha,
+            parameters: None,
+            payload_override: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            camera_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            layers: &[],
+            dependencies: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(plugin),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+            launch_environment,
+        })
+        .expect("open smart render session")
     }
 
     fn input_pattern(seed: u8) -> Vec<u8> {
         (0..WIDTH * HEIGHT * 4)
             .map(|index| seed.wrapping_add(index as u8))
             .collect()
+    }
+
+    #[test]
+    fn plugin_data_secondary_selector_reaches_the_resident_render_worker() {
+        let (repository, plugin, sha) = temp_repository();
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        let mut session = RenderSession::open_plugin_data_effect(
+            SessionOpenRequest {
+                companions: Vec::new(),
+                repository: &repository.0,
+                plugin_path: &plugin,
+                plugin_sha256: &sha,
+                parameters: None,
+                payload_override: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                camera_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                launch_environment: behavior("plugin_data_secondary"),
+            },
+            &selector,
+        )
+        .expect("open exact PluginData secondary session");
+        let input = input_pattern(23);
+        let outcome = session
+            .render_frame(0, 0, &input)
+            .expect("secondary effect renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("secondary frame did not render: {:?}", outcome.status);
+        };
+        assert_eq!(
+            pixels,
+            input.iter().map(|byte| byte ^ 0x5a).collect::<Vec<_>>()
+        );
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["final_report"]["plugin_data"]["selected_index"], 1);
+        assert_eq!(
+            close["final_report"]["plugin_data"]["registrations"][1]["match_name_hex"],
+            "7365636f6e64"
+        );
+    }
+
+    /// Reads a file a still-running worker writes on its own schedule, waiting
+    /// up to `budget` for it to appear. A fixed sleep would encode how fast
+    /// this machine happens to start processes; the whole suite runs in
+    /// parallel, so that number is not stable.
+    fn read_when_written(path: &std::path::Path, budget: Duration) -> Option<String> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match std::fs::read_to_string(path) {
+                Ok(contents) if !contents.is_empty() => return Some(contents),
+                _ if std::time::Instant::now() >= deadline => return None,
+                _ => std::thread::sleep(Duration::from_millis(25)),
+            }
+        }
     }
 
     fn current_desktop_name() -> String {
@@ -219,26 +346,7 @@ mod windows_e2e {
     }
 
     fn build_audio_fixture() -> PathBuf {
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(manifest)
-            .args([
-                "-p",
-                "dummy-workers",
-                "--bin",
-                "audio_session_protocol_worker",
-            ])
-            .status()
-            .expect("run cargo build for the audio session fixture");
-        assert!(status.success(), "audio session fixture build failed");
-        std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("audio_session_protocol_worker.exe")
+        fixture_binary("audio_session_protocol_worker")
     }
 
     fn temp_audio_repository() -> (TempRepository, PathBuf, String) {
@@ -251,7 +359,7 @@ mod windows_e2e {
         write_freshness_source_marker(&root);
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
         let plugin = root.join("plugin.plugin");
         let plugin_bytes = b"audio session dummy plugin";
         std::fs::write(&plugin, plugin_bytes).unwrap();
@@ -261,12 +369,6 @@ mod windows_e2e {
 
     #[test]
     fn audio_session_renders_spans_and_closes_clean() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "audio_session_renders_spans_and_closes_clean",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_audio_repository();
         let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
             repository: &repository.0,
@@ -274,11 +376,12 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             max_samples: 1024,
             channels: 1,
             time_scale: 44100,
             frame_deadline: Duration::from_secs(30),
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open audio session");
 
@@ -316,6 +419,11 @@ mod windows_e2e {
         let close = session.close();
         assert_eq!(close["requests_ok"], 2);
         assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(
+            close["worker"]["diagnostics"]["process_memory_limit_bytes"],
+            512 * 1024 * 1024u64,
+            "close: {close}"
+        );
     }
 
     /// In-place parity (issue #751): an audio session opened with
@@ -328,10 +436,6 @@ mod windows_e2e {
     /// here instead of passing silently.
     #[test]
     fn audio_session_renders_in_place() {
-        if crate::common::skip_without_sealed_worker_launch("audio_session_renders_in_place") {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_audio_repository();
         let search_dir = repository.0.join("deps");
         std::fs::create_dir_all(&search_dir).unwrap();
@@ -346,6 +450,7 @@ mod windows_e2e {
             channels: 1,
             time_scale: 44100,
             frame_deadline: Duration::from_secs(30),
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open in-place audio session");
 
@@ -368,12 +473,6 @@ mod windows_e2e {
     /// host-protection invariant breach, not published as a valid span.
     #[test]
     fn audio_session_rejects_out_of_range_output_start() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "audio_session_rejects_out_of_range_output_start",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("audio_out_of_range_start"));
         let (repository, plugin, sha) = temp_audio_repository();
         let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
             repository: &repository.0,
@@ -381,11 +480,12 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             max_samples: 1024,
             channels: 1,
             time_scale: 44100,
             frame_deadline: Duration::from_secs(30),
+            launch_environment: behavior("audio_out_of_range_start"),
         })
         .expect("open audio session");
 
@@ -402,14 +502,9 @@ mod windows_e2e {
 
     #[test]
     fn smart_session_dispatches_the_smart_worker_and_closes_clean() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "smart_session_dispatches_the_smart_worker_and_closes_clean",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -421,13 +516,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             layers: &[],
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -438,6 +534,7 @@ mod windows_e2e {
             smart: true,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open smart render session");
         let outcome = session
@@ -447,6 +544,11 @@ mod windows_e2e {
         let close = session.close();
         assert_eq!(close["render_path"], "smart", "close: {close}");
         assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(
+            close["worker"]["diagnostics"]["process_memory_limit_bytes"],
+            2 * 1024 * 1024 * 1024u64,
+            "close: {close}"
+        );
         // The smart clean verdict comes from the smart report's dedicated
         // session_* fields, not the classic persistent-sequence keys.
         assert_eq!(close["final_report"]["session_mode"], true);
@@ -461,15 +563,10 @@ mod windows_e2e {
     /// clean over the same transport as a staged launch.
     #[test]
     fn in_place_session_renders_with_dependency_search_dirs() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "in_place_session_renders_with_dependency_search_dirs",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let search_dir = plugin.parent().expect("plugin parent").to_path_buf();
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -481,6 +578,7 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             layers: &[],
@@ -498,6 +596,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open in-place render session");
         let outcome = session
@@ -510,9 +609,9 @@ mod windows_e2e {
 
     #[test]
     fn smart_session_with_an_explicit_gpu_backend_requires_a_policy() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -524,13 +623,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             layers: &[],
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb32f,
@@ -541,6 +641,7 @@ mod windows_e2e {
             smart: true,
             gpu_backend: RenderGpuBackend::DirectX,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("an explicit GPU backend without a policy must fail closed");
@@ -552,18 +653,13 @@ mod windows_e2e {
 
     #[test]
     fn smart_auto_backend_without_a_policy_degrades_to_the_cpu_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "smart_auto_backend_without_a_policy_degrades_to_the_cpu_session",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Auto + no policy opens the CPU smart session command; the fixture
         // rejects every command word except the two CPU session commands, so
         // reaching a rendered frame proves no GPU command was attempted.
         // (Argb8 keeps the fixture's depth-8 transport contract.)
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -575,13 +671,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             layers: &[],
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -592,6 +689,7 @@ mod windows_e2e {
             smart: true,
             gpu_backend: RenderGpuBackend::Auto,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open smart render session with the auto backend");
         let outcome = session
@@ -647,12 +745,6 @@ mod windows_e2e {
 
     #[test]
     fn secondary_layers_reach_their_shared_slots() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "secondary_layers_reach_their_shared_slots",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Each layer's slot is filled with its slot number as a byte; the
         // fixture reads the first byte of each layer slot and rejects the
@@ -676,6 +768,7 @@ mod windows_e2e {
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -687,13 +780,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -704,6 +798,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with secondary layers");
         let outcome = session
@@ -722,12 +817,6 @@ mod windows_e2e {
     /// layer at open, or an update that never reached the file, fails the frame.
     #[test]
     fn a_dynamic_layer_shows_each_frame_its_own_pixels() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "a_dynamic_layer_shows_each_frame_its_own_pixels",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         const SLOT: u32 = 3;
         let bytes = (WIDTH * HEIGHT * 4) as usize;
@@ -740,6 +829,7 @@ mod windows_e2e {
             dynamic: true,
         }];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -751,13 +841,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -768,6 +859,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with a dynamic layer");
         // Frame 0 renders on the bytes the session opened with.
@@ -797,12 +889,6 @@ mod windows_e2e {
     /// or invent, and neither may take the session down with it.
     #[test]
     fn a_dynamic_layer_update_is_bounded_by_what_it_opened_with() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "a_dynamic_layer_update_is_bounded_by_what_it_opened_with",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         const SLOT: u32 = 3;
         let bytes = (WIDTH * HEIGHT * 4) as usize;
@@ -815,6 +901,7 @@ mod windows_e2e {
             dynamic: true,
         }];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -826,13 +913,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -843,6 +931,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with a dynamic layer");
         // Frame 0 first: the session numbers frames from zero, so starting at
@@ -873,12 +962,6 @@ mod windows_e2e {
 
     #[test]
     fn timed_layers_travel_the_session_trailer_into_their_slots() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "timed_layers_travel_the_session_trailer_into_their_slots",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Two timed entries share slot 5 at different rational times, plus a
         // static secondary in slot 9. Each physical slot is filled with its
@@ -912,6 +995,7 @@ mod windows_e2e {
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -923,13 +1007,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -940,6 +1025,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with timed layers");
         let outcome = session
@@ -952,7 +1038,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_two_timed_layers_at_the_same_slot_and_time() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Same slot, equal rational time (2/60 == 1/30): a per-frame collision
         // the worker parser would reject, so open must fail fast the same way.
@@ -975,6 +1060,7 @@ mod windows_e2e {
             },
         ];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -986,13 +1072,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1003,6 +1090,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("open must reject a same-slot same-time timed collision");
@@ -1014,12 +1102,6 @@ mod windows_e2e {
 
     #[test]
     fn open_admits_a_static_and_timed_layer_at_the_same_slot() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "open_admits_a_static_and_timed_layer_at_the_same_slot",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // A static entry and a timed entry share slot 4: the valid one-shot
         // representation of a layer parameter sampled at current_time (static)
@@ -1045,6 +1127,7 @@ mod windows_e2e {
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1056,13 +1139,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1073,6 +1157,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open must admit a same-slot static and timed mix");
         let outcome = session
@@ -1085,7 +1170,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_two_static_layers_at_the_same_slot() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Two static entries at one slot are ambiguous per frame; open must
         // fail closed, the same rule the one-shot parser applies.
@@ -1108,6 +1192,7 @@ mod windows_e2e {
             },
         ];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1119,13 +1204,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1136,6 +1222,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("open must reject two static layers at one slot");
@@ -1147,18 +1234,13 @@ mod windows_e2e {
 
     #[test]
     fn alpha_as_coverage_params_travel_the_session_launch() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "alpha_as_coverage_params_travel_the_session_launch",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // The slots ride the `--alpha-as-coverage-v1` auxiliary option, which
         // the worker peels from argv's tail before the session contract; the
         // fixture strips the pair and still resolves the 10-slot contract, so
         // open succeeds and frames render (issue #98 W1-4c).
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1170,13 +1252,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[0, 3],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1187,6 +1270,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open with alpha-as-coverage slots");
         let outcome = session
@@ -1199,11 +1283,11 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_an_out_of_range_alpha_as_coverage_slot() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Same bound the one-shot path enforces (slot <= 1024); open must fail
         // fast rather than launch a worker that rejects the option.
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1215,13 +1299,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[1025],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1232,6 +1317,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("open must reject an out-of-range alpha-as-coverage slot");
@@ -1243,7 +1329,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_layer_pixels_that_do_not_match_dimensions() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let layers = vec![SessionLayer {
             slot: 3,
@@ -1255,6 +1340,7 @@ mod windows_e2e {
             dynamic: false,
         }];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1266,13 +1352,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1283,6 +1370,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("mismatched layer pixels fail fast at open");
@@ -1294,7 +1382,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_a_zero_layer_slot() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let layers = vec![SessionLayer {
             slot: 0,
@@ -1305,6 +1392,7 @@ mod windows_e2e {
             dynamic: false,
         }];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1316,13 +1404,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1333,6 +1422,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("a zero layer slot fails fast at open");
@@ -1352,23 +1442,29 @@ mod windows_e2e {
     ///
     /// Two claims, and the first is what makes the second non-vacuous:
     ///   1. with no override, the slot carries exactly what
-    ///      `encode_interactive_payload` produces for `parameters`;
+    ///      the default payload encoder produces for `parameters`;
     ///   2. with an override, the slot carries the override verbatim -- an id
     ///      shape the encoder in (1) can never emit, so a passthrough that
     ///      silently re-encoded `parameters` would fail here.
     #[test]
-    fn a_payload_override_reaches_the_worker_verbatim() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "a_payload_override_reaches_the_worker_verbatim",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
+    fn normalized_defaults_open_a_session_and_payload_overrides_remain_verbatim() {
         let (repository, plugin, sha) = temp_repository();
-        let parameters = [float_parameter(1)];
+        let mut numeric = float_parameter(1);
+        numeric.value = 150.0;
+        let mut arbitrary = float_parameter(2);
+        arbitrary.name = "state".into();
+        arbitrary.kind = "arbitrary_data".into();
+        arbitrary.minimum = 10.0;
+        arbitrary.maximum = -10.0;
+        arbitrary.value = f64::NAN;
+        arbitrary.debug_summary = None;
+        let parameters = [numeric, arbitrary];
+        let normalized =
+            aexcompat_broker::image_render::normalize_default_interactive_parameters(&parameters);
 
         let launch_payload = |override_payload: Option<&str>| -> String {
             let mut session = RenderSession::open(SessionOpenRequest {
+                companions: Vec::new(),
                 repository: &repository.0,
                 plugin_path: &plugin,
                 plugin_sha256: &sha,
@@ -1380,13 +1476,14 @@ mod windows_e2e {
                 output_checksum_detail: false,
                 mask_trailer: None,
                 spatial_trailer: None,
+                camera_trailer: None,
                 render_environment_trailer: None,
                 audio_trailer: None,
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],
                 dependencies: Vec::new(),
-                dependency_search_dirs: Vec::new(),
+                dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
                 width: WIDTH,
                 height: HEIGHT,
                 pixel_format: RenderPixelFormat::Argb8,
@@ -1397,10 +1494,11 @@ mod windows_e2e {
                 smart: false,
                 gpu_backend: RenderGpuBackend::Cpu,
                 gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default(),
             })
             .expect("open render session");
             let outcome = session
-                .render_frame(0, 0, &input_pattern(3))
+                .render_frame_with_parameters(0, 0, &input_pattern(3), Some(&normalized))
                 .expect("frame");
             assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
             let close = session.close();
@@ -1414,9 +1512,10 @@ mod windows_e2e {
         // (1) No override: the encoder's own output reaches the worker. This
         // also pins the encoding the fixture route has to be distinguishable
         // from.
-        let encoded = aexcompat_broker::image_render::encode_interactive_payload(&parameters)
-            .expect("encode the parameter payload");
-        assert_eq!(encoded, "v2|param_1@1:f64=1");
+        let encoded =
+            aexcompat_broker::image_render::encode_default_interactive_payload(&parameters)
+                .expect("encode the parameter payload");
+        assert_eq!(encoded, "v2|param_1@1:f64=100");
         assert_eq!(launch_payload(None), encoded);
 
         // (2) An override in the fixture route's shape: a descriptor id that is
@@ -1428,16 +1527,11 @@ mod windows_e2e {
 
     #[test]
     fn animation_sidecar_rides_the_session_and_is_cleaned_up() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "animation_sidecar_rides_the_session_and_is_cleaned_up",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters = [float_parameter(1)];
         let animations = [scalar_animation(1)];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1449,13 +1543,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1466,6 +1561,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with parameter animation");
         assert_eq!(
@@ -1488,12 +1584,6 @@ mod windows_e2e {
 
     #[test]
     fn arbitrary_data_parameters_accept_arbitrary_animation() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "arbitrary_data_parameters_accept_arbitrary_animation",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters: [InteractiveParameter; 1] = [serde_json::from_value(serde_json::json!({
             "slot": 1, "name": "state", "kind": "arbitrary_data",
@@ -1513,6 +1603,7 @@ mod windows_e2e {
         }))
         .expect("arbitrary animation fixture")];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1524,13 +1615,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1541,6 +1633,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("arbitrary_data parameters bind arbitrary animation timelines");
         let outcome = session
@@ -1552,12 +1645,6 @@ mod windows_e2e {
 
     #[test]
     fn auxiliary_options_ride_the_session_argv_tail() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "auxiliary_options_ride_the_session_argv_tail",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // A manifest the real worker's loader would accept: one depth channel
         // whose f32le sidecar exists next to it with a matching hash. The
@@ -1604,6 +1691,7 @@ mod windows_e2e {
         // auxiliary gates (existing file / existing directory / literal "1"),
         // so a mangled pair would kill the session before the first frame.
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1615,13 +1703,14 @@ mod windows_e2e {
             output_checksum_detail: true,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1632,6 +1721,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with auxiliary options");
         let outcome = session
@@ -1643,12 +1733,12 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_a_non_empty_world_dump_directory() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let reused = repository.0.join("target/reused-dumps");
         std::fs::create_dir_all(&reused).unwrap();
         std::fs::write(reused.join("000-stale.bin"), b"stale").unwrap();
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1660,13 +1750,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1677,6 +1768,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("a reused dump directory fails fast at open");
@@ -1685,10 +1777,10 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_a_world_dump_directory_outside_the_target_tree() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let missing = repository.0.join("outside-dumps");
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1700,13 +1792,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1717,6 +1810,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("a dump directory outside the managed tree fails fast at open");
@@ -1725,10 +1819,10 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_animation_bound_to_an_unknown_slot() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let animations = [scalar_animation(2)];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1740,13 +1834,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1757,6 +1852,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("an animation without a matching parameter fails before launch");
@@ -1770,14 +1866,14 @@ mod windows_e2e {
 
     #[test]
     fn session_renders_frames_and_validates_slot_transfers() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "session_renders_frames_and_validates_slot_transfers",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         let mut checksums = Vec::new();
         for (frame_index, seed) in [(0u32, 11u8), (1, 173)] {
             let input = input_pattern(seed);
@@ -1797,6 +1893,9 @@ mod windows_e2e {
                 FrameStatus::FrameError { render_error, .. } => {
                     panic!("frame {frame_index} unexpectedly errored: {render_error}")
                 }
+                FrameStatus::SmartOutputUntouched => {
+                    panic!("classic frame {frame_index} reported untouched Smart output")
+                }
             }
         }
         assert_ne!(
@@ -1813,17 +1912,12 @@ mod windows_e2e {
 
     #[test]
     fn zero_duration_session_renders_the_single_frame() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "zero_duration_session_renders_the_single_frame",
-        ) {
-            return;
-        }
         // A zero-duration render (total_time == 0) is valid and renders the
         // single current_time == 0 frame, matching the one-shot worker (#272).
         // It is no longer routed to the one-shot path.
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1835,13 +1929,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1852,6 +1947,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("a zero-duration session opens");
         let input = input_pattern(19);
@@ -1879,14 +1975,14 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_parameters_ride_the_v2_message_and_reach_the_worker() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "per_frame_parameters_ride_the_v2_message_and_reach_the_worker",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         let input = input_pattern(31);
         let inverted: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
 
@@ -1934,15 +2030,15 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_ui_action_rides_the_v2_message_and_reaches_the_worker() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "per_frame_ui_action_rides_the_v2_message_and_reaches_the_worker",
-        ) {
-            return;
-        }
         use aexcompat_broker::image_render::RenderUiAction;
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         let input = input_pattern(29);
         let inverted: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
 
@@ -2023,13 +2119,7 @@ mod windows_e2e {
 
     #[test]
     fn interactive_session_renders_reports_and_previews_across_frames() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "interactive_session_renders_reports_and_previews_across_frames",
-        ) {
-            return;
-        }
         use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters = [float_parameter(1)];
         let input = input_pattern(53);
@@ -2064,6 +2154,7 @@ mod windows_e2e {
                 )
                 .expect("valid inspection-bound selection"),
                 dependencies: Vec::new(),
+                dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
                 width: WIDTH,
                 height: HEIGHT,
                 pixel_format: RenderPixelFormat::Argb8,
@@ -2120,14 +2211,14 @@ mod windows_e2e {
 
     #[test]
     fn rejected_per_frame_parameters_leave_the_session_usable() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "rejected_per_frame_parameters_leave_the_session_usable",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         // Out-of-range value: the broker-side validation rejects the set
         // before anything reaches the transport, exactly like the launch
         // payload validation would.
@@ -2150,14 +2241,14 @@ mod windows_e2e {
 
     #[test]
     fn frame_local_error_keeps_the_session_usable() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "frame_local_error_keeps_the_session_usable",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("error_frame_0"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("error_frame_0"),
+        );
         let outcome = session
             .render_frame(0, 0, &input_pattern(1))
             .expect("frame-local errors do not invalidate the session");
@@ -2167,6 +2258,7 @@ mod windows_e2e {
                 render_error: -40,
                 missing_dependency: None,
                 return_message: None,
+                selector_crash: None,
             }
         ));
         let outcome = session
@@ -2180,21 +2272,276 @@ mod windows_e2e {
     }
 
     #[test]
-    fn empty_smart_result_frame_is_accepted_as_a_valid_empty_render() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "empty_smart_result_frame_is_accepted_as_a_valid_empty_render",
-        ) {
-            return;
+    fn smart_untouched_output_is_a_typed_frame_local_outcome() {
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_smart_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            behavior("smart_output_untouched"),
+        );
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(1))
+            .expect("typed untouched output remains a frame-local outcome");
+        assert!(matches!(outcome.status, FrameStatus::SmartOutputUntouched));
+        let close = session.close();
+        assert_eq!(close["frames_errored"], 1);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn abandoned_smart_untouched_close_requires_exact_history_and_final_evidence() {
+        let valid = serde_json::json!({
+            "invalidated": false,
+            "worker": { "classification": "ok" },
+            "frames_ok": 3,
+            "frames_errored": 1,
+            "smart_output_untouched_frames": 1,
+            "final_report": {
+                "status": "render_completed",
+                "global_setdown_error": 0,
+                "guard_bytes_intact": true,
+                "suite_leases_balanced": false,
+                "suite_lease_warning": true,
+                "suite_fault_observed": false,
+                "suite_acquires": 3,
+                "suite_releases": 2,
+                "live_suite_lease_count": 1,
+                "live_suite_reference_count": 1,
+                "live_suite_leases": "PF Handle Suite@2=1",
+                "handle_lifetimes_balanced": true,
+                "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true,
+                "session_mode": true,
+                "session_render_error": 0,
+                "session_sequence_setup_error": 0,
+                "session_sequence_setdown_error": 0,
+                "pre_render_error": 0,
+                "smart_render_selector_error": 0,
+                "smart_render_error": -6,
+                "output_pixels_valid": false,
+                "empty_result_rect": false,
+                "result_rects_valid": true
+            }
+        });
+        validate_abandoned_smart_untouched_close(&valid)
+            .expect("canonical abandoned-attempt evidence authorizes retry");
+
+        for (pointer, replacement) in [
+            ("/smart_output_untouched_frames", serde_json::json!(0)),
+            ("/frames_errored", serde_json::json!(2)),
+            ("/final_report/pre_render_error", serde_json::json!(4)),
+            (
+                "/final_report/smart_render_selector_error",
+                serde_json::json!(4),
+            ),
+            ("/final_report/smart_render_error", serde_json::json!(0)),
+            ("/final_report/output_pixels_valid", serde_json::json!(true)),
+            ("/final_report/empty_result_rect", serde_json::json!(true)),
+            ("/final_report/result_rects_valid", serde_json::json!(false)),
+            (
+                "/final_report/suite_fault_observed",
+                serde_json::json!(true),
+            ),
+        ] {
+            let mut mutated = valid.clone();
+            *mutated.pointer_mut(pointer).expect("test pointer exists") = replacement;
+            assert!(
+                validate_abandoned_smart_untouched_close(&mutated).is_err(),
+                "mutation {pointer} must fail closed"
+            );
         }
+    }
+
+    #[test]
+    fn abandoned_smart_heap_corruption_close_is_narrow_and_fail_closed() {
+        let valid = serde_json::json!({
+            "stage": "render_session_close",
+            "render_path": "smart",
+            "session_clean": false,
+            "invalidated": true,
+            "invalidated_reason": { "reason": "worker_exited" },
+            "frames_ok": 3,
+            "frames_errored": 0,
+            "final_report": null,
+            "worker": {
+                "classification": "crashed",
+                "exit_code": 0xC000_0374u64,
+                "diagnostics": {
+                    "failure_stage": "smart_render",
+                    "active_stage": "smart_render_cpu"
+                }
+            }
+        });
+        validate_abandoned_smart_heap_corruption_close(&valid)
+            .expect("exact Smart heap-corruption evidence authorizes one retry");
+        let mut crashed_during_close = valid.clone();
+        crashed_during_close["invalidated_reason"]["reason"] =
+            serde_json::json!("worker_exited_during_close");
+        validate_abandoned_smart_heap_corruption_close(&crashed_during_close)
+            .expect("the same exact crash after close delivery authorizes one retry");
+
+        for (pointer, replacement) in [
+            ("/render_path", serde_json::json!("classic")),
+            ("/invalidated", serde_json::json!(false)),
+            (
+                "/invalidated_reason/reason",
+                serde_json::json!("worker_invariant_failure"),
+            ),
+            ("/worker/classification", serde_json::json!("nonzero_exit")),
+            ("/worker/exit_code", serde_json::json!(0xC000_0005u64)),
+            (
+                "/worker/diagnostics/failure_stage",
+                serde_json::json!("frame_setdown"),
+            ),
+            (
+                "/worker/diagnostics/active_stage",
+                serde_json::json!("frame_setdown"),
+            ),
+            ("/final_report", serde_json::json!({ "status": "partial" })),
+            ("/frames_ok", serde_json::json!("3")),
+            ("/session_clean", serde_json::json!(true)),
+            ("/frames_errored", serde_json::json!(1)),
+        ] {
+            let mut mutated = valid.clone();
+            *mutated.pointer_mut(pointer).expect("test pointer exists") = replacement;
+            if pointer.ends_with("failure_stage") || pointer.ends_with("active_stage") {
+                *mutated
+                    .pointer_mut("/worker/diagnostics/failure_stage")
+                    .expect("failure stage exists") = serde_json::json!("frame_setdown");
+                *mutated
+                    .pointer_mut("/worker/diagnostics/active_stage")
+                    .expect("active stage exists") = serde_json::json!("frame_setdown");
+            }
+            assert!(
+                validate_abandoned_smart_heap_corruption_close(&mutated).is_err(),
+                "mutation {pointer} must fail closed"
+            );
+        }
+        for missing in ["final_report", "frames_ok"] {
+            let mut mutated = valid.clone();
+            mutated
+                .as_object_mut()
+                .expect("close is an object")
+                .remove(missing);
+            assert!(
+                validate_abandoned_smart_heap_corruption_close(&mutated).is_err(),
+                "missing {missing} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_untouched_marker_is_rejected_outside_its_exact_contract() {
+        for (smart, behavior_name) in [
+            (false, "smart_output_untouched"),
+            (true, "smart_output_untouched_wrong_error"),
+            (true, "smart_output_untouched_dependency"),
+            (true, "smart_output_untouched_return_message"),
+            (true, "smart_output_untouched_ok"),
+        ] {
+            let (repository, plugin, sha) = temp_repository();
+            let launch = behavior(behavior_name);
+            let mut session = if smart {
+                open_smart_session(&repository.0, &plugin, &sha, launch)
+            } else {
+                open_session(
+                    &repository.0,
+                    &plugin,
+                    &sha,
+                    Duration::from_secs(30),
+                    launch,
+                )
+            };
+            let error = session
+                .render_frame(0, 0, &input_pattern(1))
+                .expect_err("an ineligible untouched marker must fail closed");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(session.invalidation().is_some());
+        }
+    }
+
+    #[test]
+    fn selector_crash_is_distinct_from_a_plugin_returning_512() {
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("selector_crash_frame_0"),
+        );
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(1))
+            .expect("a guarded selector crash remains a frame diagnostic");
+        let FrameStatus::FrameError {
+            render_error,
+            selector_crash: Some(crash),
+            ..
+        } = outcome.status
+        else {
+            panic!("expected a structured selector crash");
+        };
+        assert_eq!(render_error, 512);
+        assert_eq!(crash.selector, "SMART_RENDER");
+        assert_eq!(crash.exception_code, 0xC0000005);
+        let next = session
+            .render_frame(1, 1, &input_pattern(2))
+            .expect("a later frame is not contaminated by the prior crash");
+        assert!(matches!(next.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["frames_errored"], 1);
+        assert_eq!(close["frames_ok"], 1);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn selector_crash_is_rejected_outside_its_exact_contract() {
+        // The field is the host's own claim, not plug-in text: a shape the
+        // worker cannot produce invalidates the session instead of being
+        // dropped (issue #983).
+        for behavior_name in [
+            "selector_crash_wrong_error_frame_0",
+            "selector_crash_bad_selector_frame_0",
+            "selector_crash_zero_code_frame_0",
+        ] {
+            let (repository, plugin, sha) = temp_repository();
+            let mut session = open_session(
+                &repository.0,
+                &plugin,
+                &sha,
+                Duration::from_secs(30),
+                behavior(behavior_name),
+            );
+            let error = session
+                .render_frame(0, 0, &input_pattern(1))
+                .expect_err("a malformed selector crash must fail closed");
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::InvalidData,
+                "{behavior_name}"
+            );
+            assert_eq!(
+                session
+                    .invalidation()
+                    .map(|invalidation| invalidation.reason),
+                Some("malformed_selector_crash"),
+                "{behavior_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_smart_result_frame_is_accepted_as_a_valid_empty_render() {
         // A SmartFX frame whose PreRender returned a legally empty result_rect
         // (#278) reports a 0x0 ok frame with the explicit empty_result flag. The
         // session accepts it as a valid empty render (not a dimension invariant
         // failure) with no output pixels, and stays usable for later frames.
-        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
         let (repository, plugin, sha) = temp_repository();
         // Only a SmartFX session may report an empty result, so open a smart
         // session (the broker rejects an empty result on a classic session).
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -2206,13 +2553,14 @@ mod windows_e2e {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -2223,6 +2571,7 @@ mod windows_e2e {
             smart: true,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: behavior("empty_result_frame_0"),
         })
         .expect("open a smart render session");
         let outcome = session
@@ -2251,14 +2600,14 @@ mod windows_e2e {
 
     #[test]
     fn frame_deadline_watchdog_terminates_the_job() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "frame_deadline_watchdog_terminates_the_job",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("hang_frame"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(2));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(2),
+            behavior("hang_frame"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(3))
             .expect_err("a hung frame must trip the watchdog");
@@ -2275,32 +2624,34 @@ mod windows_e2e {
 
     #[test]
     fn modal_ui_worker_uses_a_private_desktop_before_session_timeout() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "modal_ui_worker_uses_a_private_desktop_before_session_timeout",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("modal_frame"));
         let report_path = std::env::temp_dir().join(format!(
             "aexcompat-session-desktop-{:032x}.txt",
             rand::random::<u128>()
         ));
-        unsafe {
-            std::env::set_var("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT", &report_path);
-        }
+        // The report path rides this session's launch, so a concurrent test
+        // never sees it and the fixture writes to a path unique to this test.
         let parent_desktop = current_desktop_name();
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(2));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(2),
+            behavior("modal_frame")
+                .with_child_var("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT", &report_path),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(17))
             .expect_err("a modal worker must trip the session watchdog");
         assert!(error.to_string().contains("frame_deadline"), "{error}");
+        // The two-second deadline is short enough that it can expire while the
+        // worker is still starting up, so read the launch-time report before
+        // close() takes the job object down rather than assuming it landed.
+        let reported = read_when_written(&report_path, Duration::from_secs(20));
         let close = session.close();
-        unsafe {
-            std::env::remove_var("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT");
-        }
-        let worker_desktop = std::fs::read_to_string(&report_path).unwrap();
         let _ = std::fs::remove_file(report_path);
+        let worker_desktop =
+            reported.unwrap_or_else(|| panic!("worker never reported its desktop; close: {close}"));
         assert!(
             worker_desktop.starts_with("AEXCompatWorkerDesktop-"),
             "worker desktop was not private: {worker_desktop:?}"
@@ -2313,14 +2664,14 @@ mod windows_e2e {
 
     #[test]
     fn worker_crash_invalidates_the_session_with_diagnostics() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "worker_crash_invalidates_the_session_with_diagnostics",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("crash_frame"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("crash_frame"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(5))
             .expect_err("a crashed worker must invalidate the session");
@@ -2333,23 +2684,25 @@ mod windows_e2e {
 
     #[test]
     fn a_crashing_resident_session_captures_an_opt_in_minidump() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "a_crashing_resident_session_captures_an_opt_in_minidump",
-        ) {
-            return;
-        }
-        // Opt-in on: the broker creates one inherited dump pipe for the session
-        // launch (the same launch-boundary plumbing the one-shot path uses,
-        // issue #18/#224) because AEXCOMPAT_MINIDUMP_DIR resolves under the
-        // repository target tree. The fixture streams a marker-terminated image
+        // Opt-in on: this launch names a dump directory that resolves under the
+        // repository target tree (the same policy `AEXCOMPAT_MINIDUMP_DIR`
+        // goes through), so the broker creates one inherited dump pipe for the
+        // session launch — the same launch-boundary plumbing the one-shot path
+        // uses (issue #18/#224). The fixture streams a marker-terminated image
         // through that pipe from its crash frame, and the broker finalizes it
-        // into a .dmp when the session collects the exit at close.
-        let _behavior = BehaviorGuard::set(Some("crash_frame_minidump"));
+        // into a .dmp when the session collects the exit at close. Requesting
+        // the directory per launch (issue #910) keeps it out of the broker's
+        // process environment, where a concurrent test would also see it.
         let (repository, plugin, sha) = temp_repository();
-        let _minidump_dir = MinidumpDirGuard::set("target/crash-dumps");
         let dump_dir = repository.0.join("target").join("crash-dumps");
 
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("crash_frame_minidump").with_minidump_directory("target/crash-dumps"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(5))
             .expect_err("a crashed worker must invalidate the session");
@@ -2393,14 +2746,14 @@ mod windows_e2e {
 
     #[test]
     fn a_reserved_fatal_session_error_invalidates_instead_of_continuing() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "a_reserved_fatal_session_error_invalidates_instead_of_continuing",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("fatal_error_frame_0"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("fatal_error_frame_0"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(12))
             .expect_err("a reserved fatal error code must not read as frame-local");
@@ -2419,14 +2772,14 @@ mod windows_e2e {
 
     #[test]
     fn a_framing_violation_from_a_live_worker_invalidates_promptly() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "a_framing_violation_from_a_live_worker_invalidates_promptly",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("bad_framing_frame_0"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("bad_framing_frame_0"),
+        );
         let started = std::time::Instant::now();
         let error = session
             .render_frame(0, 0, &input_pattern(13))
@@ -2447,14 +2800,14 @@ mod windows_e2e {
 
     #[test]
     fn reused_frame_indices_are_rejected_without_killing_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "reused_frame_indices_are_rejected_without_killing_the_session",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         let outcome = session
             .render_frame(0, 0, &input_pattern(14))
             .expect("frame 0 renders");
@@ -2477,14 +2830,14 @@ mod windows_e2e {
 
     #[test]
     fn error_response_with_a_mutated_header_is_fail_closed() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "error_response_with_a_mutated_header_is_fail_closed",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("error_mutates_header"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("error_mutates_header"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(10))
             .expect_err("a header mutation must not hide behind an error response");
@@ -2497,14 +2850,14 @@ mod windows_e2e {
 
     #[test]
     fn a_unilateral_worker_exit_breaks_the_close_handshake_contract() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "a_unilateral_worker_exit_breaks_the_close_handshake_contract",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("exit_after_frame_0"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("exit_after_frame_0"),
+        );
         let outcome = session
             .render_frame(0, 0, &input_pattern(11))
             .expect("the frame itself completes");
@@ -2523,15 +2876,75 @@ mod windows_e2e {
     }
 
     #[test]
-    fn process_death_is_seen_even_when_a_descendant_holds_the_pipe() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "process_death_is_seen_even_when_a_descendant_holds_the_pipe",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("exit_leaving_descendant"));
+    fn post_frame_heap_corruption_authorizes_one_discarded_smart_attempt() {
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_smart_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            behavior("heap_corruption_after_frame_0"),
+        );
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(12))
+            .expect("the Smart frame itself completes");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        std::thread::sleep(Duration::from_millis(500));
+
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+        assert_eq!(close["invalidated_reason"]["reason"], "premature_exit");
+        assert_eq!(close["frames_ok"], 1);
+        assert_eq!(close["frames_errored"], 0);
+        assert_eq!(close["final_report"], serde_json::Value::Null);
+        assert_eq!(close["worker"]["classification"], "crashed");
+        assert_eq!(close["worker"]["exit_code"], 0xC000_0374u64);
+        assert_eq!(
+            close["worker"]["diagnostics"]["active_stage"],
+            "smart_render"
+        );
+        validate_abandoned_smart_heap_corruption_close(&close)
+            .expect("the exact post-frame Smart crash authorizes one discarded retry");
+    }
+
+    #[test]
+    fn heap_corruption_after_close_delivery_invalidates_the_session() {
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_smart_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            behavior("heap_corruption_on_close_after_frame_0"),
+        );
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(13))
+            .expect("the Smart frame itself completes");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+        assert_eq!(
+            close["invalidated_reason"]["reason"],
+            "worker_exited_during_close"
+        );
+        assert_eq!(close["frames_ok"], 1);
+        assert_eq!(close["frames_errored"], 0);
+        assert_eq!(close["final_report"], serde_json::Value::Null);
+        assert_eq!(close["worker"]["classification"], "crashed");
+        assert_eq!(close["worker"]["exit_code"], 0xC000_0374u64);
+        validate_abandoned_smart_heap_corruption_close(&close)
+            .expect("the exact close-delivered Smart crash authorizes one discarded retry");
+    }
+
+    #[test]
+    fn process_death_is_seen_even_when_a_descendant_holds_the_pipe() {
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("exit_leaving_descendant"),
+        );
         let started = std::time::Instant::now();
         let error = session
             .render_frame(0, 0, &input_pattern(9))
@@ -2553,14 +2966,14 @@ mod windows_e2e {
 
     #[test]
     fn stale_generation_and_missing_header_update_are_fail_closed() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "stale_generation_and_missing_header_update_are_fail_closed",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("stale_generation"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("stale_generation"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(6))
             .expect_err("a stale generation must invalidate the session");
@@ -2573,13 +2986,14 @@ mod windows_e2e {
 
     #[test]
     fn mutated_static_header_is_fail_closed() {
-        if crate::common::skip_without_sealed_worker_launch("mutated_static_header_is_fail_closed")
-        {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("mutate_header"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("mutate_header"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(7))
             .expect_err("a mutated broker-owned header must invalidate the session");
@@ -2592,13 +3006,14 @@ mod windows_e2e {
 
     #[test]
     fn output_extent_mismatch_is_fail_closed() {
-        if crate::common::skip_without_sealed_worker_launch("output_extent_mismatch_is_fail_closed")
-        {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("bad_extent"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("bad_extent"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(8))
             .expect_err("an extent disagreement must invalidate the session");
@@ -2629,12 +3044,6 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_cli_renders_a_png_sequence_through_one_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "video_batch_cli_renders_a_png_sequence_through_one_session",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 3);
         let output_directory = repository.0.join("batch-out");
@@ -2657,8 +3066,13 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("report.json");
-        let passed =
-            run_video_batch(&repository.0, &request_path, &report_path).expect("batch render runs");
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &LaunchEnvironment::default(),
+        )
+        .expect("batch render runs");
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
         assert!(passed, "report: {report}");
@@ -2677,17 +3091,93 @@ mod windows_e2e {
     }
 
     #[test]
+    fn video_batch_delivers_declared_static_layer_pixels() {
+        let (repository, plugin, _sha) = temp_repository();
+        let inputs = write_input_frames(&repository.0, 2);
+        let layer_path = repository.0.join("map.png");
+        image::RgbaImage::from_pixel(WIDTH, HEIGHT, image::Rgba([3, 7, 11, 255]))
+            .save(&layer_path)
+            .unwrap();
+        let request_path = repository.0.join("layer-batch-request.json");
+        let report_path = repository.0.join("layer-batch-report.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "plugin": plugin.to_string_lossy(),
+                "input_frames": inputs,
+                "output_directory": repository.0.join("layer-batch-out").to_string_lossy(),
+                "parameters": [{
+                    "slot": 3, "name": "Map", "kind": "layer",
+                    "minimum": 0.0, "maximum": 0.0, "value": 0.0,
+                    "choices": [], "color": [255, 0, 0, 0],
+                    "components": [0.0, 0.0, 0.0], "component_count": 0,
+                    "layer_path": layer_path.to_string_lossy(),
+                    "enabled": true, "visible": true, "supervised": false,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &behavior("require_static_layer_slot3"),
+        )
+        .expect("batch renders with a declared static layer");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert!(
+            passed,
+            "declared map pixels must reach the worker: {report}"
+        );
+        assert_eq!(report["frames_ok"], 2, "both frames use the same layer");
+    }
+
+    #[test]
+    fn video_batch_rejects_a_missing_declared_static_layer() {
+        let (repository, plugin, _sha) = temp_repository();
+        let inputs = write_input_frames(&repository.0, 1);
+        let request_path = repository.0.join("missing-layer-request.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "plugin": plugin.to_string_lossy(),
+                "input_frames": inputs,
+                "output_directory": repository.0.join("missing-layer-out").to_string_lossy(),
+                "parameters": [{
+                    "slot": 3, "name": "Map", "kind": "layer",
+                    "minimum": 0.0, "maximum": 0.0, "value": 0.0,
+                    "choices": [], "color": [255, 0, 0, 0],
+                    "components": [0.0, 0.0, 0.0], "component_count": 0,
+                    "layer_path": repository.0.join("missing-map.png").to_string_lossy(),
+                    "enabled": true, "visible": true, "supervised": false,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = run_video_batch(
+            &repository.0,
+            &request_path,
+            &repository.0.join("missing-layer-report.json"),
+            &LaunchEnvironment::default(),
+        )
+        .expect_err("a missing declared layer must fail before render");
+        assert!(
+            error.to_string().contains("secondary image open failed"),
+            "unexpected failure: {error}"
+        );
+    }
+
+    #[test]
     fn video_batch_reports_an_empty_smart_frame_without_a_png() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "video_batch_reports_an_empty_smart_frame_without_a_png",
-        ) {
-            return;
-        }
         // A SmartFX batch frame that legally renders an empty result (#278) has
         // no pixels, so there is no PNG or raw to write. The batch must report it
         // as a legal empty frame and keep going, not abort on a 0x0 image. The
         // fixture answers frame 0 empty; frames 1-2 render normally.
-        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 3);
         let output_directory = repository.0.join("empty-batch-out");
@@ -2706,8 +3196,13 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("empty-report.json");
-        let passed =
-            run_video_batch(&repository.0, &request_path, &report_path).expect("batch render runs");
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &behavior("empty_result_frame_0"),
+        )
+        .expect("batch render runs");
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
         assert!(passed, "the empty frame must not abort the batch: {report}");
@@ -2737,17 +3232,11 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_empty_frame_rejects_a_stale_output_png() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "video_batch_empty_frame_rejects_a_stale_output_png",
-        ) {
-            return;
-        }
         // The empty-frame arm writes no PNG, but it must still honor the
         // fresh-output contract the non-empty arm enforces (#278): a stale
         // frame-*.png left in the output directory from a previous run would
         // otherwise keep old pixels on disk while the report claims the frame is
         // empty, so a directory glob would ingest the wrong frame. Reject it.
-        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 3);
         let output_directory = repository.0.join("stale-batch-out");
@@ -2768,8 +3257,13 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("stale-report.json");
-        let passed = run_video_batch(&repository.0, &request_path, &report_path)
-            .expect("the batch runs and writes a report");
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &behavior("empty_result_frame_0"),
+        )
+        .expect("the batch runs and writes a report");
         // The stale PNG aborts the batch (a failed frame), so it does not pass
         // and the empty frame is recorded as failed rather than silently ok.
         assert!(
@@ -2784,12 +3278,6 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_aborts_on_a_frame_error_by_default() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "video_batch_aborts_on_a_frame_error_by_default",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("error_frame_0"));
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 2);
         let request_path = repository.0.join("request.json");
@@ -2805,8 +3293,13 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("report.json");
-        let passed =
-            run_video_batch(&repository.0, &request_path, &report_path).expect("batch render runs");
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &behavior("error_frame_0"),
+        )
+        .expect("batch render runs");
         assert!(!passed);
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
@@ -2853,7 +3346,7 @@ mod windows_e2e {
         write_freshness_source_marker(&root);
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
         let mut plugins = Vec::new();
         for (name, bytes) in [
             ("alpha.plugin", b"cluster plugin alpha" as &[u8]),
@@ -2872,9 +3365,13 @@ mod windows_e2e {
         }
     }
 
-    fn open_cluster_render_session(cluster: &TempCluster) -> RenderSession {
+    fn open_cluster_render_session(
+        cluster: &TempCluster,
+        launch_environment: LaunchEnvironment,
+    ) -> RenderSession {
         RenderSession::open_cluster(
             SessionOpenRequest {
+                companions: Vec::new(),
                 repository: &cluster.repository.0,
                 plugin_path: &cluster.plugins[0].0,
                 plugin_sha256: &cluster.plugins[0].1,
@@ -2886,14 +3383,16 @@ mod windows_e2e {
                 output_checksum_detail: false,
                 mask_trailer: None,
                 spatial_trailer: None,
+                camera_trailer: None,
                 render_environment_trailer: None,
                 audio_trailer: None,
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],
-                // The shared closure rides the base request's dependencies.
-                dependencies: vec![approved_artifact(&cluster.dependency)],
-                dependency_search_dirs: Vec::new(),
+                // Resident cluster sessions resolve their shared closure from
+                // the admitted in-place repository root (issue #816).
+                dependencies: Vec::new(),
+                dependency_search_dirs: vec![cluster.repository.0.clone()],
                 width: WIDTH,
                 height: HEIGHT,
                 pixel_format: RenderPixelFormat::Argb8,
@@ -2904,6 +3403,7 @@ mod windows_e2e {
                 smart: false,
                 gpu_backend: RenderGpuBackend::Cpu,
                 gpu_runtime_policy: None,
+                launch_environment,
             },
             ClusterRenderPlugins {
                 plugins: cluster
@@ -2918,7 +3418,10 @@ mod windows_e2e {
         .expect("open cluster render session")
     }
 
-    fn open_discovery_session(cluster: &TempCluster) -> DiscoverySession {
+    fn open_discovery_session(
+        cluster: &TempCluster,
+        launch_environment: LaunchEnvironment,
+    ) -> DiscoverySession {
         DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
             repository: &cluster.repository.0,
             plugins: cluster
@@ -2928,21 +3431,16 @@ mod windows_e2e {
                 .collect(),
             dependency_search_dirs: vec![cluster.dependency.parent().unwrap().to_path_buf()],
             module_bound: 64,
-            inspect_deadline: Duration::from_secs(30),
+            inspect_deadline: None,
+            launch_environment,
         })
         .expect("open discovery session")
     }
 
     #[test]
     fn cluster_render_session_swaps_plugins_and_closes_clean() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "cluster_render_session_swaps_plugins_and_closes_clean",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session = open_cluster_render_session(&cluster, LaunchEnvironment::default());
 
         let outcome = session
             .render_frame(0, 0, &input_pattern(3))
@@ -2962,6 +3460,11 @@ mod windows_e2e {
         assert_eq!(close["session_clean"], true, "close: {close}");
         assert_eq!(close["invalidated"], false, "close: {close}");
         assert_eq!(close["frames_ok"], 2, "close: {close}");
+        assert_eq!(
+            close["worker"]["diagnostics"]["process_memory_limit_bytes"],
+            2 * 1024 * 1024 * 1024u64,
+            "close: {close}"
+        );
         // The swap rode the manifest: the final report's cluster module
         // audit records the epoch and stays inside the declared set.
         let epochs = close["final_report"]["module_audit"]["epochs"]
@@ -2971,21 +3474,119 @@ mod windows_e2e {
         assert_eq!(epochs[0]["plugin_index"], 0);
     }
 
+    #[test]
+    fn native_cluster_swap_records_each_members_depth_and_final_flags() {
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let worker = source_root.join("target/minihost-build/aex_worker.exe");
+        let probe =
+            source_root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
+        if !worker.is_file() || !probe.is_file() {
+            eprintln!("native cluster depth test needs the Release worker and sampling probe");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-native-cluster-depth-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        write_freshness_source_marker(&root);
+        let worker_dir = root.join("target/minihost-build");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::copy(&worker, worker_dir.join("aex_worker.exe")).unwrap();
+        let mut plugins = Vec::new();
+        for marker in ["shallow", "floatonly"] {
+            let path = root.join(format!("sampling-{marker}.aex"));
+            std::fs::copy(&probe, &path).unwrap();
+            plugins.push((
+                path.clone(),
+                format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap())),
+            ));
+        }
+        let repository = TempRepository(root);
+        let mut session = RenderSession::open_cluster(
+            SessionOpenRequest {
+                companions: Vec::new(),
+                repository: &repository.0,
+                plugin_path: &plugins[0].0,
+                plugin_sha256: &plugins[0].1,
+                parameters: None,
+                payload_override: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                camera_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                dependency_search_dirs: vec![repository.0.clone()],
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb16,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default(),
+            },
+            ClusterRenderPlugins {
+                plugins: plugins
+                    .iter()
+                    .map(|(path, _)| approved_artifact(path))
+                    .collect(),
+                swap_payloads: vec![None, None],
+                module_bound: 64,
+            },
+        )
+        .expect("open native cluster session");
+        let first = session.render_frame(0, 0, &input_pattern(3)).unwrap();
+        let first_depth = first.depth_provenance.unwrap();
+        assert_eq!(first_depth.planned_dispatch_pixel_bytes, Some(4));
+        assert_eq!(first_depth.dispatch_pixel_bytes, Some(4));
+        assert!(!first_depth.advertised_depth_supported);
+        assert!(matches!(
+            session.swap_plugin(1).unwrap(),
+            SwapOutcome::Swapped
+        ));
+        let second = session.render_frame(1, 1, &input_pattern(9)).unwrap();
+        let second_depth = second.depth_provenance.unwrap();
+        assert_eq!(second_depth.planned_dispatch_pixel_bytes, Some(16));
+        assert_eq!(second_depth.dispatch_pixel_bytes, Some(16));
+        assert!(!second_depth.advertised_depth_supported);
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "{close}");
+        assert_eq!(
+            close["final_report"]["advertised_out_flags"],
+            second_depth.advertised_out_flags
+        );
+        assert_eq!(
+            close["final_report"]["advertised_out_flags2"],
+            second_depth.advertised_out_flags2
+        );
+        assert_eq!(close["final_report"]["dispatch_pixel_bytes"], 16);
+    }
+
     /// In-place cluster render session (issue #751): the v2 manifest names
     /// the cluster by real paths, the launch admits the search directories,
     /// and the swap selects members by index over the same transport as the
     /// sealed session.
     #[test]
     fn in_place_cluster_render_session_swaps_plugins_and_closes_clean() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "in_place_cluster_render_session_swaps_plugins_and_closes_clean",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
         let mut session = RenderSession::open_cluster(
             SessionOpenRequest {
+                companions: Vec::new(),
                 repository: &cluster.repository.0,
                 plugin_path: &cluster.plugins[0].0,
                 plugin_sha256: &cluster.plugins[0].1,
@@ -2997,6 +3598,7 @@ mod windows_e2e {
                 output_checksum_detail: false,
                 mask_trailer: None,
                 spatial_trailer: None,
+                camera_trailer: None,
                 render_environment_trailer: None,
                 audio_trailer: None,
                 alpha_as_coverage_params: &[],
@@ -3014,6 +3616,7 @@ mod windows_e2e {
                 smart: false,
                 gpu_backend: RenderGpuBackend::Cpu,
                 gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default(),
             },
             ClusterRenderPlugins {
                 plugins: cluster
@@ -3045,14 +3648,8 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_rejects_out_of_manifest_and_current_index_as_caller_errors() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "cluster_swap_rejects_out_of_manifest_and_current_index_as_caller_errors",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session = open_cluster_render_session(&cluster, LaunchEnvironment::default());
 
         // An index outside the manifest, and the current index, are caller
         // errors rejected before anything is sent; the session stays usable.
@@ -3068,14 +3665,8 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_done_mismatch_invalidates_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "cluster_swap_done_mismatch_invalidates_the_session",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("swap_done_wrong_index"));
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session = open_cluster_render_session(&cluster, behavior("swap_done_wrong_index"));
         session
             .render_frame(0, 0, &input_pattern(3))
             .expect("frame 0 renders");
@@ -3095,14 +3686,8 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_worker_death_is_detected_by_the_three_way_wait() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "cluster_swap_worker_death_is_detected_by_the_three_way_wait",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("crash_on_swap"));
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session = open_cluster_render_session(&cluster, behavior("crash_on_swap"));
         session
             .render_frame(0, 0, &input_pattern(3))
             .expect("frame 0 renders");
@@ -3116,14 +3701,9 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_global_setup_error_is_plugin_local() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "cluster_swap_global_setup_error_is_plugin_local",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("swap_global_setup_error"));
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session =
+            open_cluster_render_session(&cluster, behavior("swap_global_setup_error"));
         let swap = session.swap_plugin(1).expect("the swap exchange completes");
         let SwapOutcome::PluginError { global_setup_error } = swap else {
             panic!("expected a plugin-local GLOBAL_SETUP error, got {swap:?}");
@@ -3136,44 +3716,32 @@ mod windows_e2e {
     }
 
     #[test]
-    fn cluster_close_records_an_audit_module_outside_the_declared_set() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "cluster_close_records_an_audit_module_outside_the_declared_set",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("audit_undeclared_module"));
+    fn cluster_close_records_all_classified_in_place_modules() {
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session =
+            open_cluster_render_session(&cluster, behavior("audit_undeclared_module"));
         session
             .render_frame(0, 0, &input_pattern(3))
             .expect("frame 0 renders");
         session.swap_plugin(1).expect("swap to plugins[1]");
         let close = session.close();
-        // The observed union carried a module the manifest never declared.
-        // Since issue #730 that is a recorded observation on the close report,
-        // not an invalidation: the module list explains the frames, it does
-        // not decide whether they were valid.
+        // In-place sessions classify the observed module union without
+        // narrowing it to a staged manifest declaration. The extra module is
+        // retained as evidence and does not produce a warning.
         assert_eq!(close["invalidated"], false, "close: {close}");
         assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["module_audit_warning"], serde_json::Value::Null);
         assert!(
-            close["module_audit_warning"]
-                .as_str()
-                .is_some_and(|warning| !warning.is_empty()),
-            "close: {close}"
+            close["final_report"]["module_audit"]["observed_union"]["plugin"]
+                .as_array()
+                .is_some_and(|modules| modules.iter().any(|module| module == "evil.dll"))
         );
     }
 
     #[test]
     fn discovery_session_inspects_every_cluster_plugin() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "discovery_session_inspects_every_cluster_plugin",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
-        let mut session = open_discovery_session(&cluster);
+        let mut session = open_discovery_session(&cluster, LaunchEnvironment::default());
 
         let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
         let InspectOutcome::Inspected { report } = first else {
@@ -3195,6 +3763,11 @@ mod windows_e2e {
         let close = session.close();
         assert_eq!(close["session_clean"], true, "close: {close}");
         assert_eq!(close["inspects_ok"], 3, "close: {close}");
+        assert_eq!(
+            close["worker"]["diagnostics"]["process_memory_limit_bytes"],
+            512 * 1024 * 1024u64,
+            "close: {close}"
+        );
         // The inspect swap rode the manifest: one epoch, declared-set audit.
         let epochs = close["final_report"]["module_audit"]["epochs"]
             .as_array()
@@ -3203,18 +3776,43 @@ mod windows_e2e {
         assert_eq!(epochs[0]["plugin_index"], 0);
     }
 
+    #[test]
+    fn discovery_session_reinspects_one_dll_at_an_exact_plugin_data_effect() {
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster, behavior("plugin_data_secondary"));
+        let first = session
+            .inspect_plugin(0, 0)
+            .expect("inspect default effect");
+        let InspectOutcome::Inspected { report } = first else {
+            panic!("default effect inspection failed: {first:?}");
+        };
+        assert_eq!(report["plugin_data"]["selected_index"], 0);
+
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        let secondary = session
+            .inspect_plugin_effect(0, 1, Some(&selector))
+            .expect("inspect exact secondary effect");
+        let InspectOutcome::Inspected { report } = secondary else {
+            panic!("secondary effect inspection failed: {secondary:?}");
+        };
+        assert_eq!(report["plugin_data"]["selected_index"], 1);
+        assert_eq!(report["parameters"][0]["name"], "secondary");
+        assert_eq!(report["parameters"][0]["default"], 2.0);
+
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["inspects_ok"], 2, "close: {close}");
+    }
+
     /// In-place discovery session (issue #751, cluster-manifest-v2): the
     /// manifest names each plug-in by its real path and the search
     /// directories ride the manifest instead of a pinned closure; the
     /// exchanges and the close contract match the sealed session.
     #[test]
     fn in_place_discovery_session_inspects_by_real_path() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "in_place_discovery_session_inspects_by_real_path",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
         let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
             repository: &cluster.repository.0,
@@ -3225,7 +3823,8 @@ mod windows_e2e {
                 .collect(),
             dependency_search_dirs: vec![cluster.repository.0.clone()],
             module_bound: 64,
-            inspect_deadline: Duration::from_secs(30),
+            inspect_deadline: Some(Duration::from_secs(30)),
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open in-place discovery session");
 
@@ -3247,17 +3846,73 @@ mod windows_e2e {
         assert_eq!(close["invalidated"], false, "close: {close}");
     }
 
+    #[test]
+    fn native_discovery_close_skips_post_report_dll_detach_delay() {
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let worker = source_root.join("target/minihost-build/aex_worker.exe");
+        let fixture = source_root.join("target/minihost-build/worker_session_detach_fixture.dll");
+        if !worker.is_file() || !fixture.is_file() {
+            eprintln!(
+                "skipping native discovery close test: Release worker or detach fixture missing"
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-discovery-close-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        write_freshness_source_marker(&root);
+        let worker_dir = root.join("target/minihost-build");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::copy(&worker, worker_dir.join("aex_worker.exe")).unwrap();
+        let mut plugins = Vec::new();
+        for name in ["first", "second"] {
+            let path = root.join(format!("{name}.aex"));
+            std::fs::copy(&fixture, &path).unwrap();
+            plugins.push(approved_artifact(&path));
+        }
+        let repository = TempRepository(root);
+        let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
+            repository: &repository.0,
+            plugins,
+            dependency_search_dirs: vec![repository.0.clone()],
+            module_bound: 64,
+            inspect_deadline: Some(Duration::from_secs(30)),
+            launch_environment: LaunchEnvironment::default()
+                .with_child_var("AEXCOMPAT_DETACH_DELAY_MS", "5000"),
+        })
+        .expect("open native discovery session");
+        for index in 0..2 {
+            let outcome = session.inspect_plugin(index, index).unwrap();
+            assert!(
+                matches!(outcome, InspectOutcome::InspectError { ref error_kind, .. } if error_kind == "entrypoint_unresolved"),
+                "fixture has no EffectMain: {outcome:?}"
+            );
+        }
+        let started = Instant::now();
+        let close = session.close();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "close stalled: {close}"
+        );
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["inspects_errored"], 2, "close: {close}");
+        assert_eq!(close["worker"]["classification"], "ok", "close: {close}");
+        assert_eq!(
+            close["final_report"]["status"], "discovery_session_completed",
+            "close: {close}"
+        );
+    }
+
     /// An in-place identity mismatch (issue #751, the #309 state transition)
     /// is plug-in-local: the structured `identity_changed` reaches the caller
     /// and the session keeps serving other members.
     #[test]
     fn in_place_discovery_identity_change_is_plugin_local() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "in_place_discovery_identity_change_is_plugin_local",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("inspect_identity_changed_plugin_1"));
         let cluster = temp_cluster_repository();
         let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
             repository: &cluster.repository.0,
@@ -3268,7 +3923,8 @@ mod windows_e2e {
                 .collect(),
             dependency_search_dirs: vec![cluster.repository.0.clone()],
             module_bound: 64,
-            inspect_deadline: Duration::from_secs(30),
+            inspect_deadline: Some(Duration::from_secs(30)),
+            launch_environment: behavior("inspect_identity_changed_plugin_1"),
         })
         .expect("open in-place discovery session");
         let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
@@ -3288,14 +3944,8 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_rejects_out_of_manifest_index_and_off_serial_requests() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "discovery_session_rejects_out_of_manifest_index_and_off_serial_requests",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
-        let mut session = open_discovery_session(&cluster);
+        let mut session = open_discovery_session(&cluster, LaunchEnvironment::default());
 
         // Both are caller errors rejected before anything is sent; the
         // session stays usable.
@@ -3309,14 +3959,8 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_reports_parameter_local_error_and_continues() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "discovery_session_reports_parameter_local_error_and_continues",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("inspect_error_plugin_1"));
         let cluster = temp_cluster_repository();
-        let mut session = open_discovery_session(&cluster);
+        let mut session = open_discovery_session(&cluster, behavior("inspect_error_plugin_1"));
         let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
         assert!(matches!(first, InspectOutcome::Inspected { .. }));
         let second = session
@@ -3334,20 +3978,110 @@ mod windows_e2e {
     }
 
     #[test]
-    fn discovery_session_worker_death_is_detected_by_the_three_way_wait() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "discovery_session_worker_death_is_detected_by_the_three_way_wait",
-        ) {
-            return;
-        }
-        let _behavior = BehaviorGuard::set(Some("crash_on_inspect"));
+    fn discovery_session_preserves_entrypoint_aegp_partial_report() {
         let cluster = temp_cluster_repository();
-        let mut session = open_discovery_session(&cluster);
+        let mut session =
+            open_discovery_session(&cluster, behavior("inspect_entrypoint_aegp_plugin_1"));
+        assert!(matches!(
+            session.inspect_plugin(0, 0).expect("first inspect"),
+            InspectOutcome::Inspected { .. }
+        ));
+        let outcome = session.inspect_plugin(1, 1).expect("AEGP classification");
+        let InspectOutcome::InspectError { error_kind, report } = outcome else {
+            panic!("expected entrypoint error, got {outcome:?}");
+        };
+        assert_eq!(error_kind, "entrypoint_unresolved");
+        assert_eq!(
+            report.expect("partial classification report")["plugin_kind"],
+            "aegp_candidate"
+        );
+        let repeated = session.inspect_plugin(1, 2).expect("repeat classification");
+        let InspectOutcome::InspectError { error_kind, report } = repeated else {
+            panic!("expected repeated entrypoint error, got {repeated:?}");
+        };
+        assert_eq!(error_kind, "entrypoint_unresolved");
+        assert_eq!(
+            report.expect("repeated partial report")["plugin_kind"],
+            "aegp_candidate"
+        );
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn discovery_session_worker_death_is_detected_by_the_three_way_wait() {
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster, behavior("crash_on_inspect"));
         let error = session
             .inspect_plugin(0, 0)
             .expect_err("a worker dying mid-inspect must fail the request");
         assert!(error.to_string().contains("worker_exited"), "{error}");
         let close = session.close();
         assert_eq!(close["invalidated"], true, "close: {close}");
+    }
+
+    #[test]
+    fn discovery_session_authenticates_checkpoint_before_cleanup_crash() {
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster, behavior("checkpoint_then_crash"));
+        let outcome = session
+            .inspect_plugin(0, 0)
+            .expect("authenticated checkpoint plus crash is a typed outcome");
+        let InspectOutcome::CleanupCrashCheckpoint { .. } = outcome else {
+            panic!("expected cleanup crash checkpoint, got {outcome:?}");
+        };
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+        assert_eq!(
+            close["invalidated_reason"]["reason"],
+            "cleanup_crash_checkpoint"
+        );
+    }
+
+    #[test]
+    fn discovery_session_checkpoint_does_not_replace_clean_terminal_response() {
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster, behavior("checkpoint_then_done"));
+        let outcome = session
+            .inspect_plugin(0, 0)
+            .expect("terminal response wins");
+        assert!(matches!(outcome, InspectOutcome::Inspected { .. }));
+        assert_eq!(session.close()["session_clean"], true);
+    }
+
+    #[test]
+    fn discovery_session_rejects_duplicate_or_wrong_identity_checkpoint() {
+        for behavior_name in [
+            "duplicate_checkpoint",
+            "wrong_checkpoint_sha",
+            "checkpoint_bad_status",
+            "checkpoint_bad_setup",
+            "checkpoint_bad_params",
+            "checkpoint_bad_setdown",
+            "checkpoint_missing_parameters",
+        ] {
+            let cluster = temp_cluster_repository();
+            let mut session = open_discovery_session(&cluster, behavior(behavior_name));
+            let error = session
+                .inspect_plugin(0, 0)
+                .expect_err("invalid checkpoint must fail closed");
+            assert!(
+                error.to_string().contains("checkpoint"),
+                "{behavior_name}: {error}"
+            );
+            assert_eq!(session.close()["invalidated"], true);
+        }
+    }
+
+    #[test]
+    fn discovery_session_checkpoint_followed_by_noncrash_exit_fails_closed() {
+        let cluster = temp_cluster_repository();
+        let mut session =
+            open_discovery_session(&cluster, behavior("checkpoint_then_noncrash_exit"));
+        let error = session
+            .inspect_plugin(0, 0)
+            .expect_err("a checkpoint cannot convert a non-crash exit to success");
+        assert!(error.to_string().contains("worker_exited"), "{error}");
+        assert_eq!(session.close()["invalidated"], true);
     }
 }

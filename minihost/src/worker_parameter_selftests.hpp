@@ -26,5 +26,6 @@ struct Hooks {
 void configure(Hooks hooks);
 bool verify_pf_param_utils_suite3();
 bool verify_parameter_animation_transport();
+bool verify_parameter_registry_capacity();
 }
 

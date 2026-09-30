@@ -10,6 +10,11 @@ use aexcompat_host_core::boundary::{
 };
 use aexcompat_host_core::error::{HostError, HostErrorCode};
 use aexcompat_host_core::handle::{HandleKind, HandleRegistry, OwnerId};
+use aexcompat_host_core::parameter::{
+    HOST_PARAMETER_ANIMATION_MAX_KEYS, HostAnimationKey, HostAnimationValue,
+    HostParameterAnimationAbiDescriptorV1, HostRationalTime,
+    evaluate as evaluate_parameter_animation,
+};
 use aexcompat_host_core::report::{HostReport, HostReportSnapshot, ReportCounters, ReportPhase};
 use aexcompat_host_core::scene::{
     HostOwnedSceneTopologySnapshot, HostSceneIdentity, HostSceneIdentityAbiDescriptorV1,
@@ -37,6 +42,82 @@ pub static AEX_HOST_CORE_SCENE_OWNER_RELATION_ABI_DESCRIPTOR_V1:
 #[unsafe(export_name = "aex_host_core_scene_topology_abi_descriptor_v1")]
 pub static AEX_HOST_CORE_SCENE_TOPOLOGY_ABI_DESCRIPTOR_V1: HostSceneTopologyAbiDescriptorV1 =
     HostSceneTopologyAbiDescriptorV1::current();
+
+#[unsafe(export_name = "aex_host_core_parameter_animation_abi_descriptor_v1")]
+pub static AEX_HOST_CORE_PARAMETER_ANIMATION_ABI_DESCRIPTOR_V1:
+    HostParameterAnimationAbiDescriptorV1 = HostParameterAnimationAbiDescriptorV1::current();
+
+fn call_parameter_evaluator(
+    now: HostRationalTime,
+    keys: &[HostAnimationKey],
+    output: &mut HostAnimationValue,
+    evaluator: impl FnOnce(
+        HostRationalTime,
+        &[HostAnimationKey],
+    ) -> Result<HostAnimationValue, HostError>,
+) -> i32 {
+    *output = HostAnimationValue::default();
+    match contain_panic("ffi_parameter_animation_evaluate", || evaluator(now, keys)) {
+        Ok(value) => {
+            *output = value;
+            HostErrorCode::Ok as i32
+        }
+        Err(error) => error.code() as i32,
+    }
+}
+
+/// Evaluates one bounded, pointer-free typed timeline without mutating any
+/// production worker state.
+///
+/// # Safety
+///
+/// All non-null pointers must be aligned and valid for the full input/output
+/// extent. The native adapter must contain pointer faults with Windows SEH.
+/// Valid inputs are copied before `output` is written, so their storage may
+/// overlap. Rejected calls clear a valid output pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aex_host_core_parameter_animation_evaluate_v1(
+    now: *const HostRationalTime,
+    keys: *const HostAnimationKey,
+    key_count: u32,
+    output: *mut HostAnimationValue,
+) -> i32 {
+    if output.is_null()
+        || !(output as usize).is_multiple_of(std::mem::align_of::<HostAnimationValue>())
+    {
+        return HostErrorCode::InvalidArgument as i32;
+    }
+    if now.is_null()
+        || !(now as usize).is_multiple_of(std::mem::align_of::<HostRationalTime>())
+        || keys.is_null()
+        || !(keys as usize).is_multiple_of(std::mem::align_of::<HostAnimationKey>())
+        || key_count == 0
+        || key_count as usize > HOST_PARAMETER_ANIMATION_MAX_KEYS
+    {
+        // SAFETY: The non-null, aligned output is writable by contract.
+        unsafe { output.write(HostAnimationValue::default()) };
+        return HostErrorCode::InvalidArgument as i32;
+    }
+    // Copy both inputs before writing output. The C ABI permits an output
+    // address inside either input, so creating shared and mutable references
+    // to the caller's storage would violate Rust's aliasing rules.
+    // SAFETY: The caller promises readable input for the validated extent;
+    // the native adapter contains pointer faults in its SEH frame.
+    let now = unsafe { now.read() };
+    let mut owned_keys = [HostAnimationKey::default(); HOST_PARAMETER_ANIMATION_MAX_KEYS];
+    // SAFETY: The bounded source extent is valid by contract; the private
+    // stack buffer cannot overlap caller-owned input.
+    unsafe { std::ptr::copy_nonoverlapping(keys, owned_keys.as_mut_ptr(), key_count as usize) };
+    // SAFETY: All input reads are complete, so even an aliased output can be
+    // borrowed mutably for the remainder of this synchronous call.
+    let output = unsafe { &mut *output };
+    call_parameter_evaluator(
+        now,
+        &owned_keys[..key_count as usize],
+        output,
+        evaluate_parameter_animation,
+    )
+}
 
 struct SessionRecord {
     session: HostSession,
@@ -476,12 +557,12 @@ unsafe fn ffi_entry_uncontained(
         }
     };
     let outcome = call();
-    if let (Some(handle_output), CallOutcome::Passed(observation)) = (created_handle, &outcome) {
-        if let Some(handle) = observation.created_handle {
-            // SAFETY: The pointer was checked above; native validity is the
-            // C++ adapter's responsibility.
-            unsafe { handle_output.write(handle) };
-        }
+    if let (Some(handle_output), CallOutcome::Passed(observation)) = (created_handle, &outcome)
+        && let Some(handle) = observation.created_handle
+    {
+        // SAFETY: The pointer was checked above; native validity is the
+        // C++ adapter's responsibility.
+        unsafe { handle_output.write(handle) };
     }
     unsafe { write_outcome(status, report, report_id, outcome) }
 }
@@ -869,6 +950,71 @@ mod tests {
             AEX_HOST_CORE_SCENE_TOPOLOGY_ABI_DESCRIPTOR_V1,
             HostSceneTopologyAbiDescriptorV1::current()
         );
+        assert_eq!(
+            AEX_HOST_CORE_PARAMETER_ANIMATION_ABI_DESCRIPTOR_V1,
+            HostParameterAnimationAbiDescriptorV1::current()
+        );
+    }
+
+    #[test]
+    fn parameter_animation_ffi_clears_output_on_rejection_and_panic() {
+        let now = HostRationalTime { value: 1, scale: 2 };
+        let key = HostAnimationKey {
+            time: HostRationalTime { value: 0, scale: 1 },
+            kind: aexcompat_host_core::parameter::value_kind::SCALAR,
+            interpolation: aexcompat_host_core::parameter::interpolation::LINEAR,
+            scalar: 7.0,
+            ..HostAnimationKey::default()
+        };
+        let mut output = HostAnimationValue {
+            scalar: 123.0,
+            ..HostAnimationValue::default()
+        };
+        assert_eq!(
+            unsafe { aex_host_core_parameter_animation_evaluate_v1(&now, &key, 1, &mut output) },
+            HostErrorCode::Ok as i32
+        );
+        assert_eq!(output.scalar, 7.0);
+
+        let mut alias_key = key;
+        let alias_input = &raw mut alias_key;
+        let alias_output = alias_input.cast::<HostAnimationValue>();
+        assert_eq!(
+            unsafe {
+                aex_host_core_parameter_animation_evaluate_v1(&now, alias_input, 1, alias_output)
+            },
+            HostErrorCode::Ok as i32
+        );
+        // SAFETY: The completed FFI call wrote a value inside alias_key's
+        // still-live, aligned storage.
+        assert_eq!(unsafe { (*alias_output).scalar }, 7.0);
+
+        output.scalar = 123.0;
+        assert_eq!(
+            unsafe {
+                aex_host_core_parameter_animation_evaluate_v1(
+                    std::ptr::null(),
+                    &key,
+                    1,
+                    &mut output,
+                )
+            },
+            HostErrorCode::InvalidArgument as i32
+        );
+        assert_eq!(output, HostAnimationValue::default());
+        output.scalar = 123.0;
+        assert_eq!(
+            unsafe { aex_host_core_parameter_animation_evaluate_v1(&now, &key, 257, &mut output) },
+            HostErrorCode::InvalidArgument as i32
+        );
+        assert_eq!(output, HostAnimationValue::default());
+
+        output.scalar = 123.0;
+        assert_eq!(
+            call_parameter_evaluator(now, &[key], &mut output, |_, _| panic!("synthetic panic")),
+            HostErrorCode::Panic as i32
+        );
+        assert_eq!(output, HostAnimationValue::default());
     }
 
     #[test]

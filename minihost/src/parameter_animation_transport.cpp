@@ -1,4 +1,5 @@
 #include "parameter_animation_transport.hpp"
+#include "worker_parameter_limits.hpp"
 
 #include "strict_json.hpp"
 
@@ -6,6 +7,7 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <set>
 #include <string>
 #include <utility>
@@ -22,7 +24,8 @@ using strict_json::json_member;
 using strict_json::json_number;
 using strict_json::json_string;
 
-constexpr std::size_t kMaxParams = 1024;
+constexpr std::size_t kMaxParams =
+    aexcompat::worker_runtime::parameters::kMaxParameterCount;
 
 }  // namespace
 
@@ -30,6 +33,47 @@ bool rational_less(int32_t left_value, uint32_t left_scale,
                    int32_t right_value, uint32_t right_scale) {
   return static_cast<int64_t>(left_value) * right_scale <
          static_cast<int64_t>(right_value) * left_scale;
+}
+
+ParameterAnimationKey evaluate_parameter_animation(
+    const ParameterTimeline& timeline, int32_t time, uint32_t scale) {
+  if (!rational_less(timeline.keys.front().time, timeline.keys.front().scale,
+                     time, scale))
+    return timeline.keys.front();
+  for (std::size_t i = 1; i < timeline.keys.size(); ++i) {
+    const auto& right = timeline.keys[i];
+    if (rational_less(time, scale, right.time, right.scale)) {
+      const auto& left = timeline.keys[i - 1];
+      if (left.hold || left.kind != right.kind ||
+          left.component_count != right.component_count)
+        return left;
+      const long double now = static_cast<long double>(time) / scale,
+                        a = static_cast<long double>(left.time) / left.scale,
+                        b = static_cast<long double>(right.time) / right.scale;
+      const double f = static_cast<double>((now - a) / (b - a));
+      AnimationKey value = left;
+      if (!std::isfinite(f)) {
+        // Ordered rationals can still collapse to the same MSVC double.
+        // Make the worker's value path fail closed for every value kind.
+        value.scalar = std::numeric_limits<double>::quiet_NaN();
+        return value;
+      }
+      if (value.kind == AnimationValueKind::Scalar)
+        value.scalar += (right.scalar - value.scalar) * f;
+      else if (value.kind == AnimationValueKind::Color)
+        for (std::size_t c = 0; c < 4; ++c)
+          value.color[c] = static_cast<unsigned char>(
+              std::clamp(std::lround(value.color[c] +
+                                     (right.color[c] - value.color[c]) * f),
+                         0l, 255l));
+      else
+        for (int c = 0; c < value.component_count; ++c)
+          value.components[c] +=
+              (right.components[c] - value.components[c]) * f;
+      return value;
+    }
+  }
+  return timeline.keys.back();
 }
 
 bool load_parameter_animation(const std::filesystem::path& path,

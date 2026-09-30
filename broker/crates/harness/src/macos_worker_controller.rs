@@ -178,6 +178,16 @@ impl WorkerSession {
         self.audit_tree_with_limits(MAX_SESSION_FILES, MAX_SESSION_BYTES)
     }
 
+    pub(crate) fn audit_tree_with_additional_files(
+        &self,
+        additional_files: usize,
+    ) -> Result<(), String> {
+        let files = MAX_SESSION_FILES
+            .checked_add(additional_files)
+            .ok_or_else(|| "macos_worker_artifact_limit: file count overflow".to_string())?;
+        self.audit_tree_with_limits(files, MAX_SESSION_BYTES)
+    }
+
     fn audit_tree_with_limits(&self, max_files: usize, max_bytes: u64) -> Result<(), String> {
         let mut count = 0usize;
         let mut bytes = 0u64;
@@ -274,6 +284,13 @@ fn hash_file(path: &Path) -> Result<[u8; 32], String> {
     Ok(hasher.finalize().into())
 }
 
+fn hash_file_hex(path: &Path) -> Result<String, String> {
+    Ok(hash_file(path)?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 fn install_resource_limits(command: &mut Command, limits: ResourceLimits) {
     // SAFETY: this closure performs only async-signal-safe libc calls and
     // returns an io::Error without allocation in the child-before-exec path.
@@ -330,6 +347,12 @@ pub(crate) struct BoundedOutput {
     pub(crate) status: ExitStatus,
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
+}
+
+pub(crate) struct StagedSetupOutput {
+    pub(crate) output: BoundedOutput,
+    pub(crate) staged_plugin_sha256: Option<String>,
+    pub(crate) post_setup_sha256: Option<String>,
 }
 
 pub(crate) fn wait_bounded(mut child: Child, deadline: Duration) -> Result<BoundedOutput, String> {
@@ -441,22 +464,31 @@ pub(crate) fn run_staged_setup(
     plugin: &Path,
     tier: SecurityTier,
     deadline: Duration,
-) -> Result<BoundedOutput, String> {
+) -> Result<StagedSetupOutput, String> {
     let mut session = WorkerSession::create()?;
     let staged_worker = session.stage_file(worker, "worker")?;
     let staged_plugin = session.stage_file(plugin, &staged_name("plugin", plugin))?;
+    // This is a record, never a reason to skip dispatch.
+    let staged_plugin_sha256 = hash_file_hex(&staged_plugin).ok();
     let mut command = session.command(&staged_worker, tier, ResourceLimits::default());
-    command.arg("setup").arg(staged_plugin);
+    command.arg("setup").arg(&staged_plugin);
     let result = wait_bounded(
         command
             .spawn()
             .map_err(|error| format!("macos_worker_launch: {error}"))?,
         deadline,
     );
+    // A post-run read is evidence only. A plug-in may remove or alter its
+    // staged file; that must not turn a successful setup into a failure.
+    let post_setup_sha256 = hash_file_hex(&staged_plugin).ok();
     let audit = session.audit_tree_with_limits(2, MAX_SESSION_BYTES);
     let cleanup = session.cleanup();
     match (result, audit, cleanup) {
-        (Ok(output), Ok(()), Ok(())) => Ok(output),
+        (Ok(output), Ok(()), Ok(())) => Ok(StagedSetupOutput {
+            output,
+            staged_plugin_sha256,
+            post_setup_sha256,
+        }),
         (Err(error), Ok(()), Ok(())) => Err(error),
         (Ok(_), Err(audit), Ok(())) => Err(audit),
         (Ok(_), Ok(()), Err(cleanup)) => Err(cleanup),
@@ -813,8 +845,13 @@ mod tests {
             Duration::from_secs(5),
         )
         .unwrap();
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid PE"));
+        assert!(!output.output.status.success());
+        assert!(String::from_utf8_lossy(&output.output.stderr).contains("invalid PE"));
+        assert_eq!(output.staged_plugin_sha256.as_ref().unwrap().len(), 64);
+        assert_eq!(
+            output.post_setup_sha256.as_deref(),
+            output.staged_plugin_sha256.as_deref()
+        );
     }
 
     #[test]
@@ -835,8 +872,8 @@ mod tests {
             Duration::from_secs(5),
         )
         .unwrap();
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid PE"));
+        assert!(!output.output.status.success());
+        assert!(String::from_utf8_lossy(&output.output.stderr).contains("invalid PE"));
     }
 
     #[test]

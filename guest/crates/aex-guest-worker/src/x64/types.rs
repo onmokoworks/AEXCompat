@@ -6,6 +6,113 @@ pub struct GuestParam {
     pub bytes: Vec<u8>,
 }
 
+fn parameter_disk_id(parameter: &GuestParam) -> Option<i32> {
+    parameter.bytes.get(..4).and_then(|bytes| {
+        let bytes: [u8; 4] = bytes.try_into().ok()?;
+        Some(i32::from_le_bytes(bytes))
+    })
+}
+
+/// Where a smart checkout index landed among the declared parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LayerParameterResolution {
+    /// Zero-based offset into the captured parameter list (slot - 1).
+    pub offset: usize,
+    /// `true` when the positional slot was not a layer and the offset came
+    /// from matching the index against the layer parameters' disk ids. AE and
+    /// the minihost's `pre_checkout_layer` resolve positionally only, so this
+    /// is a host-side substitution the caller must record.
+    pub disk_id_fallback: bool,
+}
+
+/// Resolves a `PF_CHECKOUT_LAYER`/pre-checkout index to a layer parameter.
+///
+/// Positional resolution wins outright: when parameter `index` (1-based) is a
+/// `PF_Param_LAYER`, that slot is returned without consulting disk ids, no
+/// matter what other parameters declare as their id. Only when the positional
+/// slot is absent or not a layer are disk ids consulted, and only among layer
+/// parameters, so a slider or popup that happens to carry the same id never
+/// makes a valid positional checkout ambiguous.
+pub(crate) fn resolve_layer_parameter_offset(
+    parameters: &[GuestParam],
+    checkout_index: i32,
+) -> Result<LayerParameterResolution, String> {
+    let positional = usize::try_from(checkout_index)
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|offset| parameters.get(offset).map(|parameter| (offset, parameter)));
+    if let Some((offset, parameter)) = positional
+        && parameter.param_type == 0
+    {
+        return Ok(LayerParameterResolution {
+            offset,
+            disk_id_fallback: false,
+        });
+    }
+    let mut layer_disk_matches = parameters.iter().enumerate().filter(|(_, parameter)| {
+        parameter.param_type == 0 && parameter_disk_id(parameter) == Some(checkout_index)
+    });
+    let disk_match = layer_disk_matches.next();
+    if disk_match.is_some() && layer_disk_matches.next().is_some() {
+        return Err(format!(
+            "smart checkout index={checkout_index} is not a positional PF_Param_LAYER and its disk_id is duplicated among layer parameters"
+        ));
+    }
+    if let Some((offset, _)) = disk_match {
+        return Ok(LayerParameterResolution {
+            offset,
+            disk_id_fallback: true,
+        });
+    }
+    if positional.is_some() {
+        Err(format!(
+            "smart checkout index={checkout_index} is not a PF_Param_LAYER"
+        ))
+    } else {
+        Err(format!(
+            "smart checkout index={checkout_index} does not resolve to a declared parameter"
+        ))
+    }
+}
+
+/// A smart checkout that the host resolved through the disk-id fallback in
+/// `resolve_layer_parameter_offset` instead of positionally. AE and the
+/// minihost have no such fallback, so each one is a host-side substitution
+/// that a sweep must be able to see next to the render result.
+///
+/// Records are keyed by `(requested_index, resolved_slot)` and accumulate for
+/// the engine's lifetime: a repeat checkout bumps `call_count` instead of
+/// adding an entry, and nothing clears the list between resident frames, so
+/// a per-frame report carries the running total across every frame the
+/// engine has rendered so far (the same convention as
+/// `unsupported_suite_calls`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SmartCheckoutDiskIdFallback {
+    pub requested_index: i32,
+    pub resolved_slot: usize,
+    pub call_count: u64,
+}
+
+/// Dedupes on `(requested_index, resolved_slot)` and never removes an entry;
+/// see `SmartCheckoutDiskIdFallback` for the resulting cumulative semantics.
+pub(crate) fn record_smart_checkout_disk_id_fallback(
+    records: &mut Vec<SmartCheckoutDiskIdFallback>,
+    requested_index: i32,
+    resolved_slot: usize,
+) {
+    if let Some(record) = records.iter_mut().find(|record| {
+        record.requested_index == requested_index && record.resolved_slot == resolved_slot
+    }) {
+        record.call_count += 1;
+    } else {
+        records.push(SmartCheckoutDiskIdFallback {
+            requested_index,
+            resolved_slot,
+            call_count: 1,
+        });
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnsupportedSuiteCall {
     pub name: &'static str,
@@ -53,9 +160,30 @@ fn record_named_unsupported_suite_call(
     }
 }
 
+#[derive(Clone, Copy)]
+struct WindowsInitOnceState {
+    owner: Option<u32>,
+    context: u64,
+    complete: bool,
+}
+
 #[derive(Default)]
 struct GuestState {
+    pointer_encoding_key: Option<u64>,
+    crt_wlocale_buffer: Option<u64>,
+    crt_pctype_buffer: Option<u64>,
+    crt_locale_names_buffer: Option<u64>,
+    crt_lconv_buffer: Option<u64>,
+    crt_locales: BTreeSet<u64>,
+    next_crt_locale: u64,
+    crt_tm_buffers: BTreeMap<u32, u64>,
+    crt_strerror_buffers: BTreeMap<u32, u64>,
+    windows_hostent_buffers: BTreeMap<u32, u64>,
+    loaded_libraries: BTreeMap<String, GuestLibrary>,
+    sapphire_filebuf_fgetc_return: Option<u64>,
     params: Vec<GuestParam>,
+    popup_choice_pages: u64,
+    custom_ui_registration: Option<CustomUiRegistration>,
     callback_error: Option<String>,
     unsupported_import: Option<(String, String)>,
     smart_input_world: u64,
@@ -67,8 +195,14 @@ struct GuestState {
     smart_current_time: i32,
     smart_current_time_scale: u32,
     suite_requests: Vec<String>,
+    options_button_name: Option<Vec<u8>>,
+    persistent_blob_active: bool,
+    persistent_strings: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
+    persistent_longs: HashMap<(Vec<u8>, Vec<u8>), i32>,
+    addrinfo_allocations: HashSet<u64>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
+    smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
     aegp_compute_cache_classes: HashMap<Vec<u8>, [u64; 4]>,
     selector_dispatch_active: bool,
     pending_unsupported_suite: Option<PendingUnsupportedSuite>,
@@ -85,9 +219,12 @@ struct GuestState {
     next_pf_handle_data: u64,
     image_region: Option<(u64, u64)>,
     image_executable_ranges: Vec<(u64, u64)>,
+    sealed_image_read_ranges: Vec<(u64, u64)>,
+    sealed_image_reads: bool,
     latest_runtime_target: Option<TraceRuntimeTarget>,
     handles: HashMap<u64, GuestHandle>,
     worlds: HashMap<u64, GuestWorld>,
+    resident_world_formats: HashMap<u64, i32>,
     aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
     aegp_memory_free: Vec<AegpMemoryBlock>,
     next_aegp_memory_handle: u64,
@@ -98,22 +235,82 @@ struct GuestState {
     trace: Option<TraceCapture>,
     trace_labels: HashMap<u64, TraceLabel>,
     trace_watches: Vec<TraceWatchSpec>,
+    trace_checkpoint_only: bool,
     pending_iterate: Option<PendingIterate>,
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
     vcomp_requested_threads: Option<u32>,
     omp_dynamic_requested: Option<bool>,
+    imported_data: BTreeMap<&'static str, u64>,
     msvcp_mutexes: HashMap<u64, MsvcpMutex>,
+    msvcp_lockit_locks: [Option<(u32, u32)>; 8],
+    msvcp_lockit_objects: HashMap<u64, (i32, u32)>,
     pending_crt_initterm: Option<PendingCrtInitterm>,
     crt_onexit_tables: HashMap<u64, Vec<u64>>,
     crt_terminate_handler: u64,
     windows_critical_sections: HashMap<u64, u32>,
+    windows_srw_locks: BTreeMap<u64, WindowsSrwLock>,
     windows_condition_variables: HashSet<u64>,
+    windows_condition_waiters: BTreeMap<u64, VecDeque<u32>>,
+    scheduler_condition_locks: BTreeMap<u32, u64>,
+    windows_address_waiters: BTreeMap<u64, BTreeSet<u32>>,
     windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
+    windows_tls_slots: BTreeMap<u32, u64>,
     pending_fls_free: Option<PendingFlsFree>,
+    windows_threads: BTreeMap<u64, WindowsThread>,
+    windows_hooks: BTreeMap<u64, (i32, u64, u64, u32)>,
+    next_windows_hook: u64,
+    windows_timers: BTreeMap<(u64, u64), (u32, u64)>,
+    windows_init_once: BTreeMap<u64, WindowsInitOnceState>,
+    next_windows_timer: u64,
+    windows_message_boxes: Vec<(String, String, u32)>,
+    windows_objects: WindowsKernelObjects,
+    windows_sids: BTreeSet<u64>,
+    windows_sid_issued: u64,
+    windows_acl_allocations: BTreeMap<u64, u64>,
+    windows_acl_issued: u64,
+    next_windows_thread_id: u32,
+    current_windows_thread_id: u32,
+    com_apartments: BTreeMap<u32, (u32, u32)>,
+    // Process defaults (service count, authentication level, impersonation level).
+    // No COM transport may operate without implementing these security settings.
+    com_security: Option<(i32, u32, u32)>,
+    pending_windows_thread: Option<PendingWindowsThread>,
     windows_last_error: u32,
+    crt_errno: u32,
+    last_crt_heap_failure: Option<(u64, String)>,
+    crt_errno_buffers: BTreeMap<u32, u64>,
+    crt_random_states: BTreeMap<u32, u32>,
+    registry: crate::guest_registry::GuestRegistry,
+    guest_files: GuestFiles,
+    performance_counter_origin: Option<std::time::Instant>,
+    windows_module_refcounts: HashMap<u64, u32>,
+    windows_pinned_modules: HashSet<u64>,
+    windows_thread_error_mode: u32,
+    windows_socket_startups: u32,
+    windows_private_heaps: BTreeMap<u64, BTreeSet<u64>>,
+    scheduler_yield_reason: Option<SchedulerYieldReason>,
+    scheduler_resume_rip: u64,
+    scheduler_ready_hint: bool,
+    scheduler_woken_threads: VecDeque<u32>,
+    scheduler_virtual_tick: u64,
+    scheduler_switches_remaining: u64,
+    scheduler_wait_deadline: Option<u64>,
+    scheduler_main_wait: Option<SchedulerMainWait>,
+    scheduler_child_completed: bool,
+    scheduler_resume_active: bool,
+    scheduler_parent_context: Option<Context>,
+    windows_command_line_a: u64,
+    windows_command_line_w: u64,
+    environment_strings_base: u64,
+    environment_overrides: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    getenv_buffer: Option<u64>,
+    wgetenv_buffers: BTreeMap<Vec<u8>, u64>,
+    wenviron_cell: Option<u64>,
+    process_prng_state: u64,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
     crt_heap: CrtHeap,
+    crt_heap_mapped: bool,
     extended_strings: HashMap<i32, u64>,
     extended_empty_string: u64,
     extended_string_table_valid: bool,
@@ -122,6 +319,56 @@ struct GuestState {
     avx_state_sync_points: HashMap<u64, AvxStateSync>,
     gpu_runtime: GpuRuntime,
     gpu_suite: GpuSuiteState,
+}
+
+impl GuestState {
+    fn seal_image_reads(&mut self) {
+        let mut ranges = Vec::with_capacity(self.loaded_libraries.len() + 1);
+        ranges.extend(self.image_region);
+        ranges.extend(
+            self.loaded_libraries
+                .values()
+                .map(|library| (library.base, library.end)),
+        );
+        ranges.sort_unstable_by_key(|range| range.0);
+
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            if let Some(last) = merged.last_mut()
+                && start <= last.1
+            {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        self.sealed_image_read_ranges = merged;
+        self.sealed_image_reads = true;
+    }
+
+    fn sealed_image_contains(&self, address: u64, inclusive_end: u64) -> bool {
+        if !self.sealed_image_reads {
+            return false;
+        }
+        let index = self
+            .sealed_image_read_ranges
+            .partition_point(|range| range.0 <= address);
+        index > 0 && inclusive_end < self.sealed_image_read_ranges[index - 1].1
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct CustomUiRegistration {
+    pub events: u32,
+    pub comp_width: i32,
+    pub comp_height: i32,
+    pub comp_alignment: i32,
+    pub layer_width: i32,
+    pub layer_height: i32,
+    pub layer_alignment: i32,
+    pub preview_width: i32,
+    pub preview_height: i32,
+    pub preview_alignment: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -157,7 +404,14 @@ struct VcompDynamicLoop {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MsvcpMutex {
     mutex_type: u32,
+    owner_thread_id: Option<u32>,
     lock_count: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct WindowsSrwLock {
+    owner: Option<u32>,
+    waiters: VecDeque<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -173,6 +427,39 @@ struct PendingCrtInitterm {
     return_address: u64,
     continuation_rsp: u64,
     stop_on_error: bool,
+}
+
+#[derive(Clone, Debug)]
+struct WindowsThread {
+    id: u32,
+    start: u64,
+    parameter: u64,
+    suspended: bool,
+    completed: bool,
+    exit_code: u32,
+    handle_open: bool,
+    stack_base: u64,
+    stack_size: u64,
+    stack_mapped: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingWindowsThread {
+    handle: u64,
+    return_address: u64,
+    continuation_rsp: u64,
+    callback_return_rsp: u64,
+    caller_tls_values: BTreeMap<u32, u64>,
+    caller_fls_values: BTreeMap<u32, u64>,
+    caller_last_error: u32,
+    caller_crt_errno: u32,
+    caller_thread_error_mode: u32,
+    caller_thread_id: u32,
+    completion_return: u64,
+    caller_teb_stack: [u8; 16],
+    exit_code: Option<u32>,
+    fls_pass: u32,
+    fls_processed: BTreeSet<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,6 +499,7 @@ struct PendingIterate {
     continuation: u64,
     callback_name: &'static str,
     callback_phase: IterateCallbackPhase,
+    scheduled_pixels: i32,
     abort_function: u64,
     progress_function: u64,
     effect_ref: u64,
@@ -262,7 +550,12 @@ struct AegpMemoryBlock {
 
 pub struct GuestEngine<'a> {
     unicorn: Unicorn<'a, GuestState>,
+    scheduled_windows_threads: BTreeMap<u32, ParkedWindowsThread>,
+    scheduler_ready: VecDeque<u32>,
+    scheduler_deferred_ready: VecDeque<u32>,
+    parked_main_context: Option<Context>,
     next_data: u64,
+    next_import_stub: u64,
     image_base: u64,
     image_end: u64,
     census_hook: Option<UcHookId>,
@@ -271,6 +564,36 @@ pub struct GuestEngine<'a> {
     image_sha256: String,
     entry_export: String,
     trace_modules: Vec<TraceModule>,
+    primary_attached: bool,
+    primary_poisoned: bool,
+}
+
+struct ParkedWindowsThread {
+    crt_errno: u32,
+    context: Context,
+    pending: PendingWindowsThread,
+    tls_values: BTreeMap<u32, u64>,
+    fls_values: BTreeMap<u32, u64>,
+    last_error: u32,
+    thread_error_mode: u32,
+    teb_stack: [u8; 16],
+    wait_deadline: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SchedulerYieldReason {
+    Voluntary,
+    AddressWait,
+    SrwLock,
+    Event,
+    ConditionVariable,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SchedulerMainWait {
+    address: u64,
+    deadline: Option<u64>,
+    woken: bool,
 }
 
 impl Drop for GuestEngine<'_> {
@@ -287,8 +610,12 @@ impl Drop for GuestEngine<'_> {
                 .get_data()
                 .crt_heap
                 .allocations()
+                .filter(|(pointer, _)| !(CRT_HEAP_BASE..CRT_HEAP_END).contains(pointer))
                 .map(|(pointer, allocation)| (pointer, allocation.backing_size)),
         );
+        if self.unicorn.get_data().crt_heap_mapped {
+            mappings.push((CRT_HEAP_BASE, MAX_CRT_HEAP_BYTES));
+        }
         mappings.extend(self.unicorn.get_data().gpu_suite.mapped_regions());
         {
             let state = self.unicorn.get_data_mut();
@@ -329,6 +656,8 @@ struct TraceCapture {
     watch_occurrence_counts: HashMap<String, u64>,
     watch_stack: Vec<Vec<PendingTraceWatch>>,
     selector_watches: Vec<PendingTraceWatch>,
+    checkpoint_returns: HashMap<u64, Vec<PendingTraceWatch>>,
+    unhookable_watches: Vec<UnhookableWatch>,
     witnesses: Vec<TraceMemoryWitness>,
     dropped_witnesses: u64,
     basic_blocks: HashMap<(u64, u32), u64>,
@@ -341,6 +670,7 @@ struct TraceCapture {
     known_function_entries: HashSet<u64>,
     truncated: bool,
     dropped_events: u64,
+    checkpoint_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -367,6 +697,8 @@ pub struct TraceWatchSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub absolute_address: Option<u64>,
     pub register: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dereference_offset: Option<u64>,
     pub size: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<u64>,
@@ -387,8 +719,21 @@ pub struct TraceModule {
     pub symbols: Vec<String>,
 }
 
+/// A watch the active capture mode cannot arm. Checkpoint capture hooks the
+/// selector entry and the direct call sites its watches name, so a watch
+/// that depends on a tail-call jump or an indirect call produces no witness;
+/// listing it here keeps that absence explicit instead of silent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UnhookableWatch {
+    pub id: String,
+    pub reason: &'static str,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceConfiguration {
+    pub capture_mode: &'static str,
+    /// Watches this capture could not hook (always empty for `full_trace`).
+    pub unhookable_watches: Vec<UnhookableWatch>,
     pub max_events: usize,
     pub max_basic_blocks: usize,
     pub max_branch_edges: usize,
@@ -544,11 +889,17 @@ pub struct TraceCrashSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_rva: Option<u64>,
     pub instruction_bytes: String,
+    /// Readable 64-bit words starting at RSP, for recovering untracked native calls.
+    pub stack_words: Vec<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_target: Option<TraceRuntimeTarget>,
     pub handle_allocations: Vec<u64>,
     pub handle_allocation_failures: Vec<String>,
     pub live_handle_count: usize,
+    pub crt_heap_live_bytes: u64,
+    pub crt_heap_allocation_count: usize,
+    /// Highest-address live allocations as (pointer, requested bytes, backing bytes).
+    pub crt_heap_tail_allocations: Vec<(u64, u64, u64)>,
     pub next_pf_handle_data: u64,
     pub pf_handle_data_end: u64,
 }

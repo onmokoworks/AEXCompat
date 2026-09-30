@@ -1,6 +1,160 @@
 use super::*;
 
 #[test]
+fn diagnostic_world_layout_is_bounded_before_worker_launch() {
+    let layout = DiagnosticWorldLayout {
+        input_row_padding: 16,
+        input_padding_byte: None,
+        input_pixel_format: None,
+        output_row_padding: 8,
+        input_origin_x: -3,
+        input_origin_y: 4,
+        request_rect: Some([2, 1, 7, 5]),
+        extent_hint: Some([1, 0, 8, 6]),
+    };
+    assert_eq!(
+        layout
+            .encoded(9, 7, RenderPixelFormat::Argb8, true)
+            .unwrap(),
+        "v1|16|8|-3|4|2|1|7|5|1|0|8|6"
+    );
+    assert_eq!(
+        DiagnosticWorldLayout {
+            input_padding_byte: Some(0),
+            ..layout
+        }
+        .encoded(9, 7, RenderPixelFormat::Argb8, true)
+        .unwrap(),
+        "v2|16|8|-3|4|2|1|7|5|1|0|8|6|0"
+    );
+    assert_eq!(
+        DiagnosticWorldLayout {
+            input_pixel_format: Some(RenderPixelFormat::Argb16),
+            ..layout
+        }
+        .encoded(9, 7, RenderPixelFormat::Argb8, true)
+        .unwrap(),
+        "v3|16|8|-3|4|2|1|7|5|1|0|8|6|90|8"
+    );
+    assert!(
+        layout
+            .encoded(9, 7, RenderPixelFormat::Argb8, false)
+            .is_err()
+    );
+    assert!(
+        layout
+            .encoded(6, 7, RenderPixelFormat::Argb8, true)
+            .is_err()
+    );
+    let padded = DiagnosticWorldLayout {
+        input_row_padding: 2,
+        ..layout
+    };
+    assert!(
+        padded
+            .encoded(9, 7, RenderPixelFormat::Argb8, true)
+            .is_err()
+    );
+    let excessive = DiagnosticWorldLayout {
+        output_row_padding: 260,
+        ..layout
+    };
+    assert!(
+        excessive
+            .encoded(9, 7, RenderPixelFormat::Argb8, true)
+            .is_err()
+    );
+}
+
+#[test]
+fn plugin_data_effect_selector_is_exact_and_bounded() {
+    let selector = PluginDataEffectSelector {
+        index: 63,
+        match_name_hex: "5365636f6e64".to_lowercase(),
+    };
+    assert_eq!(
+        selector.encoded().unwrap(),
+        "v1|63|5365636f6e64".to_lowercase()
+    );
+    let mut args = vec!["worker-prefix".to_owned()];
+    append_plugin_data_selector_args(&mut args, Some(&selector)).unwrap();
+    assert_eq!(
+        args,
+        [
+            "worker-prefix",
+            "--plugin-data-selector-v1",
+            "v1|63|5365636f6e64"
+        ]
+        .map(str::to_lowercase)
+    );
+    let request: serde_json::Value = serde_json::from_str(
+        &discovery::inspect_plugin_request_json(4, 9, Some(&selector)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        request,
+        serde_json::json!({
+            "v": 1,
+            "type": "inspect_plugin",
+            "plugin_index": 4,
+            "request_index": 9,
+            "effect_index": 63,
+            "effect_match_name_hex": "5365636f6e64".to_lowercase(),
+        })
+    );
+    let default_request: serde_json::Value =
+        serde_json::from_str(&discovery::inspect_plugin_request_json(4, 9, None).unwrap()).unwrap();
+    assert_eq!(default_request.as_object().unwrap().len(), 4);
+    let matching_report = serde_json::json!({
+        "plugin_data": {
+            "selected_index": 63,
+            "registrations": (0..64).map(|index| serde_json::json!({
+                "index": index,
+                "match_name_hex": if index == 63 {
+                    "5365636f6e64".to_lowercase()
+                } else {
+                    format!("{index:02x}")
+                }
+            })).collect::<Vec<_>>()
+        }
+    });
+    assert!(discovery::report_matches_plugin_data_selector(
+        &matching_report,
+        Some(&selector)
+    ));
+    for mismatched in [
+        serde_json::json!({"plugin_data": null}),
+        serde_json::json!({"plugin_data": {"selected_index": 62, "registrations": []}}),
+        serde_json::json!({"plugin_data": {"selected_index": 63, "registrations": []}}),
+    ] {
+        assert!(!discovery::report_matches_plugin_data_selector(
+            &mismatched,
+            Some(&selector)
+        ));
+    }
+    for selector in [
+        PluginDataEffectSelector {
+            index: 64,
+            match_name_hex: "61".into(),
+        },
+        PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: String::new(),
+        },
+        PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "A1".into(),
+        },
+        PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "00".into(),
+        },
+    ] {
+        assert!(selector.encoded().is_err());
+    }
+}
+
+#[test]
 fn session_geometry_slot_layout_matches_the_protocol() {
     let geometry = SessionGeometry {
         width: 33,
@@ -67,6 +221,39 @@ fn frame_done_parsing_is_strict_about_unknown_fields() {
                 "render_error":0,"generation":1}"#,
     );
     assert!(ok.is_ok());
+    assert!(ok.unwrap().performance.is_none());
+    let measured: FrameDone = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
+            "render_error":0,"generation":1,
+            "performance":{"worker_setup_ns":120,"worker_render_ns":900,
+                "render_selector_ns":500,"worker_finalize_ns":80}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        measured.performance.as_ref().unwrap().render_selector_ns,
+        Some(500)
+    );
+    let unavailable: FrameDone = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
+            "render_error":0,"generation":1,
+            "performance":{"worker_setup_ns":null,"worker_render_ns":null,
+                "render_selector_ns":null,"worker_finalize_ns":null}}"#,
+    )
+    .unwrap();
+    assert!(
+        unavailable
+            .performance
+            .unwrap()
+            .render_selector_ns
+            .is_none()
+    );
+    let invalid_performance: Result<FrameDone, _> = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
+            "render_error":0,"generation":1,
+            "performance":{"worker_setup_ns":1,"worker_render_ns":2,
+                "render_selector_ns":1,"worker_finalize_ns":1,"surprise":true}}"#,
+    );
+    assert!(invalid_performance.is_err());
     let unknown: Result<FrameDone, _> = serde_json::from_str(
         r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
                 "render_error":0,"generation":1,"surprise":true}"#,
@@ -89,6 +276,43 @@ fn frame_done_parsing_is_strict_about_unknown_fields() {
         dependency_error.missing_dependency.as_deref().unwrap()
     ));
     assert!(!valid_dependency_basename("..\\escape.dll"));
+}
+
+#[test]
+fn rendered_frame_depth_provenance_distinguishes_fallback_and_rejects_malformed_capture() {
+    let mut output: FrameDoneOutput = serde_json::from_value(serde_json::json!({
+        "width": 1, "height": 1, "rowbytes": 8, "pixel_format": "argb16",
+        "packed_bytes": 8, "guards_intact": true,
+        "advertised_out_flags": 0, "advertised_out_flags2": 0,
+        "advertised_depth_supported": false,
+        "planned_dispatch_pixel_bytes": 4, "dispatch_pixel_bytes": 4
+    }))
+    .unwrap();
+    let fallback = output.depth_provenance(8).unwrap().unwrap();
+    assert!(!fallback.advertised_depth_supported);
+    assert_eq!(fallback.planned_dispatch_pixel_bytes, Some(4));
+    assert_eq!(fallback.dispatch_pixel_bytes, Some(4));
+
+    output.dispatch_pixel_bytes = Some(16);
+    assert_eq!(
+        output
+            .depth_provenance(8)
+            .unwrap()
+            .unwrap()
+            .dispatch_pixel_bytes,
+        Some(16)
+    );
+    output.dispatch_pixel_bytes = Some(12);
+    assert!(output.depth_provenance(8).is_err());
+    output.dispatch_pixel_bytes = None;
+    assert!(output.depth_provenance(8).is_err());
+    output.dispatch_pixel_bytes = Some(4);
+    output.advertised_depth_supported = Some(true);
+    assert!(output.depth_provenance(8).is_err());
+    output.advertised_depth_supported = Some(false);
+    output.planned_dispatch_pixel_bytes = Some(8);
+    output.dispatch_pixel_bytes = Some(8);
+    assert!(output.depth_provenance(8).is_err());
 }
 
 #[test]
@@ -279,7 +503,7 @@ fn smart_final_report_clean_requires_the_session_fields() {
 }
 
 #[test]
-fn classic_final_report_accepts_only_explicit_nonfaulting_suite_lease_warning() {
+fn final_report_accepts_only_explicit_nonfaulting_suite_lease_warning() {
     let mut warned = serde_json::json!({
         "status": "render_completed",
         "global_setdown_error": 0,
@@ -324,7 +548,11 @@ fn classic_final_report_accepts_only_explicit_nonfaulting_suite_lease_warning() 
     smart_warned["session_sequence_setdown_error"] = serde_json::json!(0);
     assert_eq!(
         validate_final_report(&smart_warned, true),
-        Err(CloseReportInvariant::UnexpectedLiveSuiteLease)
+        Ok(FinalReportValidation::CleanWithSuiteLeaseWarning {
+            suite_acquires: 33,
+            suite_releases: 24,
+            live_suite_lease_count: 1,
+        })
     );
 
     for (key, value) in [
@@ -612,12 +840,14 @@ fn open_rejects_timing_the_worker_could_never_render() {
             output_checksum_detail: false,
             mask_trailer: None,
             spatial_trailer: None,
+            camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            companions: Vec::new(),
             dependency_search_dirs: Vec::new(),
             width: 8,
             height: 4,
@@ -629,6 +859,7 @@ fn open_rejects_timing_the_worker_could_never_render() {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: Default::default(),
         });
         let Err(error) = result else {
             panic!("invalid timing must be rejected before launch");
@@ -653,6 +884,7 @@ fn open_rejects_in_place_search_dirs_combined_with_staged_dependencies() {
         output_checksum_detail: false,
         mask_trailer: None,
         spatial_trailer: None,
+        camera_trailer: None,
         render_environment_trailer: None,
         audio_trailer: None,
         alpha_as_coverage_params: &[],
@@ -663,6 +895,7 @@ fn open_rejects_in_place_search_dirs_combined_with_staged_dependencies() {
             expected_sha256: [0; 32],
             expected_size: 1,
         }],
+        companions: Vec::new(),
         dependency_search_dirs: vec![std::path::PathBuf::from(r"C:\missing-search-dir")],
         width: 8,
         height: 4,
@@ -674,6 +907,7 @@ fn open_rejects_in_place_search_dirs_combined_with_staged_dependencies() {
         smart: false,
         gpu_backend: RenderGpuBackend::Cpu,
         gpu_runtime_policy: None,
+        launch_environment: Default::default(),
     });
     let Err(error) = result else {
         panic!("in-place search dirs combined with staged dependencies must be rejected");
@@ -691,9 +925,12 @@ fn fatal_session_error_codes_match_the_worker_contract() {
     for code in [-41, -42, -43, -44, -45, -47] {
         assert!(is_fatal_session_error(code), "{code} is session-fatal");
     }
-    // Time-scale (-40) and time-range (-46) rejections are frame-local,
-    // as are ordinary positive selector errors.
-    for code in [-40, -46, 516, 25, -1] {
+    // Time-scale (-40), time-range (-46) and the audio-passthrough ui_action
+    // refusal (-48, issue #1048) are frame-local, as are ordinary positive
+    // selector errors. -48 is listed so a later widening of the fatal range
+    // cannot silently convert the deliberate frame-local refusal into a
+    // session invalidation.
+    for code in [-40, -46, -48, 516, 25, -1] {
         assert!(!is_fatal_session_error(code), "{code} stays frame-local");
     }
 }

@@ -53,9 +53,19 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
         return PF_Err_BAD_CALLBACK_PARAM;
       PF_RenderRequest request = smart->input->output_request;
       PF_CheckoutResult checkout{};
+#if AEXCOMPAT_SMART_PAST_INPUT_TEST
+      // Frame zero uses the present input; later frames request the prior
+      // *primary* input. The output copy below makes the returned pixels, not
+      // just the callback status, observable in the batch PNG.
+      const A_long requested_time = in_data->current_time > 0
+          ? in_data->current_time - in_data->time_step
+          : in_data->current_time;
+#else
+      const A_long requested_time = in_data->current_time + in_data->time_step;
+#endif
       const PF_Err error = smart->cb->checkout_layer(
           in_data->effect_ref, 0, 0, &request,
-          in_data->current_time + in_data->time_step,
+          requested_time,
           in_data->time_step, in_data->time_scale, &checkout);
 #if AEXCOMPAT_EXPECT_SMART_DENIED
       if (error == PF_Err_NONE) return PF_Err_INTERNAL_STRUCT_DAMAGED;

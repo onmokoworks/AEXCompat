@@ -14,18 +14,7 @@ SCHEMA_PATH = ROOT / "schemas" / "issue26-scene-probe-evidence.schema.json"
 INIT_SCHEMA_PATH = (
     ROOT / "schemas" / "issue26-scene-probe-init.schema.json"
 )
-PROBE = (
-    ROOT
-    / "instruments"
-    / "aex"
-    / "issue26-scene-probe"
-    / "issue26_scene_probe.cpp"
-)
-FIXTURE = PROBE.with_name("fixture.jsx")
 TOOL = ROOT / "tools" / "issue26_scene_probe_evidence.py"
-REAL_RUNNER = ROOT / "tools" / "run-issue26-scene-probe-real-ae.ps1"
-PROBE_RESOURCE = PROBE.with_name("issue26_scene_probe.rc")
-PROBE_CMAKE = PROBE.with_name("CMakeLists.txt")
 CORPUS = ROOT / "corpus" / "issue26-scene-probe"
 REAL_ARTIFACTS = CORPUS / "artifacts"
 EVIDENCE_SPEC = importlib.util.spec_from_file_location(
@@ -136,16 +125,6 @@ def test_evidence_validator_rejects_duplicate_keys(tmp_path: Path):
     assert "duplicate JSON key: status" in completed.stderr
 
 
-
-
-
-
-def test_probe_uses_the_windows_plugin_subsystem():
-    cmake = PROBE_CMAKE.read_text(encoding="utf-8")
-    assert (
-        "target_link_options(issue26_scene_probe PRIVATE "
-        "/SUBSYSTEM:WINDOWS)"
-    ) in cmake
 
 
 
@@ -626,46 +605,3 @@ def test_blocked_and_crashed_evidence_generators_return_nonzero(
         check=False,
     )
     assert crashed.returncode != 0
-
-
-
-
-def test_real_runner_retains_outputs_and_fixture_report_inputs():
-    runner = REAL_RUNNER.read_text(encoding="utf-8")
-    tool = TOOL.read_text(encoding="utf-8")
-    assert (
-        "$resolvedPluginRoot + [System.IO.Path]::DirectorySeparatorChar"
-        in runner
-    )
-    assert "Get-Process -Name AfterFX,'AfterFX.com'" in runner
-    assert "AfterFX.com is required next to AfterFX.exe" in runner
-    assert '$fixtureArguments = \'-m -r "{0}"\' -f $FixturePath' in runner
-    assert '$arguments = \'-m "{0}"\' -f $fixtureProject' in runner
-    assert "Start-Process -FilePath $AfterEffectsPath" in runner
-    assert (
-        "$env:ISSUE26_SCENE_FIXTURE_PROJECT = $fixtureProject"
-        in runner
-    )
-    assert (
-        "After Effects exited without a saved fixture project"
-        in runner
-    )
-    assert "fixture_project_sha256" in runner
-    assert "fixture-authoring.stdout.txt" in runner
-    assert "fixture-authoring.stderr.txt" in runner
-    assert "$outputsReady -and $activeAe.Count -eq 0" in runner
-    assert "After Effects remains active; preserving" in runner
-    assert '$fixtureDiagnostic = "$fixtureMetadata.error.json"' in runner
-    assert '$initReport = "$rawReport.init.json"' in runner
-    assert "$probeRunId = [Guid]::NewGuid().ToString('D')" in runner
-    assert "$env:ISSUE26_SCENE_PROBE_RUN_ID = $probeRunId" in runner
-    assert "probe_run_id = $probeRunId" in runner
-    assert "diagnostic: $fixtureDiagnostic" in runner
-    assert "fixture_diagnostic = $fixtureDiagnostic" in runner
-    assert "-RedirectStandardOutput $standardOutput" in runner
-    assert "-RedirectStandardError $standardError" in runner
-    assert (
-        'record["artifacts"]["fixture_metadata"] = artifact(fixture_path)'
-        in tool
-    )
-    assert 'record["fixture_report"] = fixture_report' in tool

@@ -7,7 +7,7 @@ $resultRelative = "analysis/REAL_AEX_RENDER_GATE_RESULT_2026-07-17.json"
 $outputRelative = "target/image-transport/aex-render-gate-output.rgba"
 $adapterRelative = "tools/refresh-runtime-session.py"
 $sessionHarnessRelative = "broker/target/release/aexcompat-harness.exe"
-$releaseWorkerRelative = "target/minihost-build/aex_render_worker.exe"
+$releaseWorkerRelative = "target/minihost-build/aex_worker.exe"
 
 $artifacts = [ordered]@{
     aex = [ordered]@{

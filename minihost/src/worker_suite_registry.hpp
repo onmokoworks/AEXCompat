@@ -2,9 +2,11 @@
 
 #include "suite_lease_tracker.hpp"
 
+#include <atomic>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -28,22 +30,34 @@ using SuiteResolver = SuiteResolveResult (*)(
 enum class UnsupportedSuiteId : uint8_t {
   aegp_proj_9,
   aegp_item_14,
+  aegp_item_13,
   aegp_item_10,
+  aegp_item_3,
   aegp_comp_25,
   aegp_comp_26,
   aegp_comp_21,
   aegp_comp_9,
+  aegp_comp_4,
   aegp_layer_15,
   aegp_layer_11,
   aegp_layer_14,
+  aegp_layer_13,
   aegp_layer_5,
+  aegp_layer_8,
   aegp_collection_2,
   aegp_effect_4,
   aegp_effect_2,
   aegp_effect_3,
+  aegp_effect_1,
   aegp_stream_11,
   aegp_stream_7,
+  aegp_stream_8,
+  aegp_stream_9,
+  aegp_stream_4,
+  aegp_iterate_1,
   aegp_keyframe_5,
+  aegp_keyframe_4,
+  aegp_utility_5,
   aegp_utility_7,
   aegp_utility_13,
   pf_ae_adv_app_1,
@@ -55,6 +69,25 @@ enum class UnsupportedSuiteId : uint8_t {
   aegp_dynamic_stream_2,
   pf_batch_sampling_1,
   aefx_ace_1,
+  // Every slot of `PF AE Private Effect Suite` except the one this host
+  // implements (issue #1283). One id covers versions 3, 5 and 6 because AE
+  // registers one table under all three, so a diagnostic cannot say which
+  // version the caller acquired and the descriptor names the lowest.
+  pf_ae_private_effect,
+  // AE-private suites acquired as a host-presence gate (issue #1210): the
+  // observed callers acquire and release them and never call a slot, so every
+  // slot is a diagnosed unsupported stub.
+  ae_timecode_helper_1,
+  // Not suites: the vtables of the BEE.dll-compatible scene objects behind the
+  // effect layer handle (worker_bee_scene_facade). An unobserved virtual slot
+  // is recorded here by index so the report names it (issue #1210).
+  bee_av_layer_vtable,
+  bee_item_vtable,          // comp item
+  bee_footage_item_vtable,  // source (footage) item
+  bee_project_vtable,
+  // The vtable of the PF_World-compatible object behind every handed-out
+  // world's reserved_long4 (worker_pf_world_facade, issue #1276).
+  pf_world_vtable,
 };
 
 int32_t record_unsupported_suite_call(UnsupportedSuiteId suite,
@@ -91,6 +124,7 @@ class SuiteRegistry final {
   uint32_t live_reference_count() const;
   uint32_t acquire_count() const;
   uint32_t release_count() const;
+  uint32_t rejected_release_count() const;
   std::string live_summary() const;
   suite_runtime::SuiteLeaseSnapshot snapshot() const;
   uint32_t release_since(
@@ -112,8 +146,18 @@ class SuiteRegistry final {
   void record_missing_suite(const std::string& name, int32_t version);
   int32_t reject_unknown(const char* name, int32_t version,
                          TraceWriter* trace_writer);
+  void record_failed_acquire(const std::string& name, int32_t version);
+  bool consume_failed_acquire(const std::string& name, int32_t version);
+  void record_successful_acquire(const std::string& name, int32_t version);
+  bool contain_close_duplicate_release(const std::string& name,
+                                       int32_t version);
 
   suite_runtime::SuiteLeaseTracker lease_tracker_;
+  std::atomic<uint32_t> rejected_releases_{};
+  mutable std::mutex failed_acquires_mutex_;
+  std::map<std::pair<std::string, int32_t>, uint32_t> failed_acquires_;
+  std::map<std::pair<std::string, int32_t>, bool> successful_acquires_;
+  std::map<std::pair<std::string, int32_t>, bool> contained_close_releases_;
   mutable std::mutex missing_suites_mutex_;
   std::vector<std::pair<std::string, int32_t>> missing_suites_;
   bool missing_suites_truncated_{};

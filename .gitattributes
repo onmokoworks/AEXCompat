@@ -1,2 +1,9 @@
 tests/fixtures/aepx/*.aepx -text
 imports/**/*.aepx -text
+
+# LICENSE must stay byte-identical to the canonical MPL-2.0 text, and a
+# checkout with core.autocrlf=true (the GitHub Windows runner default) would
+# otherwise rewrite it (#1464). Nothing hashes the file any more, so this is
+# hygiene rather than a gate: the point is that a clone cannot silently hold a
+# different LICENSE than the one that was licensed.
+LICENSE -text

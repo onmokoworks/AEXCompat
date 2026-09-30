@@ -1,6 +1,6 @@
 """Behavioral self-tests for the worker render session frame loop.
 
-Drives ``aex_render_worker.exe --render-session-v1`` directly over the
+Drives ``aex_worker.exe --kind classic --render-session-v1`` directly over the
 protocol transport (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md): two
 inherited anonymous pipes carrying length-prefixed JSON and one inherited
 anonymous file mapping with copy-through pixel slots. Expectations are
@@ -20,7 +20,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = Path(os.environ.get(
+    "AEXCOMPAT_TEST_WORKER_PATH",
+    ROOT / "target" / "minihost-build" / "aex_worker.exe"))
 AEX = ROOT / "target" / "pf-sampling-probe-build" / "Release" / "pf_sampling_probe.aex"
 PARAMETER_ECHO_AEX = (
     ROOT / "target" / "pf-parameter-echo-probe-build" / "Release"
@@ -303,16 +305,51 @@ class SessionTransport:
 
 def _require_artifacts():
     if not WORKER.is_file():
-        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if not AEX.is_file():
         pytest.skip("pf_sampling_probe.aex is not built")
 
 
-def _spawn(transport, aex=None, payload="v5|"):
+def probe_variant(marker, probe=None):
+    """A copy of a probe whose file name carries a depth-advertisement marker.
+
+    The probes read their own module path and change what they advertise when
+    they see ``-shallow``, ``-floatonly`` or ``-rewrite`` in their file name,
+    so the variant is a property
+    of the plug-in the run loaded. The earlier spelling of this was an
+    environment variable, which every other test that spawns the same probe
+    inherited - and after a session report began describing the slot rather
+    than the plug-in's world, those tests stayed green while silently
+    measuring a narrowed run.
+
+    Copied rather than written to a temp file so a failed run leaves the exact
+    bytes that ran, next to the original so the build directory holds every
+    variant of a probe together.
+
+    One marker per probe, and one test per (probe, marker): the copy truncates
+    in place, and pytest runs with ``-n auto --dist worksteal``, which makes no
+    module affinity guarantee - two tests sharing a variant path could have one
+    worker rewriting the `.aex` while another has it mapped.
+    """
+    probe = AEX if probe is None else probe
+    variant = probe.with_name(f"{probe.stem}-{marker}{probe.suffix}")
+    # Copied every time rather than when an mtime comparison says it is stale:
+    # anything that touches the copy without changing its bytes (a restore, a
+    # glob that resets timestamps) would make it permanently "fresh", and the
+    # test would then run an old plug-in and still pass. A vacuous green is
+    # worse than the copy.
+    variant.write_bytes(probe.read_bytes())
+    return variant
+
+
+def _spawn(transport, aex=None, payload="v5|", command="--render-session-v1",
+           variant=None):
     aex = AEX if aex is None else aex
+    if variant is not None:
+        aex = probe_variant(variant, aex)
     aex_sha = hashlib.sha256(aex.read_bytes()).hexdigest()
     process = subprocess.Popen(
-        [str(WORKER), "--render-session-v1", str(aex), aex_sha, payload,
+        [str(WORKER), "--kind", "classic", command, str(aex), aex_sha, payload,
          str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE)],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -331,6 +368,89 @@ def render_frame_message(frame_index, time_value, scale=TIME_SCALE):
             "current_time": {"value": time_value, "scale": scale}}
 
 
+def test_classic_session_narrows_a_plug_in_that_does_not_advertise_the_depth():
+    """The classic twin of the smart narrowing case. What the caller receives
+    is the slot, at the session's depth; the plug-in rendered into a narrower
+    world that the frame loop widened into it. The final report has to describe
+    the slot too - taking its row length from the slot and its pixel size from
+    the plug-in's world reports the written half of every row as undefined
+    padding, which reads as a plug-in that short-wrote its rows.
+    """
+    _require_artifacts()
+    transport = SessionTransport(depth_code=16, output_pixel_bytes=8)
+    process = _spawn(transport, command="--render-session16-v1",
+                     variant="shallow")
+    try:
+        transport.write_input(11, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", json.dumps(done)
+        output = done["output"]
+        assert output["pixel_format"] == "argb16"
+        assert output["rowbytes"] == WIDTH * 8
+        assert output["packed_bytes"] == WIDTH * HEIGHT * 8
+        assert output["advertised_depth_supported"] is False
+        assert output["planned_dispatch_pixel_bytes"] == 4
+        assert output["dispatch_pixel_bytes"] == 4
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-800:])
+        report = json.loads(stdout.strip())
+        assert report["pixel_format"] == "argb16"
+        assert report["rowbytes"] == WIDTH * 8
+        assert report["bytes_written_per_row"] == WIDTH * 8
+        assert report["undefined_tail_bytes_per_row"] == 0
+        assert report["advertised_depth_supported"] is False
+        assert report["depth_supported"] is True
+        assert report["dispatch_pixel_bytes"] == 4
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_classic_session_dispatches_a_float_only_plug_in_at_float32():
+    """A plug-in that advertises FLOAT_COLOR_AWARE and not DEEP_COLOR_AWARE is
+    handed float32 worlds in a 16-bpc session and its frame is narrowed into
+    the 16-bit slot. After Effects was measured to render such an effect above
+    8-bit precision in a 16-bpc project
+    (docs/DEPTH_FALLBACK_OBSERVATION_2026-09-17.md), so dropping it to 8 bits
+    would be the wrong answer, not merely a coarser one.
+    """
+    _require_artifacts()
+    transport = SessionTransport(depth_code=16, output_pixel_bytes=8)
+    process = _spawn(transport, command="--render-session16-v1",
+                     variant="floatonly")
+    try:
+        transport.write_input(11, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", json.dumps(done)
+        output = done["output"]
+        assert output["pixel_format"] == "argb16"
+        assert output["rowbytes"] == WIDTH * 8
+        assert output["packed_bytes"] == WIDTH * HEIGHT * 8
+        assert output["advertised_depth_supported"] is False
+        assert output["planned_dispatch_pixel_bytes"] == 16
+        assert output["dispatch_pixel_bytes"] == 16
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-800:])
+        report = json.loads(stdout.strip())
+        assert report["pixel_format"] == "argb16"
+        assert report["rowbytes"] == WIDTH * 8
+        assert report["undefined_tail_bytes_per_row"] == 0
+        assert report["advertised_depth_supported"] is False
+        assert report["depth_supported"] is True
+        assert report["dispatch_pixel_bytes"] == 16
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
 def test_session_renders_frames_with_persistent_sequence_and_packed_extents():
     _require_artifacts()
     transport = SessionTransport()
@@ -347,6 +467,11 @@ def test_session_renders_frames_with_persistent_sequence_and_packed_extents():
             assert done["status"] == "ok", done
             assert done["render_error"] == 0
             assert done["generation"] == frame_index + 1
+            performance = done["performance"]
+            assert performance["worker_setup_ns"] >= 0
+            assert performance["render_selector_ns"] > 0
+            assert performance["worker_render_ns"] >= performance["render_selector_ns"]
+            assert performance["worker_finalize_ns"] >= 0
             output = done["output"]
             assert output["width"] == WIDTH
             assert output["height"] == HEIGHT
@@ -366,6 +491,8 @@ def test_session_renders_frames_with_persistent_sequence_and_packed_extents():
         assert code == 0, (code, stderr[-500:])
         report = json.loads(stdout.strip())
         assert isinstance(report, dict)
+        assert report["worker_admitted_plugin_sha256"] == hashlib.sha256(
+            AEX.read_bytes()).hexdigest()
     finally:
         if process.poll() is None:
             process.kill()
@@ -617,7 +744,7 @@ def test_session_launch_without_channels_fails_closed():
     _require_artifacts()
     aex_sha = hashlib.sha256(AEX.read_bytes()).hexdigest()
     result = subprocess.run(
-        [str(WORKER), "--render-session-v1", str(AEX), aex_sha, "v5|",
+        [str(WORKER), "--kind", "classic", "--render-session-v1", str(AEX), aex_sha, "v5|",
          str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE)],
         cwd=ROOT, capture_output=True, text=True, timeout=60)
     assert result.returncode == EXIT_PROTOCOL_VIOLATION
@@ -629,7 +756,7 @@ def test_session_launch_rejects_time_scale_above_int32():
     # The per-frame protocol carries scales as signed 32-bit, so a launch
     # scale above INT32_MAX could never be matched by any frame.
     result = subprocess.run(
-        [str(WORKER), "--render-session-v1", str(AEX), aex_sha, "v5|",
+        [str(WORKER), "--kind", "classic", "--render-session-v1", str(AEX), aex_sha, "v5|",
          str(WIDTH), str(HEIGHT), "1", "300", str(2**31)],
         cwd=ROOT, capture_output=True, text=True, timeout=60)
     assert result.returncode == 3
@@ -681,7 +808,7 @@ def test_session_audio_trailer_feeds_the_plug_in_the_checked_out_window(tmp_path
     equivalence with that transport, which #365 removed.
     """
     if not WORKER.is_file():
-        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if SIDECAR_AEX is None:
         pytest.skip("pf_visual_audio_sidecar_probe.aex is not built; run "
                     "tools/build-pf-visual-audio-probe.ps1")
@@ -690,7 +817,7 @@ def test_session_audio_trailer_feeds_the_plug_in_the_checked_out_window(tmp_path
     transport = SessionTransport()
     aex_sha = hashlib.sha256(SIDECAR_AEX.read_bytes()).hexdigest()
     process = subprocess.Popen(
-        [str(WORKER), "--render-session-v1", str(SIDECAR_AEX), aex_sha, "v5|",
+        [str(WORKER), "--kind", "classic", "--render-session-v1", str(SIDECAR_AEX), aex_sha, "v5|",
          str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE), trailer],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -733,7 +860,7 @@ def test_session_without_the_audio_trailer_leaves_the_plug_in_no_source(tmp_path
     caught the trailer being dropped on the session route.
     """
     if not WORKER.is_file():
-        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if SIDECAR_AEX is None:
         pytest.skip("pf_visual_audio_sidecar_probe.aex is not built; run "
                     "tools/build-pf-visual-audio-probe.ps1")

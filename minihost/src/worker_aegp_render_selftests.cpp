@@ -178,7 +178,25 @@ bool verify_aegp_render_options_suite1() {
       render_options_get_quality(options, &render_quality) != 0 || render_quality != 0)
     return false;
   void* duplicate = nullptr;
+  AegpRenderOptionsValue source_snapshot{}, duplicate_snapshot{};
+  const auto same_options = [](const AegpRenderOptionsValue& left,
+                               const AegpRenderOptionsValue& right) {
+    return left.owner_plugin_id == right.owner_plugin_id && left.item == right.item &&
+        left.time.value == right.time.value && left.time.scale == right.time.scale &&
+        left.time_step.value == right.time_step.value &&
+        left.time_step.scale == right.time_step.scale && left.field == right.field &&
+        left.world_type == right.world_type && left.downsample_x == right.downsample_x &&
+        left.downsample_y == right.downsample_y && left.roi.left == right.roi.left &&
+        left.roi.top == right.roi.top && left.roi.right == right.roi.right &&
+        left.roi.bottom == right.roi.bottom && left.matte == right.matte &&
+        left.channel_order == right.channel_order &&
+        left.render_guide_layers == right.render_guide_layers &&
+        left.render_quality == right.render_quality;
+  };
   if (render_options_duplicate(1, options, &duplicate) != 0 || !duplicate ||
+      !snapshot_item(options, source_snapshot) ||
+      !snapshot_item(duplicate, duplicate_snapshot) ||
+      !same_options(source_snapshot, duplicate_snapshot) ||
       render_options_set_time(duplicate, {7, 30}) != 0 ||
       render_options_get_time(options, &time) != 0 || time.value != -5 || time.scale != 24)
     return false;
@@ -209,12 +227,16 @@ bool verify_aegp_render_options_suite1() {
       rendered.bottom != 4 ||
       checkin_frame(receipt) != 0) return false;
 
+  // This matrix isolates duplicated option snapshots. The synchronous ABI
+  // registers scene items and deliberately rejects a missing scheduler stage;
+  // verify_aegp_item_staged_worlds covers that production path with real stages.
   for (int32_t depth = 1; depth <= 3; ++depth) {
     if (render_options_set_world_type(duplicate, depth) != 0 ||
         render_options_set_downsample(duplicate, static_cast<int16_t>(depth + 1), 4) != 0)
       return false;
     receipt = nullptr;
-    if (render_checkout_frame_reject(duplicate, nullptr, nullptr, &receipt) != 0 || !receipt ||
+    if (aexcompat::aegp_item_render_runtime::publish_receipt(
+            duplicate, &receipt) != 0 || !receipt ||
         get_receipt_world(receipt, &world) != 0 || aegp_world_get_type(world, &type) != 0 ||
         type != depth || aegp_world_get_size(world, &width, &height) != 0 ||
         width != (kSyntheticCompWidth + depth) / (depth + 1) || height != 3 ||
@@ -222,7 +244,8 @@ bool verify_aegp_render_options_suite1() {
   }
   if (render_options_set_matte(duplicate, 2) != 0) return false;
   receipt = reinterpret_cast<void*>(1);
-  if (render_checkout_frame_reject(duplicate, nullptr, nullptr, &receipt) == 0 || receipt != nullptr ||
+  if (aexcompat::aegp_item_render_runtime::publish_receipt(
+          duplicate, &receipt) == 0 || receipt != nullptr ||
       render_options_set_time(duplicate, {1, 0}) == 0 ||
       render_options_set_time_step(duplicate, {0, 1}) == 0 ||
       render_options_set_field(duplicate, 3) == 0 ||

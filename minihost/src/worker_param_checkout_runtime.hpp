@@ -12,17 +12,12 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
                                uint32_t time_scale, void* definition);
 int32_t __cdecl checkin_param(void*, void* definition);
 
-// The frame the hosted (non-classic) ledger answers checkouts for. `checkout_param`
-// refuses any other time unless the plug-in advertised wide time input, and until
-// issue #828 nothing set this: the ledger kept its default current_time 0 /
-// time_scale 1, so every SmartFX frame past t=0 had its parameter checkouts
-// refused with PF_Err_OUT_OF_MEMORY. The classic path has always configured the
+// The frame and WIDE_TIME_INPUT declaration associated with hosted checkouts.
+// The declaration informs dependency/cache policy; checkout_param evaluates a
+// requested temporal value regardless of that flag. The classic path has its
 // equivalent state on its dispatch context (`classic::Context::configure_checkout_time`).
 // Call this before the frame's first selector reaches the plug-in, not just before
 // SMART_PRE_RENDER: QUERY_DYNAMIC_FLAGS is allowed to check parameters out too.
-// A zero `time_scale` closes the time gate - no time compares equal, the frame's
-// own included - rather than being taken as a scale of 1. Wide time still
-// bypasses the gate, exactly as it bypasses any other time refusal.
 void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
                                     bool wide_time_allowed) noexcept;
 bool param_checkouts_balanced();

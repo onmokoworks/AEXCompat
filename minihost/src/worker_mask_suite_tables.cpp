@@ -43,6 +43,16 @@ StreamSuite g_stream_suite{&is_stream_legal, &can_vary_over_time,
     &set_stream_value, &unsupported_layer_stream_value,
     &get_expression_state, &reject_expression_state, &unsupported_get_expression,
     &unsupported_set_expression, &duplicate_stream_ref, &get_unique_stream_id};
+StreamSuite4 g_stream_suite4{&is_stream_legal, &can_vary_over_time,
+    &get_valid_interpolations, &unsupported_new_layer_stream,
+    &unsupported_effect_stream_count, &unsupported_new_effect_stream,
+    &get_new_mask_stream, &dispose_stream, &unsupported_stream_name,
+    &get_stream_units_text, &get_stream_properties, &is_stream_timevarying,
+    &get_stream_type, &get_new_stream_value, &dispose_stream_value,
+    &set_stream_value, &unsupported_layer_stream_value,
+    &get_expression_state, &reject_expression_state,
+    &reject_get_expression_ansi, &reject_set_expression_ansi,
+    &duplicate_stream_ref};
 KeyframeSuite g_keyframe_suite{&get_stream_num_keyframes, &get_keyframe_time,
     &insert_keyframe, &delete_keyframe, &get_new_keyframe_value,
     &set_keyframe_value, &get_stream_value_dimensionality,
@@ -52,6 +62,18 @@ KeyframeSuite g_keyframe_suite{&get_stream_num_keyframes, &get_keyframe_time,
     &get_keyframe_interpolation, &set_keyframe_interpolation,
     &start_add_keyframes, &add_keyframes, &set_add_keyframe,
     &end_add_keyframes, &get_keyframe_label, &set_keyframe_label};
+KeyframeSuite4 g_keyframe_suite4{&get_stream_num_keyframes, &get_keyframe_time,
+    &insert_keyframe, &delete_keyframe, &get_new_keyframe_value,
+    &set_keyframe_value, &get_stream_value_dimensionality,
+    &get_stream_temporal_dimensionality, &get_new_keyframe_spatial_tangents,
+    &set_keyframe_spatial_tangents, &get_keyframe_temporal_ease,
+    &set_keyframe_temporal_ease, &get_keyframe_flags, &set_keyframe_flag,
+    &get_keyframe_interpolation, &set_keyframe_interpolation,
+    &start_add_keyframes, &add_keyframes, &set_add_keyframe,
+    &end_add_keyframes};
+// Same TU, defined after the v4 table it copies, so the initialization order is
+// fixed. See the header for why v3 and v4 are the same table on x64.
+KeyframeSuite4 g_keyframe_suite3 = g_keyframe_suite4;
 
 bool keyframe_suite5_abi_wiring_valid() {
   const KeyframeSuite expected{&get_stream_num_keyframes, &get_keyframe_time,

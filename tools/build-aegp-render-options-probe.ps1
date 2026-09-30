@@ -15,8 +15,9 @@ New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $env:TEMP = $tmp; $env:TMP = $tmp; $env:AE_SDK_ROOT = $AfterEffectsSdk
 if (-not (Test-Path (Join-Path $AfterEffectsSdk "Examples\Headers\AE_GeneralPlug.h"))) { throw "After Effects SDK headers were not found" }
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
-& $CMake -S $source -B $build -G $Generator -A $Architecture
+& $CMake -S $source -B $build -G $Generator @ConfigureArgs
 if ($LASTEXITCODE) { throw "configure failed" }
 & $CMake --build $build --config $Configuration --target aegp_render_options_probe
 if ($LASTEXITCODE) { throw "build failed" }

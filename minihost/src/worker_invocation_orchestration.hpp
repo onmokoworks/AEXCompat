@@ -26,10 +26,21 @@ struct RenderSessionOutcome {
   int32_t width{0};
   int32_t height{0};
   int32_t rowbytes{0};
+  /// The depth the last frame this session transferred actually arrived at -
+  /// what the plug-in rendered, including a route that planned its own depth
+  /// (the GPU negotiation transport renders float32 whatever the plug-in was
+  /// dispatched at, #1072). Before any frame
+  /// completes it holds the depth the session decided to dispatch at. The
+  /// session slot stays at the session's own depth either way; this is
+  /// recorded so a run dispatched at another depth says so, rather than being
+  /// inferred from
+  /// a flag a later selector may have rewritten.
+  int32_t dispatch_pixel_bytes{4};
   std::string input_hash;
   std::string output_hash;
   bool guards_intact{true};
   int32_t render_error{-1};
+  worker_runtime::output_coverage::Result output_coverage{};
 };
 
 // SmartFX resident session (protocol v1.1): the shared session mechanics plus
@@ -90,6 +101,11 @@ struct InvocationState {
     bool mask_attribute_mode{};
     bool user_changed_mode{};
     bool params_only_mode{};
+    // Broker-authorized, one-shot recovery for an inspection whose ordinary
+    // lifecycle was already proven to crash only in GLOBAL_SETDOWN. It emits
+    // the inspected parameter schema and terminates the process without
+    // invoking plug-in cleanup; it is never a resident/session mode.
+    bool cleanup_contained_params_only_mode{};
     bool runtime_module_authorization_mode{};
     bool external_dependencies_mode{};
     bool do_dialog_mode{};
@@ -169,14 +185,40 @@ struct FinalDispatchRequest {
   int32_t params_error{};
   bool image_render_supported{};
   bool depth_supported{};
+  /// The session routes render at the caller's depth whether or not the
+  /// plug-in advertises it, dispatching at a depth it does and converting the
+  /// frame back (`effect_bootstrap::dispatch_pixel_bytes`). The one-shot routes in
+  /// the same dispatch keep gating on `depth_supported`, which after #365 they
+  /// can only ever reach at 8 bits.
+  bool depth_dispatchable{};
+  /// The plug-in's advertised out-flags as the bootstrap snapshotted them,
+  /// right after GLOBAL_SETUP. Sessions decide their dispatch depth from these
+  /// rather than from the live `out_data`, which later selectors write into.
+  uint32_t advertised_out_flags{};
+  uint32_t advertised_out_flags2{};
   bool smart_render_supported{};
   // Cluster-session swap hook (classic render session only, issue #405);
   // null on every non-cluster path, where a swap_plugin message stays a
   // protocol violation.
   const worker_render_session::SwapPluginHook* cluster_swap{};
+  // PF_OutFlag_AUDIO_EFFECT_ONLY: the classic render session serves such an
+  // effect's frames as input passthrough instead of failing the session for
+  // having no video selector to dispatch (issue #1048). Appended after the
+  // pointer member on purpose - the call sites initialize this aggregate
+  // positionally, and a bool inserted before `cluster_swap` would silently
+  // swallow the pointer through pointer-to-bool conversion.
+  bool audio_effect_only{};
+  // Native behavioral seam for the spawned-thread activation boundary. The
+  // production caller leaves this null; self-tests substitute a bounded probe
+  // for render_once so the thread/context contract can be tested without a
+  // loaded AEX or the process-global selector diagnostics it would require.
+  void (*concurrent_thread_context_probe)(){};
 };
 
 struct ClassicFinalDispatchResult {
+  /// Depth the last reported session frame dispatched the plug-in at; the
+  /// caller's own depth when no session ran. Recorded, not enforced.
+  int32_t dispatch_pixel_bytes{4};
   // Non-ASCII case argument; worker_main_impl exits with code 2 unchanged.
   bool case_id_rejected{};
   std::string case_id;
@@ -210,9 +252,13 @@ struct ClassicFinalDispatchResult {
   int32_t get_flattened_sequence_data_error{-1};
   bool original_sequence_preserved{};
   int32_t render_error{-1};
+  output_coverage::Result output_coverage{};
 };
 
 struct SmartFinalDispatchResult {
+  /// Depth the last reported session frame dispatched the plug-in at; the
+  /// caller's own depth when no session ran. Recorded, not enforced.
+  int32_t dispatch_pixel_bytes{4};
   bool case_id_rejected{};
   std::string case_id;
   smart_execution::Result smart;

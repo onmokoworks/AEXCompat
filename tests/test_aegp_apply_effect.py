@@ -1,28 +1,28 @@
-import json
 import os
 import subprocess
 import tempfile
 from pathlib import Path
 
+from _native_selftest import worker_self_test
+
 import pytest
 
+from _msvc_compile import compile_driver
+
 ROOT = Path(__file__).resolve().parents[1]
-SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
-SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
-PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
-SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
-BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
+
 
 def _sdk_headers() -> Path:
     if HEADERS is None or not HEADERS.is_dir():
         pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
     return HEADERS
 
+
 def test_sdk_frozen_apply_effect_abi_compiles() -> None:
     headers = _sdk_headers()
-    source = r'''
+    source = r"""
 #include <cstddef>
 #include <type_traits>
 #include "AEConfig.h"
@@ -51,12 +51,25 @@ static_assert(sizeof(AEGP_EffectSuite2) == 136);
 static_assert(sizeof(AEGP_EffectSuite3) == 136);
 static_assert(sizeof(AEGP_EffectSuite4) == 176);
 int main() { return 0; }
-'''
+"""
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    vswhere = (
+        Path(program_files_x86)
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
     installation = subprocess.check_output(
-        [str(vswhere), "-latest", "-products", "*", "-requires",
-         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+        [
+            str(vswhere),
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ],
         text=True,
     ).strip()
     vcvars = Path(installation) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
@@ -67,11 +80,12 @@ int main() { return 0; }
         cpp.write_text(source, encoding="ascii")
         batch.write_text(
             f'@call "{vcvars}" >nul\n'
-            f'@cl /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{headers}" '
+            f'@{compile_driver()} /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{headers}" '
             f'/I"{headers / "SP"}" /Fo"{obj}" "{cpp}"\n',
             encoding="ascii",
         )
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
+
 
 def test_native_self_test_passes_all_three_workers() -> None:
     expected = {
@@ -84,15 +98,5 @@ def test_native_self_test_passes_all_three_workers() -> None:
         "lease_capacity": 16,
         "fail_closed": True,
     }
-    for name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe"):
-        worker = BUILD / name
-        assert worker.exists(), f"build {name} before running the native test"
-        completed = subprocess.run(
-            [str(worker), "--self-test-aegp-apply-effect"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert completed.returncode == 0, completed.stderr
-        assert json.loads(completed.stdout) == expected
+    for report in worker_self_test("--self-test-aegp-apply-effect").values():
+        assert report == expected

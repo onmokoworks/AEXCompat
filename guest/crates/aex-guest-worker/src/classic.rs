@@ -1,12 +1,13 @@
 use aex_abi::x86_64_windows as abi;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::backend::{
-    ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue, TraceWatchSpec,
-    UnsupportedSuiteCall,
+    CustomUiRegistration, ExecutionTrace, GuestCensus, GuestEngine, GuestError,
+    SmartCheckoutDiskIdFallback, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
 };
 use crate::gpu_lifecycle::{
     GpuRenderDiagnostic, GpuRuntimeBackendKind, LifecycleCall, LifecycleFailure, LifecycleReply,
@@ -23,20 +24,42 @@ const CMD_SEQUENCE_SETDOWN: u64 = abi::PF_CMD_SEQUENCE_SETDOWN as u64;
 const CMD_FRAME_SETUP: u64 = abi::PF_CMD_FRAME_SETUP as u64;
 const CMD_RENDER: u64 = abi::PF_CMD_RENDER as u64;
 const CMD_FRAME_SETDOWN: u64 = abi::PF_CMD_FRAME_SETDOWN as u64;
+const CMD_USER_CHANGED_PARAM: u64 = abi::PF_CMD_USER_CHANGED_PARAM as u64;
 const CMD_SMART_PRE_RENDER: u64 = abi::PF_CMD_SMART_PRE_RENDER as u64;
 const CMD_SMART_RENDER: u64 = abi::PF_CMD_SMART_RENDER as u64;
 const CMD_SMART_RENDER_GPU: u64 = abi::PF_CMD_SMART_RENDER_GPU as u64;
 const CMD_GPU_DEVICE_SETUP: u64 = abi::PF_CMD_GPU_DEVICE_SETUP as u64;
 const CMD_GPU_DEVICE_SETDOWN: u64 = abi::PF_CMD_GPU_DEVICE_SETDOWN as u64;
-const PARAM_LAYER: i32 = 0;
+const CMD_ARBITRARY_CALLBACK: u64 = abi::PF_CMD_ARBITRARY_CALLBACK as u64;
+// PF_LayerDef origin fields; mirrored by the native worker's world facade.
+const LAYER_ORIGIN_X_OFFSET: usize = 104;
+const LAYER_ORIGIN_Y_OFFSET: usize = 108;
+pub const PARAM_LAYER: i32 = 0;
 const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
-const PARAM_ANGLE: i32 = 3;
+pub(crate) const PARAM_ANGLE: i32 = 3;
 const PARAM_CHECKBOX: i32 = 4;
 pub(crate) const PARAM_COLOR: i32 = 5;
 pub(crate) const PARAM_POINT: i32 = 6;
+pub(crate) const PARAM_POINT3D: i32 = 18;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
+const PARAM_ARBITRARY_DATA: i32 = 11;
+const ARBITRARY_DEFAULT_HANDLE_OFFSET: usize = 8;
+const ARBITRARY_VALUE_HANDLE_OFFSET: usize = 16;
+const ARBITRARY_REFCON_OFFSET: usize = 24;
+/// `PF_ArbParamsExtra`: `which_function` at 0, then the per-function union
+/// (`id` at 4, `refconPV` at 8, source handle at 16, destination handle
+/// pointer at 24). The host keeps the COPY destination cell inside the same
+/// scratch block, after the union.
+const ARBITRARY_EXTRA_BYTES: usize = 48;
+const ARBITRARY_EXTRA_ID_OFFSET: usize = 4;
+const ARBITRARY_EXTRA_REFCON_OFFSET: usize = 8;
+const ARBITRARY_EXTRA_HANDLE_OFFSET: usize = 16;
+const ARBITRARY_EXTRA_DESTINATION_POINTER_OFFSET: usize = 24;
+const ARBITRARY_EXTRA_DESTINATION_CELL_OFFSET: usize = 32;
+const ARBITRARY_DISPOSE_FUNC: i32 = 1;
+const ARBITRARY_COPY_FUNC: i32 = 2;
 const LAYER_DEFAULT_OFFSET: usize = 116;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
 const POINT_DEFAULT_X_OFFSET: usize = 12;
@@ -65,6 +88,101 @@ pub enum ClassicError {
     Selector { selector: &'static str, error: i32 },
     #[error("invalid frame input: {0}")]
     Input(String),
+    /// A `PF_Cmd_ARBITRARY_CALLBACK` round trip (COPY/DISPOSE) the host
+    /// issued on the plug-in's behalf did not produce the contract result.
+    #[error("arbitrary parameter id={id} {operation} failed: {message}")]
+    Arbitrary {
+        operation: &'static str,
+        id: i16,
+        message: String,
+    },
+    /// Two independent failures from one lifecycle step. `primary` keeps the
+    /// error whose kind (guest crash, selector code) categorizes the failure;
+    /// `secondary` stays visible in the message instead of being dropped.
+    #[error("{primary}; additionally: {secondary}")]
+    Compound {
+        primary: Box<ClassicError>,
+        secondary: Box<ClassicError>,
+    },
+}
+
+impl ClassicError {
+    /// The selector error code this failure carries, looking through a
+    /// compound failure to its primary error.
+    pub fn selector_error_code(&self) -> Option<i32> {
+        match self {
+            ClassicError::Selector { error, .. } => Some(*error),
+            ClassicError::Compound { primary, .. } => primary.selector_error_code(),
+            _ => None,
+        }
+    }
+}
+
+fn combine_failures(failures: Vec<ClassicError>) -> Result<(), ClassicError> {
+    match failures
+        .into_iter()
+        .reduce(|primary, secondary| ClassicError::Compound {
+            primary: Box::new(primary),
+            secondary: Box::new(secondary),
+        }) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Settles a render against the disposal of its arbitrary value copies.
+/// A finished render stays finished: its DISPOSE failures are handed to
+/// `record` as messages, mirroring the minihost `ArbitraryValuesScope`, which
+/// discards the DISPOSE result and only counts it (AE ignores the arbitrary
+/// callback's return code). A failed render keeps its own error primary, with
+/// the disposal failures attached as the secondary so neither is dropped.
+fn settle_render_disposal<T>(
+    result: Result<T, ClassicError>,
+    failures: Vec<ClassicError>,
+    record: impl FnOnce(&mut T, Vec<String>),
+) -> Result<T, ClassicError> {
+    match result {
+        Ok(mut value) => {
+            record(
+                &mut value,
+                failures.iter().map(ToString::to_string).collect(),
+            );
+            Ok(value)
+        }
+        Err(primary) => match combine_failures(failures) {
+            Ok(()) => Err(primary),
+            Err(secondary) => Err(ClassicError::Compound {
+                primary: Box::new(primary),
+                secondary: Box::new(secondary),
+            }),
+        },
+    }
+}
+
+/// Settles `GLOBAL_SETDOWN` against the arbitrary disposal that preceded it.
+/// The minihost fails global teardown on either, so both stay errors here; a
+/// GLOBAL_SETDOWN failure (its error code, or a guest crash) is the primary
+/// so `selector_error_code` reports it, and the disposal failure rides along
+/// as the secondary, never instead of it.
+fn settle_global_setdown(
+    setdown: Result<i32, ClassicError>,
+    cleanup: Result<(), ClassicError>,
+) -> Result<i32, ClassicError> {
+    match (setdown, cleanup) {
+        (setdown, Ok(())) => setdown,
+        (Ok(0), Err(cleanup)) => Err(cleanup),
+        (Ok(error), Err(cleanup)) => Err(ClassicError::Compound {
+            primary: Box::new(ClassicError::Selector {
+                selector: "GLOBAL_SETDOWN",
+                error,
+            }),
+            secondary: Box::new(cleanup),
+        }),
+        (Err(setdown), Err(cleanup)) => Err(ClassicError::Compound {
+            primary: Box::new(setdown),
+            secondary: Box::new(cleanup),
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -73,6 +191,12 @@ pub struct ParameterReport {
     pub index: i32,
     pub param_type: i32,
     pub name: String,
+    pub ui_flags: u32,
+    pub flags: u32,
+    pub ui_width: u16,
+    pub ui_height: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choices: Option<String>,
     pub default_value: Option<f64>,
     pub valid_min: Option<f64>,
     pub valid_max: Option<f64>,
@@ -83,6 +207,10 @@ pub struct ParameterReport {
     pub current_color: Option<[u8; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_color: Option<[u8; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_components: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_components: Option<Vec<f64>>,
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +220,107 @@ pub struct ParameterValue {
     pub value: Option<f64>,
     pub color: Option<[u8; 4]>,
     pub point: Option<[f64; 2]>,
+    pub angle: Option<f64>,
+    pub point3d: Option<[f64; 3]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ResidentLayer<'a> {
+    pub slot: usize,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: &'a [u8],
+    pub format: FramePixelFormat,
+    pub layout: Option<ResidentWorldLayout>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResidentWorldLayout {
+    pub rowbytes: u32,
+    pub padding_byte: u8,
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub extent: [i32; 4],
+}
+
+fn resident_world_shape(
+    format: FramePixelFormat,
+    width: u32,
+    height: u32,
+    requested: Option<ResidentWorldLayout>,
+) -> Result<(ResidentWorldLayout, usize), ClassicError> {
+    let packed = format
+        .rowbytes(width)
+        .map_err(|error| ClassicError::Input(error.to_string()))?;
+    let layout = requested.unwrap_or(ResidentWorldLayout {
+        rowbytes: packed,
+        padding_byte: 0,
+        origin_x: 0,
+        origin_y: 0,
+        extent: [0, 0, width as i32, height as i32],
+    });
+    if width == 0
+        || height == 0
+        || width > MAX_RENDER_WIDTH
+        || height > MAX_RENDER_HEIGHT
+        || layout.rowbytes < packed
+        || layout.rowbytes - packed > 256
+        || layout.rowbytes % format.bytes_per_pixel() as u32 != 0
+        || layout.origin_x.unsigned_abs() > 4096
+        || layout.origin_y.unsigned_abs() > 4096
+        || layout.extent[0] < 0
+        || layout.extent[1] < 0
+        || layout.extent[2] <= layout.extent[0]
+        || layout.extent[3] <= layout.extent[1]
+        || layout.extent[2] > width as i32
+        || layout.extent[3] > height as i32
+    {
+        return Err(ClassicError::Input(
+            "resident world layout is invalid".into(),
+        ));
+    }
+    let bytes = (layout.rowbytes as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| ClassicError::Input("resident world size overflow".into()))?;
+    Ok((layout, bytes))
+}
+
+fn resident_world_pixels<'a>(
+    packed_pixels: &'a [u8],
+    format: FramePixelFormat,
+    width: u32,
+    height: u32,
+    layout: ResidentWorldLayout,
+) -> Result<Cow<'a, [u8]>, ClassicError> {
+    format
+        .validate_bytes(width, height, packed_pixels)
+        .map_err(|error| ClassicError::Input(error.to_string()))?;
+    let packed_rowbytes = format
+        .rowbytes(width)
+        .map_err(|error| ClassicError::Input(error.to_string()))?
+        as usize;
+    if layout.rowbytes as usize == packed_rowbytes {
+        return Ok(Cow::Borrowed(packed_pixels));
+    }
+    let mut strided = vec![layout.padding_byte; layout.rowbytes as usize * height as usize];
+    for (source, destination) in packed_pixels
+        .chunks_exact(packed_rowbytes)
+        .zip(strided.chunks_exact_mut(layout.rowbytes as usize))
+    {
+        destination[..packed_rowbytes].copy_from_slice(source);
+    }
+    Ok(Cow::Owned(strided))
+}
+
+#[derive(Debug)]
+pub struct ResidentWorldDump {
+    pub slot: usize,
+    pub width: u32,
+    pub height: u32,
+    pub raw_pixels: Vec<u8>,
+    pub format: FramePixelFormat,
+    pub layout: ResidentWorldLayout,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +333,10 @@ pub struct AppliedParameter {
     pub color: Option<[u8; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<[f64; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub angle: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point3d: Option<[f64; 3]>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -115,10 +348,26 @@ pub struct SetupReport {
     pub advertised_num_params: i32,
     pub out_flags: u32,
     pub out_flags2: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_ui: Option<CustomUiRegistration>,
     pub parameters: Vec<ParameterReport>,
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ParameterUiState {
+    pub slot: usize,
+    pub ui_flags: u32,
+    pub flags: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UserChangedReport {
+    pub slot: usize,
+    pub selector_error: i32,
+    pub parameters: Vec<ParameterUiState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,11 +436,193 @@ pub struct RenderReport {
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
+    /// Smart checkouts the host resolved by disk id instead of positionally.
+    /// AE and the minihost resolve `PF_CHECKOUT_LAYER` positionally only, so
+    /// every entry here is a host-side substitution rather than observed AE
+    /// behavior; an empty list means no render on this engine has used such a
+    /// substitution yet. Entries are deduplicated on
+    /// `(requested_index, resolved_slot)` with a running `call_count`, and the
+    /// engine never clears them between resident frames, so a per-frame
+    /// report carries the cumulative total for the engine's lifetime, the
+    /// same convention as `unsupported_suite_calls`.
+    pub smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
+    /// `PF_Arbitrary_DISPOSE_FUNC` failures from releasing this render's
+    /// arbitrary value copies, one message per failed slot. AE ignores the
+    /// arbitrary callback's return code and the minihost
+    /// `ArbitraryValuesScope` only counts a failed DISPOSE
+    /// (`arbitrary.invalid_operations`), so the render result stands and the
+    /// failures are recorded next to it instead of replacing it; an empty
+    /// list means every copy was released cleanly.
+    pub arbitrary_dispose_failures: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub census: Option<GuestCensus>,
     pub argb8: Vec<u8>,
     #[serde(skip)]
     pub raw_pixels: Vec<u8>,
+    #[serde(skip)]
+    pub raw_input_pixels: Vec<u8>,
+    #[serde(skip)]
+    pub raw_input_layout: Option<ResidentWorldLayout>,
+    #[serde(skip)]
+    pub raw_input_format: Option<FramePixelFormat>,
+    #[serde(skip)]
+    pub raw_secondary_layers: Vec<ResidentWorldDump>,
+}
+
+fn write_ansi_numeric_callbacks(engine: &GuestEngine<'static>, utility_bytes: &mut [u8]) {
+    for (offset, callback) in [
+        (
+            abi::UTILS_ANSI_ATAN_OFFSET,
+            engine.ansi_atan_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_ATAN2_OFFSET,
+            engine.ansi_atan2_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_CEIL_OFFSET,
+            engine.ansi_ceil_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_COS_OFFSET,
+            engine.ansi_cos_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_EXP_OFFSET,
+            engine.ansi_exp_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_FABS_OFFSET,
+            engine.ansi_fabs_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_FLOOR_OFFSET,
+            engine.ansi_floor_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_FMOD_OFFSET,
+            engine.ansi_fmod_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_HYPOT_OFFSET,
+            engine.ansi_hypot_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_LOG_OFFSET,
+            engine.ansi_log_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_LOG10_OFFSET,
+            engine.ansi_log10_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_POW_OFFSET,
+            engine.ansi_pow_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_SIN_OFFSET,
+            engine.ansi_sin_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_SQRT_OFFSET,
+            engine.ansi_sqrt_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_TAN_OFFSET,
+            engine.ansi_tan_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_ASIN_OFFSET,
+            engine.ansi_asin_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_ACOS_OFFSET,
+            engine.ansi_acos_callback_address(),
+        ),
+    ] {
+        write_u64(utility_bytes, offset, callback);
+    }
+}
+
+pub(crate) fn build_utility_callbacks(engine: &GuestEngine<'static>) -> Vec<u8> {
+    let mut utility_bytes = vec![0u8; abi::PF_UTIL_CALLBACKS_SIZE];
+    for (offset, callback) in [
+        (
+            abi::UTILS_SUBPIXEL_SAMPLE_OFFSET,
+            engine.subpixel_sample8_callback_address(),
+        ),
+        (
+            abi::UTILS_AREA_SAMPLE_OFFSET,
+            engine.area_sample8_callback_address(),
+        ),
+        (
+            abi::UTILS_TRANSFER_RECT_OFFSET,
+            engine.transfer_rect8_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_STRCPY_OFFSET,
+            engine.ansi_strcpy_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_SPRINTF_OFFSET,
+            engine.ansi_sprintf_callback_address(),
+        ),
+        (abi::UTILS_COPY_OFFSET, engine.copy_callback_address()),
+        (abi::UTILS_BLEND_OFFSET, engine.blend_callback_address()),
+        (abi::UTILS_FILL_OFFSET, engine.fill8_callback_address()),
+        (
+            abi::UTILS_NEW_WORLD_OFFSET,
+            engine.new_world8_callback_address(),
+        ),
+        (
+            abi::UTILS_DISPOSE_WORLD_OFFSET,
+            engine.dispose_world_callback_address(),
+        ),
+        (
+            abi::UTILS_GET_CALLBACK_ADDR_OFFSET,
+            engine.get_callback_addr_callback_address(),
+        ),
+        (
+            abi::UTILS_ITERATE_OFFSET,
+            engine.iterate8_callback_address(),
+        ),
+        (
+            abi::UTILS_ITERATE_ORIGIN_OFFSET,
+            engine.iterate8_origin_callback_address(),
+        ),
+        (
+            abi::UTILS_ITERATE16_OFFSET,
+            engine.iterate16_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_NEW_HANDLE_OFFSET,
+            engine.new_handle_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_LOCK_HANDLE_OFFSET,
+            engine.lock_handle_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_UNLOCK_HANDLE_OFFSET,
+            engine.unlock_handle_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_DISPOSE_HANDLE_OFFSET,
+            engine.dispose_handle_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_GET_HANDLE_SIZE_OFFSET,
+            engine.handle_size_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_RESIZE_HANDLE_OFFSET,
+            engine.resize_handle_callback_address(),
+        ),
+    ] {
+        write_u64(&mut utility_bytes, offset, callback);
+    }
+    write_ansi_numeric_callbacks(engine, &mut utility_bytes);
+    utility_bytes
 }
 
 pub struct ClassicHost {
@@ -204,9 +635,24 @@ pub struct ClassicHost {
     global_active: bool,
     sequence_active: bool,
     frame_resources: Option<FrameResources>,
+    user_changed_extra: Option<u64>,
+    arbitrary_extra: Option<u64>,
+    arbitrary_values: Vec<ArbitraryValue>,
     resident_frames: u64,
     resident_frame_setdown_error: i32,
     last_gpu_diagnostic: GpuRenderDiagnostic,
+}
+
+/// A private copy of an arbitrary parameter's default, made through
+/// `PF_Arbitrary_COPY_FUNC` for one render and disposed through
+/// `PF_Arbitrary_DISPOSE_FUNC` when that render ends.
+#[derive(Clone, Copy, Debug)]
+struct ArbitraryValue {
+    id: i16,
+    refcon: u64,
+    handle: u64,
+    /// Guest address of the `PF_ParamDef` whose value slot holds `handle`.
+    definition: u64,
 }
 
 #[derive(Clone)]
@@ -214,7 +660,9 @@ struct FrameResources {
     width: u32,
     height: u32,
     format: FramePixelFormat,
+    input_format: FramePixelFormat,
     pixel_bytes: usize,
+    input_alloc_bytes: usize,
     input_param: u64,
     params: u64,
     output_world: u64,
@@ -222,9 +670,101 @@ struct FrameResources {
     output_guard_base: u64,
     output_pixels: u64,
     parameter_definitions: Vec<u64>,
+    secondary_layers: Vec<ResidentLayerResources>,
+}
+
+#[derive(Clone)]
+struct ResidentLayerResources {
+    slot: usize,
+    width: u32,
+    height: u32,
+    pixels: u64,
+    format: FramePixelFormat,
+    layout: ResidentWorldLayout,
+}
+
+pub(crate) fn build_interact_callbacks(
+    engine: &GuestEngine<'static>,
+) -> [u8; abi::PF_INTERACT_CALLBACKS_SIZE] {
+    let mut callbacks = [0u8; abi::PF_INTERACT_CALLBACKS_SIZE];
+    for offset in abi::INPUT_CALLBACK_OFFSETS {
+        write_u64(&mut callbacks, offset, engine.poison_callback_address());
+    }
+    for (offset, callback) in [
+        (
+            abi::INTER_ADD_PARAM_OFFSET,
+            engine.add_param_callback_address(),
+        ),
+        (
+            abi::INTER_REGISTER_UI_OFFSET,
+            engine.register_ui_callback_address(),
+        ),
+        (
+            abi::INTER_CHECKOUT_PARAM_OFFSET,
+            engine.checkout_param_callback_address(),
+        ),
+        (
+            abi::INTER_CHECKIN_PARAM_OFFSET,
+            engine.checkin_param_callback_address(),
+        ),
+        (abi::INTER_ABORT_OFFSET, engine.noop_callback_address()),
+        (abi::INTER_PROGRESS_OFFSET, engine.noop_callback_address()),
+        (
+            abi::INTER_RESERVED_0_OFFSET,
+            engine.extended_alloc_callback_address(),
+        ),
+        (
+            abi::INTER_RESERVED_1_OFFSET,
+            engine.extended_lookup_callback_address(),
+        ),
+        (
+            abi::INTER_RESERVED_2_OFFSET,
+            engine.extended_free_callback_address(),
+        ),
+    ] {
+        write_u64(&mut callbacks, offset, callback);
+    }
+    callbacks
 }
 
 impl ClassicHost {
+    #[cfg(test)]
+    pub(crate) fn from_test_engine(
+        mut engine: GuestEngine<'static>,
+        entry: u64,
+    ) -> Result<Self, ClassicError> {
+        let input = engine.allocate(abi::PF_IN_DATA_SIZE, 8)?;
+        let output = engine.allocate(abi::PF_OUT_DATA_SIZE, 8)?;
+        let mut input_bytes = vec![0u8; abi::PF_IN_DATA_SIZE];
+        input_bytes[..abi::PF_INTERACT_CALLBACKS_SIZE]
+            .copy_from_slice(&build_interact_callbacks(&engine));
+        write_u64(&mut input_bytes, abi::IN_EFFECT_REF_OFFSET, 1);
+        write_i32(&mut input_bytes, abi::IN_QUALITY_OFFSET, 1);
+        write_i16(&mut input_bytes, abi::IN_VERSION_OFFSET, 13);
+        write_i16(&mut input_bytes, abi::IN_VERSION_OFFSET + 2, 29);
+        write_u32(&mut input_bytes, abi::IN_APPL_ID_OFFSET, 0x4658_5443);
+        write_i32(&mut input_bytes, abi::IN_NUM_PARAMS_OFFSET, 1);
+        engine.write(input, &input_bytes)?;
+        engine.write(output, &vec![0u8; abi::PF_OUT_DATA_SIZE])?;
+        Ok(Self {
+            engine,
+            entry,
+            input,
+            output,
+            trace_output_pixel: None,
+            setup_report: None,
+            global_active: false,
+            sequence_active: false,
+            frame_resources: None,
+            user_changed_extra: None,
+            arbitrary_extra: None,
+            arbitrary_values: Vec::new(),
+            resident_frames: 0,
+            resident_frame_setdown_error: 0,
+            last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
+        })
+    }
+
     pub fn new(image: &PeImage) -> Result<Self, ClassicError> {
         Self::new_with_effect(image, None)
     }
@@ -233,56 +773,26 @@ impl ClassicHost {
         image: &PeImage,
         effect_selector: Option<&str>,
     ) -> Result<Self, ClassicError> {
-        let mut engine = GuestEngine::load(image)?;
+        Self::from_engine_with_effect(GuestEngine::load(image)?, image, effect_selector)
+    }
+
+    /// Finish Classic-host construction from an already loaded engine. This is
+    /// used by forkserver children after they attach the same-SHA primary from
+    /// a deferred template; ordinary callers should use `new_with_effect`.
+    pub fn from_engine_with_effect(
+        mut engine: GuestEngine<'static>,
+        image: &PeImage,
+        effect_selector: Option<&str>,
+    ) -> Result<Self, ClassicError> {
+        engine.validate_attached_primary(image)?;
         let input = engine.allocate(abi::PF_IN_DATA_SIZE, 8)?;
         let output = engine.allocate(abi::PF_OUT_DATA_SIZE, 8)?;
         let utils = engine.allocate(abi::PF_UTIL_CALLBACKS_SIZE, 8)?;
         let pica_basic = engine.allocate(64, 8)?;
 
         let mut input_bytes = vec![0u8; abi::PF_IN_DATA_SIZE];
-        for offset in abi::INPUT_CALLBACK_OFFSETS {
-            write_u64(&mut input_bytes, offset, engine.poison_callback_address());
-        }
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_ADD_PARAM_OFFSET,
-            engine.add_param_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_CHECKOUT_PARAM_OFFSET,
-            engine.checkout_param_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_CHECKIN_PARAM_OFFSET,
-            engine.checkin_param_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_ABORT_OFFSET,
-            engine.noop_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_PROGRESS_OFFSET,
-            engine.noop_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_RESERVED_0_OFFSET,
-            engine.extended_alloc_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_RESERVED_1_OFFSET,
-            engine.extended_lookup_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_RESERVED_2_OFFSET,
-            engine.extended_free_callback_address(),
-        );
+        input_bytes[..abi::PF_INTERACT_CALLBACKS_SIZE]
+            .copy_from_slice(&build_interact_callbacks(&engine));
         write_u64(&mut input_bytes, abi::IN_UTILS_OFFSET, utils);
         write_u64(&mut input_bytes, abi::IN_PICA_BASICP_OFFSET, pica_basic);
         write_u64(&mut input_bytes, abi::IN_EFFECT_REF_OFFSET, 1);
@@ -308,145 +818,7 @@ impl ClassicHost {
         write_u64(&mut pica_bytes, 0, engine.acquire_suite_callback_address());
         write_u64(&mut pica_bytes, 8, engine.noop_callback_address());
         engine.write(pica_basic, &pica_bytes)?;
-        let mut utility_bytes = vec![0u8; abi::PF_UTIL_CALLBACKS_SIZE];
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_SUBPIXEL_SAMPLE_OFFSET,
-            engine.subpixel_sample8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_AREA_SAMPLE_OFFSET,
-            engine.area_sample8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_TRANSFER_RECT_OFFSET,
-            engine.transfer_rect8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ANSI_STRCPY_OFFSET,
-            engine.ansi_strcpy_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ANSI_SPRINTF_OFFSET,
-            engine.ansi_sprintf_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_COPY_OFFSET,
-            engine.copy_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_BLEND_OFFSET,
-            engine.blend_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_FILL_OFFSET,
-            engine.fill8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_NEW_WORLD_OFFSET,
-            engine.new_world8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_DISPOSE_WORLD_OFFSET,
-            engine.dispose_world_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_GET_CALLBACK_ADDR_OFFSET,
-            engine.get_callback_addr_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ITERATE_OFFSET,
-            engine.iterate8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ITERATE_ORIGIN_OFFSET,
-            engine.iterate8_origin_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ITERATE16_OFFSET,
-            engine.iterate16_callback_address(),
-        );
-        for (offset, callback) in [
-            (
-                abi::UTILS_ANSI_CEIL_OFFSET,
-                engine.ansi_ceil_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_COS_OFFSET,
-                engine.ansi_cos_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_FABS_OFFSET,
-                engine.ansi_fabs_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_HYPOT_OFFSET,
-                engine.ansi_hypot_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_POW_OFFSET,
-                engine.ansi_pow_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_SIN_OFFSET,
-                engine.ansi_sin_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_SQRT_OFFSET,
-                engine.ansi_sqrt_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_ASIN_OFFSET,
-                engine.ansi_asin_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_ACOS_OFFSET,
-                engine.ansi_acos_callback_address(),
-            ),
-        ] {
-            write_u64(&mut utility_bytes, offset, callback);
-        }
-        for (offset, callback) in [
-            (
-                abi::UTILS_HOST_NEW_HANDLE_OFFSET,
-                engine.new_handle_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_LOCK_HANDLE_OFFSET,
-                engine.lock_handle_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_UNLOCK_HANDLE_OFFSET,
-                engine.unlock_handle_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_DISPOSE_HANDLE_OFFSET,
-                engine.dispose_handle_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_GET_HANDLE_SIZE_OFFSET,
-                engine.handle_size_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_RESIZE_HANDLE_OFFSET,
-                engine.resize_handle_callback_address(),
-            ),
-        ] {
-            write_u64(&mut utility_bytes, offset, callback);
-        }
+        let utility_bytes = build_utility_callbacks(&engine);
         engine.write(utils, &utility_bytes)?;
         let entry = engine.resolve_effect_entry(image, effect_selector, pica_basic)?;
         Ok(Self {
@@ -459,6 +831,9 @@ impl ClassicHost {
             global_active: false,
             sequence_active: false,
             frame_resources: None,
+            user_changed_extra: None,
+            arbitrary_extra: None,
+            arbitrary_values: Vec::new(),
             resident_frames: 0,
             resident_frame_setdown_error: 0,
             last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
@@ -512,11 +887,31 @@ impl ClassicHost {
                     numeric_descriptor(&param.bytes, param.param_type);
                 let (current_color, default_color) =
                     color_descriptor(&param.bytes, param.param_type);
-                ParameterReport {
+                let (current_components, default_components) =
+                    component_descriptor(&param.bytes, param.param_type);
+                let choices =
+                    if param.param_type == PARAM_POPUP {
+                        let pointer =
+                            read_u64(&param.bytes, abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET);
+                        Some(self.read_guest_text(pointer, 4096).map_err(|error| {
+                        ClassicError::Input(format!(
+                            "popup choices for slot {} index {} name {:?} at {pointer:#x}: {error}",
+                            offset + 1, param.index, param.name
+                        ))
+                    })?)
+                    } else {
+                        None
+                    };
+                Ok(ParameterReport {
                     slot: offset + 1,
                     index: param.index,
                     param_type: param.param_type,
                     name: param.name.clone(),
+                    ui_flags: read_u32(&param.bytes, abi::PARAM_UI_FLAGS_OFFSET),
+                    flags: read_u32(&param.bytes, abi::PARAM_FLAGS_OFFSET),
+                    ui_width: read_i16(&param.bytes, abi::PARAM_UI_WIDTH_OFFSET).max(0) as u16,
+                    ui_height: read_i16(&param.bytes, abi::PARAM_UI_HEIGHT_OFFSET).max(0) as u16,
+                    choices,
                     default_value,
                     valid_min,
                     valid_max,
@@ -525,9 +920,11 @@ impl ClassicHost {
                     precision,
                     current_color,
                     default_color,
-                }
+                    current_components,
+                    default_components,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ClassicError>>()?;
         let report = SetupReport {
             schema_version: 1,
             execution_backend: self.engine.backend_name(),
@@ -536,6 +933,7 @@ impl ClassicHost {
             advertised_num_params,
             out_flags,
             out_flags2,
+            custom_ui: self.engine.custom_ui_registration(),
             parameters,
             suite_requests: self.engine.suite_requests().to_vec(),
             unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
@@ -543,6 +941,24 @@ impl ClassicHost {
         };
         self.setup_report = Some(report.clone());
         Ok(report)
+    }
+
+    fn read_guest_text(&self, address: u64, limit: usize) -> Result<String, ClassicError> {
+        if address == 0 {
+            return Ok(String::new());
+        }
+        let mut bytes = Vec::new();
+        for offset in 0..limit {
+            let mut byte = [0u8; 1];
+            self.engine.read(address + offset as u64, &mut byte)?;
+            if byte[0] == 0 {
+                return Ok(String::from_utf8_lossy(&bytes).into_owned());
+            }
+            bytes.push(byte[0]);
+        }
+        Err(ClassicError::Input(
+            "popup choice text exceeds the 4096-byte setup bound".into(),
+        ))
     }
 
     pub fn begin_resident_session(
@@ -568,7 +984,7 @@ impl ClassicHost {
                 return Err(error);
             }
         };
-        if let Err(error) = self.write_frame_context(width, height, 0, time_scale) {
+        if let Err(error) = self.write_frame_context(width, height, 0, 1, 0, time_scale) {
             let _ = self.end_global();
             return Err(error);
         }
@@ -642,11 +1058,118 @@ impl ClassicHost {
             width,
             height,
             current_time,
+            1,
+            0,
             time_scale,
             format,
+            None,
             input_pixels,
             parameter_values,
             true,
+            &[],
+            None,
+            false,
+            None,
+        )
+    }
+
+    /// Render a protocol frame without collecting diagnostic input worlds or a preview.
+    /// The resident response uses only the raw output, its digest, and guard state.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_resident_frame_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        current_time: i32,
+        time_scale: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_pixels_mode(
+            width,
+            height,
+            current_time,
+            1,
+            0,
+            time_scale,
+            format,
+            None,
+            input_pixels,
+            parameter_values,
+            true,
+            &[],
+            None,
+            true,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_resident_fixture_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        current_time: i32,
+        time_step: i32,
+        total_time: i32,
+        time_scale: u32,
+        format: FramePixelFormat,
+        input_format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+        secondary_layers: &[ResidentLayer<'_>],
+        smart: bool,
+        primary_layout: Option<ResidentWorldLayout>,
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_pixels_mode(
+            width,
+            height,
+            current_time,
+            time_step,
+            total_time,
+            time_scale,
+            format,
+            Some(input_format),
+            input_pixels,
+            parameter_values,
+            true,
+            secondary_layers,
+            Some(smart),
+            false,
+            primary_layout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn probe_resident_fixture_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        time_scale: u32,
+        format: FramePixelFormat,
+        input_format: FramePixelFormat,
+        input_pixels: &[u8],
+        secondary_layers: &[ResidentLayer<'_>],
+        smart: bool,
+        primary_layout: Option<ResidentWorldLayout>,
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_pixels_mode(
+            width,
+            height,
+            0,
+            1,
+            0,
+            time_scale,
+            format,
+            Some(input_format),
+            input_pixels,
+            &[],
+            false,
+            secondary_layers,
+            Some(smart),
+            false,
+            primary_layout,
         )
     }
 
@@ -679,11 +1202,18 @@ impl ClassicHost {
             width,
             height,
             0,
+            1,
+            0,
             time_scale,
             format,
+            None,
             input_pixels,
             &[],
             false,
+            &[],
+            None,
+            false,
+            None,
         )
     }
 
@@ -693,23 +1223,38 @@ impl ClassicHost {
         width: u32,
         height: u32,
         current_time: i32,
+        time_step: i32,
+        total_time: i32,
         time_scale: u32,
         format: FramePixelFormat,
+        input_format: Option<FramePixelFormat>,
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         count_frame: bool,
+        secondary_layers: &[ResidentLayer<'_>],
+        smart_override: Option<bool>,
+        compact_report: bool,
+        primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<RenderReport, ClassicError> {
         if !self.sequence_active {
             return Err(ClassicError::Input(
                 "resident session has not been opened".into(),
             ));
         }
-        self.write_frame_context(width, height, current_time, time_scale)?;
+        self.write_frame_context(
+            width,
+            height,
+            current_time,
+            time_step,
+            total_time,
+            time_scale,
+        )?;
         let report = self
             .render_pixels_with_request_mode(
                 width,
                 height,
                 format,
+                input_format,
                 input_pixels,
                 parameter_values,
                 [0, 0, width as i32, height as i32],
@@ -717,6 +1262,10 @@ impl ClassicHost {
                 false,
                 true,
                 RenderBackendRequest::Cpu,
+                secondary_layers,
+                smart_override,
+                compact_report,
+                primary_layout,
             )?
             .0;
         if count_frame {
@@ -750,6 +1299,168 @@ impl ClassicHost {
         }
     }
 
+    pub(crate) fn flush_guest_console_diagnostics(&mut self) -> Result<(), ClassicError> {
+        self.engine.flush_guest_console_diagnostics()?;
+        Ok(())
+    }
+
+    pub fn apply_resident_parameter_values(
+        &mut self,
+        parameter_values: &[ParameterValue],
+    ) -> Result<(), ClassicError> {
+        let resources = self.frame_resources.as_ref().ok_or_else(|| {
+            ClassicError::Input("resident parameters have not been prepared".into())
+        })?;
+        let mut seen_slots = BTreeSet::new();
+        let mut pending_writes = Vec::with_capacity(parameter_values.len());
+        for requested in parameter_values {
+            let slot = requested.slot.ok_or_else(|| {
+                ClassicError::Input("resident parameter update requires an exact slot".into())
+            })?;
+            if slot == 0 || slot > resources.parameter_definitions.len() || !seen_slots.insert(slot)
+            {
+                return Err(ClassicError::Input(format!(
+                    "resident parameter slot {slot} is invalid or duplicated"
+                )));
+            }
+            let mut definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+            self.engine
+                .read(resources.parameter_definitions[slot - 1], &mut definition)?;
+            let param_type = read_i32(&definition, abi::PARAM_PARAM_TYPE_OFFSET);
+            apply_parameter_value_for_layer(
+                &mut definition,
+                param_type,
+                requested,
+                resources.width,
+                resources.height,
+            )?;
+            pending_writes.push((resources.parameter_definitions[slot - 1], definition));
+        }
+        for (address, definition) in pending_writes {
+            self.engine.write(address, &definition)?;
+        }
+        Ok(())
+    }
+
+    pub fn user_changed_parameter(
+        &mut self,
+        slot: usize,
+    ) -> Result<UserChangedReport, ClassicError> {
+        if !self.sequence_active {
+            return Err(ClassicError::Input(
+                "resident session has not been opened".into(),
+            ));
+        }
+        let resources = self.frame_resources.as_ref().ok_or_else(|| {
+            ClassicError::Input("resident parameters have not been prepared".into())
+        })?;
+        if slot == 0 || slot > resources.parameter_definitions.len() {
+            return Err(ClassicError::Input(format!(
+                "user-changed parameter slot {slot} is invalid"
+            )));
+        }
+        let params = resources.params;
+        let definitions = resources.parameter_definitions.clone();
+        let extra = match self.user_changed_extra {
+            Some(extra) => extra,
+            None => {
+                let extra = self
+                    .engine
+                    .allocate(abi::PF_USER_CHANGED_PARAM_EXTRA_SIZE, 4)?;
+                self.user_changed_extra = Some(extra);
+                extra
+            }
+        };
+        let mut extra_bytes = vec![0u8; abi::PF_USER_CHANGED_PARAM_EXTRA_SIZE];
+        write_i32(
+            &mut extra_bytes,
+            abi::USER_CHANGED_PARAM_INDEX_OFFSET,
+            slot as i32,
+        );
+        self.engine.write(extra, &extra_bytes)?;
+        let selector_error = self
+            .engine
+            .call_selector_win64(
+                self.entry,
+                [
+                    CMD_USER_CHANGED_PARAM,
+                    self.input,
+                    self.output,
+                    params,
+                    0,
+                    extra,
+                ],
+            )
+            .map_err(|source| selector_guest_error("USER_CHANGED_PARAM", source))?
+            as i32;
+        if selector_error != 0 {
+            return Err(ClassicError::Selector {
+                selector: "USER_CHANGED_PARAM",
+                error: selector_error,
+            });
+        }
+        let mut parameters = Vec::with_capacity(definitions.len());
+        for (index, definition) in definitions.into_iter().enumerate() {
+            let mut bytes = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+            self.engine.read(definition, &mut bytes)?;
+            parameters.push(ParameterUiState {
+                slot: index + 1,
+                ui_flags: read_u32(&bytes, abi::PARAM_UI_FLAGS_OFFSET),
+                flags: read_u32(&bytes, abi::PARAM_FLAGS_OFFSET),
+            });
+        }
+        Ok(UserChangedReport {
+            slot,
+            selector_error,
+            parameters,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_test_user_changed_parameters(
+        &mut self,
+        definitions: Vec<Vec<u8>>,
+    ) -> Result<(), ClassicError> {
+        let params = self.engine.allocate((definitions.len() + 1) * 8, 8)?;
+        let mut parameter_definitions = Vec::with_capacity(definitions.len());
+        for (index, definition) in definitions.into_iter().enumerate() {
+            if definition.len() != abi::PF_PARAM_DEF_SIZE {
+                return Err(ClassicError::Input(
+                    "test parameter definition has the wrong size".into(),
+                ));
+            }
+            let address = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
+            self.engine.write(address, &definition)?;
+            self.engine
+                .write_u64(params + ((index + 1) * 8) as u64, address)?;
+            parameter_definitions.push(address);
+        }
+        let placeholder = self.engine.allocate(1, 1)?;
+        self.sequence_active = true;
+        self.frame_resources = Some(FrameResources {
+            width: 1,
+            height: 1,
+            format: FramePixelFormat::Argb8,
+            input_format: FramePixelFormat::Argb8,
+            pixel_bytes: 4,
+            input_alloc_bytes: 4,
+            input_param: placeholder,
+            params,
+            output_world: placeholder,
+            input_pixels: placeholder,
+            output_guard_base: placeholder,
+            output_pixels: placeholder,
+            parameter_definitions,
+            secondary_layers: Vec::new(),
+        });
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_user_changed_extra(&self) -> Option<u64> {
+        self.user_changed_extra
+    }
+
     pub fn failure_report(&self, error: &ClassicError) -> FailureReport {
         let mut return_message = [0u8; abi::OUT_RETURN_MSG_SIZE];
         let return_message = self
@@ -777,6 +1488,14 @@ impl ClassicHost {
         stage: &'static str,
         error: &ClassicError,
     ) -> ResidentFailureDiagnostic {
+        if let ClassicError::Compound { primary, secondary } = error {
+            let mut diagnostic = self.resident_failure_diagnostic(stage, primary);
+            diagnostic.message = bounded_failure_text(&format!(
+                "{}; additionally: {secondary}",
+                diagnostic.message
+            ));
+            return diagnostic;
+        }
         let (category, selector, error_code, message, crash_reason, crash_snapshot) = match error {
             ClassicError::Guest(source) => (
                 source.diagnostic_category(),
@@ -803,6 +1522,10 @@ impl ClassicHost {
                 None,
             ),
             ClassicError::Input(message) => ("input", None, None, message.clone(), None, None),
+            ClassicError::Arbitrary { .. } => {
+                ("arbitrary", None, None, error.to_string(), None, None)
+            }
+            ClassicError::Compound { .. } => unreachable!("compound failures are unwrapped above"),
         };
         let suite_requests = self.engine.suite_requests();
         let unsupported_suite_calls = self.engine.unsupported_suite_calls();
@@ -1089,6 +1812,10 @@ impl ClassicHost {
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        // The engine keeps trace configuration between renders, so a plain
+        // trace resets whatever an earlier watched render configured: it is
+        // always a full capture with no watches.
+        self.configure_trace(Vec::new(), None);
         self.render_pixels_with_request(
             width,
             height,
@@ -1100,6 +1827,13 @@ impl ClassicHost {
             true,
             RenderBackendRequest::Cpu,
         )
+    }
+
+    fn configure_trace(&mut self, watches: Vec<TraceWatchSpec>, output_pixel: Option<[u32; 2]>) {
+        self.engine
+            .configure_trace_checkpoint_only(!watches.is_empty());
+        self.engine.configure_trace_watches(watches);
+        self.trace_output_pixel = output_pixel;
     }
 
     pub fn render_argb8_trace_with_watches(
@@ -1133,9 +1867,18 @@ impl ClassicHost {
         watches: Vec<TraceWatchSpec>,
         output_pixel: Option<[u32; 2]>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
-        self.engine.configure_trace_watches(watches);
-        self.trace_output_pixel = output_pixel;
-        self.render_pixels_trace(width, height, format, input_pixels, parameter_values)
+        self.configure_trace(watches, output_pixel);
+        self.render_pixels_with_request(
+            width,
+            height,
+            format,
+            input_pixels,
+            parameter_values,
+            [0, 0, width as i32, height as i32],
+            false,
+            true,
+            RenderBackendRequest::Cpu,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1151,10 +1894,14 @@ impl ClassicHost {
         trace_enabled: bool,
         backend: RenderBackendRequest,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        // A standalone image render is one frame at t=0, not an empty timeline.
+        // Resident/fixture callers provide their own explicit frame context.
+        self.write_frame_context(width, height, 0, 1, 1, 1)?;
         self.render_pixels_with_request_mode(
             width,
             height,
             format,
+            None,
             input_pixels,
             parameter_values,
             output_request,
@@ -1162,6 +1909,10 @@ impl ClassicHost {
             trace_enabled,
             false,
             backend,
+            &[],
+            None,
+            false,
+            None,
         )
     }
 
@@ -1171,6 +1922,7 @@ impl ClassicHost {
         width: u32,
         height: u32,
         format: FramePixelFormat,
+        input_format: Option<FramePixelFormat>,
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         output_request: [i32; 4],
@@ -1178,6 +1930,56 @@ impl ClassicHost {
         trace_enabled: bool,
         persistent_sequence: bool,
         backend: RenderBackendRequest,
+        secondary_layers: &[ResidentLayer<'_>],
+        smart_override: Option<bool>,
+        compact_report: bool,
+        primary_layout: Option<ResidentWorldLayout>,
+    ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        let result = self.render_pixels_with_request_mode_body(
+            width,
+            height,
+            format,
+            input_format,
+            input_pixels,
+            parameter_values,
+            output_request,
+            census_enabled,
+            trace_enabled,
+            persistent_sequence,
+            backend,
+            secondary_layers,
+            smart_override,
+            compact_report,
+            primary_layout,
+        );
+        // The arbitrary value copies live exactly as long as this render, the
+        // minihost ArbitraryValuesScope: dispose them on every exit path. A
+        // DISPOSE failure never discards a finished render; it is recorded on
+        // the report, or appended to the render's own error.
+        let failures = self.dispose_arbitrary_values();
+        settle_render_disposal(result, failures, |(report, _), failures| {
+            report.arbitrary_dispose_failures = failures;
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_pixels_with_request_mode_body(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        input_format: Option<FramePixelFormat>,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+        output_request: [i32; 4],
+        census_enabled: bool,
+        trace_enabled: bool,
+        persistent_sequence: bool,
+        backend: RenderBackendRequest,
+        secondary_layers: &[ResidentLayer<'_>],
+        smart_override: Option<bool>,
+        compact_report: bool,
+        primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         self.last_gpu_diagnostic = GpuRenderDiagnostic::pending(backend);
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
@@ -1196,23 +1998,35 @@ impl ClassicHost {
                 "output request must be a non-empty rectangle inside {width}x{height}, got {output_request:?}"
             )));
         }
+        let input_format = input_format.unwrap_or(format);
         let rowbytes = format
             .rowbytes(width)
             .map_err(|error| ClassicError::Input(error.to_string()))?;
         let pixel_bytes = format
             .byte_count(width, height)
             .map_err(|error| ClassicError::Input(error.to_string()))?;
-        format
+        let (input_layout, input_alloc_bytes) =
+            resident_world_shape(input_format, width, height, primary_layout)?;
+        input_format
             .validate_bytes(width, height, input_pixels)
             .map_err(|error| ClassicError::Input(error.to_string()))?;
         let setup = self.setup()?;
-        if !format.advertised_by(setup.out_flags, setup.out_flags2) {
+        if !format.advertised_by(setup.out_flags, setup.out_flags2)
+            || !input_format.advertised_by(setup.out_flags, setup.out_flags2)
+        {
             return Err(ClassicError::Input(format!(
-                "AEX did not advertise support for {} pixel depth",
-                format.name()
+                "AEX did not advertise support for output {} or input {} pixel depth",
+                format.name(),
+                input_format.name()
             )));
         }
-        let smart_render = setup.out_flags2 & (1 << 10) != 0;
+        let smart_capable = setup.out_flags2 & (1 << 10) != 0;
+        let smart_render = smart_override.unwrap_or(smart_capable);
+        if smart_render && !smart_capable {
+            return Err(ClassicError::Input(
+                "fixture requested Smart Render but the AEX did not advertise it".into(),
+            ));
+        }
         if backend.is_gpu() && !smart_render {
             return Err(ClassicError::Input(
                 "OpenCL GPU rendering requires Smart Render support".into(),
@@ -1257,8 +2071,16 @@ impl ClassicHost {
         }
         let mut applied_values = Vec::with_capacity(parameter_values.len());
         let mut applied_requests = BTreeSet::new();
-        let resources =
-            self.ensure_frame_resources(width, height, format, pixel_bytes, captured_params.len())?;
+        let resources = self.ensure_frame_resources(
+            width,
+            height,
+            format,
+            input_format,
+            pixel_bytes,
+            captured_params.len(),
+            secondary_layers,
+            primary_layout,
+        )?;
         let input_param = resources.input_param;
         let params = resources.params;
         let output_world = resources.output_world;
@@ -1279,6 +2101,7 @@ impl ClassicHost {
                     output_pixels + row_offset + u64::from(x) * format.bytes_per_pixel() as u64,
                 ),
                 register: "absolute",
+                dereference_offset: None,
                 size: format.bytes_per_pixel(),
                 occurrence: None,
                 image_coordinate: Some([x, y]),
@@ -1291,21 +2114,32 @@ impl ClassicHost {
         write_i32(
             &mut input_world,
             abi::LAYER_WORLD_FLAGS_OFFSET,
-            format.world_flags(),
+            input_format.world_flags(),
         );
         write_u64(&mut input_world, abi::LAYER_DATA_OFFSET, guest_input_pixels);
         write_i32(
             &mut input_world,
             abi::LAYER_ROWBYTES_OFFSET,
-            rowbytes as i32,
+            input_layout.rowbytes as i32,
         );
         write_i32(&mut input_world, abi::LAYER_WIDTH_OFFSET, width as i32);
         write_i32(&mut input_world, abi::LAYER_HEIGHT_OFFSET, height as i32);
-        write_rect(
+        for (index, value) in input_layout.extent.into_iter().enumerate() {
+            write_i32(
+                &mut input_world,
+                abi::LAYER_EXTENT_HINT_OFFSET + index * 4,
+                value,
+            );
+        }
+        write_i32(
             &mut input_world,
-            abi::LAYER_EXTENT_HINT_OFFSET,
-            width,
-            height,
+            LAYER_ORIGIN_X_OFFSET,
+            input_layout.origin_x,
+        );
+        write_i32(
+            &mut input_world,
+            LAYER_ORIGIN_Y_OFFSET,
+            input_layout.origin_y,
         );
         write_i32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
         write_u32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
@@ -1313,7 +2147,19 @@ impl ClassicHost {
         input_definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
             .copy_from_slice(&input_world);
         self.engine.write(input_param, &input_definition)?;
-        self.engine.write(guest_input_pixels, input_pixels)?;
+        let prepared_input =
+            resident_world_pixels(input_pixels, input_format, width, height, input_layout)?;
+        self.engine.write(guest_input_pixels, &prepared_input)?;
+        for (layer, allocated) in secondary_layers.iter().zip(&resources.secondary_layers) {
+            let prepared = resident_world_pixels(
+                layer.pixels,
+                layer.format,
+                layer.width,
+                layer.height,
+                allocated.layout,
+            )?;
+            self.engine.write(allocated.pixels, &prepared)?;
+        }
         let output_guard = vec![OUTPUT_GUARD_PATTERN; OUTPUT_GUARD_BYTES];
         self.engine
             .write(resources.output_guard_base, &output_guard)?;
@@ -1323,10 +2169,99 @@ impl ClassicHost {
         // a partially written result region.
         self.engine.write(output_pixels, &vec![0u8; pixel_bytes])?;
         self.engine.write_u64(params, input_param)?;
+        let mut resident_world_formats = vec![
+            (
+                input_param + abi::PARAM_U_OFFSET as u64,
+                input_format.pf_pixel_format(),
+            ),
+            (output_world, format.pf_pixel_format()),
+        ];
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
-            materialize_default(&mut definition, captured.param_type, width, height);
-            if smart_render {
+            materialize_default(&mut definition, captured.param_type, width, height)
+                .map_err(ClassicError::Input)?;
+            if captured.param_type == PARAM_ARBITRARY_DATA {
+                let union = abi::PARAM_U_OFFSET;
+                let default = read_u64(&definition, union + ARBITRARY_DEFAULT_HANDLE_OFFSET);
+                // PF_ADD_ARBITRARY2 leaves the value null when there is no
+                // default; otherwise the value is a private COPY of it, never
+                // the default handle itself (minihost initialize_arbitrary_values).
+                if default != 0 {
+                    let id = read_i16(&definition, union);
+                    let refcon = read_u64(&definition, union + ARBITRARY_REFCON_OFFSET);
+                    let handle = self.copy_arbitrary_default(id, refcon, default)?;
+                    write_u64(
+                        &mut definition,
+                        union + ARBITRARY_VALUE_HANDLE_OFFSET,
+                        handle,
+                    );
+                    self.arbitrary_values.push(ArbitraryValue {
+                        id,
+                        refcon,
+                        handle,
+                        definition: resources.parameter_definitions[index],
+                    });
+                }
+            }
+            if let Some(layer) = resources
+                .secondary_layers
+                .iter()
+                .find(|layer| layer.slot == index + 1)
+            {
+                let mut layer_world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_WORLD_FLAGS_OFFSET,
+                    layer.format.world_flags(),
+                );
+                write_u64(&mut layer_world, abi::LAYER_DATA_OFFSET, layer.pixels);
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_ROWBYTES_OFFSET,
+                    layer.layout.rowbytes as i32,
+                );
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_WIDTH_OFFSET,
+                    layer.width as i32,
+                );
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_HEIGHT_OFFSET,
+                    layer.height as i32,
+                );
+                for (index, value) in layer.layout.extent.into_iter().enumerate() {
+                    write_i32(
+                        &mut layer_world,
+                        abi::LAYER_EXTENT_HINT_OFFSET + index * 4,
+                        value,
+                    );
+                }
+                write_i32(
+                    &mut layer_world,
+                    LAYER_ORIGIN_X_OFFSET,
+                    layer.layout.origin_x,
+                );
+                write_i32(
+                    &mut layer_world,
+                    LAYER_ORIGIN_Y_OFFSET,
+                    layer.layout.origin_y,
+                );
+                write_i32(&mut layer_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
+                write_u32(&mut layer_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
+                if captured.param_type != PARAM_LAYER {
+                    return Err(ClassicError::Input(format!(
+                        "secondary layer slot {} is not a layer parameter",
+                        index + 1
+                    )));
+                }
+                definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
+                    .copy_from_slice(&layer_world);
+                resident_world_formats.push((
+                    resources.parameter_definitions[index] + abi::PARAM_U_OFFSET as u64,
+                    layer.format.pf_pixel_format(),
+                ));
+            } else if smart_render {
                 materialize_layer_world(&mut definition, captured.param_type, &input_world);
             }
             if let Some((request_index, requested)) =
@@ -1340,7 +2275,13 @@ impl ClassicHost {
                                 .map_or(requested.name == captured.name, |slot| slot == index + 1)
                     })
             {
-                apply_parameter_value(&mut definition, captured.param_type, requested)?;
+                apply_parameter_value_for_layer(
+                    &mut definition,
+                    captured.param_type,
+                    requested,
+                    width,
+                    height,
+                )?;
                 applied_requests.insert(request_index);
                 applied_values.push(AppliedParameter {
                     slot: index + 1,
@@ -1348,6 +2289,8 @@ impl ClassicHost {
                     value: requested.value,
                     color: requested.color,
                     point: requested.point,
+                    angle: requested.angle,
+                    point3d: requested.point3d,
                 });
             }
             let parameter = resources.parameter_definitions[index];
@@ -1379,6 +2322,8 @@ impl ClassicHost {
         write_i32(&mut world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
         write_u32(&mut world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
         self.engine.write(output_world, &world)?;
+        self.engine
+            .configure_resident_world_formats(&resident_world_formats);
         self.engine
             .configure_render_pixel_format(format.pf_pixel_format());
         let mut input_data = vec![0u8; abi::PF_IN_DATA_SIZE];
@@ -1553,9 +2498,44 @@ impl ClassicHost {
         }
         let mut raw_pixels = vec![0u8; pixel_bytes];
         self.engine.read(output_pixels, &mut raw_pixels)?;
-        let argb8 = format
-            .to_argb8_preview(&raw_pixels)
-            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        let mut raw_input_pixels = if compact_report {
+            Vec::new()
+        } else {
+            vec![0u8; input_alloc_bytes]
+        };
+        if !compact_report {
+            self.engine
+                .read(guest_input_pixels, &mut raw_input_pixels)?;
+        }
+        let mut raw_secondary_layers = Vec::with_capacity(if compact_report {
+            0
+        } else {
+            resources.secondary_layers.len()
+        });
+        for layer in resources
+            .secondary_layers
+            .iter()
+            .filter(|_| !compact_report)
+        {
+            let layer_bytes = layer.layout.rowbytes as usize * layer.height as usize;
+            let mut pixels = vec![0u8; layer_bytes];
+            self.engine.read(layer.pixels, &mut pixels)?;
+            raw_secondary_layers.push(ResidentWorldDump {
+                slot: layer.slot,
+                width: layer.width,
+                height: layer.height,
+                raw_pixels: pixels,
+                format: layer.format,
+                layout: layer.layout,
+            });
+        }
+        let argb8 = if compact_report {
+            Vec::new()
+        } else {
+            format
+                .to_argb8_preview(&raw_pixels)
+                .map_err(|error| ClassicError::Input(error.to_string()))?
+        };
         let raw_pixel_sha256 = format!("{:x}", Sha256::digest(&raw_pixels));
         Ok((
             RenderReport {
@@ -1588,9 +2568,18 @@ impl ClassicHost {
                 suite_requests: self.engine.suite_requests().to_vec(),
                 unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
                 dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
+                smart_checkout_disk_id_fallbacks: self
+                    .engine
+                    .smart_checkout_disk_id_fallbacks()
+                    .to_vec(),
+                arbitrary_dispose_failures: Vec::new(),
                 census,
                 argb8,
                 raw_pixels,
+                raw_input_pixels,
+                raw_input_layout: (!compact_report).then_some(input_layout),
+                raw_input_format: (!compact_report).then_some(input_format),
+                raw_secondary_layers,
             },
             traces,
         ))
@@ -1601,15 +2590,44 @@ impl ClassicHost {
         width: u32,
         height: u32,
         format: FramePixelFormat,
+        input_format: FramePixelFormat,
         pixel_bytes: usize,
         parameter_count: usize,
+        secondary_layers: &[ResidentLayer<'_>],
+        primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<FrameResources, ClassicError> {
+        let (_, input_alloc_bytes) =
+            resident_world_shape(input_format, width, height, primary_layout)?;
         if let Some(resources) = &self.frame_resources {
             if resources.width != width
                 || resources.height != height
                 || resources.format != format
+                || resources.input_format != input_format
                 || resources.pixel_bytes != pixel_bytes
+                || resources.input_alloc_bytes != input_alloc_bytes
                 || resources.parameter_definitions.len() != parameter_count
+                || resources.secondary_layers.len() != secondary_layers.len()
+                || resources.secondary_layers.iter().zip(secondary_layers).any(
+                    |(allocated, requested)| {
+                        allocated.slot != requested.slot
+                            || allocated.width != requested.width
+                            || allocated.height != requested.height
+                            || allocated.format != requested.format
+                            || resident_world_shape(
+                                requested.format,
+                                requested.width,
+                                requested.height,
+                                requested.layout,
+                            )
+                            .map_or(true, |(layout, _)| {
+                                allocated.layout.rowbytes != layout.rowbytes
+                                    || allocated.layout.origin_x != layout.origin_x
+                                    || allocated.layout.origin_y != layout.origin_y
+                                    || allocated.layout.extent != layout.extent
+                                    || allocated.layout.padding_byte != layout.padding_byte
+                            })
+                    },
+                )
             {
                 return Err(ClassicError::Input(
                     "resident frame structure changed; reopen the session".into(),
@@ -1620,7 +2638,7 @@ impl ClassicHost {
         let input_param = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
         let params = self.engine.allocate((parameter_count + 1) * 8, 8)?;
         let output_world = self.engine.allocate(abi::PF_LAYER_DEF_SIZE, 8)?;
-        let input_pixels = self.engine.allocate(pixel_bytes, 64)?;
+        let input_pixels = self.engine.allocate(input_alloc_bytes, 64)?;
         let guarded_output_bytes = pixel_bytes
             .checked_add(OUTPUT_GUARD_BYTES * 2)
             .ok_or_else(|| ClassicError::Input("guarded output size overflow".into()))?;
@@ -1630,11 +2648,41 @@ impl ClassicHost {
         for _ in 0..parameter_count {
             parameter_definitions.push(self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?);
         }
+        let mut allocated_layers = Vec::with_capacity(secondary_layers.len());
+        let mut seen_slots = BTreeSet::new();
+        for layer in secondary_layers {
+            if layer.slot == 0
+                || layer.slot > parameter_count
+                || !seen_slots.insert(layer.slot)
+                || layer.width == 0
+                || layer.height == 0
+            {
+                return Err(ClassicError::Input(
+                    "secondary layer identity or dimensions are invalid".into(),
+                ));
+            }
+            layer
+                .format
+                .validate_bytes(layer.width, layer.height, layer.pixels)
+                .map_err(|error| ClassicError::Input(error.to_string()))?;
+            let (layout, bytes) =
+                resident_world_shape(layer.format, layer.width, layer.height, layer.layout)?;
+            allocated_layers.push(ResidentLayerResources {
+                slot: layer.slot,
+                width: layer.width,
+                height: layer.height,
+                pixels: self.engine.allocate(bytes, 64)?,
+                format: layer.format,
+                layout,
+            });
+        }
         let resources = FrameResources {
             width,
             height,
             format,
+            input_format,
             pixel_bytes,
+            input_alloc_bytes,
             input_param,
             params,
             output_world,
@@ -1642,14 +2690,29 @@ impl ClassicHost {
             output_guard_base,
             output_pixels,
             parameter_definitions,
+            secondary_layers: allocated_layers,
         };
         self.frame_resources = Some(resources.clone());
         Ok(resources)
     }
 
     fn invoke(&mut self, selector: u64) -> Result<u64, GuestError> {
-        self.engine
-            .call_selector_win64(self.entry, [selector, self.input, self.output, 0, 0, 0])
+        let report_timings = std::env::var_os("AEXCOMPAT_LOAD_TIMINGS").is_some();
+        if report_timings {
+            eprintln!("aex_guest_load_timing: event=begin stage=selector selector={selector}");
+        }
+        let started = std::time::Instant::now();
+        let result = self
+            .engine
+            .call_selector_win64(self.entry, [selector, self.input, self.output, 0, 0, 0]);
+        if report_timings {
+            eprintln!(
+                "aex_guest_load_timing: event=end stage=selector selector={selector} elapsed_ms={} result={}",
+                started.elapsed().as_millis(),
+                if result.is_ok() { "ok" } else { "error" }
+            );
+        }
+        result
     }
 
     fn write_frame_context(
@@ -1657,17 +2720,21 @@ impl ClassicHost {
         width: u32,
         height: u32,
         current_time: i32,
+        time_step: i32,
+        total_time: i32,
         time_scale: u32,
     ) -> Result<(), ClassicError> {
         let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
         self.engine.read(self.input, &mut input)?;
-        write_i32(&mut input, abi::IN_WIDTH_OFFSET, width as i32);
-        write_i32(&mut input, abi::IN_HEIGHT_OFFSET, height as i32);
-        write_i32(&mut input, abi::IN_CURRENT_TIME_OFFSET, current_time);
-        write_i32(&mut input, abi::IN_TIME_STEP_OFFSET, 1);
-        write_i32(&mut input, abi::IN_LOCAL_TIME_STEP_OFFSET, 1);
-        write_u32(&mut input, abi::IN_TIME_SCALE_OFFSET, time_scale);
-        write_rect(&mut input, abi::IN_EXTENT_HINT_OFFSET, width, height);
+        populate_frame_context(
+            &mut input,
+            width,
+            height,
+            current_time,
+            time_step,
+            total_time,
+            time_scale,
+        );
         self.engine.write(self.input, &input)?;
         Ok(())
     }
@@ -1699,19 +2766,186 @@ impl ClassicHost {
         if !self.global_active {
             return Ok(0);
         }
+        // Both disposals go through PF_Cmd_ARBITRARY_CALLBACK and need the
+        // plug-in's global data, so they run before GLOBAL_SETDOWN.
+        let cleanup = combine_failures(
+            self.dispose_arbitrary_values()
+                .into_iter()
+                .chain(self.dispose_arbitrary_defaults().err())
+                .collect(),
+        );
         let result = self.invoke(CMD_GLOBAL_SETDOWN);
         self.global_active = false;
         let clear = self.write_input_pointer(abi::IN_GLOBAL_DATA_OFFSET, 0);
-        match result {
-            Ok(result) => {
-                clear?;
-                Ok(result as i32)
+        let setdown = match result {
+            Ok(result) => clear.map(|()| result as i32).map_err(ClassicError::from),
+            Err(error) => Err(selector_guest_error("GLOBAL_SETDOWN", error)),
+        };
+        settle_global_setdown(setdown, cleanup)
+    }
+
+    fn arbitrary_extra(&mut self) -> Result<u64, ClassicError> {
+        if let Some(extra) = self.arbitrary_extra {
+            return Ok(extra);
+        }
+        let extra = self.engine.allocate(ARBITRARY_EXTRA_BYTES, 8)?;
+        self.arbitrary_extra = Some(extra);
+        Ok(extra)
+    }
+
+    /// Issues one `PF_Cmd_ARBITRARY_CALLBACK` with a freshly zeroed
+    /// `PF_ArbParamsExtra` and returns the plug-in's error code.
+    fn call_arbitrary_callback(
+        &mut self,
+        which_function: i32,
+        id: i16,
+        refcon: u64,
+        payload: &[(usize, u64)],
+    ) -> Result<i32, ClassicError> {
+        let extra = self.arbitrary_extra()?;
+        let mut bytes = vec![0u8; ARBITRARY_EXTRA_BYTES];
+        write_i32(&mut bytes, 0, which_function);
+        write_i16(&mut bytes, ARBITRARY_EXTRA_ID_OFFSET, id);
+        write_u64(&mut bytes, ARBITRARY_EXTRA_REFCON_OFFSET, refcon);
+        for (offset, value) in payload {
+            write_u64(&mut bytes, *offset, *value);
+        }
+        self.engine.write(extra, &bytes)?;
+        let error = self
+            .engine
+            .call_selector_win64(
+                self.entry,
+                [CMD_ARBITRARY_CALLBACK, self.input, self.output, 0, 0, extra],
+            )
+            .map_err(|source| selector_guest_error("ARBITRARY_CALLBACK", source))?;
+        Ok(error as i32)
+    }
+
+    /// `PF_Arbitrary_COPY_FUNC`: duplicates `source` into a handle the render
+    /// owns. A null or aliased destination is a contract failure, not a value.
+    fn copy_arbitrary_default(
+        &mut self,
+        id: i16,
+        refcon: u64,
+        source: u64,
+    ) -> Result<u64, ClassicError> {
+        let destination_cell =
+            self.arbitrary_extra()? + ARBITRARY_EXTRA_DESTINATION_CELL_OFFSET as u64;
+        let error = self.call_arbitrary_callback(
+            ARBITRARY_COPY_FUNC,
+            id,
+            refcon,
+            &[
+                (ARBITRARY_EXTRA_HANDLE_OFFSET, source),
+                (ARBITRARY_EXTRA_DESTINATION_POINTER_OFFSET, destination_cell),
+            ],
+        )?;
+        if error != 0 {
+            return Err(ClassicError::Arbitrary {
+                operation: "COPY",
+                id,
+                message: format!("ARBITRARY_CALLBACK returned {error}"),
+            });
+        }
+        let destination = self.read_guest_u64(destination_cell)?;
+        if destination == 0 {
+            return Err(ClassicError::Arbitrary {
+                operation: "COPY",
+                id,
+                message: "plug-in returned a null destination handle".into(),
+            });
+        }
+        if destination == source {
+            return Err(ClassicError::Arbitrary {
+                operation: "COPY",
+                id,
+                message: "plug-in returned the source handle instead of a copy".into(),
+            });
+        }
+        Ok(destination)
+    }
+
+    /// `PF_Arbitrary_DISPOSE_FUNC` for one handle.
+    fn dispose_arbitrary_handle(
+        &mut self,
+        id: i16,
+        refcon: u64,
+        handle: u64,
+    ) -> Result<(), ClassicError> {
+        let error = self.call_arbitrary_callback(
+            ARBITRARY_DISPOSE_FUNC,
+            id,
+            refcon,
+            &[(ARBITRARY_EXTRA_HANDLE_OFFSET, handle)],
+        )?;
+        if error != 0 {
+            return Err(ClassicError::Arbitrary {
+                operation: "DISPOSE",
+                id,
+                message: format!("ARBITRARY_CALLBACK returned {error}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Disposes every render-owned value copy. Each slot is released exactly
+    /// once whether or not its DISPOSE succeeds, and every failure is
+    /// returned, in slot order, for the caller to record or report.
+    fn dispose_arbitrary_values(&mut self) -> Vec<ClassicError> {
+        let mut failures = Vec::new();
+        for value in std::mem::take(&mut self.arbitrary_values) {
+            if let Err(error) = self.dispose_arbitrary_handle(value.id, value.refcon, value.handle)
+            {
+                failures.push(error);
             }
-            Err(error) => {
-                let _ = clear;
-                Err(selector_guest_error("GLOBAL_SETDOWN", error))
+            if let Err(error) = self.engine.write_u64(
+                value.definition + (abi::PARAM_U_OFFSET + ARBITRARY_VALUE_HANDLE_OFFSET) as u64,
+                0,
+            ) {
+                failures.push(ClassicError::Guest(error));
             }
         }
+        failures
+    }
+
+    /// Disposes every captured arbitrary default (minihost
+    /// `dispose_arbitrary_defaults`): all slots are visited, each default slot
+    /// is nulled whether or not its DISPOSE succeeded so it is never disposed
+    /// twice, and the failures are reported together.
+    fn dispose_arbitrary_defaults(&mut self) -> Result<(), ClassicError> {
+        let union = abi::PARAM_U_OFFSET;
+        let owned = self
+            .engine
+            .parameters()
+            .iter()
+            .enumerate()
+            .filter(|(_, parameter)| parameter.param_type == PARAM_ARBITRARY_DATA)
+            .map(|(index, parameter)| {
+                (
+                    index,
+                    read_i16(&parameter.bytes, union),
+                    read_u64(&parameter.bytes, union + ARBITRARY_DEFAULT_HANDLE_OFFSET),
+                    read_u64(&parameter.bytes, union + ARBITRARY_REFCON_OFFSET),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for (index, id, handle, refcon) in owned {
+            if handle == 0 {
+                continue;
+            }
+            if let Err(error) = self.dispose_arbitrary_handle(id, refcon, handle) {
+                failures.push(error);
+            }
+            if let Some(parameter) = self.engine.parameters_mut().get_mut(index) {
+                write_u64(
+                    &mut parameter.bytes,
+                    union + ARBITRARY_DEFAULT_HANDLE_OFFSET,
+                    0,
+                );
+            }
+        }
+        combine_failures(failures)
     }
 
     fn call_with_optional_trace(
@@ -2366,6 +3600,10 @@ fn read_f32(bytes: &[u8], offset: usize) -> f32 {
     f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+fn read_f64(bytes: &[u8], offset: usize) -> f64 {
+    f64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
@@ -2391,7 +3629,12 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
-fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, height: u32) {
+fn materialize_default(
+    definition: &mut [u8],
+    param_type: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
     let union = abi::PARAM_U_OFFSET;
     match param_type {
         PARAM_SLIDER | PARAM_FIXED_SLIDER => {
@@ -2416,6 +3659,16 @@ fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, heigh
                 union + abi::PF_PIXEL_SIZE..union + abi::PF_PIXEL_SIZE * 2,
                 union,
             );
+        }
+        PARAM_ARBITRARY_DATA => {
+            // PF_ADD_ARBITRARY2 initializes the value to null independently of
+            // the optional default handle. The render-time value is a private
+            // COPY of the default that ClassicHost obtains through
+            // PF_Cmd_ARBITRARY_CALLBACK; it is never the default handle itself,
+            // and a null default simply leaves the value uninitialized.
+            definition
+                [union + ARBITRARY_VALUE_HANDLE_OFFSET..union + ARBITRARY_VALUE_HANDLE_OFFSET + 8]
+                .copy_from_slice(&0u64.to_le_bytes());
         }
         PARAM_POPUP => {
             let value = i16::from_le_bytes(
@@ -2445,8 +3698,26 @@ fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, heigh
             definition[union..union + 4].copy_from_slice(&x.to_le_bytes());
             definition[union + 4..union + 8].copy_from_slice(&y.to_le_bytes());
         }
+        PARAM_POINT3D => {
+            for (component, extent) in [width, height, height].into_iter().enumerate() {
+                let offset = union + 24 + component * 8;
+                let percent = f64::from_le_bytes(
+                    definition[offset..offset + 8]
+                        .try_into()
+                        .expect("point3d default is eight bytes"),
+                );
+                let pixels = if width > 0 && height > 0 {
+                    percent / 100.0 * f64::from(extent)
+                } else {
+                    percent
+                };
+                definition[union + component * 8..union + component * 8 + 8]
+                    .copy_from_slice(&pixels.to_le_bytes());
+            }
+        }
         _ => {}
     }
+    Ok(())
 }
 
 fn materialize_layer_world(definition: &mut [u8], param_type: i32, input_world: &[u8]) {
@@ -2460,16 +3731,31 @@ fn materialize_layer_world(definition: &mut [u8], param_type: i32, input_world: 
     }
 }
 
+#[cfg(test)]
 fn apply_parameter_value(
     definition: &mut [u8],
     param_type: i32,
     requested: &ParameterValue,
 ) -> Result<(), ClassicError> {
+    apply_parameter_value_for_layer(definition, param_type, requested, 0, 0)
+}
+
+fn apply_parameter_value_for_layer(
+    definition: &mut [u8],
+    param_type: i32,
+    requested: &ParameterValue,
+    width: u32,
+    height: u32,
+) -> Result<(), ClassicError> {
     if param_type == PARAM_COLOR {
         let color = requested.color.ok_or_else(|| {
             ClassicError::Input("color parameter requires four ARGB8 components".into())
         })?;
-        if requested.value.is_some() {
+        if requested.value.is_some()
+            || requested.point.is_some()
+            || requested.angle.is_some()
+            || requested.point3d.is_some()
+        {
             return Err(ClassicError::Input(
                 "color parameter accepts only ARGB8 components".into(),
             ));
@@ -2491,15 +3777,65 @@ fn apply_parameter_value(
                 "point parameter components must be finite and typed".into(),
             ));
         }
-        for (offset, value) in [(0, x), (4, y)] {
-            let fixed = value * 65536.0;
-            if fixed < i32::MIN as f64 || fixed > i32::MAX as f64 {
-                return Err(ClassicError::Input(format!(
-                    "point component is outside 16.16 range: {value}"
-                )));
-            }
+        for (offset, value, extent) in [(0, x, width), (4, y, height)] {
+            let pixels = if width > 0 && height > 0 {
+                value / 100.0 * f64::from(extent)
+            } else {
+                value
+            };
+            let fixed = pixels.clamp(-32768.0, 32767.0) * 65536.0;
             definition[abi::PARAM_U_OFFSET + offset..abi::PARAM_U_OFFSET + offset + 4]
                 .copy_from_slice(&(fixed.round() as i32).to_le_bytes());
+        }
+        return Ok(());
+    }
+    if param_type == PARAM_ANGLE {
+        let angle = requested.angle.ok_or_else(|| {
+            ClassicError::Input("angle parameter requires one typed component".into())
+        })?;
+        if requested.value.is_some()
+            || requested.color.is_some()
+            || requested.point.is_some()
+            || requested.point3d.is_some()
+            || !angle.is_finite()
+        {
+            return Err(ClassicError::Input(
+                "angle parameter component must be finite and typed".into(),
+            ));
+        }
+        let fixed = angle * 65536.0;
+        if fixed < i32::MIN as f64 || fixed > i32::MAX as f64 {
+            return Err(ClassicError::Input(format!(
+                "angle component is outside 16.16 range: {angle}"
+            )));
+        }
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4]
+            .copy_from_slice(&(fixed.round() as i32).to_le_bytes());
+        return Ok(());
+    }
+    if param_type == PARAM_POINT3D {
+        let values = requested.point3d.ok_or_else(|| {
+            ClassicError::Input("point3d parameter requires three typed components".into())
+        })?;
+        if requested.value.is_some()
+            || requested.color.is_some()
+            || requested.point.is_some()
+            || requested.angle.is_some()
+            || values.iter().any(|value| !value.is_finite())
+        {
+            return Err(ClassicError::Input(
+                "point3d parameter components must be finite and typed".into(),
+            ));
+        }
+        for (index, (value, extent)) in values.into_iter().zip([width, height, height]).enumerate()
+        {
+            let pixels = if width > 0 && height > 0 {
+                value / 100.0 * f64::from(extent)
+            } else {
+                value
+            };
+            definition[abi::PARAM_U_OFFSET + index * 8..abi::PARAM_U_OFFSET + index * 8 + 8]
+                .copy_from_slice(&pixels.to_le_bytes());
         }
         return Ok(());
     }
@@ -2511,6 +3847,11 @@ fn apply_parameter_value(
     if requested.point.is_some() {
         return Err(ClassicError::Input(format!(
             "parameter type {param_type} does not accept a point value"
+        )));
+    }
+    if requested.angle.is_some() || requested.point3d.is_some() {
+        return Err(ClassicError::Input(format!(
+            "parameter type {param_type} does not accept component values"
         )));
     }
     let value = requested.value.ok_or_else(|| {
@@ -2564,6 +3905,25 @@ fn color_descriptor(definition: &[u8], param_type: i32) -> (Option<[u8; 4]>, Opt
     // AE materializes `dephault` into `value` before the first render. Report
     // that effective initial state rather than the add-param scratch bytes.
     (Some(default), Some(default))
+}
+
+fn component_descriptor(
+    definition: &[u8],
+    param_type: i32,
+) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
+    let union = abi::PARAM_U_OFFSET;
+    let defaults = match param_type {
+        PARAM_ANGLE => vec![read_i32(definition, union + ANGLE_DEFAULT_OFFSET) as f64 / 65536.0],
+        PARAM_POINT => vec![
+            read_i32(definition, union + POINT_DEFAULT_X_OFFSET) as f64 / 65536.0,
+            read_i32(definition, union + POINT_DEFAULT_Y_OFFSET) as f64 / 65536.0,
+        ],
+        PARAM_POINT3D => (0..3)
+            .map(|component| read_f64(definition, union + 24 + component * 8))
+            .collect(),
+        _ => return (None, None),
+    };
+    (Some(defaults.clone()), Some(defaults))
 }
 
 fn numeric_descriptor(
@@ -2634,6 +3994,25 @@ fn numeric_descriptor(
         ),
         _ => (None, None, None, None, None, None),
     }
+}
+
+fn populate_frame_context(
+    input: &mut [u8],
+    width: u32,
+    height: u32,
+    current_time: i32,
+    time_step: i32,
+    total_time: i32,
+    time_scale: u32,
+) {
+    write_i32(input, abi::IN_WIDTH_OFFSET, width as i32);
+    write_i32(input, abi::IN_HEIGHT_OFFSET, height as i32);
+    write_i32(input, abi::IN_CURRENT_TIME_OFFSET, current_time);
+    write_i32(input, abi::IN_TIME_STEP_OFFSET, time_step);
+    write_i32(input, abi::IN_TOTAL_TIME_OFFSET, total_time);
+    write_i32(input, abi::IN_LOCAL_TIME_STEP_OFFSET, time_step);
+    write_u32(input, abi::IN_TIME_SCALE_OFFSET, time_scale);
+    write_rect(input, abi::IN_EXTENT_HINT_OFFSET, width, height);
 }
 
 fn cleanup_error_code(result: Result<i32, ClassicError>) -> i32 {
@@ -2722,6 +4101,182 @@ fn bounded_text(value: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_world_layout_expands_actual_stride_and_rejects_bad_geometry() {
+        let requested = ResidentWorldLayout {
+            rowbytes: 24,
+            padding_byte: 0x5a,
+            origin_x: -2,
+            origin_y: 3,
+            extent: [0, 0, 4, 3],
+        };
+        let (layout, bytes) =
+            resident_world_shape(FramePixelFormat::Argb8, 4, 3, Some(requested)).unwrap();
+        assert_eq!(bytes, 72);
+        let packed = (0..48u8).collect::<Vec<_>>();
+        let expanded =
+            resident_world_pixels(&packed, FramePixelFormat::Argb8, 4, 3, layout).unwrap();
+        for (index, row) in expanded.chunks_exact(24).enumerate() {
+            assert_eq!(&row[..16], &packed[index * 16..(index + 1) * 16]);
+            assert_eq!(&row[16..], &[0x5a; 8]);
+        }
+        let bad = ResidentWorldLayout {
+            extent: [0, 0, 5, 3],
+            ..requested
+        };
+        assert!(resident_world_shape(FramePixelFormat::Argb8, 4, 3, Some(bad)).is_err());
+    }
+
+    #[test]
+    fn resident_layout_reaches_public_layer_probe_and_preserves_raw_stride() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let aex =
+            repository.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !aex.is_file() {
+            eprintln!("skipping guest layout AEX smoke: build public layer probe");
+            return;
+        }
+        let image = PeImage::parse_and_map(&std::fs::read(aex).unwrap()).unwrap();
+        let mut host = ClassicHost::new_with_effect(&image, None).unwrap();
+        host.begin_resident_session(4, 3, 1).unwrap();
+        let primary = [255u8, 40, 60, 80].repeat(12);
+        let secondary = [255u8, 20, 100, 140].repeat(12);
+        let layer = ResidentLayer {
+            slot: 1,
+            width: 4,
+            height: 3,
+            pixels: &secondary,
+            format: FramePixelFormat::Argb8,
+            layout: Some(ResidentWorldLayout {
+                rowbytes: 24,
+                padding_byte: 0x5a,
+                origin_x: -2,
+                origin_y: 3,
+                extent: [0, 0, 4, 3],
+            }),
+        };
+        let scalar = ParameterValue {
+            slot: Some(2),
+            name: "Amount".into(),
+            value: Some(255.0),
+            color: None,
+            point: None,
+            angle: None,
+            point3d: None,
+        };
+        let report = host
+            .render_resident_fixture_pixels(
+                4,
+                3,
+                0,
+                1,
+                1,
+                1,
+                FramePixelFormat::Argb8,
+                FramePixelFormat::Argb8,
+                &primary,
+                &[scalar],
+                &[layer],
+                false,
+                Some(ResidentWorldLayout {
+                    rowbytes: 20,
+                    padding_byte: 0x5a,
+                    origin_x: 2,
+                    origin_y: -1,
+                    extent: [1, 0, 4, 3],
+                }),
+            )
+            .unwrap();
+        assert_eq!(report.raw_input_pixels.len(), 60);
+        assert!(
+            report
+                .raw_input_pixels
+                .chunks_exact(20)
+                .all(|row| row[16..] == [0x5a; 4])
+        );
+        assert_eq!(report.raw_secondary_layers[0].raw_pixels.len(), 72);
+        assert!(
+            report.raw_secondary_layers[0]
+                .raw_pixels
+                .chunks_exact(24)
+                .all(|row| row[16..] == [0x5a; 8])
+        );
+        assert_eq!(report.raw_secondary_layers[0].layout.origin_x, -2);
+        assert_eq!(&report.raw_pixels[8..12], &[255, 3, 8, 126]);
+        let _ = host.close_resident_session();
+    }
+
+    #[test]
+    fn resident_mixed_depth_layer_reaches_public_probe_with_raw_stride() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let aex =
+            repository.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !aex.is_file() {
+            eprintln!("skipping guest mixed-depth AEX smoke: build public layer probe");
+            return;
+        }
+        let image = PeImage::parse_and_map(&std::fs::read(aex).unwrap()).unwrap();
+        let mut host = ClassicHost::new_with_effect(&image, None).unwrap();
+        host.begin_resident_session(4, 3, 1).unwrap();
+        let primary = [255u8, 40, 60, 80].repeat(12);
+        let secondary = FramePixelFormat::Argb16
+            .promote_rgba8(&[20u8, 100, 140, 255].repeat(12))
+            .unwrap();
+        let layer = ResidentLayer {
+            slot: 1,
+            width: 4,
+            height: 3,
+            pixels: &secondary,
+            format: FramePixelFormat::Argb16,
+            layout: Some(ResidentWorldLayout {
+                rowbytes: 40,
+                padding_byte: 0x5a,
+                origin_x: -2,
+                origin_y: 3,
+                extent: [0, 0, 4, 3],
+            }),
+        };
+        let scalar = ParameterValue {
+            slot: Some(2),
+            name: "Amount".into(),
+            value: Some(255.0),
+            color: None,
+            point: None,
+            angle: None,
+            point3d: None,
+        };
+        let report = host
+            .render_resident_fixture_pixels(
+                4,
+                3,
+                0,
+                1,
+                1,
+                1,
+                FramePixelFormat::Argb8,
+                FramePixelFormat::Argb8,
+                &primary,
+                &[scalar],
+                &[layer],
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            report.raw_secondary_layers[0].format,
+            FramePixelFormat::Argb16
+        );
+        assert_eq!(report.raw_secondary_layers[0].raw_pixels.len(), 120);
+        assert!(
+            report.raw_secondary_layers[0]
+                .raw_pixels
+                .chunks_exact(40)
+                .all(|row| row[32..] == [0x5a; 8])
+        );
+        assert_eq!(&report.raw_pixels[8..12], &[255, 3, 24, 126]);
+        let _ = host.close_resident_session();
+    }
 
     #[test]
     fn failure_text_is_utf8_safe_and_bounded() {
@@ -2850,7 +4405,7 @@ mod tests {
         slider[abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET
             ..abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET + 4]
             .copy_from_slice(&123i32.to_le_bytes());
-        materialize_default(&mut slider, PARAM_FIXED_SLIDER, 32, 20);
+        materialize_default(&mut slider, PARAM_FIXED_SLIDER, 32, 20).unwrap();
         assert_eq!(
             &slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
             &123i32.to_le_bytes()
@@ -2860,7 +4415,7 @@ mod tests {
         float_slider[abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET
             ..abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET + 4]
             .copy_from_slice(&5.0f32.to_le_bytes());
-        materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER, 32, 20);
+        materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER, 32, 20).unwrap();
         assert_eq!(
             &float_slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8],
             &5.0f64.to_le_bytes()
@@ -2869,7 +4424,7 @@ mod tests {
         let mut color = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         color[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8]
             .copy_from_slice(&[1, 2, 3, 4, 255, 64, 128, 192]);
-        materialize_default(&mut color, PARAM_COLOR, 32, 20);
+        materialize_default(&mut color, PARAM_COLOR, 32, 20).unwrap();
         assert_eq!(
             &color[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
             &[255, 64, 128, 192]
@@ -2882,7 +4437,7 @@ mod tests {
         point[abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET
             ..abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET + 4]
             .copy_from_slice(&(25 * 65536i32).to_le_bytes());
-        materialize_default(&mut point, PARAM_POINT, 32, 20);
+        materialize_default(&mut point, PARAM_POINT, 32, 20).unwrap();
         assert_eq!(
             read_i32(&point, abi::PARAM_U_OFFSET),
             16 * 65536,
@@ -2893,6 +4448,251 @@ mod tests {
             5 * 65536,
             "point y percentage default must become a source coordinate"
         );
+
+        let mut point3d = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        for (index, value) in [50.0f64, 25.0, 75.0].into_iter().enumerate() {
+            point3d[abi::PARAM_U_OFFSET + 24 + index * 8..abi::PARAM_U_OFFSET + 32 + index * 8]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        materialize_default(&mut point3d, PARAM_POINT3D, 32, 20).unwrap();
+        for (index, expected) in [16.0f64, 5.0, 15.0].into_iter().enumerate() {
+            assert_eq!(
+                f64::from_le_bytes(
+                    point3d[abi::PARAM_U_OFFSET + index * 8..abi::PARAM_U_OFFSET + index * 8 + 8]
+                        .try_into()
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn setup_component_descriptors_preserve_angle_point_and_point3d_defaults() {
+        let mut angle = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        angle[abi::PARAM_U_OFFSET + ANGLE_DEFAULT_OFFSET
+            ..abi::PARAM_U_OFFSET + ANGLE_DEFAULT_OFFSET + 4]
+            .copy_from_slice(&(45i32 * 65536).to_le_bytes());
+        assert_eq!(
+            component_descriptor(&angle, PARAM_ANGLE),
+            (Some(vec![45.0]), Some(vec![45.0]))
+        );
+
+        let mut point = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        point[abi::PARAM_U_OFFSET + POINT_DEFAULT_X_OFFSET
+            ..abi::PARAM_U_OFFSET + POINT_DEFAULT_X_OFFSET + 4]
+            .copy_from_slice(&(25i32 * 65536).to_le_bytes());
+        point[abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET
+            ..abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET + 4]
+            .copy_from_slice(&(-10i32 * 65536).to_le_bytes());
+        assert_eq!(
+            component_descriptor(&point, PARAM_POINT),
+            (Some(vec![25.0, -10.0]), Some(vec![25.0, -10.0]))
+        );
+
+        let mut point3d = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        for (index, value) in [10.5f64, -20.25, 30.75].into_iter().enumerate() {
+            let offset = abi::PARAM_U_OFFSET + 24 + index * 8;
+            point3d[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(
+            component_descriptor(&point3d, PARAM_POINT3D),
+            (
+                Some(vec![10.5, -20.25, 30.75]),
+                Some(vec![10.5, -20.25, 30.75])
+            )
+        );
+    }
+
+    #[test]
+    fn materialize_default_never_aliases_arbitrary_default_into_value() {
+        let union = abi::PARAM_U_OFFSET;
+        let mut arbitrary = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        arbitrary[union..union + 4].copy_from_slice(&[7, 0, 0, 0]);
+        arbitrary
+            [union + ARBITRARY_DEFAULT_HANDLE_OFFSET..union + ARBITRARY_DEFAULT_HANDLE_OFFSET + 8]
+            .copy_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
+        arbitrary[union + ARBITRARY_VALUE_HANDLE_OFFSET..union + ARBITRARY_VALUE_HANDLE_OFFSET + 8]
+            .copy_from_slice(&0x5555_5555_5555_5555u64.to_le_bytes());
+        arbitrary[union + ARBITRARY_REFCON_OFFSET..union + ARBITRARY_REFCON_OFFSET + 8]
+            .copy_from_slice(&0x0fed_cba9_8765_4321u64.to_le_bytes());
+
+        materialize_default(&mut arbitrary, PARAM_ARBITRARY_DATA, 32, 20).unwrap();
+
+        // The value is left null for the host's COPY; the default and refcon
+        // metadata stay intact for that callback.
+        assert_eq!(
+            read_u64(&arbitrary, union + ARBITRARY_VALUE_HANDLE_OFFSET),
+            0
+        );
+        assert_eq!(
+            read_u64(&arbitrary, union + ARBITRARY_DEFAULT_HANDLE_OFFSET),
+            0x1234_5678_9abc_def0
+        );
+        assert_eq!(&arbitrary[union..union + 4], &[7, 0, 0, 0]);
+        assert_eq!(
+            read_u64(&arbitrary, union + ARBITRARY_REFCON_OFFSET),
+            0x0fed_cba9_8765_4321
+        );
+    }
+
+    #[test]
+    fn arbitrary_null_default_leaves_value_uninitialized() {
+        let union = abi::PARAM_U_OFFSET;
+        let mut arbitrary = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        arbitrary[union + ARBITRARY_VALUE_HANDLE_OFFSET..union + ARBITRARY_VALUE_HANDLE_OFFSET + 8]
+            .copy_from_slice(&0x5555_5555_5555_5555u64.to_le_bytes());
+        materialize_default(&mut arbitrary, PARAM_ARBITRARY_DATA, 32, 20).unwrap();
+        assert_eq!(
+            read_u64(&arbitrary, union + ARBITRARY_VALUE_HANDLE_OFFSET),
+            0
+        );
+    }
+
+    #[test]
+    fn combine_failures_keeps_every_error_visible_in_order() {
+        assert!(combine_failures(Vec::new()).is_ok());
+        let single = combine_failures(vec![ClassicError::Selector {
+            selector: "GLOBAL_SETDOWN",
+            error: 5,
+        }])
+        .unwrap_err();
+        assert!(matches!(
+            single,
+            ClassicError::Selector {
+                selector: "GLOBAL_SETDOWN",
+                error: 5
+            }
+        ));
+        let combined = combine_failures(vec![
+            ClassicError::Arbitrary {
+                operation: "DISPOSE",
+                id: 3,
+                message: "ARBITRARY_CALLBACK returned 9".into(),
+            },
+            ClassicError::Selector {
+                selector: "GLOBAL_SETDOWN",
+                error: 5,
+            },
+            ClassicError::Input("third".into()),
+        ])
+        .unwrap_err();
+        assert_eq!(combined.selector_error_code(), None);
+        assert_eq!(
+            combined.to_string(),
+            "arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9; additionally: selector GLOBAL_SETDOWN returned 5; additionally: invalid frame input: third"
+        );
+        let selector_primary = ClassicError::Compound {
+            primary: Box::new(ClassicError::Selector {
+                selector: "GLOBAL_SETDOWN",
+                error: 5,
+            }),
+            secondary: Box::new(ClassicError::Input("cleanup".into())),
+        };
+        assert_eq!(selector_primary.selector_error_code(), Some(5));
+    }
+
+    fn dispose_failure(id: i16, error: i32) -> ClassicError {
+        ClassicError::Arbitrary {
+            operation: "DISPOSE",
+            id,
+            message: format!("ARBITRARY_CALLBACK returned {error}"),
+        }
+    }
+
+    #[test]
+    fn finished_render_survives_dispose_failures_and_records_them() {
+        let settled = settle_render_disposal(
+            Ok::<Vec<String>, ClassicError>(Vec::new()),
+            vec![dispose_failure(3, 9), dispose_failure(5, -1)],
+            |recorded, failures| *recorded = failures,
+        )
+        .unwrap();
+        assert_eq!(
+            settled,
+            [
+                "arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9",
+                "arbitrary parameter id=5 DISPOSE failed: ARBITRARY_CALLBACK returned -1",
+            ]
+        );
+
+        let clean = settle_render_disposal(
+            Ok::<Vec<String>, ClassicError>(vec!["untouched".into()]),
+            Vec::new(),
+            |recorded, failures| {
+                assert!(failures.is_empty());
+                recorded.push("recorded".into());
+            },
+        )
+        .unwrap();
+        assert_eq!(clean, ["untouched", "recorded"]);
+    }
+
+    #[test]
+    fn failed_render_keeps_its_error_primary_over_dispose_failures() {
+        let failed = settle_render_disposal(
+            Err::<(), _>(ClassicError::Selector {
+                selector: "SMART_RENDER",
+                error: 25,
+            }),
+            vec![dispose_failure(3, 9)],
+            |_, _| panic!("a failed render has no report to record on"),
+        )
+        .unwrap_err();
+        assert_eq!(failed.selector_error_code(), Some(25));
+        assert_eq!(
+            failed.to_string(),
+            "selector SMART_RENDER returned 25; additionally: arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9"
+        );
+
+        let untouched = settle_render_disposal(
+            Err::<(), _>(ClassicError::Input("bad frame".into())),
+            Vec::new(),
+            |_, _| panic!("a failed render has no report to record on"),
+        )
+        .unwrap_err();
+        assert!(matches!(untouched, ClassicError::Input(ref message) if message == "bad frame"));
+    }
+
+    #[test]
+    fn global_setdown_error_stays_primary_over_dispose_failures() {
+        let cleanup = || combine_failures(vec![dispose_failure(3, 9)]);
+
+        assert_eq!(settle_global_setdown(Ok(0), Ok(())).unwrap(), 0);
+        assert_eq!(settle_global_setdown(Ok(7), Ok(())).unwrap(), 7);
+
+        let cleanup_only = settle_global_setdown(Ok(0), cleanup()).unwrap_err();
+        assert_eq!(cleanup_only.selector_error_code(), None);
+        assert!(matches!(
+            cleanup_only,
+            ClassicError::Arbitrary {
+                operation: "DISPOSE",
+                id: 3,
+                ..
+            }
+        ));
+
+        let setdown_code = settle_global_setdown(Ok(5), cleanup()).unwrap_err();
+        assert_eq!(setdown_code.selector_error_code(), Some(5));
+        assert_eq!(
+            setdown_code.to_string(),
+            "selector GLOBAL_SETDOWN returned 5; additionally: arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9"
+        );
+
+        let setdown_crash = settle_global_setdown(
+            Err(ClassicError::SelectorGuest {
+                selector: "GLOBAL_SETDOWN",
+                source: GuestError::Callback("faulted".into()),
+            }),
+            cleanup(),
+        )
+        .unwrap_err();
+        assert_eq!(setdown_crash.selector_error_code(), None);
+        assert!(matches!(
+            setdown_crash,
+            ClassicError::Compound { ref primary, .. }
+                if matches!(**primary, ClassicError::SelectorGuest { selector: "GLOBAL_SETDOWN", .. })
+        ));
     }
 
     #[test]
@@ -2906,6 +4706,8 @@ mod tests {
             value: Some(value),
             color: None,
             point: None,
+            angle: None,
+            point3d: None,
         };
         apply_parameter_value(&mut fixed, PARAM_FIXED_SLIDER, &scalar(12.5)).unwrap();
         assert_eq!(read_i32(&fixed, union), 12 * 65536 + 32768);
@@ -2939,6 +4741,8 @@ mod tests {
                 value: None,
                 color: None,
                 point: Some([42.5, -7.25]),
+                angle: None,
+                point3d: None,
             },
         )
         .unwrap();
@@ -2950,6 +4754,64 @@ mod tests {
             read_i32(&point, abi::PARAM_U_OFFSET + 4),
             (-7.25 * 65536.0) as i32
         );
+
+        let mut angle = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        apply_parameter_value_for_layer(
+            &mut angle,
+            PARAM_ANGLE,
+            &ParameterValue {
+                name: "angle".into(),
+                slot: None,
+                value: None,
+                color: None,
+                point: None,
+                angle: Some(12.5),
+                point3d: None,
+            },
+            32,
+            20,
+        )
+        .unwrap();
+        assert_eq!(read_i32(&angle, union), (12.5 * 65536.0) as i32);
+
+        let mut point3d = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        apply_parameter_value_for_layer(
+            &mut point3d,
+            PARAM_POINT3D,
+            &ParameterValue {
+                name: "point3d".into(),
+                slot: None,
+                value: None,
+                color: None,
+                point: None,
+                angle: None,
+                point3d: Some([50.0, 25.0, 75.0]),
+            },
+            32,
+            20,
+        )
+        .unwrap();
+        for (index, expected) in [16.0f64, 5.0, 15.0].into_iter().enumerate() {
+            assert_eq!(
+                f64::from_le_bytes(
+                    point3d[union + index * 8..union + index * 8 + 8]
+                        .try_into()
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_frame_context_preserves_non_unit_time_step() {
+        let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
+        populate_frame_context(&mut input, 640, 360, 42, 7, 210, 30);
+        assert_eq!(read_i32(&input, abi::IN_CURRENT_TIME_OFFSET), 42);
+        assert_eq!(read_i32(&input, abi::IN_TIME_STEP_OFFSET), 7);
+        assert_eq!(read_i32(&input, abi::IN_TOTAL_TIME_OFFSET), 210);
+        assert_eq!(read_i32(&input, abi::IN_LOCAL_TIME_STEP_OFFSET), 7);
+        assert_eq!(read_u32(&input, abi::IN_TIME_SCALE_OFFSET), 30);
     }
 
     #[test]
@@ -2971,6 +4833,8 @@ mod tests {
                 value: None,
                 color: Some([255, 64, 128, 192]),
                 point: None,
+                angle: None,
+                point3d: None,
             },
         )
         .unwrap();
@@ -2984,6 +4848,8 @@ mod tests {
             value: None,
             color: Some([255, 64, 128, 192]),
             point: None,
+            angle: None,
+            point3d: None,
         })
         .unwrap();
         assert_eq!(applied["slot"], 2);
@@ -3003,6 +4869,8 @@ mod tests {
                 value: None,
                 color: Some([255, 1, 2, 3]),
                 point: None,
+                angle: None,
+                point3d: None,
             },
         )
         .unwrap_err();

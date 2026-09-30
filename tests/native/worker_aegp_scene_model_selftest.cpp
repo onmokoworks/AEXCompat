@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <type_traits>
@@ -19,6 +20,7 @@ using aexcompat::scene_model::ObjectKind;
 using aexcompat::scene_model::ObjectSnapshot;
 using aexcompat::scene_model::Registry;
 using aexcompat::scene_model::kBorrowedHandleCapacity;
+using aexcompat::scene_model::kObjectCapacity;
 
 namespace {
 
@@ -28,10 +30,6 @@ struct FixtureStorage {
   std::array<int, 3> layers{};
   std::array<void*, 3> layer_handles{{
       &layers[0], &layers[1], &layers[2]}};
-};
-
-struct alignas(std::max_align_t) ForgedBorrowedToken {
-  uint64_t lease_identity{};
 };
 
 std::atomic<uint32_t> g_transaction_generation{41};
@@ -56,6 +54,35 @@ bool aligned_token(void* handle) {
 }  // namespace
 
 int main() {
+  for (std::size_t rejected_position = 0; rejected_position < 6;
+       ++rejected_position) {
+    FixtureStorage rejected_storage{};
+    Registry rejected_registry;
+    void* item = &rejected_storage.item;
+    void* comp = &rejected_storage.comp;
+    auto layers = rejected_storage.layer_handles;
+    void* marker_handle = reinterpret_cast<void*>(
+        static_cast<uintptr_t>(0x0000600000000008ull));
+    if (rejected_position == 0)
+      item = marker_handle;
+    else if (rejected_position == 1)
+      comp = marker_handle;
+    else if (rejected_position < 5)
+      layers[rejected_position - 2] = marker_handle;
+    else
+      layers[2] = nullptr;
+    const uint64_t before_rejected_fixture = rejected_registry.fingerprint();
+    assert(!rejected_registry.initialize_fixture(
+        item, comp, layers.data(), layers.size()));
+    assert(rejected_registry.fingerprint() == before_rejected_fixture);
+    assert(rejected_registry.project_count() == 0);
+    assert(rejected_registry.live_object_count(ObjectKind::project) == 0);
+    assert(rejected_registry.initialize_fixture(
+        &rejected_storage.item, &rejected_storage.comp,
+        rejected_storage.layer_handles.data(),
+        rejected_storage.layer_handles.size()));
+  }
+
   FixtureStorage storage{};
   Registry registry;
   assert(initialize(registry, storage));
@@ -128,20 +155,23 @@ int main() {
       static_cast<uintptr_t>(0x12345678)), ObjectKind::layer, unchanged));
   assert(unchanged.identity.object_id == sentinel.identity.object_id);
 
-  auto* exposed_lease_identity = static_cast<uint64_t*>(layer_handle);
-  const uint64_t observed_lease_identity = *exposed_lease_identity;
-  assert(observed_lease_identity != 0);
-  ForgedBorrowedToken forged{observed_lease_identity};
-  static_assert(
-      alignof(ForgedBorrowedToken) >= alignof(std::max_align_t));
-  assert(aligned_token(&forged));
-  assert(!registry.resolve(&forged, ObjectKind::layer, unchanged, 1));
-  assert(unchanged.identity.object_id == sentinel.identity.object_id);
-  *exposed_lease_identity = observed_lease_identity + 1;
+  void* forged_token = reinterpret_cast<void*>(
+      reinterpret_cast<uintptr_t>(layer_handle) + alignof(std::max_align_t));
+  assert(aligned_token(forged_token));
   assert(!registry.resolve(
-      layer_handle, ObjectKind::layer, unchanged, 1));
+      forged_token, ObjectKind::layer, unchanged, 1));
   assert(unchanged.identity.object_id == sentinel.identity.object_id);
-  *exposed_lease_identity = observed_lease_identity;
+  Identity rejected_collision{
+      9, 9, 9, ObjectKind::effect, {}};
+  const Identity rejected_collision_sentinel = rejected_collision;
+  assert(!registry.create_child(
+      ObjectKind::effect, layer.identity, 0, forged_token,
+      u"Rejected token namespace", rejected_collision));
+  assert(rejected_collision == rejected_collision_sentinel);
+  assert(!registry.create_child(
+      ObjectKind::effect, layer.identity, 0, layer_handle,
+      u"Rejected live token collision", rejected_collision));
+  assert(rejected_collision == rejected_collision_sentinel);
   assert(registry.resolve(
       layer_handle, ObjectKind::layer, resolved_layer, 1));
 
@@ -443,6 +473,111 @@ int main() {
   assert(!mutation_registry.identity_for_legacy(
       &value_storage, ObjectKind::value, value_identity));
 
+  FixtureStorage record_reuse_storage{};
+  Registry record_reuse;
+  assert(initialize(record_reuse, record_reuse_storage));
+  ObjectSnapshot record_reuse_comp{};
+  ObjectSnapshot record_reuse_layer{};
+  assert(record_reuse.comp_from_item(
+      record_reuse.active_item(), record_reuse_comp));
+  assert(record_reuse.layer_by_index(
+      record_reuse_comp.identity, 0, record_reuse_layer));
+  const auto initial_record_statistics =
+      record_reuse.object_record_statistics();
+  Identity first_erased_record{};
+  void* first_erased_scheduler_key = nullptr;
+  for (std::size_t index = 0; index < 2 * kObjectCapacity; ++index) {
+    Identity cycled_record{};
+    assert(record_reuse.create_child(
+        ObjectKind::effect, record_reuse_layer.identity,
+        static_cast<int32_t>(index), nullptr, u"Cycled Effect",
+        cycled_record));
+    void* scheduler_key = nullptr;
+    assert(record_reuse.scheduler_key(cycled_record, scheduler_key));
+    if (index == 0) {
+      first_erased_record = cycled_record;
+      first_erased_scheduler_key = scheduler_key;
+    } else {
+      assert(scheduler_key != first_erased_scheduler_key);
+    }
+    assert(record_reuse.live_object_count(ObjectKind::effect) == 1);
+    assert(record_reuse.erase_tree(cycled_record));
+    assert(record_reuse.live_object_count(ObjectKind::effect) == 0);
+    assert(!record_reuse.snapshot(first_erased_record, unchanged));
+  }
+  auto record_statistics = record_reuse.object_record_statistics();
+  assert(record_statistics.issues ==
+      initial_record_statistics.issues + 2 * kObjectCapacity);
+  assert(record_statistics.reuses == 2 * kObjectCapacity - 1);
+  assert(record_statistics.exhaustion_failures == 0);
+  assert(record_statistics.live == initial_record_statistics.live);
+
+  std::array<Identity, kObjectCapacity> live_records{};
+  const std::size_t capacity_to_fill =
+      kObjectCapacity - initial_record_statistics.live;
+  for (std::size_t index = 0; index < capacity_to_fill; ++index)
+    assert(record_reuse.create_child(
+        ObjectKind::effect, record_reuse_layer.identity,
+        static_cast<int32_t>(index), nullptr, u"Live Effect",
+        live_records[index]));
+  Identity rejected_record{};
+  assert(!record_reuse.create_child(
+      ObjectKind::effect, record_reuse_layer.identity, 0, nullptr,
+      u"Exhausted Effect", rejected_record));
+  record_statistics = record_reuse.object_record_statistics();
+  assert(record_statistics.reuses == 2 * kObjectCapacity);
+  assert(record_statistics.exhaustion_failures == 1);
+  assert(record_statistics.live == kObjectCapacity);
+  for (std::size_t index = 0; index < capacity_to_fill; ++index)
+    assert(record_reuse.erase_tree(live_records[index]));
+  assert(record_reuse.object_record_statistics().live ==
+      initial_record_statistics.live);
+
+  FixtureStorage rollback_reuse_storage{};
+  auto rollback_reuse = std::make_unique<Registry>();
+  assert(initialize(*rollback_reuse, rollback_reuse_storage));
+  ObjectSnapshot rollback_comp{};
+  ObjectSnapshot rollback_layer{};
+  assert(rollback_reuse->comp_from_item(
+      rollback_reuse->active_item(), rollback_comp));
+  assert(rollback_reuse->layer_by_index(
+      rollback_comp.identity, 0, rollback_layer));
+  auto rollback_checkpoint =
+      std::make_unique<Registry::MutationCheckpoint>();
+  assert(rollback_reuse->capture_mutation_checkpoint(*rollback_checkpoint));
+  Identity rolled_back_identity{};
+  void* rolled_back_scheduler_key = nullptr;
+  g_transaction_generation.store(60);
+  {
+    aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+        *rollback_reuse, 1, &read_transaction_generation);
+    assert(transaction.stage());
+    assert(transaction.validate(true));
+    assert(!transaction.commit(
+        [&]() noexcept {
+          return rollback_reuse->create_child(
+                     ObjectKind::effect, rollback_layer.identity, 0,
+                     nullptr, u"Rolled Back Effect", rolled_back_identity) &&
+              rollback_reuse->scheduler_key(
+                  rolled_back_identity, rolled_back_scheduler_key) && false;
+        },
+        [&]() noexcept {
+          return rollback_reuse->restore_mutation_checkpoint(
+              *rollback_checkpoint);
+        },
+        []() noexcept { ++g_transaction_generation; }));
+  }
+  assert(!rollback_reuse->snapshot(rolled_back_identity, unchanged));
+  Identity after_rollback_identity{};
+  void* after_rollback_scheduler_key = nullptr;
+  assert(rollback_reuse->create_child(
+      ObjectKind::effect, rollback_layer.identity, 0, nullptr,
+      u"After Rollback Effect", after_rollback_identity));
+  assert(rollback_reuse->scheduler_key(
+      after_rollback_identity, after_rollback_scheduler_key));
+  assert(!(after_rollback_identity == rolled_back_identity));
+  assert(after_rollback_scheduler_key != rolled_back_scheduler_key);
+
   FixtureStorage exhaustion_storage{};
   Registry exhaustion;
   assert(initialize(exhaustion, exhaustion_storage));
@@ -452,29 +587,66 @@ int main() {
       exhaustion.active_item(), exhaustion_comp));
   assert(exhaustion.layer_by_index(
       exhaustion_comp.identity, 0, exhaustion_layer));
-  Identity current = exhaustion_layer.identity;
   std::array<void*, kBorrowedHandleCapacity> issued{};
   for (std::size_t index = 0; index < issued.size(); ++index) {
-    issued[index] = exhaustion.borrow(current);
+    issued[index] = exhaustion.borrow_unique(
+        exhaustion_layer.identity, static_cast<int32_t>(index + 1));
     assert(aligned_token(issued[index]));
-    assert(exhaustion.borrow(current) == issued[index]);
     assert(std::find(issued.begin(), issued.begin() + index,
                      issued[index]) == issued.begin() + index);
-    Identity next{};
-    assert(exhaustion.invalidate(current, next));
-    current = next;
   }
-  assert(exhaustion.borrow(current) == nullptr);
-  for (void* stale : issued)
-    assert(!exhaustion.resolve(
-        stale, ObjectKind::layer, unchanged, 1));
+  assert(exhaustion.borrow_unique(exhaustion_layer.identity, 1000) == nullptr);
+  assert(exhaustion.release(
+      issued[0], ObjectKind::layer, 1, true));
+  void* replacement_token = exhaustion.borrow_unique(
+      exhaustion_layer.identity, 1000);
+  assert(aligned_token(replacement_token));
+  assert(replacement_token != issued[0]);
+  assert(!exhaustion.resolve_possessed(
+      issued[0], ObjectKind::layer, 1, unchanged, 1));
+  assert(exhaustion.resolve_possessed(
+      replacement_token, ObjectKind::layer, 1000, unchanged, 1));
+  assert(exhaustion.release(
+      replacement_token, ObjectKind::layer, 1000, true));
+  void* previous_token = replacement_token;
+  for (std::size_t index = 0; index < 4 * kBorrowedHandleCapacity; ++index) {
+    const int32_t possession = static_cast<int32_t>(2000 + index);
+    void* cycled = exhaustion.borrow_unique(
+        exhaustion_layer.identity, possession);
+    assert(aligned_token(cycled));
+    assert(cycled != previous_token);
+    assert(!exhaustion.resolve_possessed(
+        previous_token, ObjectKind::layer, possession, unchanged, 1));
+    assert(exhaustion.resolve_possessed(
+        cycled, ObjectKind::layer, possession, unchanged, 1));
+    assert(exhaustion.release(
+        cycled, ObjectKind::layer, possession, true));
+    previous_token = cycled;
+  }
+  const auto handle_statistics = exhaustion.borrowed_handle_statistics();
+  assert(handle_statistics.issues == 1 + kBorrowedHandleCapacity +
+      4 * kBorrowedHandleCapacity);
+  assert(handle_statistics.reuses == 1 + 4 * kBorrowedHandleCapacity);
+  assert(handle_statistics.exhaustion_failures == 1);
+  assert(handle_statistics.live == kBorrowedHandleCapacity - 1);
 
   std::puts(
       "{\"scene_model\":\"passed\",\"projects\":2,\"folders\":3,"
       "\"footage\":1,\"items\":3,\"compositions\":3,\"layers\":5,"
       "\"aligned_tokens\":true,\"cross_registry_rejected\":true,"
-      "\"forged_token_rejected\":true,\"lease_identity_checked\":true,"
-      "\"token_exhaustion_rejected\":true,"
+      "\"forged_token_rejected\":true,\"opaque_token_namespace\":true,"
+      "\"legacy_token_namespace_collision_rejected\":true,"
+      "\"fixture_admission_atomic\":true,"
+      "\"live_token_exhaustion_rejected\":true,"
+      "\"dead_token_slots_reused\":true,"
+      "\"stale_token_reuse_rejected\":true,"
+      "\"token_reuse_cycles\":512,"
+      "\"dead_object_records_reused\":true,"
+      "\"stale_object_record_reuse_rejected\":true,"
+      "\"object_record_reuse_cycles\":512,"
+      "\"live_object_record_exhaustion_rejected\":true,"
+      "\"scheduler_key_reuse_aba_rejected\":true,"
+      "\"rollback_identity_reuse_aba_rejected\":true,"
       "\"relationships_propagated\":true,\"stale_rejected\":true,"
       "\"effect_stream_value_keyframe_registry\":true,"
       "\"stream_kinds\":[\"scalar\",\"color\",\"layer\",\"mask\",\"arbitrary\"],"

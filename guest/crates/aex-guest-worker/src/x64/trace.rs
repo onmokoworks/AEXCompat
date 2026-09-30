@@ -180,6 +180,26 @@ fn selected_watch_occurrence(capture: &mut TraceCapture, spec: &TraceWatchSpec) 
         .is_none_or(|occurrence| occurrence == *count)
 }
 
+fn trace_watch_address(
+    unicorn: &Unicorn<'_, GuestState>,
+    register: &'static str,
+    stack_offset: u64,
+    dereference_offset: Option<u64>,
+) -> u64 {
+    let base = trace_register_value(unicorn, register, stack_offset).unwrap_or(0);
+    let Some(offset) = dereference_offset else {
+        return base;
+    };
+    let Some(pointer_address) = base.checked_add(offset) else {
+        return 0;
+    };
+    let mut bytes = [0u8; 8];
+    if unicorn.mem_read(pointer_address, &mut bytes).is_err() {
+        return 0;
+    }
+    u64::from_le_bytes(bytes)
+}
+
 fn select_function_watches(capture: &mut TraceCapture, function_rva: u64) -> Vec<TraceWatchSpec> {
     let matches = capture
         .watch_specs
@@ -213,14 +233,114 @@ fn select_call_watches(
         .collect()
 }
 
-fn trace_instruction(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckpointSiteKind {
+    Call,
+    Jump,
+}
+
+/// A call or jump instruction in the image, as checkpoint capture sees it
+/// before execution: only a direct near branch has a static target, and
+/// `target_rva` is set only when that target lies inside the image.
+#[derive(Clone, Copy, Debug)]
+struct CheckpointSite {
+    address: u64,
+    return_address: u64,
+    pc_rva: u64,
+    target_rva: Option<u64>,
+    kind: CheckpointSiteKind,
+    direct: bool,
+}
+
+impl CheckpointSite {
+    /// A direct call into the image: the only site `checkpoint_instruction`
+    /// arms, so a direct call whose target is outside the image is not one.
+    fn hookable_call(&self) -> bool {
+        self.kind == CheckpointSiteKind::Call && self.direct && self.target_rva.is_some()
+    }
+}
+
+fn checkpoint_site(
+    instruction: &iced_x86::Instruction,
+    address: u64,
+    image_base: u64,
+    image_end: u64,
+) -> Option<CheckpointSite> {
+    let kind = match instruction.mnemonic() {
+        Mnemonic::Call => CheckpointSiteKind::Call,
+        Mnemonic::Jmp => CheckpointSiteKind::Jump,
+        _ => return None,
+    };
+    let direct = matches!(
+        instruction.op0_kind(),
+        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+    );
+    let target_rva = direct
+        .then(|| instruction.near_branch_target())
+        .filter(|target| (image_base..image_end).contains(target))
+        .map(|target| target - image_base);
+    Some(CheckpointSite {
+        address,
+        return_address: instruction.next_ip(),
+        pc_rva: address.saturating_sub(image_base),
+        target_rva,
+        kind,
+        direct,
+    })
+}
+
+/// Why checkpoint capture cannot arm `watch`, or `None` when it can.
+fn checkpoint_unhookable_reason(
+    watch: &TraceWatchSpec,
+    entry_rva: u64,
+    sites: &[CheckpointSite],
+) -> Option<&'static str> {
+    if watch.absolute_address.is_some() {
+        // Selector-scoped snapshot, taken at begin/finish without a hook.
+        return None;
+    }
+    if let Some(function_rva) = watch.function_rva {
+        if function_rva == entry_rva
+            || sites
+                .iter()
+                .any(|site| site.hookable_call() && site.target_rva == Some(function_rva))
+        {
+            return None;
+        }
+        return Some(
+            if sites.iter().any(|site| {
+                site.kind == CheckpointSiteKind::Jump && site.target_rva == Some(function_rva)
+            }) {
+                "function is reached only by a tail-call jump; checkpoint capture hooks direct call sites and the selector entry"
+            } else {
+                "no direct call site targets the function; checkpoint capture hooks direct call sites and the selector entry, not indirect calls"
+            },
+        );
+    }
+    if let Some(instruction_rva) = watch.instruction_rva {
+        return match sites.iter().find(|site| site.pc_rva == instruction_rva) {
+            Some(site) if site.hookable_call() => None,
+            Some(site) if site.kind == CheckpointSiteKind::Call && site.direct => Some(
+                "direct call whose target lies outside the image; checkpoint capture hooks direct calls into the image only",
+            ),
+            Some(site) if site.kind == CheckpointSiteKind::Call => {
+                Some("indirect call site; checkpoint capture hooks direct call sites only")
+            }
+            Some(_) => Some("tail-call jump site; checkpoint capture hooks direct call sites only"),
+            None => Some("rva is not a call or jump instruction in an executable section"),
+        };
+    }
+    None
+}
+
+/// Arms `function=` watches that name the traced selector itself when
+/// execution reaches its entry; they complete when the selector returns.
+fn arm_selector_entry_watches(
     unicorn: &mut Unicorn<'_, GuestState>,
     address: u64,
-    size: u32,
     image_base: u64,
     image_end: u64,
 ) {
-    let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
     let entry_rva = address.saturating_sub(image_base);
     let entry_watches = if unicorn.get_data().trace.as_ref().is_some_and(|capture| {
         address == image_base + capture.entry_rva
@@ -238,35 +358,126 @@ fn trace_instruction(
     } else {
         Vec::new()
     };
-    if !entry_watches.is_empty() {
-        let pending = entry_watches
-            .into_iter()
-            .map(|spec| {
-                let watch_address = trace_register_value(unicorn, spec.register, 0x28).unwrap_or(0);
-                PendingTraceWatch {
-                    spec_id: spec.id,
-                    register: spec.register,
-                    call_id: None,
-                    function_rva: Some(entry_rva),
-                    pc_rva: Some(entry_rva),
-                    address: watch_address,
-                    before: trace_memory_snapshot(
-                        unicorn,
-                        watch_address,
-                        spec.size,
-                        image_base,
-                        image_end,
-                    ),
-                    image_coordinate: spec.image_coordinate,
-                    image_row_offset: spec.image_row_offset,
-                    image_format: spec.image_format,
-                }
-            })
-            .collect::<Vec<_>>();
+    if entry_watches.is_empty() {
+        return;
+    }
+    let pending = entry_watches
+        .into_iter()
+        .map(|spec| {
+            let watch_address =
+                trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset);
+            PendingTraceWatch {
+                spec_id: spec.id,
+                register: spec.register,
+                call_id: None,
+                function_rva: Some(entry_rva),
+                pc_rva: Some(entry_rva),
+                address: watch_address,
+                before: trace_memory_snapshot(
+                    unicorn,
+                    watch_address,
+                    spec.size,
+                    image_base,
+                    image_end,
+                ),
+                image_coordinate: spec.image_coordinate,
+                image_row_offset: spec.image_row_offset,
+                image_format: spec.image_format,
+            }
+        })
+        .collect::<Vec<_>>();
+    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+        capture.selector_watches.extend(pending);
+    }
+}
+
+fn checkpoint_instruction(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    address: u64,
+    image_base: u64,
+    image_end: u64,
+) {
+    arm_selector_entry_watches(unicorn, address, image_base, image_end);
+    let pc_rva = address.saturating_sub(image_base);
+    let pending = unicorn
+        .get_data_mut()
+        .trace
+        .as_mut()
+        .and_then(|capture| capture.checkpoint_returns.remove(&pc_rva))
+        .unwrap_or_default();
+    if !pending.is_empty() {
+        let completed = complete_trace_watches(unicorn, pending, image_base, image_end);
         if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
-            capture.selector_watches.extend(pending);
+            append_trace_witnesses(capture, completed);
         }
     }
+
+    let mut bytes = [0u8; 15];
+    if unicorn.mem_read(address, &mut bytes).is_err() {
+        return;
+    }
+    let instruction = Decoder::with_ip(64, &bytes, address, DecoderOptions::NONE).decode();
+    if instruction.mnemonic() != Mnemonic::Call {
+        return;
+    }
+    let target = instruction.near_branch_target();
+    if !(image_base..image_end).contains(&target) {
+        return;
+    }
+    let target_rva = target - image_base;
+    let watches = unicorn
+        .get_data_mut()
+        .trace
+        .as_mut()
+        .map(|capture| select_call_watches(capture, Some(target_rva), Some(pc_rva)))
+        .unwrap_or_default();
+    if watches.is_empty() {
+        return;
+    }
+    let pending = watches
+        .into_iter()
+        .map(|spec| {
+            let watch_address =
+                trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset);
+            PendingTraceWatch {
+                spec_id: spec.id,
+                register: spec.register,
+                call_id: None,
+                function_rva: Some(target_rva),
+                pc_rva: Some(pc_rva),
+                address: watch_address,
+                before: trace_memory_snapshot(
+                    unicorn,
+                    watch_address,
+                    spec.size,
+                    image_base,
+                    image_end,
+                ),
+                image_coordinate: spec.image_coordinate,
+                image_row_offset: spec.image_row_offset,
+                image_format: spec.image_format,
+            }
+        })
+        .collect::<Vec<_>>();
+    let return_rva = instruction.next_ip().saturating_sub(image_base);
+    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+        capture
+            .checkpoint_returns
+            .entry(return_rva)
+            .or_default()
+            .extend(pending);
+    }
+}
+
+fn trace_instruction(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    address: u64,
+    size: u32,
+    image_base: u64,
+    image_end: u64,
+) {
+    let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
+    arm_selector_entry_watches(unicorn, address, image_base, image_end);
     let return_value = trace_return_value(unicorn, image_base, image_end);
     loop {
         let should_infer_return = unicorn
@@ -487,7 +698,8 @@ fn trace_instruction(
         let pending = matching_watches
             .into_iter()
             .map(|spec| {
-                let address = trace_register_value(unicorn, spec.register, 0x20).unwrap_or(0);
+                let address =
+                    trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset);
                 PendingTraceWatch {
                     spec_id: spec.id,
                     register: spec.register,
@@ -586,7 +798,8 @@ fn trace_instruction(
             let pending = matching_watches
                 .into_iter()
                 .map(|spec| {
-                    let address = trace_register_value(unicorn, spec.register, 0x28).unwrap_or(0);
+                    let address =
+                        trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset);
                     PendingTraceWatch {
                         spec_id: spec.id,
                         register: spec.register,
@@ -1338,9 +1551,45 @@ enum AvxStateSync {
     AllRegisters,
 }
 
+fn native_avx_state_sync(
+    instruction: &iced_x86::Instruction,
+    info_factory: &mut InstructionInfoFactory,
+) -> Option<AvxStateSync> {
+    if instruction.is_invalid() || instruction.encoding() != EncodingKind::VEX {
+        return None;
+    }
+    match instruction.mnemonic() {
+        Mnemonic::Vzeroupper => Some(AvxStateSync::AllUpper),
+        Mnemonic::Vzeroall => Some(AvxStateSync::AllRegisters),
+        // The invalid-instruction fallback must observe the complete YMM
+        // source before it writes an aliased XMM destination.
+        Mnemonic::Vextractf128 => None,
+        _ if instruction.op0_kind() == OpKind::Register
+            && matches!(
+                info_factory.info(&instruction).op_access(0),
+                OpAccess::Write
+                    | OpAccess::CondWrite
+                    | OpAccess::ReadWrite
+                    | OpAccess::ReadCondWrite
+            ) =>
+        {
+            iced_xmm_index(instruction.op0_register()).map(AvxStateSync::RegisterUpper)
+        }
+        _ => None,
+    }
+}
+
 fn discover_avx_state_sync_points(
     bytes: &[u8],
     address: u64,
+) -> Result<Vec<(u64, AvxStateSync)>, GuestError> {
+    discover_avx_state_sync_points_with_limit(bytes, address, MAX_AVX_STATE_SYNC_POINTS)
+}
+
+fn discover_avx_state_sync_points_with_limit(
+    bytes: &[u8],
+    address: u64,
+    limit: usize,
 ) -> Result<Vec<(u64, AvxStateSync)>, GuestError> {
     // A PE executable section can contain inline data or multiple entry points,
     // so a single linear decode is not sufficient. In 64-bit mode every C4/C5
@@ -1348,50 +1597,45 @@ fn discover_avx_state_sync_points(
     // false positives only install a hook at an address that is never executed.
     let mut points = Vec::new();
     let mut info_factory = InstructionInfoFactory::new();
-    for (offset, prefix) in bytes.iter().copied().enumerate() {
-        if !matches!(prefix, 0xc4 | 0xc5) {
-            continue;
-        }
-        let Some(instruction_address) = address.checked_add(offset as u64) else {
-            continue;
-        };
-        let mut decoder = Decoder::with_ip(
-            64,
-            &bytes[offset..],
-            instruction_address,
-            DecoderOptions::NONE,
-        );
-        let instruction = decoder.decode();
-        if instruction.is_invalid() || instruction.encoding() != EncodingKind::VEX {
-            continue;
-        }
-        let sync = match instruction.mnemonic() {
-            Mnemonic::Vzeroupper => Some(AvxStateSync::AllUpper),
-            Mnemonic::Vzeroall => Some(AvxStateSync::AllRegisters),
-            // The invalid-instruction fallback must observe the complete YMM
-            // source before it writes an aliased XMM destination.
-            Mnemonic::Vextractf128 => None,
-            _ if instruction.op0_kind() == OpKind::Register
-                && matches!(
-                    info_factory.info(&instruction).op_access(0),
-                    OpAccess::Write
-                        | OpAccess::CondWrite
-                        | OpAccess::ReadWrite
-                        | OpAccess::ReadCondWrite
-                ) =>
+    let mut decoder = Decoder::with_ip(64, bytes, address, DecoderOptions::NONE);
+    // Executable images are overwhelmingly non-VEX bytes. Use memchr's
+    // vectorized two-byte search to find the exact same C4/C5 candidate set
+    // without visiting every byte in Rust before the independent decodes.
+    for offset in memchr::memchr2_iter(0xc4, 0xc5, bytes) {
+        let mut start = offset;
+        loop {
+            let Some(instruction_address) = address.checked_add(start as u64) else {
+                break;
+            };
+            // The candidate is always inside `bytes`; reset one decoder instead
+            // of rebuilding its tables for every possible VEX prefix.
+            decoder
+                .set_position(start)
+                .expect("candidate offset came from these bytes");
+            decoder.set_ip(instruction_address);
+            let instruction = decoder.decode();
+            if !instruction.is_invalid()
+                && instruction.encoding() == EncodingKind::VEX
+                && let Some(sync) = native_avx_state_sync(&instruction, &mut info_factory)
             {
-                iced_xmm_index(instruction.op0_register()).map(AvxStateSync::RegisterUpper)
+                if points.len() >= limit {
+                    return Err(GuestError::AvxStateCapacity {
+                        observed: points.len() + 1,
+                        limit,
+                    });
+                }
+                points.push((instruction.ip(), sync));
             }
-            _ => None,
-        };
-        if let Some(sync) = sync {
-            if points.len() >= MAX_AVX_STATE_SYNC_POINTS {
-                return Err(GuestError::AvxStateCapacity {
-                    observed: points.len() + 1,
-                    limit: MAX_AVX_STATE_SYNC_POINTS,
-                });
+            if start == 0
+                || offset - start >= 14
+                || !matches!(
+                    bytes[start - 1],
+                    0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0x67 | 0xf0 | 0xf2 | 0xf3
+                )
+            {
+                break;
             }
-            points.push((instruction.ip(), sync));
+            start -= 1;
         }
     }
     Ok(points)
@@ -1464,28 +1708,89 @@ fn install_avx_state_sync_points(
             )?;
         }
     } else {
-        let first = *unique.keys().min().ok_or_else(|| {
-            GuestError::Callback("dense AVX state sync map is unexpectedly empty".into())
-        })?;
-        let last = *unique.keys().max().ok_or_else(|| {
-            GuestError::Callback("dense AVX state sync map is unexpectedly empty".into())
-        })?;
+        // A range code hook calls back into Rust on every instruction between
+        // the first and last candidate. Dense plug-ins spend most of their
+        // render time in that dispatch; let the translator handle exact points.
         unicorn.get_data_mut().avx_state_sync_points = unique;
-        uc(
-            "install dense native AVX state sync",
-            unicorn.add_code_hook(first, last, |unicorn, address, _| {
-                let sync = unicorn
-                    .get_data()
-                    .avx_state_sync_points
-                    .get(&address)
-                    .copied();
-                if let Some(sync) = sync {
-                    synchronize_native_avx_state(unicorn, sync);
-                }
-            }),
-        )?;
+        install_translated_avx_state_sync(unicorn)?;
     }
     Ok(())
+}
+
+// A conservative filter: false means no VEX encoding can start here. Decode
+// remains authoritative for every candidate, including invalid prefix mixes.
+#[cfg(test)]
+fn may_start_vex_instruction(bytes: &[u8]) -> bool {
+    for &byte in bytes {
+        match byte {
+            0x26
+            | 0x2e
+            | 0x36
+            | 0x3e
+            | 0x64
+            | 0x65
+            | 0x66
+            | 0x67
+            | 0xf0
+            | 0xf2
+            | 0xf3
+            | 0x40..=0x4f => continue,
+            0xc4 | 0xc5 => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+// Dependency DLLs can contain hundreds of thousands of native VEX writes.
+// Decode them once while loading and queue their exact addresses for Unicorn's
+// translator, avoiding a runtime callback on every instruction in the image.
+fn install_runtime_avx_state_sync(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    points: Vec<(u64, AvxStateSync)>,
+) -> Result<(), GuestError> {
+    let state = unicorn.get_data_mut();
+    let observed = state
+        .avx_state_sync_points
+        .len()
+        .checked_add(points.len())
+        .ok_or(GuestError::AvxStateCapacity {
+            observed: usize::MAX,
+            limit: MAX_RUNTIME_AVX_STATE_SYNC_POINTS,
+        })?;
+    if observed > MAX_RUNTIME_AVX_STATE_SYNC_POINTS {
+        return Err(GuestError::AvxStateCapacity {
+            observed,
+            limit: MAX_RUNTIME_AVX_STATE_SYNC_POINTS,
+        });
+    }
+    state.avx_state_sync_points.extend(points);
+    Ok(())
+}
+
+fn install_translated_avx_state_sync(
+    unicorn: &mut Unicorn<'static, GuestState>,
+) -> Result<(), GuestError> {
+    let mut points: Vec<_> = unicorn
+        .get_data()
+        .avx_state_sync_points
+        .iter()
+        .map(|(&address, &sync)| (address, sync))
+        .collect();
+    points.sort_unstable_by_key(|(address, _)| *address);
+    let addresses: Vec<_> = points.iter().map(|(address, _)| *address).collect();
+    let actions: Vec<_> = points
+        .iter()
+        .map(|(_, sync)| match sync {
+            AvxStateSync::RegisterUpper(index) => (*index + 1) as u8,
+            AvxStateSync::AllUpper => 17,
+            AvxStateSync::AllRegisters => 18,
+        })
+        .collect();
+    uc(
+        "install translated native AVX state sync",
+        aex_unicorn_buffer::set_x86_avx_sync_points(unicorn, &addresses, &actions),
+    )
 }
 
 fn iced_memory_address(
@@ -1516,9 +1821,11 @@ fn read_avx256_operand(
             value.copy_from_slice(bytes.as_ref());
         }
         OpKind::Memory => {
-            unicorn
-                .mem_read(iced_memory_address(unicorn, instruction)?, &mut value)
-                .ok()?;
+            let address = iced_memory_address(unicorn, instruction)?;
+            if !guest_range_has_permission(unicorn, address, value.len() as u64, Prot::READ).ok()? {
+                return None;
+            }
+            unicorn.mem_read(address, &mut value).ok()?;
         }
         _ => return None,
     }
@@ -1546,7 +1853,9 @@ fn write_avx256_operand(
             let Some(address) = iced_memory_address(unicorn, instruction) else {
                 return false;
             };
-            unicorn.mem_write(address, value).is_ok()
+            guest_range_has_permission(unicorn, address, value.len() as u64, Prot::WRITE)
+                .unwrap_or(false)
+                && unicorn.mem_write(address, value).is_ok()
         }
         _ => false,
     }
@@ -1565,9 +1874,11 @@ fn read_avx128_operand(
             value.copy_from_slice(bytes.get(..16)?);
         }
         OpKind::Memory => {
-            unicorn
-                .mem_read(iced_memory_address(unicorn, instruction)?, &mut value)
-                .ok()?;
+            let address = iced_memory_address(unicorn, instruction)?;
+            if !guest_range_has_permission(unicorn, address, value.len() as u64, Prot::READ).ok()? {
+                return None;
+            }
+            unicorn.mem_read(address, &mut value).ok()?;
         }
         _ => return None,
     }
@@ -1601,7 +1912,9 @@ fn write_avx128_operand(
             let Some(address) = iced_memory_address(unicorn, instruction) else {
                 return false;
             };
-            unicorn.mem_write(address, value).is_ok()
+            guest_range_has_permission(unicorn, address, value.len() as u64, Prot::WRITE)
+                .unwrap_or(false)
+                && unicorn.mem_write(address, value).is_ok()
         }
         _ => false,
     }
@@ -1736,16 +2049,28 @@ fn emulate_vextractf128(
 }
 
 fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
+    let translated_mask = aex_unicorn_buffer::x86_avx_defined_mask(unicorn);
+    for index in 0..16 {
+        if translated_mask & (1 << index) != 0 {
+            unicorn.get_data_mut().avx_defined_ymm[index] = true;
+        }
+    }
     let Ok(rip) = unicorn.reg_read(RegisterX86::RIP) else {
         return false;
     };
-    let Some((image_base, image_end)) = unicorn.get_data().image_region else {
+    let Some((_, executable_end)) = unicorn
+        .get_data()
+        .image_executable_ranges
+        .iter()
+        .find(|(start, end)| (*start..*end).contains(&rip))
+        .copied()
+    else {
         return false;
     };
-    if !(image_base..image_end).contains(&rip) {
+    let byte_count = usize::try_from((executable_end - rip).min(15)).unwrap_or(15);
+    if !guest_range_has_permission(unicorn, rip, byte_count as u64, Prot::EXEC).unwrap_or(false) {
         return false;
     }
-    let byte_count = usize::try_from((image_end - rip).min(15)).unwrap_or(15);
     let mut bytes = [0u8; 15];
     if unicorn.mem_read(rip, &mut bytes[..byte_count]).is_err() {
         return false;

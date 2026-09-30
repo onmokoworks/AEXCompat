@@ -7,9 +7,21 @@ namespace aexcompat::l2mode {
 
 // ABI-facing data remains private to l2_main. This is the narrow callback seam
 // used by the mode executor for selector ordering, cleanup, and reporting.
-enum class EarlyMode { None, AutomaticDialog, DoDialog, ExternalDependencies, ParametersOnly };
+enum class EarlyMode {
+  None,
+  AutomaticDialog,
+  DoDialog,
+  ExternalDependencies,
+  ParametersOnly,
+  CleanupContainedParametersOnly
+};
 EarlyMode select_early_mode(bool automatic_dialog, bool do_dialog,
-                            bool external_dependencies, bool parameters_only);
+                            bool external_dependencies, bool parameters_only,
+                            bool cleanup_contained_parameters_only = false);
+// Exact argv admission for the dedicated one-shot mode. Keeping this check in
+// the testable lifecycle seam prevents an appended request/payload from being
+// reinterpreted as a reusable session contract.
+bool cleanup_contained_params_only_command(int argc, wchar_t** argv);
 struct HandleStatistics { uint64_t created{}; uint64_t disposed{}; };
 struct Hooks {
   uint32_t (*out_flags)(void*){};

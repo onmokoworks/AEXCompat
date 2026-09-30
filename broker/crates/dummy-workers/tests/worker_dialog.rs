@@ -120,6 +120,50 @@ fn a_dialog_seen_to_go_away_while_the_worker_runs_is_reported_closed() {
 }
 
 #[test]
+fn a_warning_dialog_is_silenced_without_weakening_private_desktop_containment() {
+    use aexcompat_broker::windows_process::run_isolated;
+
+    let title = format!("aexcompat-1163-silenced-warning-{}", std::process::id());
+    let result = run_isolated(
+        Path::new(env!("CARGO_BIN_EXE_dummy_messagebox")),
+        &[title.clone(), "dialog-silenced-warning".into()],
+        Some(Duration::from_secs(30)),
+    )
+    .expect("launch the dialog worker");
+
+    assert_eq!(
+        result.classification.as_str(),
+        "ok",
+        "stdout={:?} stderr={:?} windows={:?}",
+        result.stdout,
+        result.stderr,
+        result.dismissed_windows
+    );
+    let opened = result.stdout.find("messagebox_open").expect("open marker");
+    let beep = result
+        .stdout
+        .find("messagebeep_observed_before_dismissal")
+        .expect("MessageBox did not call the system-beep entry while open");
+    let dismissed = result
+        .stdout
+        .find("messagebox_dismissed")
+        .expect("dismiss marker");
+    assert!(opened < beep && beep < dismissed, "{:?}", result.stdout);
+    assert!(
+        result.stdout.contains("messagebeep_calls:1"),
+        "{:?}",
+        result.stdout
+    );
+    let dialog = result
+        .dismissed_windows
+        .iter()
+        .find(|window| window.title == title)
+        .unwrap_or_else(|| panic!("dialog not recorded: {:?}", result.dismissed_windows));
+    assert!(dialog.asked_to_close, "{dialog:?}");
+    assert!(dialog.closed, "{dialog:?}");
+}
+
+#[test]
 fn a_window_that_is_not_a_dialog_is_recorded_and_left_alone() {
     use aexcompat_broker::windows_process::run_isolated;
 

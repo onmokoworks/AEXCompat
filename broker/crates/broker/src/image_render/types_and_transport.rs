@@ -28,15 +28,6 @@ impl RenderTiming {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RenderPixelFormat {
-    #[default]
-    Argb8,
-    Argb16,
-    Argb32f,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
 pub enum RenderGpuBackend {
     #[default]
     Auto,
@@ -69,32 +60,6 @@ pub(crate) fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBacken
         RenderGpuBackend::OpenCl => Some(RuntimeBackend::Opencl),
         RenderGpuBackend::DirectX => Some(RuntimeBackend::Directx),
         RenderGpuBackend::Cpu => None,
-    }
-}
-
-impl RenderPixelFormat {
-    pub(crate) fn report_name(self) -> &'static str {
-        match self {
-            Self::Argb8 => "argb8",
-            Self::Argb16 => "argb16",
-            Self::Argb32f => "argb32f",
-        }
-    }
-
-    pub(crate) fn bytes_per_pixel(self) -> u64 {
-        match self {
-            Self::Argb8 => 4,
-            Self::Argb16 => 8,
-            Self::Argb32f => 16,
-        }
-    }
-
-    pub(crate) fn raw_extension(self) -> Option<&'static str> {
-        match self {
-            Self::Argb8 => None,
-            Self::Argb16 => Some("rgba16le"),
-            Self::Argb32f => Some("rgba32f-le"),
-        }
     }
 }
 
@@ -155,6 +120,9 @@ fn requested_minidump_directory(repository: &Path) -> io::Result<Option<String>>
 }
 
 fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
+    if let Some(path) = fixture_world_dump_override() {
+        return resolve_world_dump_dir(repository, &path).map(Some);
+    }
     match std::env::var_os(WORLD_DUMP_DIR_ENV) {
         Some(value) => resolve_world_dump_dir(repository, Path::new(&value)).map(Some),
         None => Ok(None),
@@ -303,30 +271,6 @@ impl RenderUiAction {
             RenderUiAction::Draw => Ok("draw:v1".into()),
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct InteractiveParameter {
-    pub slot: u32,
-    pub name: String,
-    pub kind: String,
-    pub minimum: f64,
-    pub maximum: f64,
-    pub value: f64,
-    pub choices: Vec<String>,
-    pub color: [u8; 4],
-    pub components: [f64; 3],
-    pub component_count: usize,
-    pub layer_path: Option<PathBuf>,
-    pub enabled: bool,
-    pub visible: bool,
-    pub supervised: bool,
-    #[serde(default)]
-    pub debug_summary: Option<String>,
-    #[serde(default)]
-    pub custom_ui_events: u32,
-    #[serde(default)]
-    pub control_size: [u16; 2],
 }
 
 #[derive(Clone, Debug)]

@@ -41,8 +41,10 @@ use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
 };
 pub use crate::x64::{
-    ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
+    ExecutionTrace, GuestCensus, GuestParam, SmartCheckoutDiskIdFallback, TraceStateValue,
+    TraceWatchSpec, UnsupportedSuiteCall,
 };
+use crate::x64::{record_smart_checkout_disk_id_fallback, resolve_layer_parameter_offset};
 use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_suite_layout};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
@@ -213,8 +215,11 @@ struct NativeState {
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
+    smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
     utility_suites: HashMap<u32, u64>,
     iterate8_suite: u64,
+    iterate16_suite: u64,
+    iterate_float_suite: u64,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
     smart_checkout_ids: HashMap<i32, NativeSmartCheckout>,
@@ -225,6 +230,7 @@ struct NativeState {
     parameter_definitions: Vec<u64>,
     handles: HashMap<u64, NativeHandle>,
     worlds: HashMap<u64, NativeWorld>,
+    resident_world_formats: HashMap<u64, i32>,
     aegp_memory: NativeAegpMemory,
     handle_allocations: Vec<u64>,
     arena_next: u64,
@@ -307,6 +313,7 @@ pub struct GuestEngine<'a> {
     image: Mapping,
     arena: Mapping,
     state: NativeState,
+    image_sha256: String,
     loaded_images: BTreeSet<String>,
     dllmain_attached: bool,
     lifetime: PhantomData<&'a ()>,
@@ -348,6 +355,10 @@ impl GuestEngine<'static> {
         "native-x86_64-carrier"
     }
 
+    pub fn flush_guest_console_diagnostics(&mut self) -> Result<(), GuestError> {
+        Ok(())
+    }
+
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
         let image_size = image.mapped_bytes().len();
         let image_mapping =
@@ -371,6 +382,7 @@ impl GuestEngine<'static> {
                 image_end: image.image_base() + image_size as u64,
                 ..NativeState::default()
             },
+            image_sha256: image.report().sha256,
             loaded_images: loaded_image_snapshot(),
             dllmain_attached: image.dll_entry_address().is_none(),
             lifetime: PhantomData,
@@ -409,6 +421,7 @@ impl GuestEngine<'static> {
             engine.write_u64(iterate8_suite + (slot * 8) as u64, callback)?;
         }
         engine.state.iterate8_suite = iterate8_suite;
+        engine.install_typed_iterate_suites()?;
         let color_param_suite = engine.allocate(8, 8)?;
         engine.write_u64(color_param_suite, callback_address!(color_param_value))?;
         engine.state.color_param_suite = color_param_suite;
@@ -441,6 +454,21 @@ impl GuestEngine<'static> {
             engine.dllmain_attached = true;
         }
         Ok(engine)
+    }
+
+    pub fn validate_attached_primary(&self, image: &PeImage) -> Result<(), GuestError> {
+        if image.report().sha256 != self.image_sha256
+            || image.image_base() != self.state.image_start
+            || image
+                .image_base()
+                .checked_add(image.mapped_bytes().len() as u64)
+                != Some(self.state.image_end)
+        {
+            return Err(GuestError::Callback(
+                "Classic host primary does not match the loaded native image".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn resolve_effect_entry(
@@ -573,6 +601,22 @@ impl GuestEngine<'static> {
         }
     }
 
+    fn install_typed_iterate_suites(&mut self) -> Result<(), GuestError> {
+        for (is_float, callback) in [
+            (false, callback_address!(iterate_world16)),
+            (true, callback_address!(iterate_world_float)),
+        ] {
+            let table = self.allocate(8, 8)?;
+            self.write_u64(table, callback)?;
+            if is_float {
+                self.state.iterate_float_suite = table;
+            } else {
+                self.state.iterate16_suite = table;
+            }
+        }
+        Ok(())
+    }
+
     pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
         self.call_win64(address, args)
     }
@@ -658,6 +702,8 @@ impl GuestEngine<'static> {
 
     pub fn configure_trace_watches(&mut self, _: Vec<TraceWatchSpec>) {}
 
+    pub fn configure_trace_checkpoint_only(&mut self, _: bool) {}
+
     pub fn add_trace_watch(&mut self, _: TraceWatchSpec) {}
 
     pub fn configure_parameter_definitions(
@@ -729,6 +775,10 @@ impl GuestEngine<'static> {
         &self.state.params
     }
 
+    pub fn parameters_mut(&mut self) -> &mut [GuestParam] {
+        &mut self.state.params
+    }
+
     pub fn suite_requests(&self) -> &[String] {
         &self.state.suite_requests
     }
@@ -789,6 +839,10 @@ impl GuestEngine<'static> {
 
     pub fn dropped_unsupported_suite_calls(&self) -> u64 {
         self.state.dropped_unsupported_suite_calls
+    }
+
+    pub fn smart_checkout_disk_id_fallbacks(&self) -> &[SmartCheckoutDiskIdFallback] {
+        &self.state.smart_checkout_disk_id_fallbacks
     }
 
     pub fn pre_checkout_requests(&self) -> &[[i32; 4]] {
@@ -853,6 +907,12 @@ impl GuestEngine<'static> {
         // Native classic worlds carry enough row-byte information for
         // native_world_pixel_format() to recover ARGB8/16/32F directly.
     }
+    pub fn configure_resident_world_formats(&mut self, formats: &[(u64, i32)]) {
+        self.state.resident_world_formats.clear();
+        self.state
+            .resident_world_formats
+            .extend(formats.iter().copied());
+    }
     // The extended Inter callbacks are implemented only by the Unicorn
     // backend in this issue. Keep the native carrier buildable without
     // advertising silent success at an unimplemented callback boundary.
@@ -898,13 +958,34 @@ impl GuestEngine<'static> {
     pub fn ansi_ceil_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
+    pub fn ansi_atan_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_atan2_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
     pub fn ansi_cos_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_exp_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
     pub fn ansi_fabs_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
+    pub fn ansi_floor_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_fmod_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
     pub fn ansi_hypot_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_log_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_log10_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
     pub fn ansi_pow_callback_address(&self) -> u64 {
@@ -914,6 +995,9 @@ impl GuestEngine<'static> {
         callback_address!(poison_callback)
     }
     pub fn ansi_sqrt_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_tan_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
     pub fn ansi_asin_callback_address(&self) -> u64 {
@@ -1075,6 +1159,7 @@ fn native_world_pixel_format(state: &NativeState, world: u64) -> Option<i32> {
         .worlds
         .get(&world)
         .map(|record| record.pixel_format)
+        .or_else(|| state.resident_world_formats.get(&world).copied())
         .or_else(|| {
             (world != 0 && (world == state.smart_input_world || world == state.smart_output_world))
                 .then_some(state.smart_pixel_format)
@@ -1289,7 +1374,10 @@ struct NativeMaskWorld8 {
     flags: u32,
 }
 
-fn native_world8(state: &NativeState, world: u64) -> Option<NativeWorld8> {
+fn native_world_typed(state: &NativeState, world: u64, pixel_bytes: usize) -> Option<NativeWorld8> {
+    if !matches!(pixel_bytes, 4 | 8 | 16) {
+        return None;
+    }
     let arena_base = state.arena_end.saturating_sub(ARENA_SIZE as u64);
     if world < arena_base || world.checked_add(abi::PF_LAYER_DEF_SIZE as u64)? > state.arena_end {
         return None;
@@ -1305,7 +1393,7 @@ fn native_world8(state: &NativeState, world: u64) -> Option<NativeWorld8> {
     if data == 0
         || width <= 0
         || height <= 0
-        || rowbytes < usize::try_from(width).ok()?.checked_mul(4)?
+        || rowbytes < usize::try_from(width).ok()?.checked_mul(pixel_bytes)?
         || height > 16_777_216
     {
         return None;
@@ -1431,10 +1519,11 @@ unsafe extern "win64" fn transfer_rect8(
         if !(0..=2).contains(&transfer_mode) || rgb_only > 1 || opacity16 > 32768 {
             return PF_BAD_CALLBACK_PARAM;
         }
-        let Some(source) = native_world8(state, source_world) else {
+        let Some(source) = native_world_typed(state, source_world, abi::PF_PIXEL_SIZE) else {
             return PF_BAD_CALLBACK_PARAM;
         };
-        let Some(destination) = native_world8(state, destination_world) else {
+        let Some(destination) = native_world_typed(state, destination_world, abi::PF_PIXEL_SIZE)
+        else {
             return PF_BAD_CALLBACK_PARAM;
         };
         let mask = if mask_world == 0 {
@@ -1649,18 +1738,96 @@ unsafe extern "win64" fn iterate_world8(
     pixel_function: u64,
     destination_world: u64,
 ) -> u64 {
+    unsafe {
+        iterate_world_typed(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+            4,
+        )
+    }
+}
+
+unsafe extern "win64" fn iterate_world16(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+) -> u64 {
+    unsafe {
+        iterate_world_typed(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+            8,
+        )
+    }
+}
+
+unsafe extern "win64" fn iterate_world_float(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+) -> u64 {
+    unsafe {
+        iterate_world_typed(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+            16,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn iterate_world_typed(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+    pixel_bytes: usize,
+) -> u64 {
     if pixel_function == 0 {
         return 4;
     }
     let Some(Some((destination, source, bounds, effect_ref, abort, progress))) =
         with_state(|state| {
-            let Some(destination) = native_world8(state, destination_world) else {
+            let Some(destination) = native_world_typed(state, destination_world, pixel_bytes)
+            else {
                 return None;
             };
             let source = if source_world == 0 {
                 None
             } else {
-                let Some(source) = native_world8(state, source_world) else {
+                let Some(source) = native_world_typed(state, source_world, pixel_bytes) else {
                     return None;
                 };
                 Some(source)
@@ -1699,9 +1866,11 @@ unsafe extern "win64" fn iterate_world8(
     let rows = bottom - top;
     for y in top..bottom {
         for x in left..right {
-            let output = destination.data + y as u64 * destination.rowbytes as u64 + x as u64 * 4;
+            let output = destination.data
+                + y as u64 * destination.rowbytes as u64
+                + x as u64 * pixel_bytes as u64;
             let input = source.map_or(0, |source| {
-                source.data + y as u64 * source.rowbytes as u64 + x as u64 * 4
+                source.data + y as u64 * source.rowbytes as u64 + x as u64 * pixel_bytes as u64
             });
             let error = unsafe { pixel(refcon, x, y, input, output) };
             if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true) {
@@ -1713,15 +1882,25 @@ unsafe extern "win64" fn iterate_world8(
         }
         let completed = y - top + 1;
         if progress != 0 {
-            let callback: IterateProgress = unsafe { std::mem::transmute(progress as usize) };
-            let current = progress_base as i64
-                + (progress_final as i64 - progress_base as i64) * completed as i64 / rows as i64;
-            let error = unsafe { callback(effect_ref, current as i32, progress_final) };
-            if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true) {
-                if error != 0 {
-                    return error as u32 as u64;
+            let composed_progress = match crate::compose_iterate_progress(
+                progress_base,
+                progress_final,
+                completed,
+                rows,
+            ) {
+                Ok(progress) => progress,
+                Err(()) => return 4,
+            };
+            if let Some((current, total)) = composed_progress {
+                let callback: IterateProgress = unsafe { std::mem::transmute(progress as usize) };
+                let error = unsafe { callback(effect_ref, current, total) };
+                if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true)
+                {
+                    if error != 0 {
+                        return error as u32 as u64;
+                    }
+                    return 4;
                 }
-                return 4;
             }
         }
         if completed < rows && abort != 0 {
@@ -1812,10 +1991,11 @@ unsafe extern "win64" fn iterate_lut8(
     destination_world: u64,
 ) -> u64 {
     with_state(|state| {
-        let Some(source) = native_world8(state, source_world) else {
+        let Some(source) = native_world_typed(state, source_world, abi::PF_PIXEL_SIZE) else {
             return 4;
         };
-        let Some(destination) = native_world8(state, destination_world) else {
+        let Some(destination) = native_world_typed(state, destination_world, abi::PF_PIXEL_SIZE)
+        else {
             return 4;
         };
         let Some([left, top, right, bottom]) = native_bounds(
@@ -1864,21 +2044,33 @@ unsafe extern "win64" fn iterate_generic(iterations: i32, refcon: u64, callback:
     0
 }
 
-fn native_smart_checkout_world(state: &NativeState, index: i32) -> Option<(u64, i32, i32)> {
-    let world = if index == 0 {
+fn native_smart_checkout_world(state: &mut NativeState, index: i32) -> Option<(u64, i32, i32)> {
+    let mut world = if index == 0 {
         state.smart_input_world
     } else {
-        let offset = usize::try_from(index).ok()?.checked_sub(1)?;
-        if state.params.get(offset)?.param_type != 0 {
-            return None;
+        let resolution = resolve_layer_parameter_offset(&state.params, index).ok()?;
+        if resolution.disk_id_fallback {
+            record_smart_checkout_disk_id_fallback(
+                &mut state.smart_checkout_disk_id_fallbacks,
+                index,
+                resolution.offset + 1,
+            );
         }
         state
             .parameter_definitions
-            .get(offset)
+            .get(resolution.offset)
             .copied()
             .filter(|definition| *definition != 0)?
             .checked_add(abi::PARAM_U_OFFSET as u64)?
     };
+    if index != 0
+        && native_guest_range_valid(state, world, abi::PF_LAYER_DEF_SIZE as u64)
+        && unsafe { std::slice::from_raw_parts(world as *const u8, abi::PF_LAYER_DEF_SIZE) }
+            .iter()
+            .all(|byte| *byte == 0)
+    {
+        world = state.smart_input_world;
+    }
     if !native_world_descriptor_valid(state, world) {
         return None;
     }
@@ -2238,6 +2430,16 @@ unsafe extern "win64" fn acquire_suite(
         } else if name == "PF Iterate8 Suite" && matches!(version, 1 | 2) && output != 0 {
             unsafe {
                 *(output as *mut u64) = state.iterate8_suite;
+            }
+            0
+        } else if name == "PF iterate16 Suite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.iterate16_suite;
+            }
+            0
+        } else if name == "PF iterateFloat Suite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.iterate_float_suite;
             }
             0
         } else if name == "PF ColorParamSuite" && version == 1 && output != 0 {

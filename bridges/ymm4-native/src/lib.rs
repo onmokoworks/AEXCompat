@@ -157,13 +157,15 @@ fn open_session(
         output_checksum_detail: false,
         mask_trailer: None,
         spatial_trailer: None,
+        camera_trailer: None,
         render_environment_trailer: None,
         audio_trailer: None,
         alpha_as_coverage_params: &[],
         conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
-        dependency_search_dirs: Vec::new(),
+        companions: Vec::new(),
+        dependency_search_dirs: search_root(&plugin),
         width,
         height,
         pixel_format: RenderPixelFormat::Argb8,
@@ -175,6 +177,7 @@ fn open_session(
         gpu_backend: RenderGpuBackend::Auto,
         gpu_runtime_policy: None,
         payload_override: None,
+        launch_environment: Default::default(),
     }) {
         Ok(session) => session,
         Err(error) => {
@@ -210,8 +213,19 @@ fn open_session(
                     render_error,
                     missing_dependency,
                     return_message,
+                    selector_crash,
                 } => RenderReply::Error(format!(
-                    "AEX frame error {render_error}{}{}",
+                    "AEX frame error {render_error}{}{}{}",
+                    // A guarded selector fault, not a value the plug-in returned:
+                    // the numeric 512 alone cannot tell the two apart (issue #983).
+                    selector_crash
+                        .map(|crash| {
+                            format!(
+                                "; {} crashed with exception 0x{:08X}",
+                                crash.selector, crash.exception_code
+                            )
+                        })
+                        .unwrap_or_default(),
                     missing_dependency
                         .as_deref()
                         .map(|value| format!("; missing dependency: {value}"))
@@ -221,6 +235,9 @@ fn open_session(
                         .map(|value| format!("; {}: {}", value.selector, value.text))
                         .unwrap_or_default()
                 )),
+                FrameStatus::SmartOutputUntouched => {
+                    RenderReply::Error("AEX Smart frame produced no output".to_owned())
+                }
             },
             Err(error) => {
                 RenderReply::Error(format!("RenderSession::render_frame failed: {error}"))
@@ -575,4 +592,13 @@ mod tests {
         assert_eq!(decoded.len(), exposed.len());
         assert_eq!(decoded[2].choices, vec!["A", "B"]);
     }
+}
+
+// #816 made a non-empty search root set part of the in-place protocol; the
+// loader resolves the closure from the plug-in's own directory.
+fn search_root(plugin: &std::path::Path) -> Vec<std::path::PathBuf> {
+    plugin
+        .parent()
+        .map(|parent| vec![parent.to_path_buf()])
+        .unwrap_or_default()
 }

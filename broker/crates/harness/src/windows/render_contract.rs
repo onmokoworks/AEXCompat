@@ -6,6 +6,256 @@ enum TaskKind {
     InspectParameters,
 }
 
+fn prepare_render_preview(
+    success: bool,
+    operation: Option<&str>,
+    output: Option<&Path>,
+) -> Result<Option<(PathBuf, egui::ColorImage)>, String> {
+    if operation != Some("render_image") || !success {
+        return Ok(None);
+    }
+    let output = output.ok_or("native render reported success without an output image")?;
+    let image = decode_preview_image(output)
+        .map_err(|error| format!("native render output is not displayable: {error}"))?;
+    Ok(Some((output.to_path_buf(), image)))
+}
+
+fn report_ui_output_failure(body: &str, error: &str) -> String {
+    let mut report = serde_json::from_str::<serde_json::Value>(body)
+        .unwrap_or_else(|_| serde_json::json!({ "native_report": body }));
+    if !report.is_object() {
+        report = serde_json::json!({ "native_report": report });
+    }
+    report["native_passed"] = report
+        .get("passed")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    report["passed"] = serde_json::json!(false);
+    report["ui_output"] = serde_json::json!({
+        "displayable": false,
+        "error": error,
+    });
+    serde_json::to_string_pretty(&report).unwrap_or_else(|_| error.to_owned())
+}
+
+fn native_failure_status(operation: Option<&str>, body: &str) -> &'static str {
+    if operation == Some("render_image") {
+        let report = serde_json::from_str::<serde_json::Value>(body).ok();
+        if report
+            .as_ref()
+            .is_some_and(|report| report.pointer("/ui_output/error").is_some())
+        {
+            return "AEX output could not be loaded.";
+        }
+        if report
+            .as_ref()
+            .and_then(|report| report.get("error"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|error| error.contains("local worker binary is missing or unreadable"))
+        {
+            return "Required render worker is missing or unreadable.";
+        }
+    }
+    "Failed safely"
+}
+
+fn visible_report_summary(body: &str) -> Option<String> {
+    if let Ok(report) = serde_json::from_str::<serde_json::Value>(body) {
+        for pointer in ["/ui_output/error", "/error", "/message"] {
+            if let Some(message) = report.pointer(pointer).and_then(serde_json::Value::as_str) {
+                return Some(visible_text_summary(message));
+            }
+        }
+        return None;
+    }
+    body.lines()
+        .find(|line| !line.trim().is_empty())
+        .map(visible_text_summary)
+}
+
+fn visible_text_summary(value: &str) -> String {
+    let mut output = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(1024)
+        .collect::<String>();
+    if value.chars().count() > 1024 {
+        output.push_str("...");
+    }
+    output
+}
+
+fn required_render_worker_path(repository: &Path, smart: bool) -> PathBuf {
+    repository.join(if smart {
+        "target/minihost-build/aex_worker.exe"
+    } else {
+        "target/minihost-build/aex_worker.exe"
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_input_fingerprint(
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+    smart_render: bool,
+    pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
+    gpu_backend: aexcompat_broker::image_render::RenderGpuBackend,
+    frame: i32,
+    duration_frames: i32,
+    frames_per_second: u32,
+    frame_time_step: i32,
+    host_context: Option<&aexcompat_broker::render_request::HostContext>,
+    audio_input: Option<&Path>,
+    custom_ui_click: bool,
+    custom_ui_draw: bool,
+    custom_ui_click_point: [u16; 2],
+    custom_ui_click_color: [f32; 4],
+) -> String {
+    serde_json::json!({
+        "parameters": parameters,
+        "smart_render": smart_render,
+        "pixel_format": format!("{pixel_format:?}"),
+        "gpu_backend": format!("{gpu_backend:?}"),
+        "frame": frame,
+        "duration_frames": duration_frames,
+        "frames_per_second": frames_per_second,
+        "frame_time_step": frame_time_step,
+        "host_context": host_context,
+        "audio_input": audio_input,
+        "custom_ui_click": custom_ui_click,
+        "custom_ui_draw": custom_ui_draw,
+        "custom_ui_click_point": custom_ui_click_point,
+        "custom_ui_click_color": custom_ui_click_color,
+    })
+    .to_string()
+}
+
+fn receive_task_result(receiver: &Receiver<TaskResult>) -> Option<TaskResult> {
+    match receiver.try_recv() {
+        Ok(result) => Some(result),
+        Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => Some(TaskResult {
+            success: false,
+            body: serde_json::json!({
+                "passed": false,
+                "error": "background task ended without returning a result",
+                "stage": "ui_background_task",
+            })
+            .to_string(),
+            output: None,
+            identity: None,
+            operation: None,
+            diagnostic_eligible: false,
+        }),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ParameterInspectionState {
+    #[default]
+    NotSelected,
+    Loading,
+    Ready,
+    ZeroParameters,
+    UnsupportedParameters,
+    HiddenParameters,
+    Failed,
+}
+
+fn parameter_inspection_state(
+    report: &serde_json::Value,
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+) -> Result<ParameterInspectionState, String> {
+    let raw_count = report
+        .get("worker_diagnostics")
+        .and_then(|diagnostics| diagnostics.get("parameter_metadata"))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .ok_or("inspection has no raw parameter metadata")?;
+    if raw_count == 0 {
+        return if parameters.is_empty() {
+            Ok(ParameterInspectionState::ZeroParameters)
+        } else {
+            Err("inspection mapped parameters from an empty worker result".into())
+        };
+    }
+    if parameters.is_empty() {
+        return Ok(ParameterInspectionState::UnsupportedParameters);
+    }
+    if parameters.iter().all(|parameter| !parameter.visible) {
+        return Ok(ParameterInspectionState::HiddenParameters);
+    }
+    Ok(ParameterInspectionState::Ready)
+}
+
+fn parameter_inspection_message(
+    state: ParameterInspectionState,
+) -> Option<(&'static str, &'static str)> {
+    match state {
+        ParameterInspectionState::ZeroParameters => Some((
+            "This effect intentionally declared no parameters.",
+            "このエフェクトはパラメーターを定義していません。",
+        )),
+        ParameterInspectionState::UnsupportedParameters => Some((
+            "This effect declared parameters, but none use supported control types.",
+            "パラメーターはありますが、対応しているコントロール形式がありません。",
+        )),
+        ParameterInspectionState::HiddenParameters => Some((
+            "This effect declared controls, but all are hidden by the plug-in.",
+            "コントロールはありますが、プラグインによってすべて非表示です。",
+        )),
+        ParameterInspectionState::Failed => Some((
+            "Effect Controls inspection failed. See the diagnostic report below.",
+            "エフェクトコントロールの検査に失敗しました。下の診断レポートを確認してください。",
+        )),
+        ParameterInspectionState::NotSelected
+        | ParameterInspectionState::Loading
+        | ParameterInspectionState::Ready => None,
+    }
+}
+
+fn parameter_inspection_status(
+    state: ParameterInspectionState,
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+    smart_render: bool,
+) -> String {
+    let render_path = if smart_render { "SmartFX" } else { "Classic" };
+    match state {
+        ParameterInspectionState::Ready => format!(
+            "Effect Controls ready: {} visible parameter(s). Render path: {render_path}.",
+            parameters
+                .iter()
+                .filter(|parameter| parameter.visible)
+                .count()
+        ),
+        ParameterInspectionState::ZeroParameters => format!(
+            "Effect Controls ready: the effect declared no parameters. Render path: {render_path}."
+        ),
+        ParameterInspectionState::UnsupportedParameters => format!(
+            "Effect Controls inspected: declared parameters use unsupported control types. Render path: {render_path}."
+        ),
+        ParameterInspectionState::HiddenParameters => format!(
+            "Effect Controls inspected: all declared controls are hidden. Render path: {render_path}."
+        ),
+        ParameterInspectionState::Failed => {
+            "Effect Controls capability inspection failed safely; rendering is blocked.".into()
+        }
+        ParameterInspectionState::NotSelected | ParameterInspectionState::Loading => {
+            "Loading Effect Controls...".into()
+        }
+    }
+}
+
+fn render_action_enabled(
+    busy: bool,
+    has_selection: bool,
+    has_input: bool,
+    session_approved: bool,
+    selection_stale: bool,
+    has_capability: bool,
+) -> bool {
+    !busy && has_selection && has_input && session_approved && !selection_stale && has_capability
+}
+
 #[derive(Debug, Default, PartialEq)]
 struct RenderDiagnostics {
     render_path: String,
@@ -703,6 +953,10 @@ struct MatrixCase {
     output_relation: Option<String>,
     differing_input_pixels: Option<u64>,
     error: Option<String>,
+    advertised_depth_supported: Option<bool>,
+    planned_dispatch_pixel_bytes: Option<u64>,
+    dispatch_pixel_bytes: Option<u64>,
+    depth_relation: Option<String>,
 }
 
 fn compatibility_matrix(report: &serde_json::Value) -> Option<Vec<MatrixCase>> {
@@ -729,9 +983,67 @@ fn compatibility_matrix(report: &serde_json::Value) -> Option<Vec<MatrixCase>> {
                 output_relation: case["output_relation"].as_str().map(str::to_owned),
                 differing_input_pixels: case["differing_input_pixels"].as_u64(),
                 error: case["error"].as_str().map(str::to_owned),
+                advertised_depth_supported: case["advertised_depth_supported"].as_bool(),
+                planned_dispatch_pixel_bytes: case["planned_dispatch_pixel_bytes"].as_u64(),
+                dispatch_pixel_bytes: case["dispatch_pixel_bytes"].as_u64(),
+                depth_relation: case["depth_relation"].as_str().map(str::to_owned),
             })
             .collect()
     })
+}
+
+fn depth_render_classification(
+    requested: u64,
+    planned: u64,
+    captured: u64,
+) -> (&'static str, &'static str) {
+    match (planned != requested, captured != planned) {
+        (false, false) => ("ok", "native"),
+        (true, false) => ("depth_fallback_rendered", "advertised_fallback"),
+        (false, true) => ("capture_converted_rendered", "gpu_capture_conversion"),
+        (true, true) => ("depth_fallback_rendered", "fallback_and_gpu_capture"),
+    }
+}
+
+fn matrix_success_classification(
+    report: &serde_json::Value,
+    requested_bytes: u64,
+) -> (&'static str, &'static str, bool, bool, Option<&'static str>) {
+    if report["width"] == 0 && report["height"] == 0 && report["output_png"].is_null() {
+        return (
+            "empty_result",
+            "not_dispatched",
+            false,
+            true,
+            Some("empty_result"),
+        );
+    }
+    if report["image_render_supported"] == false {
+        return (
+            "unsupported_media_type",
+            "not_dispatched",
+            false,
+            false,
+            Some("media_type_negotiation"),
+        );
+    }
+    let depth = &report["depth_provenance"];
+    if let (Some(_), Some(planned), Some(captured)) = (
+        depth["advertised_depth_supported"].as_bool(),
+        depth["planned_dispatch_pixel_bytes"].as_u64(),
+        depth["dispatch_pixel_bytes"].as_u64(),
+    ) {
+        let (classification, relation) =
+            depth_render_classification(requested_bytes, planned, captured);
+        return (classification, relation, true, true, None);
+    }
+    (
+        "depth_provenance_missing",
+        "unknown",
+        false,
+        true,
+        Some("report_validation"),
+    )
 }
 
 fn run_effect_matrix(
@@ -777,18 +1089,42 @@ fn run_effect_matrix(
                 );
             cases.push(match result {
                 Ok(report) => {
+                    let requested_bytes = match pixel_format {
+                        RenderPixelFormat::Argb8 => 4,
+                        RenderPixelFormat::Argb16 => 8,
+                        RenderPixelFormat::Argb32f => 16,
+                    };
+                    let depth = &report["depth_provenance"];
+                    let planned_bytes = depth["planned_dispatch_pixel_bytes"].as_u64();
+                    let dispatch_bytes = depth["dispatch_pixel_bytes"].as_u64();
+                    let empty_result = report["width"] == 0
+                        && report["height"] == 0
+                        && report["output_png"].is_null();
+                    let (classification, depth_relation, passed, applicable, failure_stage) =
+                        matrix_success_classification(&report, requested_bytes);
                     let mut case = serde_json::json!({
                         "render_path": path_name,
                         "pixel_format": format_name,
                         "render_completed": true,
-                        "applicable": true,
-                        "passed": true,
-                        "classification": report["worker_classification"],
-                        "failure_stage": serde_json::Value::Null,
+                        "applicable": applicable,
+                        "passed": passed,
+                        "classification": classification,
+                        "failure_stage": failure_stage,
                         "selector_error": serde_json::Value::Null,
-                        "output_png": output,
+                        "output_png": if empty_result { serde_json::Value::Null }
+                            else { serde_json::json!(output) },
+                        "advertised_depth_supported": depth["advertised_depth_supported"],
+                        "planned_dispatch_pixel_bytes": planned_bytes,
+                        "dispatch_pixel_bytes": dispatch_bytes,
+                        "depth_relation": depth_relation,
                     });
-                    if report["width"] != report["input_width"]
+                    if empty_result {
+                        case["output_relation"] = serde_json::json!("no_image");
+                        case["differing_input_pixels"] = serde_json::Value::Null;
+                    } else if !applicable {
+                        case["output_relation"] = serde_json::json!("not_applicable");
+                        case["differing_input_pixels"] = serde_json::Value::Null;
+                    } else if report["width"] != report["input_width"]
                         || report["height"] != report["input_height"]
                     {
                         case["output_relation"] = serde_json::json!("different_dimensions");
@@ -812,7 +1148,9 @@ fn run_effect_matrix(
                             }
                         }
                     }
-                    if let Some(reference_root) = reference_root {
+                    if let Some(reference_root) =
+                        reference_root.filter(|_| !empty_result && applicable)
+                    {
                         let reference =
                             reference_root.join(format!("{path_name}-{format_name}.png"));
                         case["reference_png"] = serde_json::json!(reference);
@@ -852,8 +1190,7 @@ fn run_effect_matrix(
                         "render_completed": false,
                         "applicable": !matches!(
                             diagnostics.classification.as_str(),
-                            "unsupported_pixel_depth" | "unsupported_render_path" |
-                                "unsupported_media_type"
+                            "unsupported_render_path" | "unsupported_media_type"
                         ),
                         "passed": false,
                         "classification": diagnostics.classification,
@@ -986,10 +1323,6 @@ fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
                 == Some(false))
             .then(|| "result_rect_validation".to_owned())
         });
-    let unsupported_depth = report
-        .as_ref()
-        .and_then(|value| value["depth_supported"].as_bool())
-        == Some(false);
     let unsupported_render_path = report
         .as_ref()
         .and_then(|value| value["smart_render_supported"].as_bool())
@@ -1034,8 +1367,6 @@ fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
             "unsupported_media_type".to_owned()
         } else if unsupported_render_path {
             "unsupported_render_path".to_owned()
-        } else if unsupported_depth {
-            "unsupported_pixel_depth".to_owned()
         } else {
             diagnostics["classification"]
                 .as_str()
@@ -1046,14 +1377,12 @@ fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
             Some("media_type_negotiation".to_owned())
         } else if unsupported_render_path {
             Some("render_path_negotiation".to_owned())
-        } else if unsupported_depth {
-            Some("pixel_depth_negotiation".to_owned())
         } else {
             failure_stage
         },
         exit_code: diagnostics["exit_code"].as_i64(),
         elapsed_ms: diagnostics["elapsed_ms"].as_u64(),
-        selector_error: if unsupported_render_path || unsupported_depth {
+        selector_error: if unsupported_render_path {
             None
         } else {
             selector_error
@@ -1084,9 +1413,6 @@ fn matrix_error_summary(message: &str) -> String {
     if let Some(report) = json_after_marker(message, "report=") {
         if report["smart_render_supported"].as_bool() == Some(false) {
             return "AEX did not advertise SmartFX render support".into();
-        }
-        if report["depth_supported"].as_bool() == Some(false) {
-            return "AEX did not advertise support for the requested pixel depth".into();
         }
         if report["result_rects_valid"].as_bool() == Some(false) {
             return "SmartFX did not return a valid result rectangle".into();

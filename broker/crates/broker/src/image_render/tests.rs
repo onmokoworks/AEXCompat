@@ -2,6 +2,64 @@
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_inspection_search_roots_include_the_owning_ae_support_files() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-inspection-support-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let support = root
+            .join("Adobe")
+            .join("Adobe After Effects 2025")
+            .join("Support Files");
+        let plugin_dir = support.join("Plug-ins").join("Effect");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(support.join("libmmd.dll"), b"runtime").unwrap();
+        let plugin = plugin_dir.join("Effect.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+
+        let roots = search_root(&plugin).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(roots, vec![plugin_dir, support]);
+    }
+
+    #[test]
+    fn session_search_roots_use_ae_defaults_only_without_explicit_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-session-support-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let support = root
+            .join("Adobe")
+            .join("Adobe After Effects 2025")
+            .join("Support Files");
+        let plugin_dir = support.join("Plug-ins").join("Effect");
+        let explicit = root.join("caller-runtime");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::create_dir_all(&explicit).unwrap();
+        let plugin = plugin_dir.join("Effect.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+        let dependency = ApprovedImageArtifact {
+            path: support.join("libmmd.dll"),
+            expected_sha256: [0; 32],
+            expected_size: 0,
+        };
+
+        let defaults = in_place_session_search_dirs(&plugin, &[dependency], &[]).unwrap();
+        let caller_roots = in_place_session_search_dirs(&plugin, &[], &[explicit.clone()]).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(defaults, vec![plugin_dir.clone(), support]);
+        assert_eq!(caller_roots, vec![plugin_dir, explicit]);
+    }
+
     /// Minimal facts for the public-report flattening; only the audio field
     /// varies across the audio projection tests below.
     fn audio_report_facts(audio_input_sha256: Option<&str>) -> InteractiveImageReportFacts {
@@ -204,7 +262,10 @@ mod tests {
             "audio_checkout_allowed": true,
             "audio_checkout_calls": 1,
             "audio_checkin_calls": 1,
+            "automatic_audio_checkins": 0,
             "audio_get_data_calls": 1,
+            "unadvertised_audio_checkout_calls": 0,
+            "last_audio_checkout_index": 2,
             "invalid_audio_operations": 0,
             "audio_lifetimes_balanced": true,
             "last_audio_window_sample_count": 6,
@@ -223,6 +284,9 @@ mod tests {
             "audio_usage_advertised",
             "audio_checkout_allowed",
             "audio_checkout_calls",
+            "automatic_audio_checkins",
+            "unadvertised_audio_checkout_calls",
+            "last_audio_checkout_index",
             "audio_lifetimes_balanced",
             "last_audio_window_sample_count",
         ] {
@@ -800,7 +864,7 @@ mod tests {
             .join(["HistoGrid", "aex"].join("."));
         if !plugin.exists()
             || !repository
-                .join("target/minihost-build/aex_smart_worker.exe")
+                .join("target/minihost-build/aex_worker.exe")
                 .exists()
         {
             return;
@@ -892,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_payload_is_slot_bound_and_range_checked() {
+    fn default_interactive_payload_is_slot_bound_and_range_normalized() {
         let parameters = vec![InteractiveParameter {
             slot: 2,
             name: "Direction".into(),
@@ -918,7 +982,14 @@ mod tests {
         );
         let mut invalid = parameters;
         invalid[0].value = 4.0;
-        assert!(encode_interactive_payload(&invalid).is_err());
+        assert_eq!(
+            encode_default_interactive_payload(&invalid).unwrap(),
+            "v2|param_2@2:i32=3"
+        );
+        let mut malformed = invalid;
+        malformed[0].minimum = 4.0;
+        malformed[0].maximum = 1.0;
+        assert!(encode_interactive_payload(&malformed).is_err());
     }
 
     #[test]
@@ -957,6 +1028,35 @@ mod tests {
         let mut too_long = parameter;
         too_long.debug_summary = Some("x".repeat(4097));
         assert!(encode_interactive_payload(&[too_long]).is_err());
+    }
+
+    #[test]
+    fn arbitrary_without_printable_text_keeps_the_plugin_default() {
+        let parameter = InteractiveParameter {
+            slot: 1,
+            name: "Grid".into(),
+            kind: "arbitrary_data".into(),
+            // Scalar bounds do not describe an arbitrary-data value. Real
+            // descriptors may leave these union bytes as unrelated data.
+            minimum: 10.0,
+            maximum: -10.0,
+            value: f64::NAN,
+            choices: vec![],
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        };
+        assert_eq!(
+            encode_default_interactive_payload(&[parameter]).unwrap(),
+            "v2|"
+        );
     }
 
     #[test]
@@ -1279,6 +1379,8 @@ mod tests {
                         "fault_address": null,
                         "registers": null,
                         "stack_pointer_values": null,
+                        "unwind_stop": null,
+                        "unwind_frames": null,
                         "global_data_handoff": {
                             "input_at_entry": {
                                 "state": "null",
@@ -1369,6 +1471,27 @@ mod tests {
                             {"offset_bytes": 32, "value": null},
                             {"offset_bytes": 40, "value": null}
                         ],
+                        "unwind_stop": "end_of_chain",
+                        "unwind_frames": [
+                            {
+                                "from_return_slot": false,
+                                "site": {
+                                    "classification": "plugin",
+                                    "module": "synthetic.aex",
+                                    "relative_offset": "0x0000000000001234",
+                                    "token": null
+                                }
+                            },
+                            {
+                                "from_return_slot": true,
+                                "site": {
+                                    "classification": "module",
+                                    "module": "kernel32.dll",
+                                    "relative_offset": "0x0000000000005678",
+                                    "token": null
+                                }
+                            }
+                        ],
                         "global_data_handoff": {
                             "input_at_entry": {
                                 "state": "non_null",
@@ -1432,6 +1555,15 @@ mod tests {
             records[1]["stack_pointer_values"].as_array().unwrap().len(),
             6
         );
+        assert_eq!(records[0]["unwind_stop"], Value::Null);
+        assert_eq!(records[0]["unwind_frames"], Value::Null);
+        assert_eq!(records[1]["unwind_stop"], "end_of_chain");
+        assert_eq!(records[1]["unwind_frames"].as_array().unwrap().len(), 2);
+        assert_eq!(records[1]["unwind_frames"][0]["from_return_slot"], false);
+        assert_eq!(
+            records[1]["unwind_frames"][1]["site"]["relative_offset"],
+            "0x0000000000005678"
+        );
         assert_eq!(
             records[0]["global_data_handoff"]["output_after_return"]["process_local_token"],
             "ptr-0123456789abcdef"
@@ -1470,6 +1602,52 @@ mod tests {
                 .to_string()
                 .contains("raw_pointer")
         );
+
+        let fault_record = report["selector_invocations"]["records"][1].clone();
+        let mut mutations = Vec::new();
+        let mut unknown_stop = fault_record.clone();
+        unknown_stop["unwind_stop"] = json!("worker_supplied_unknown");
+        mutations.push(unknown_stop);
+        let mut too_many_frames = fault_record.clone();
+        too_many_frames["unwind_frames"] =
+            Value::Array(vec![fault_record["unwind_frames"][0].clone(); 13]);
+        mutations.push(too_many_frames);
+        let mut extra_frame_key = fault_record.clone();
+        extra_frame_key["unwind_frames"][0]["worker_private"] = json!(true);
+        mutations.push(extra_frame_key);
+        let mut extra_site_key = fault_record.clone();
+        extra_site_key["unwind_frames"][0]["site"]["worker_private"] = json!("x".repeat(4096));
+        mutations.push(extra_site_key);
+        let mut unwind_without_seh = fault_record;
+        unwind_without_seh["seh_caught"] = json!(false);
+        unwind_without_seh["seh_code"] = Value::Null;
+        unwind_without_seh["fault_module_class"] = Value::Null;
+        unwind_without_seh["fault_module"] = Value::Null;
+        unwind_without_seh["plugin_rva"] = Value::Null;
+        mutations.push(unwind_without_seh);
+
+        for mutated in mutations {
+            let mutated_report = json!({
+                "selector_invocations": {
+                    "maximum_records": 64,
+                    "records": [mutated],
+                    "truncated": false
+                }
+            });
+            let mut mutated_diagnostics = json!({});
+            propagate_selector_invocations(&mut mutated_diagnostics, &mutated_report);
+            assert!(
+                mutated_diagnostics["selector_invocations"]["records"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "malformed unwind record must be dropped: {mutated_report}"
+            );
+            assert_eq!(
+                mutated_diagnostics["selector_invocations"]["truncated"],
+                true
+            );
+        }
     }
 
     #[test]
@@ -2188,6 +2366,52 @@ mod tests {
     }
 
     #[test]
+    fn the_premiere_gpu_route_outcome_survives_the_allowlist_and_the_reason_filter() {
+        // The other half of the contract `render_sweep`'s
+        // `the_premiere_gpu_route_outcome_reaches_the_record_without_extended_diag`
+        // reads: the route's faults are contained, so a plug-in whose GPU route
+        // dies on entry renders through the PF path, and this event is the only
+        // thing that says the route was tried (issue #1271). A rename here, or a
+        // tighter reason filter, would empty that record silently.
+        let declined = worker_diagnostics(
+            "stage:pr_gpu_route_begin\nstage:pr_gpu_route_end reason=startup_fault\n",
+            false,
+            "ok",
+            0,
+            5,
+        );
+        let events = declined["stage_events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1]["stage"], "pr_gpu_route");
+        assert_eq!(events[1]["state"], "end");
+        assert_eq!(events[1]["errors"]["reason"], "startup_fault");
+        // A decline is not a failed stage: the render carries on down the PF
+        // path, and calling it one would misattribute that render's verdict.
+        assert_eq!(declined["failure_stage"], Value::Null);
+        assert_eq!(declined["last_completed_stage"], "pr_gpu_route");
+
+        // A worker that died inside the route leaves the begin unmatched, which
+        // is what names the route as the active stage.
+        let died_inside =
+            worker_diagnostics("stage:pr_gpu_route_begin\n", false, "crash", 0xC0000005, 5);
+        assert_eq!(died_inside["active_stage"], "pr_gpu_route");
+
+        // The reason is dropped rather than truncated when it is not the fixed
+        // lower-case identifier shape, so plug-in authored text - it shares this
+        // stderr - cannot ride into a shareable report through this field.
+        let forged = worker_diagnostics(
+            "stage:pr_gpu_route_end reason=C:\\private\\plugin.aex\n",
+            false,
+            "ok",
+            0,
+            5,
+        );
+        let forged_events = forged["stage_events"].as_array().unwrap();
+        assert_eq!(forged_events.len(), 1);
+        assert!(forged_events[0]["errors"].get("reason").is_none());
+    }
+
+    #[test]
     fn worker_stage_diagnostics_identify_active_and_failed_selectors() {
         let diagnostics = worker_diagnostics(
             "untrusted C:\\private\\plugin\nstage:global_setup_begin\nstage:global_setup_end error=0\nstage:render_begin\n",
@@ -2290,14 +2514,75 @@ mod tests {
             "classic_output_resize"
         );
 
+        // The custom-UI draw is a plug-in dispatch before RENDER. Its own
+        // failure short-circuits the selector, so it has to be the frame's
+        // failure rather than falling back to the session-wide `render` stage.
+        let ui_draw = worker_diagnostics(
+            "stage:classic_ui_draw_begin\nstage:classic_ui_draw_end error=-5\n\
+             stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=0\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(ui_draw["first_failure_stage"], "classic_ui_draw");
+        assert_eq!(ui_draw["failure_stage"], "classic_ui_draw");
+
+        // A close failure becomes -5 only on an otherwise clean frame. This
+        // is distinct from a teardown that returned false after an existing
+        // selector error: the latter emits error=0 and must not steal the
+        // failure attribution from RENDER.
+        let ui_teardown = worker_diagnostics(
+            "stage:classic_render_begin\nstage:classic_render_end error=0\n\
+             stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=-5\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(ui_teardown["first_failure_stage"], "classic_ui_teardown");
+        assert_eq!(ui_teardown["failure_stage"], "classic_ui_teardown");
+
+        let selector_then_suppressed_close = worker_diagnostics(
+            "stage:classic_render_begin\nstage:classic_render_end error=512\n\
+             stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=0\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(
+            selector_then_suppressed_close["first_failure_stage"],
+            "classic_render"
+        );
+        assert_eq!(
+            selector_then_suppressed_close["failure_stage"],
+            "classic_render"
+        );
+
+        // A crash or hang inside either UI dispatch leaves its begin unmatched.
+        // That incomplete pair must name the operation the worker was executing.
+        for stage in ["classic_ui_draw", "classic_ui_teardown"] {
+            let crashed = worker_diagnostics(
+                &format!("stage:{stage}_begin\n"),
+                false,
+                "crash",
+                0xC0000005,
+                9,
+            );
+            assert_eq!(crashed["active_stage"], stage);
+            assert_eq!(crashed["first_failure_stage"], stage);
+            assert_eq!(crashed["failure_stage"], stage);
+        }
+
         // A frame that never reached the selector carries no `classic_render`
         // pair, because the markers live inside the selector hook rather than
         // around the dispatch call. On a non-zero incoming error
         // `dispatch_render` skips the draw, prepare_output, and selector steps,
         // so bracketing the call would re-emit that error under the selector's
         // name; `failure_stage` takes the last failing stage and would blame a
-        // RENDER the plug-in never saw. (It does not skip close_ui, which does
-        // enter the plug-in and is still unbracketed - issue #735.)
+        // RENDER the plug-in never saw. It does not skip close_ui, whose stage
+        // is clean when an earlier error already owns the frame (issue #735).
         //
         // FRAME_SETUP is not yet one of the steps that gets skipped: the
         // `render_once` path drops its error instead of propagating it and
@@ -2344,6 +2629,17 @@ mod tests {
             MAX_STAGE_EVENTS
         );
         assert_eq!(diagnostics["stderr_truncated"], true);
+    }
+
+    #[test]
+    fn active_stage_tracking_is_bounded_but_keeps_the_latest_stage() {
+        let mut trace = "stage:classic_render_begin\nstage:classic_render_end error=0\n"
+            .repeat(MAX_ACTIVE_STAGES + 20);
+        trace.push_str(&"stage:classic_render_begin\n".repeat(MAX_ACTIVE_STAGES + 20));
+        trace.push_str("stage:smart_render_begin\n");
+        let diagnostics = worker_diagnostics(&trace, true, "timeout", 1, 5_000);
+        assert_eq!(diagnostics["active_stage"], "smart_render");
+        assert_eq!(diagnostics["failure_stage"], "smart_render");
     }
 
     #[test]
@@ -2439,6 +2735,275 @@ mod tests {
     }
 
     #[test]
+    fn callback_addr_denials_are_unique_and_shape_checked() {
+        let trace = "stage:callback_addr_denied id=-5 quality=1 mode=0\n\
+             stage:callback_addr_denied id=-5 quality=1 mode=0\n\
+             stage:callback_addr_denied id=-5 quality=0 mode=0\n\
+             stage:callback_addr_denied id=oops quality=1 mode=0\n\
+             stage:callback_addr_denied id=5 quality=1 mode=0 path=C:\\private\n\
+             stage:callback_addr_denied quality=1 id=5 mode=0\n\
+             stage:callback_addr_denied id=99999999999 quality=1 mode=0\n\
+             stage:callback_addr_denied id=1 quality=1 mode=-1\n";
+        let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
+        let denials = diagnostics["callback_addr_denials"].as_array().unwrap();
+        assert_eq!(
+            denials,
+            &[
+                json!({"id": -5, "quality": 1, "mode": 0}),
+                json!({"id": -5, "quality": 0, "mode": 0}),
+            ]
+        );
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], true);
+        assert!(!diagnostics.to_string().contains("private"));
+        // The denial marker must not feed the stage state machine: it carries
+        // no _begin/_end suffix, so it can neither create events nor be
+        // blamed as a failure stage.
+        assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
+        assert_eq!(diagnostics["failure_stage"], Value::Null);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worker_callback_addr_denial_round_trips_through_broker_diagnostics() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
+        if !worker.exists() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must build aex_worker.exe before broker tests"
+            );
+            return;
+        }
+
+        let output = std::process::Command::new(&worker)
+            .args(["--kind", "discovery", "--self-test-pf-private-callbacks"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostics = worker_diagnostics(&stderr, false, "ok", 0, 1);
+        assert_eq!(
+            diagnostics["callback_addr_denials"],
+            json!([{"id": -3, "quality": 1, "mode": 0}])
+        );
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires built aex_worker.exe; run explicitly with --ignored"]
+    fn unhandled_worker_thread_fault_round_trips_into_shipping_diagnostics() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
+        if !worker.exists() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must build aex_worker.exe before broker tests"
+            );
+            return;
+        }
+        let output = std::process::Command::new(&worker)
+            .args(["--kind", "discovery", "--self-test-unhandled-thread-crash"])
+            .env_remove("AEXCOMPAT_MINIDUMP_HANDLE")
+            .env_remove("AEXCOMPAT_MINIDUMP_ACK_HANDLE")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code().map(|code| code as u32),
+            Some(0xC000_0005)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostics = worker_diagnostics(&stderr, false, "crashed", 0xC000_0005, 1);
+        assert_eq!(diagnostics["unhandled_exception"]["code"], 0xC000_0005u32);
+        assert_eq!(diagnostics["unhandled_exception"]["site"], "worker");
+        assert_eq!(
+            diagnostics["unhandled_exception"]["module"],
+            "aex_worker.exe"
+        );
+        assert!(diagnostics["unhandled_exception"]["rva"].as_u64().unwrap() > 0);
+        assert!(diagnostics.get("stderr_tail").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires built aex_worker.exe and fault-module fixture; run explicitly with --ignored"]
+    fn unhandled_loaded_module_thread_fault_names_the_foreign_module() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
+        let fixture =
+            repository.join("target/minihost-build/worker_unhandled_thread_fault_fixture.dll");
+        if !worker.exists() || !fixture.exists() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must build aex_worker.exe and its fault-module fixture before broker tests"
+            );
+            return;
+        }
+        let output = std::process::Command::new(&worker)
+            .args([
+                "--kind",
+                "discovery",
+                "--self-test-unhandled-module-thread-crash",
+            ])
+            .env_remove("AEXCOMPAT_MINIDUMP_HANDLE")
+            .env_remove("AEXCOMPAT_MINIDUMP_ACK_HANDLE")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code().map(|code| code as u32),
+            Some(0xC000_0005)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostics = worker_diagnostics(&stderr, false, "crashed", 0xC000_0005, 1);
+        assert_eq!(diagnostics["unhandled_exception"]["code"], 0xC000_0005u32);
+        assert_eq!(diagnostics["unhandled_exception"]["site"], "module");
+        assert_eq!(
+            diagnostics["unhandled_exception"]["module"],
+            "worker_unhandled_thread_fault_fixture.dll"
+        );
+        assert!(diagnostics["unhandled_exception"]["rva"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn unhandled_exception_marker_is_crash_bound_and_path_free() {
+        let valid = "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x42";
+        assert_eq!(
+            unhandled_exception_marker(valid, "crashed", 0xC000_0005),
+            Some(
+                json!({"code": 0xC000_0005u32, "site": "module", "module": "plugin.aex", "rva": 66u64})
+            )
+        );
+        assert_eq!(unhandled_exception_marker(valid, "ok", 0xC000_0005), None);
+        assert_eq!(
+            unhandled_exception_marker(valid, "crashed", 0xC000_0094),
+            None
+        );
+        for forged in [
+            "stage:unhandled_seh code=0xc0000005 site=module module=C:\\private\\plugin.aex rva=0x42",
+            "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x42 path=private",
+            "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0xgg",
+            "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x123456789abcdef01",
+            "stage:unhandled_seh code=0xc0000005 site=plugin module=plugin.aex rva=0x42",
+        ] {
+            assert_eq!(
+                unhandled_exception_marker(forged, "crashed", 0xC000_0005),
+                None
+            );
+        }
+        assert_eq!(
+            unhandled_exception_marker(
+                "stage:unhandled_seh code=0xc0000005 site=unknown",
+                "crashed",
+                0xC000_0005
+            ),
+            Some(json!({"code": 0xC000_0005u32, "site": "unknown"}))
+        );
+    }
+
+    #[test]
+    fn callback_denials_are_unique_and_identifier_shape_checked() {
+        let trace = "stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\
+             stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\
+             stage:callback_denied callback=transform_world reason=transfer_mode value=-3\n\
+             stage:callback_denied callback=transform_world reason=transfer_mode\n\
+             stage:callback_denied callback=transform_world reason=extent_over_4096\n\
+             stage:callback_denied callback=transform_world reason=C:\\private\\x\n\
+             stage:callback_denied callback=Transform reason=transfer_mode\n\
+             stage:callback_denied reason=transfer_mode callback=transform_world\n\
+             stage:callback_denied callback=transform_world reason=ok value=oops\n\
+             stage:callback_denied callback=transform_world reason=ok value=99999999999\n\
+             stage:callback_denied callback=transform_world reason=ok value=1 extra=1\n\
+             stage:callback_denied callback=private_effect_utf16_to_multibyte reason=null_argument\n\
+             stage:callback_denied callback=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb reason=boundary\n\
+             stage:callback_denied callback=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa reason=too_long\n\
+             stage:callback_denied callback=transform_world\n";
+        let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
+        let denials = diagnostics["callback_denials"].as_array().unwrap();
+        assert_eq!(
+            denials,
+            &[
+                json!({"callback": "transform_world", "reason": "transfer_mode", "value": 2}),
+                json!({"callback": "transform_world", "reason": "transfer_mode", "value": -3}),
+                json!({"callback": "transform_world", "reason": "transfer_mode"}),
+                json!({"callback": "transform_world", "reason": "extent_over_4096"}),
+                json!({"callback": "private_effect_utf16_to_multibyte", "reason": "null_argument"}),
+                json!({"callback": "b".repeat(64), "reason": "boundary"}),
+            ]
+        );
+        assert_eq!(diagnostics["callback_denials_truncated"], true);
+        assert!(!diagnostics.to_string().contains(&"a".repeat(65)));
+        assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
+        assert_eq!(diagnostics["failure_stage"], Value::Null);
+    }
+
+    #[test]
+    fn callback_denials_cap_reports_truncation_without_malformed_lines() {
+        let mut trace = String::new();
+        for index in 0..(MAX_CALLBACK_DENIALS + 3) {
+            trace.push_str(&format!(
+                "stage:callback_denied callback=transform_world reason=reason_{index}\n"
+            ));
+        }
+        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        assert_eq!(
+            diagnostics["callback_denials"].as_array().unwrap().len(),
+            MAX_CALLBACK_DENIALS
+        );
+        assert_eq!(diagnostics["callback_denials_truncated"], true);
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
+    }
+
+    #[test]
+    fn callback_addr_denials_cap_reports_truncation_without_malformed_lines() {
+        let mut trace = String::new();
+        for index in 0..(MAX_CALLBACK_ADDR_DENIALS + 3) {
+            trace.push_str(&format!(
+                "stage:callback_addr_denied id={index} quality=1 mode=0\n"
+            ));
+        }
+        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        assert_eq!(
+            diagnostics["callback_addr_denials"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_CALLBACK_ADDR_DENIALS
+        );
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], true);
+    }
+
+    #[test]
+    fn callback_addr_denials_absent_lines_report_empty_untruncated() {
+        let diagnostics = worker_diagnostics(
+            "stage:classic_render_begin\nstage:classic_render_end error=516\n",
+            false,
+            "ok",
+            0,
+            2,
+        );
+        assert!(
+            diagnostics["callback_addr_denials"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
+    }
+
+    #[test]
     fn structured_worker_report_supplies_bounded_unique_unsupported_suite_calls() {
         let mut diagnostics = json!({});
         let mut reported = vec![
@@ -2458,7 +3023,13 @@ mod tests {
 
         propagate_unsupported_suite_calls(
             &mut diagnostics,
-            &json!({"unsupported_suite_calls": reported}),
+            &json!({
+                "unsupported_suite_calls": reported,
+                "callback_history": [
+                    {"sequence": 4, "callback": "iterate", "result": 0, "reason": "none"},
+                    {"sequence": 5, "callback": "checkout_output", "result": 4, "reason": "invalid_arguments"}
+                ]
+            }),
         );
         let calls = diagnostics["unsupported_suite_calls"].as_array().unwrap();
         assert_eq!(calls.len(), MAX_UNSUPPORTED_SUITE_CALLS);
@@ -2475,6 +3046,106 @@ mod tests {
             1
         );
         assert!(!diagnostics.to_string().contains("private"));
+        assert_eq!(diagnostics["callback_history"].as_array().unwrap().len(), 2);
+        assert_eq!(diagnostics["callback_history"][1]["sequence"], 5);
+    }
+
+    #[test]
+    fn bee_facade_block_is_rebuilt_from_validated_integers_and_bounded() {
+        // The facade counters are the positive half of the facade diagnostic:
+        // `unsupported_suite_calls` names slots nobody implemented, and an
+        // empty list there reads the same whether a slot held or nothing
+        // reached it (issue #1264). This is the boundary against worker
+        // stdout, so what lands in the record has to be integers this side
+        // built, not whatever the report happened to contain.
+        let mut diagnostics = json!({});
+        propagate_bee_facade(
+            &mut diagnostics,
+            &json!({"bee_facade": {
+                "effect_layer_hand_outs": 2,
+                "trap_count": 0,
+                "layer_vtable_calls": [
+                    {"slot": 56, "call_count": 1},
+                    {"slot": 183, "call_count": 2},
+                    // Dropped: no legible slot/count pair.
+                    {"slot": "56", "call_count": 1},
+                    "not an entry",
+                ],
+                // Not copied through: only the named fields survive.
+                "sealed_path": "a private path the worker had no business emitting",
+            }}),
+        );
+        let block = &diagnostics["bee_facade"];
+        assert_eq!(block["effect_layer_hand_outs"], 2);
+        assert_eq!(block["trap_count"], 0);
+        assert_eq!(
+            block["layer_vtable_calls"],
+            json!([{"slot": 56, "call_count": 1}, {"slot": 183, "call_count": 2}])
+        );
+        // The dropped entries are why the flag exists: a shortened list read
+        // as a complete one turns "not legible" into "did not happen".
+        assert_eq!(block["layer_vtable_calls_truncated"], true);
+        assert!(!diagnostics.to_string().contains("private"));
+
+        // A report without the block leaves the diagnostics untouched, so the
+        // null default keeps meaning "no facade block was reported".
+        let mut absent = json!({"bee_facade": Value::Null});
+        propagate_bee_facade(&mut absent, &json!({}));
+        assert_eq!(absent["bee_facade"], Value::Null);
+
+        // A non-object where the block belongs is refused rather than copied.
+        let mut malformed = json!({"bee_facade": Value::Null});
+        propagate_bee_facade(&mut malformed, &json!({"bee_facade": 7}));
+        assert_eq!(malformed["bee_facade"], Value::Null);
+
+        // A list longer than any real facade could produce is capped.
+        let long: Vec<Value> = (0..64)
+            .map(|slot| json!({"slot": slot, "call_count": 1}))
+            .collect();
+        let mut capped = json!({});
+        propagate_bee_facade(
+            &mut capped,
+            &json!({"bee_facade": {"layer_vtable_calls": long}}),
+        );
+        assert_eq!(
+            capped["bee_facade"]["layer_vtable_calls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            32
+        );
+        assert_eq!(capped["bee_facade"]["layer_vtable_calls_truncated"], true);
+        // Counters the report omitted stay null rather than reading as zero.
+        assert_eq!(capped["bee_facade"]["effect_layer_hand_outs"], Value::Null);
+
+        // The worker always writes the list, so a block without it is not
+        // legible either: an empty list with the flag down would read as "no
+        // slot was dispatched".
+        let mut missing = json!({});
+        propagate_bee_facade(
+            &mut missing,
+            &json!({"bee_facade": {"effect_layer_hand_outs": 1, "trap_count": 0}}),
+        );
+        assert_eq!(missing["bee_facade"]["layer_vtable_calls"], json!([]));
+        assert_eq!(missing["bee_facade"]["layer_vtable_calls_truncated"], true);
+
+        // A slot index no BEE_AVLayer vtable has is a malformed entry, not data.
+        let mut out_of_range = json!({});
+        propagate_bee_facade(
+            &mut out_of_range,
+            &json!({"bee_facade": {"layer_vtable_calls": [
+                {"slot": 1024, "call_count": 1},
+                {"slot": 5, "call_count": 3},
+            ]}}),
+        );
+        assert_eq!(
+            out_of_range["bee_facade"]["layer_vtable_calls"],
+            json!([{"slot": 5, "call_count": 3}])
+        );
+        assert_eq!(
+            out_of_range["bee_facade"]["layer_vtable_calls_truncated"],
+            true
+        );
     }
 
     #[test]
@@ -2677,6 +3348,209 @@ mod tests {
             error
                 .to_string()
                 .contains("requires at least one dependency search directory")
+        );
+    }
+
+    #[test]
+    fn discovery_inspection_requires_search_dirs_before_worker_launch() {
+        let error = inspect_experimental_via_discovery_in_place(
+            std::path::Path::new("missing-repository"),
+            ApprovedImageArtifact {
+                path: std::path::PathBuf::from("missing-plugin.aex"),
+                expected_sha256: [0; 32],
+                expected_size: 1,
+            },
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires dependency search directories")
+        );
+    }
+
+    #[test]
+    fn discovery_report_is_converted_to_interactive_parameters() {
+        let report = json!({
+            "status": "parameters_inspected",
+            "global_setup_error": 0,
+            "params_setup_error": 0,
+            "global_setdown_error": 0,
+            "out_flags": 0,
+            "out_flags2": 1 << 10,
+            "parameters": [{
+                "index": 4,
+                "name": "Amount",
+                "type": 10,
+                "default": 25.0,
+                "valid_min": 0.0,
+                "valid_max": 100.0,
+                "slider_min": 5.0,
+                "slider_max": 75.0,
+                "ui_flags": 0,
+                "flags": 0
+            }]
+        });
+        let (parameters, diagnostics) = inspection_result_from_report(
+            report,
+            json!({"inspection_transport": "discovery_session"}),
+            false,
+        )
+        .expect("authenticated discovery report converts");
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(parameters[0].slot, 4);
+        assert_eq!(parameters[0].kind, "float");
+        assert_eq!(parameters[0].value, 25.0);
+        assert_eq!(diagnostics["advertised_out_flags2"], 1 << 10);
+        assert_eq!(diagnostics["smart_render_advertised"], true);
+        assert_eq!(diagnostics["parameter_metadata"][0]["type"], "float_slider");
+        assert_eq!(
+            diagnostics["parameter_metadata"][0]["user_range"],
+            json!({"minimum": 5.0, "maximum": 75.0})
+        );
+    }
+
+    #[test]
+    fn discovery_orchestration_retries_only_an_authenticated_cleanup_checkpoint() {
+        let report = json!({
+            "status": "parameters_inspected",
+            "global_setup_error": 0,
+            "params_setup_error": 0,
+            "global_setdown_error": 0,
+            "out_flags": 0,
+            "out_flags2": 0,
+            "parameters": []
+        });
+        let clean_close = json!({"session_clean": true});
+        let retries = std::cell::Cell::new(0);
+        let inspected = finish_discovery_inspection(
+            crate::render_session::InspectOutcome::Inspected {
+                report: report.clone(),
+            },
+            Path::new("repository"),
+            clean_close.clone(),
+            |_, _| {
+                retries.set(retries.get() + 1);
+                unreachable!("a clean terminal report must not retry")
+            },
+        )
+        .expect("clean terminal report succeeds");
+        assert!(inspected.0.is_empty());
+        assert_eq!(retries.get(), 0);
+
+        let error = finish_discovery_inspection(
+            crate::render_session::InspectOutcome::InspectError {
+                error_kind: "selector_error".to_owned(),
+                report: Some(report),
+            },
+            Path::new("repository"),
+            clean_close,
+            |_, _| {
+                retries.set(retries.get() + 1);
+                unreachable!("an inspect error must not retry")
+            },
+        )
+        .expect_err("inspect error stays failed");
+        assert!(error.to_string().contains("selector_error"));
+        assert_eq!(retries.get(), 0);
+
+        let recovered = finish_discovery_inspection(
+            crate::render_session::InspectOutcome::CleanupCrashCheckpoint {
+                authorization: crate::render_session::CleanupCrashAuthorization::fixture(),
+            },
+            Path::new("repository"),
+            json!({"invalidated": true}),
+            |_, _| {
+                retries.set(retries.get() + 1);
+                Ok((
+                    Vec::new(),
+                    json!({"inspection_status": "parameters_inspected_cleanup_contained"}),
+                ))
+            },
+        )
+        .expect("authenticated checkpoint performs one contained retry");
+        assert!(recovered.0.is_empty());
+        assert_eq!(retries.get(), 1);
+        assert_eq!(
+            recovered.1["inspection_transport"],
+            "discovery_cleanup_contained"
+        );
+    }
+
+    #[test]
+    fn in_place_aegp_initialization_requires_search_dirs_before_file_access() {
+        let error = initialize_experimental_aegp_in_place(
+            std::path::Path::new("missing-repository"),
+            std::path::Path::new("missing-plugin.aex"),
+            &"0".repeat(64),
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least one dependency search directory")
+        );
+    }
+
+    #[test]
+    fn aegp_dynamic_suite_report_is_bounded_unique_and_exact() {
+        let valid = json!({
+            "dynamic_suites": [{
+                "name": "Fixture Companion Suite",
+                "api_version": 1,
+                "internal_version": 2
+            }]
+        });
+        assert!(valid_dynamic_suite_report(&valid));
+
+        let mut duplicate = valid.clone();
+        duplicate["dynamic_suites"] = json!([
+            {"name":"Fixture Companion Suite","api_version":1,"internal_version":2},
+            {"name":"Fixture Companion Suite","api_version":1,"internal_version":2}
+        ]);
+        assert!(!valid_dynamic_suite_report(&duplicate));
+
+        for mutation in [
+            json!({"dynamic_suites":[{"name":"","api_version":1,"internal_version":0}]}),
+            json!({"dynamic_suites":[{"name":"Suite","api_version":0,"internal_version":0}]}),
+            json!({"dynamic_suites":[{"name":"Suite","api_version":1,"internal_version":-1}]}),
+            json!({"dynamic_suites":[{"name":"Suite","api_version":1,"internal_version":0,"extra":true}]}),
+        ] {
+            assert!(!valid_dynamic_suite_report(&mutation));
+        }
+        assert!(!valid_dynamic_suite_report(&json!({
+            "dynamic_suites": (0..33).map(|index| json!({
+                "name": format!("Suite {index}"),
+                "api_version": 1,
+                "internal_version": 0
+            })).collect::<Vec<_>>()
+        })));
+    }
+}
+#[test]
+fn cleanup_contained_report_contract_rejects_mutations() {
+    let valid = json!({
+        "inspection_status": "parameters_inspected_cleanup_contained",
+        "global_setup_error": 0,
+        "params_setup_error": 0,
+        "global_setdown_error": -1,
+    });
+    assert!(cleanup_contained_report_is_valid(&valid));
+    for (field, replacement) in [
+        ("inspection_status", json!("parameters_inspected")),
+        ("global_setup_error", json!(4)),
+        ("params_setup_error", json!(4)),
+        ("global_setdown_error", json!(0)),
+    ] {
+        let mut mutated = valid.clone();
+        mutated[field] = replacement;
+        assert!(!cleanup_contained_report_is_valid(&mutated), "{field}");
+        mutated.as_object_mut().unwrap().remove(field);
+        assert!(
+            !cleanup_contained_report_is_valid(&mutated),
+            "missing {field}"
         );
     }
 }

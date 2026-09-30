@@ -1,5 +1,9 @@
 #include "worker_invocation_orchestration.hpp"
 
+#include "l2_mode_execution.hpp"
+#include "render_subsystem.h"
+#include "worker_classic_render_entry.hpp"
+#include "worker_active_plugin_context.hpp"
 #include "worker_classic_runtime.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_mask_runtime.hpp"
@@ -75,6 +79,8 @@ int parse_l2_modes(int argc, wchar_t** argv, InvocationState& target,
       target.aegp_comp_idle_roundtrip_mode;
   target.params_only_mode = (argc == 4 || argc == 6) &&
       std::wstring(argv[1]) == L"--l2-params-only";
+  target.cleanup_contained_params_only_mode =
+      aexcompat::l2mode::cleanup_contained_params_only_command(argc, argv);
   target.runtime_module_authorization_mode = target.params_only_mode && argc == 6 &&
       std::wstring(argv[4]) == L"--runtime-module-authorization-v1";
   target.external_dependencies_mode = argc == 5 &&
@@ -126,6 +132,7 @@ int parse_l2_modes(int argc, wchar_t** argv, InvocationState& target,
        (target.keydown_code & 0x3fff0000u) != 0 || target.keydown_modifiers > 0xffffu)) return 3;
   target.skip_about_mode = (argc == 4 && std::wstring(argv[1]) == L"--l2-no-about") ||
       target.params_only_mode || target.external_dependencies_mode || target.do_dialog_mode ||
+      target.cleanup_contained_params_only_mode ||
       target.auto_dialog_mode || target.adjust_cursor_mode || target.draw_event_mode ||
       target.click_event_mode || target.drag_event_mode || target.ui_lifecycle_mode ||
       target.ui_idle_mode || target.ui_keydown_mode || target.ui_mouse_exited_mode;
@@ -232,19 +239,6 @@ constexpr int32_t kGetFlattenedSequenceData = 28;
 bool configure_mask_scene(const std::string& scene_id);
 int32_t invoke_sequence_selector(EffectEntry entry, int32_t selector, void* input,
                                  void* output, uint32_t* exception_code = nullptr);
-int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
-                    std::array<std::byte, kOutSize>& output,
-                    const std::string& case_id, int32_t& width, int32_t& height,
-                    int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
-                    bool& guards_intact, const RequestedAssignments* requested = nullptr,
-                    const std::vector<unsigned char>* external_rgba = nullptr,
-                    int32_t external_width = 0, int32_t external_height = 0,
-                    const std::vector<ExternalLayerInput>* external_layers = nullptr,
-                    int32_t external_current_time = 0, int32_t external_time_step = 1,
-                    int32_t external_total_time = 1, uint32_t external_time_scale = 1,
-                    int32_t external_pixel_bytes = 4, bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr);
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                               std::array<std::byte, kOutSize>& output,
                               const std::string& case_id,
@@ -257,20 +251,25 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4,
                               aexcompat::worker_runtime::smart_execution::SessionFrame*
-                                  session = nullptr);
+                                  session = nullptr,
+                              uint32_t advertised_out_flags2 = 0);
 RenderSessionOutcome run_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
+    uint32_t advertised_out_flags, uint32_t advertised_out_flags2,
     const std::vector<ExternalLayerInput>* external_layers,
-    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr);
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr,
+    bool audio_passthrough = false);
 SmartRenderSessionOutcome run_smart_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
-    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers);
+    int32_t pixel_bytes, uint32_t advertised_out_flags,
+    uint32_t advertised_out_flags2,
+    const std::vector<ExternalLayerInput>* external_layers);
 
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
@@ -300,6 +299,9 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
   const int32_t params_error = request.params_error;
   const bool image_render_supported = request.image_render_supported;
   const bool depth_supported = request.depth_supported;
+  const bool session_depth_ok = request.depth_dispatchable;
+  const bool audio_effect_only = request.audio_effect_only;
+  result.dispatch_pixel_bytes = invocation.external_pixel_bytes;
   std::string& case_id = result.case_id;
   std::string& input_hash = result.input_hash;
   std::string& output_hash = result.output_hash;
@@ -471,12 +473,27 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
   } else if (params_error == 0 && image_render_supported && depth_supported && concurrent_render) {
     std::array<int32_t, 2> widths{}, heights{}, rowbytes{};
     std::array<std::string, 2> input_hashes{};
+    const auto* active_string_table = active_plugin::string_table;
+    const HMODULE active_effect_module = active_plugin::effect_module;
     auto run_thread = [&](std::size_t index) {
-      auto thread_input = input;
-      auto thread_output = output;
-      thread_errors[index] = render_once(entry, thread_input, thread_output, "default",
-          widths[index], heights[index], rowbytes[index], input_hashes[index],
-          thread_hashes[index], thread_guards[index], nullptr);
+      active_plugin::with_context(active_string_table, active_effect_module, [&]() {
+        if (request.concurrent_thread_context_probe) {
+          request.concurrent_thread_context_probe();
+          widths[index] = 1;
+          heights[index] = 1;
+          rowbytes[index] = 4;
+          input_hashes[index] = "context-probe";
+          thread_hashes[index] = "context-probe";
+          thread_guards[index] = true;
+          thread_errors[index] = 0;
+          return;
+        }
+        auto thread_input = input;
+        auto thread_output = output;
+        thread_errors[index] = render_once(entry, thread_input, thread_output, "default",
+            widths[index], heights[index], rowbytes[index], input_hashes[index],
+            thread_hashes[index], thread_guards[index], nullptr);
+      });
     };
     std::thread first(run_thread, 0); std::thread second(run_thread, 1);
     first.join(); second.join();
@@ -486,15 +503,28 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     render_error = thread_errors[0] == 0 && thread_errors[1] == 0 &&
         widths[0] == widths[1] && heights[0] == heights[1] && rowbytes[0] == rowbytes[1] &&
         input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
-  } else if (params_error == 0 && image_render_supported && depth_supported &&
+  } else if (params_error == 0 &&
+             // A session hands the plug-in worlds at a depth it advertises
+             // and converts the frame back into the slot, so an
+             // effect that does not advertise the caller's depth renders
+             // here instead of being refused (AE's own behaviour).
+             ((image_render_supported && session_depth_ok) ||
+              audio_effect_only) &&
              invocation.render_session_mode) {
+    // An AUDIO_EFFECT_ONLY plug-in has no video selector to dispatch and no
+    // depth to support; its session runs in passthrough mode, answering every
+    // frame with the input (issue #1048). AE leaves the video of an audio-only
+    // effect untouched, which is the behavior this reproduces. Cluster
+    // sessions carry this as current-plugin state: each authenticated swap
+    // replaces it with the incoming bootstrap's AUDIO_EFFECT_ONLY bit (#1049).
     const auto session_outcome = run_render_session(
         entry, input, output, &invocation.requested_parameters, invocation.external_width,
         invocation.external_height, invocation.external_time_step,
         invocation.external_total_time,
         invocation.external_time_scale, invocation.external_pixel_bytes,
+        request.advertised_out_flags, request.advertised_out_flags2,
         invocation.external_layers.empty() ? nullptr : &invocation.external_layers,
-        request.cluster_swap);
+        request.cluster_swap, audio_effect_only);
     persistent_sequence_setup_error = session_outcome.setup_error;
     persistent_sequence_setdown_error = session_outcome.setdown_error;
     render_width = session_outcome.width;
@@ -507,7 +537,10 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     session_invariant_failure = session_outcome.invariant_failure;
     session_swap_failure = session_outcome.swap_failure;
     render_error = session_outcome.render_error;
+    result.output_coverage = session_outcome.output_coverage;
+    result.dispatch_pixel_bytes = session_outcome.dispatch_pixel_bytes;
   } else if (params_error == 0 && image_render_supported && depth_supported) {
+    aexcompat::render::ClassicFrameOutput frame_output;
     render_error = render_once(entry, input, output, case_id, render_width, render_height,
                                render_rowbytes, input_hash, output_hash, guards_intact,
                                invocation.request_mode ? &invocation.requested_parameters : nullptr,
@@ -521,7 +554,9 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
                                nullptr,
                                invocation.external_current_time, invocation.external_time_step,
                                invocation.external_total_time, invocation.external_time_scale,
-                               invocation.external_pixel_bytes);
+                               invocation.external_pixel_bytes, true, nullptr,
+                               &frame_output);
+    result.output_coverage = frame_output.output_coverage;
   }
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
   return result;
@@ -538,7 +573,9 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
   const int32_t params_error = request.params_error;
   const bool image_render_supported = request.image_render_supported;
   const bool depth_supported = request.depth_supported;
+  const bool session_depth_ok = request.depth_dispatchable;
   const bool smart_render_supported = request.smart_render_supported;
+  result.dispatch_pixel_bytes = invocation.external_pixel_bytes;
   std::string& case_id = result.case_id;
   SmartResult& smart = result.smart;
   bool& lifetime_fault_observed = result.lifetime_fault_observed;
@@ -556,13 +593,14 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
     // (bad params, unsupported depth, no SmartFX support) the loop is never
     // entered; the broker observes the nonzero process exit instead of a
     // hanging session, exactly like the classic session branch.
-    if (params_error == 0 && image_render_supported && depth_supported &&
+    if (params_error == 0 && image_render_supported && session_depth_ok &&
         smart_render_supported) {
       const auto outcome = run_smart_render_session(
           entry, input, output, &invocation.requested_parameters, case_id,
           invocation.external_width, invocation.external_height,
           invocation.external_time_step, invocation.external_total_time,
           invocation.external_time_scale, invocation.external_pixel_bytes,
+          request.advertised_out_flags, request.advertised_out_flags2,
           invocation.external_layers.empty() ? nullptr : &invocation.external_layers);
       smart = outcome.last;
       // The report's guard verdict is the session-level one: a per-frame
@@ -575,6 +613,7 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
       result.session_sequence_setup_error = outcome.session.setup_error;
       result.session_sequence_setdown_error = outcome.session.setdown_error;
       result.session_render_error = outcome.session.render_error;
+      result.dispatch_pixel_bytes = outcome.session.dispatch_pixel_bytes;
     }
   } else {
   smart = params_error == 0 && image_render_supported && depth_supported &&
@@ -588,7 +627,8 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
                           nullptr,
                           invocation.external_current_time, invocation.external_time_step,
                           invocation.external_total_time, invocation.external_time_scale,
-                          invocation.external_pixel_bytes)
+                          invocation.external_pixel_bytes, nullptr,
+                          request.advertised_out_flags2)
       : SmartResult{};
   }
   lifetime_fault_observed = invocation.mask_double_dispose_mode

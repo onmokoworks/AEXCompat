@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 
+#include "worker_pf_progress_info.hpp"
 #include "parameter_animation_transport.hpp"
 #include "render_pixel_transport.hpp"
 #include "render_subsystem.h"
@@ -31,17 +32,16 @@
 namespace aexcompat::l2_detail {
 
 using namespace aexcompat::pf_state_runtime;
-using aexcompat::parameter_animation::AnimationKey;
 using aexcompat::parameter_animation::AnimationValueKind;
 using aexcompat::parameter_animation::ParameterAnimationKey;
 using aexcompat::parameter_animation::ParameterTimeline;
-using aexcompat::parameter_animation::rational_less;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
 using aexcompat::worker_runtime::invoke_entry_seh;
 using aexcompat::worker_runtime::parameters::ParamRecord;
+using aexcompat::worker_runtime::parameters::animation_component_value;
 using EffectEntry = int32_t(__cdecl*)(int32_t, void*, void*, void**, void*, void*);
 
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 std::string sha256_bytes(const unsigned char* data, std::size_t size);
 
 namespace {
@@ -81,42 +81,17 @@ void write_rect(void* destination, int32_t width, int32_t height) {
 
 ParameterAnimationKey evaluate_animation(const ParameterTimeline &timeline,
                                          int32_t time, uint32_t scale) {
-  if (!rational_less(timeline.keys.front().time, timeline.keys.front().scale,
-                     time, scale))
-    return timeline.keys.front();
-  for (std::size_t i = 1; i < timeline.keys.size(); ++i) {
-    const auto &right = timeline.keys[i];
-    if (rational_less(time, scale, right.time, right.scale)) {
-      const auto &left = timeline.keys[i - 1];
-      if (left.hold || left.kind != right.kind ||
-          left.component_count != right.component_count)
-        return left;
-      const long double now = static_cast<long double>(time) / scale,
-                        a = static_cast<long double>(left.time) / left.scale,
-                        b = static_cast<long double>(right.time) / right.scale;
-      const double f = static_cast<double>((now - a) / (b - a));
-      AnimationKey value = left;
-      if (value.kind == AnimationValueKind::Scalar)
-        value.scalar += (right.scalar - value.scalar) * f;
-      else if (value.kind == AnimationValueKind::Color)
-        for (std::size_t c = 0; c < 4; ++c)
-          value.color[c] = static_cast<unsigned char>(
-              std::clamp(std::lround(value.color[c] +
-                                     (right.color[c] - value.color[c]) * f),
-                         0l, 255l));
-      else
-        for (int c = 0; c < value.component_count; ++c)
-          value.components[c] +=
-              (right.components[c] - value.components[c]) * f;
-      return value;
-    }
-  }
-  return timeline.keys.back();
+  return aexcompat::parameter_animation::evaluate_parameter_animation(
+      timeline, time, scale);
 }
 
 bool write_animation_value(std::array<std::byte, kParamSize> &definition,
                            const ParamRecord &param,
                            const ParameterAnimationKey &key) {
+  if (!std::isfinite(key.scalar) ||
+      std::any_of(key.components.begin(), key.components.end(),
+                  [](double value) { return !std::isfinite(value); }))
+    return false;
   if (key.kind == AnimationValueKind::Scalar) {
     if (param.type == 1 || param.type == 4 || param.type == 7) {
       if (!std::isfinite(key.scalar) || std::floor(key.scalar) != key.scalar ||
@@ -146,9 +121,13 @@ bool write_animation_value(std::array<std::byte, kParamSize> &definition,
     for (int component = 0; component < component_count; ++component) {
       if (param.type == 18) {
         write<double>(definition, 56 + component * 8,
-                      key.components[component]);
+                      animation_component_value(param, component,
+                                                key.components[component]));
       } else {
-        const double encoded = key.components[component] * 65536.0;
+        const double encoded =
+            animation_component_value(param, component,
+                                      key.components[component]) *
+            65536.0;
         if (encoded < INT32_MIN || encoded > INT32_MAX)
           return false;
         write<int32_t>(definition, 56 + component * 4,

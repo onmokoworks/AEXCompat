@@ -20,6 +20,7 @@ struct AssemblyHooks {
   void* effect_ui{};
   void* adv_info{};
   void* adv_info3{};
+  void* adv_info3_plus{};
   std::array<void*, 2> drawbot_draw{};
   void* drawbot_new_pen{};
   void* drawbot_new_brush{};
@@ -54,6 +55,9 @@ const void* provide_path_data1(void*);
 const void* provide_duck1(void*);
 const void* provide_effect_ui1(void*);
 const void* provide_adv_app1(void*);
+// AE-private host-presence gate suite (issue #1210): every slot is a
+// diagnosed unsupported stub; Timecode.aex acquires and releases it only.
+const void* provide_ae_timecode_helper1(void*);
 const void* provide_adv_app2(void*);
 const void* provide_drawbot_draw1(void*);
 const void* provide_drawbot_supplier1(void*);
@@ -69,6 +73,7 @@ const void* provide_ansi1(void*);
 const void* provide_ansi2(void*);
 const void* provide_dynamic_stream2(void*);
 const void* provide_aegp_world_suite3(void*);
+const void* provide_aegp_world_suite2(void*);
 const void* provide_layer_render_options1(void*);
 const void* provide_layer_render_options2(void*);
 const void* provide_render_options1(void*);

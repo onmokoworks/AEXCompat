@@ -6,13 +6,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
-COLOR_HEADER = ROOT / "minihost" / "src" / "worker_color_settings_runtime.hpp"
-COLOR_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_runtime.cpp"
-COLOR_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_selftests.cpp"
 MEMBERS = [
     "get_blending_tables", "does_view_have_xform", "xform_working_to_view",
     "get_new_working_space_profile", "get_new_profile_from_icc",
@@ -25,20 +20,18 @@ MEMBERS = [
 ]
 
 
-def source_text():
-    return "\n".join(path.read_text(encoding="utf-8") for path in
-                     (SOURCE, source_owners.SRC / "worker_host_suite_wiring.cpp", COLOR_HEADER, COLOR_SOURCE, COLOR_SELFTEST_SOURCE))
-
-
+# One binary now serves every route (issue #1495); `name` still picks which
+# route a call exercises, it just no longer picks a different executable.
+ROUTE_FOR_NAME = {"render": "classic", "l2": "discovery", "smart": "smart"}
 
 
 def worker(name):
     configured = os.environ.get(f"AEXCOMPAT_{name.upper()}_WORKER")
     candidates = [
         Path(configured) if configured else None,
-        ROOT / "target" / "minihost-timed-layers" / "Release" / f"aex_{name}_worker.exe",
-        ROOT / "target" / "minihost-build-v18" / "Release" / f"aex_{name}_worker.exe",
-        ROOT / "target" / "minihost-build-v18" / f"aex_{name}_worker.exe",
+        ROOT / "target" / "minihost-timed-layers" / "Release" / "aex_worker.exe",
+        ROOT / "target" / "minihost-build-v18" / "Release" / "aex_worker.exe",
+        ROOT / "target" / "minihost-build-v18" / "aex_worker.exe",
     ]
     return next((path for path in candidates if path and path.is_file()), None)
 
@@ -49,9 +42,9 @@ def worker(name):
 
 def test_color_settings_runtime_matrix():
     executable = worker("render")
-    assert executable is not None, "build aex_render_worker before running the focused runtime test"
+    assert executable is not None, "build aex_worker.exe (pwsh -File tools/build-native.ps1) before running the focused runtime test"
     completed = subprocess.run(
-        [str(executable), "--self-test-pf-color-settings-suite6"],
+        [str(executable), "--kind", "classic", "--self-test-pf-color-settings-suite6"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -70,9 +63,12 @@ def test_color_settings_runtime_matrix():
 def test_color_settings_selftest_available_on_l2_and_smart_workers():
     for name in ("l2", "smart"):
         executable = worker(name)
-        assert executable is not None, f"build aex_{name}_worker before running the focused runtime test"
+        assert executable is not None, (
+            f"build aex_worker.exe (pwsh -File tools/build-native.ps1) before "
+            "running the focused runtime test"
+        )
         completed = subprocess.run(
-            [str(executable), "--self-test-pf-color-settings-suite6"],
+            [str(executable), "--kind", ROUTE_FOR_NAME[name], "--self-test-pf-color-settings-suite6"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -87,7 +83,7 @@ def test_generated_linear_icc_with_independent_binary_parser():
     executable = worker("render")
     assert executable is not None
     completed = subprocess.run(
-        [str(executable), "--self-test-pf-color-settings-suite6"],
+        [str(executable), "--kind", "classic", "--self-test-pf-color-settings-suite6"],
         cwd=ROOT, text=True, capture_output=True, timeout=30, check=False,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
@@ -141,7 +137,7 @@ def test_generated_linear_icc_with_independent_binary_parser():
 def test_generated_linear_icc_is_accepted_by_windows_wcs(tmp_path):
     executable = worker("render")
     completed = subprocess.run(
-        [str(executable), "--self-test-pf-color-settings-suite6"],
+        [str(executable), "--kind", "classic", "--self-test-pf-color-settings-suite6"],
         cwd=ROOT, text=True, capture_output=True, timeout=30, check=False,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout

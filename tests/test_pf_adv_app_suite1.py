@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -9,10 +10,9 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
-WORKER = ROOT / "target" / "minihost-build-v18" / "Release" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build-v18" / "Release" / "aex_worker.exe"
 
 
 def _visual_studio_installation() -> Path:
@@ -125,13 +125,79 @@ def test_temp_cleanup_does_not_retry_other_permission_errors():
 
 
 def test_worker_v1_v2_tables_are_independent_non_null_fail_closed_and_balanced():
-    result = subprocess.run([str(WORKER), "--self-test-pf-adv-app-suite"], cwd=ROOT,
+    result = subprocess.run([str(WORKER), "--kind", "classic", "--self-test-pf-adv-app-suite"], cwd=ROOT,
                             check=True, capture_output=True, text=True, timeout=30)
     assert json.loads(result.stdout.strip()) == {
         "pf_adv_app_suite_versions": "passed",
         "v1_slots": 10,
         "v2_slots": 11,
         "independent_identity": True,
+        "suite_leases_balanced": True,
+    }
+
+
+def test_info_text_trace_stops_at_the_first_unterminated_argument():
+    """The extended trace must not read arguments the bounds check skipped.
+
+    Issue #1280 added a per-call ``extended_diag:info_draw_text`` line to the
+    three ``PF_AdvAppSuite`` info-text slots.  The bounds check stops at the
+    first argument with no terminator in reach, and everything after it stays
+    unread: a caller that got one pointer wrong may have got the rest wrong
+    too, so a trace that walked them would fault exactly where the untraced
+    build returns a clean 4.  The self-test hands those later arguments a
+    PAGE_NOACCESS page, which is why this has to run with the trace on - with
+    it off the trace never looks at them and the check would pass either way.
+
+    The self-test surviving is carried by ``check=True``; the line assertions
+    are what keeps that from going vacuous if the trace ever stops being
+    emitted.
+    """
+    environment = dict(os.environ, AEXCOMPAT_EXTENDED_DIAG="1")
+    result = subprocess.run([str(WORKER), "--kind", "classic", "--self-test-pf-adv-app-suite"], cwd=ROOT,
+                            check=True, capture_output=True, text=True, timeout=30,
+                            env=environment)
+    assert json.loads(result.stdout.strip())["pf_adv_app_suite_versions"] == "passed"
+    traced = [line for line in result.stderr.splitlines()
+              if "extended_diag:info_draw_text" in line]
+    assert traced, result.stderr
+    # Rejection at the head of the list, and in the middle of it: the second
+    # is what distinguishes stopping at the first bad argument from skipping
+    # it and carrying on into the poisoned page.
+    for expected in (
+        "slot=PF_InfoDrawText args=unterminated,unread -> 4",
+        "slot=PF_InfoDrawText3 args=unterminated,unread,unread -> 4",
+        "slot=PF_InfoDrawText3Plus args=unterminated,unread,unread,unread,unread -> 4",
+        "slot=PF_InfoDrawText3 args=2,unterminated,unread -> 4",
+        "slot=PF_InfoDrawText3Plus args=2,null,unterminated,unread,unread -> 4",
+    ):
+        assert f"extended_diag:info_draw_text {expected}" in traced, result.stderr
+    # The optional-line contract the same change fixed, seen from the trace:
+    # a present first line and an absent second one succeed, which is
+    # Particle_Playground's shape.  The length is whatever the self-test's own
+    # literal is, so match any length rather than a number that lives in
+    # another file - but require a length, so an all-null call does not
+    # satisfy this on its own.
+    assert any(re.fullmatch(
+        r"extended_diag:info_draw_text slot=PF_InfoDrawText args=\d+,null -> 0",
+        line) for line in traced), result.stderr
+
+
+def test_pf_pixel_format_v1_v2_catalog_and_world_callbacks_are_behavioral():
+    result = subprocess.run(
+        [str(WORKER), "--kind", "classic", "--self-test-pf-pixel-format-suite"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert json.loads(result.stdout.strip()) == {
+        "pf_pixel_format_suite_versions": "passed",
+        "v1_slots": 8,
+        "v2_slots": 2,
+        "independent_identity": True,
+        "shared_registration_slots": True,
+        "world_lifecycle_balanced": True,
         "suite_leases_balanced": True,
     }
 

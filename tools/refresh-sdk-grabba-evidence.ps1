@@ -7,12 +7,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $SdkRoot = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $SdkRoot
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$worker = Join-Path $repoRoot 'target\minihost-build\aex_l2_worker.exe'
+$worker = Join-Path $repoRoot 'target\minihost-build\aex_worker.exe'
 $harness = Join-Path $repoRoot 'broker\target\debug\aexcompat-harness.exe'
 $grabba = Join-Path $repoRoot 'target\sdk-fixtures\grabba\Grabba.aex'
 $reportRoot = Join-Path $repoRoot 'target\final-integration-evidence'
 $evidencePath = Join-Path $repoRoot 'analysis\SDK_GRABBA_AEGP_RUNTIME_RESULT_2026-07-16.json'
-$cmake = & "$PSScriptRoot\resolve-build-cmake.ps1" '' 'Ninja'
 if (-not $env:INCLUDE) {
     $vsRoot = & "$PSScriptRoot\resolve-msvc-tools.ps1" ''
     $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
@@ -46,8 +45,10 @@ function Invoke-Checked([string]$Command, [string[]]$Arguments) {
 }
 
 if (-not $SkipBuild) {
-    Invoke-Checked $cmake @('-S', (Join-Path $repoRoot 'minihost'), '-B', (Join-Path $repoRoot 'target\minihost-build'), '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release')
-    Invoke-Checked $cmake @('--build', (Join-Path $repoRoot 'target\minihost-build'), '--target', 'aex_l2_worker')
+    # The discovery route this evidence exercises is now one `aex_worker`
+    # link target shared with classic/smart, not its own `aex_l2_worker` (#1495).
+    & (Join-Path $PSScriptRoot 'build-native.ps1') -Target aex_worker
+    if ($LASTEXITCODE -ne 0) { throw 'aex_worker build failed' }
 }
 $workerIdentity = Get-Identity $worker
 if (-not $SkipBuild) {

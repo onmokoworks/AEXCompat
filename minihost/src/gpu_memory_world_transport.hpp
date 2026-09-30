@@ -19,9 +19,11 @@ void configure_host_world_fallback(HostNewWorld new_world,
                                    HostOwnsWorld owns_world,
                                    HostRecognizesSmartWorld recognizes_smart_world);
 
-bool begin_cuda_context(uint32_t active_device_index);
+bool begin_cuda_context(uint32_t active_device_index,
+                        void* borrowed_context = nullptr);
 bool end_cuda_context();
-bool begin_backend_context(int32_t framework, uint32_t active_device_index);
+bool begin_backend_context(int32_t framework, uint32_t active_device_index,
+                           void* borrowed_context = nullptr);
 bool end_backend_context(int32_t framework);
 void* active_cuda_context();
 uint32_t active_gpu_device_index();

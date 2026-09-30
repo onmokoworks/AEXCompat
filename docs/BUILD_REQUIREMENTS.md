@@ -11,7 +11,7 @@
 | Apple Silicon correctness CLI (`guest/`) | arm64 worker / local ad-hoc DMG | Apple Silicon Mac + Rust/Cargo |
 | Rust broker / harness (`broker/`) | `aexcompat-harness.exe` (GUI) ほか | Rust + MSVC Build Tools + Windows SDK |
 | Python テスト (`tests/`) | - | uv (`pyproject.toml` + `uv.lock`、一部は下記 SDK / VS も) |
-| C++ worker (`minihost/`) | `aex_l2_worker.exe` / `aex_render_worker.exe` ほか | CMake + MSVC (After Effects SDK 不要) |
+| C++ worker (`minihost/`) | `aex_worker.exe` (discovery/classic/smart を `--kind` で切替) | CMake + MSVC (After Effects SDK 不要) |
 | probe AEX (`instruments/`) | `pf_*_probe.aex` ほか | CMake + Visual Studio + After Effects SDK |
 | SDK sample fixture (v143 固定分: Grabba / Supervisor 等) | `Grabba.aex` ほか | v143 toolset + MSBuild + After Effects SDK (Supervisor は VS 2022 Build Tools 既定パス固定) |
 | AE oracle 取得 (`tools/*.jsx`) | 参照画像 / trace | After Effects 25.2 実機 |
@@ -47,6 +47,28 @@ unsupported suite evidence、欠落/不正PNGはfail-closedで非0終了する�
 - Windows 10 / 11 x64
 - Git
 
+## Windows guest workspace tests
+
+The Windows guest workspace tests exercise the Unicorn correctness backend and
+require LLVM's `libclang.dll` because `unicorn-engine-sys` invokes bindgen at
+build time. Install LLVM x64 and set `LIBCLANG_PATH` to the directory containing
+both `libclang.dll` and `clang.exe`:
+
+```powershell
+$env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
+cargo test --manifest-path guest\Cargo.toml --workspace --locked
+```
+
+CI does not hardcode that path. It takes the first directory holding both
+`clang.exe` and `libclang.dll`, records the version it loaded, and fails before
+Cargo when no candidate qualifies (#1457), so a runner-image update cannot
+silently change what bindgen links against. LLVM/Clang 20.1.0 is verified on a
+maintainer workstation; the 22.1.1 recorded here before 2026-08-20 was the
+retired self-hosted runner's. The test count is intentionally not pinned because
+it grows with compatibility work.
+The macOS `native-carrier` path remains a separate Apple Silicon/Rosetta build
+and is not compiled by this Windows gate.
+
 ## Rust broker / harness
 
 - Rust toolchain (rustup / cargo)。workspace は edition 2024 (Rust 1.85 以降)。
@@ -60,11 +82,10 @@ cargo build -p aexcompat-harness --release
 cargo test --workspace
 ```
 
-When a broker API changes, check both AviUtl2 bridge crates and their examples
+When a broker API changes, check the AviUtl2 multifilter bridge and its examples
 as well as the broker workspace:
 
 ```powershell
-cargo check --manifest-path bridges\aviutl2\Cargo.toml --all-targets --locked
 cargo check --manifest-path bridges\aviutl2-multifilter\Cargo.toml --all-targets --locked
 ```
 
@@ -104,7 +125,21 @@ uv run python -m pytest -q
     実行時に自己計算するテスト。フレッシュビルドで成立するため CI でも実行される
     (「CI (GitHub Actions)」の節を参照)。ローカルでは minihost の Ninja ビルド、
     worker の複製配置、probe ビルド、入力 fixture 生成 (workflow
-    `ae-sdk-tests.yml` の該当 step と同じ手順) の後にフラグを付けて実行する。
+    `windows-clean-clone.yml` のSDK利用時stepと同じ手順) の後にフラグを付けて実行する。
+    加えて `abi_layout_probe` が要る (issue #981)。`tools/build-*.ps1` は
+    `target\pf-*-probe-build` を configure するので、この probe は別に
+    ビルドする:
+    ```powershell
+    cmake -S instruments -B target\instruments-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+    cmake --build target\instruments-build --target abi_layout_probe
+    ```
+    これを飛ばすと `test_abi_layout_observation_matches_probe.py` が
+    `abi_layout_probe is not built` で skip され、`analysis/` の ABI 観測を
+    実 SDK に繋ぎ止めている唯一の照合が走らないまま 0 failed になる。
+    **`tools\refresh-aex-abi-layout-evidence.ps1` で代用しないこと**: あれは
+    probe をビルドしたうえで観測 JSON を**上書き**するので、直後にこの
+    テストを回しても「今書いた文書」と「それを書いた probe」を比べるだけに
+    なる。観測を更新する意図があるときだけ使う。
   - `tests/local_artifact_tests.txt` (`--run-local-artifact-tests`): 記録済み
     evidence (sha256 / receipt) をローカル現物と照合する machine-bound テスト。
     evidence を採取したビルド状態でのみ成立するため CI 対象外。対象のビルド /
@@ -114,8 +149,7 @@ uv run python -m pytest -q
 
 harness からの AEX inspect / render は `target\minihost-build\` 直下の worker
 実行ファイルを参照する。clone 直後に inspect / render まで進むには、harness の
-ビルドに加えて minihost を single-config generator (Ninja) でビルドし、さらに
-後述の **worker trust** を自分のビルドに合わせて更新する必要がある。
+ビルドに加えて minihost を single-config generator (Ninja) でビルドする必要がある。
 After Effects SDK は不要 (include は Windows SDK と C++ 標準ライブラリのみ)。
 
 ```powershell
@@ -127,8 +161,9 @@ cmake --build target\minihost-build
 生成物の確認:
 
 ```powershell
-Get-ChildItem target\minihost-build\aex_*.exe
-# aex_l2_worker.exe / aex_render_worker.exe / aex_smart_worker.exe ほか
+Get-ChildItem target\minihost-build\aex_worker.exe
+# 単一の実行ファイル。discovery/classic/smart は起動時の
+# `--kind discovery|classic|smart` で切り替える (ほかに selftest 用の実行ファイルも生成される)
 ```
 
 ### ヘッダ依存追跡の検証 (issue #657)
@@ -157,19 +192,18 @@ broker / harness と gate スクリプト (`tools/refresh-sdk-grabba-evidence.ps
 はこのパス直下の exe を前提にしているため、multi-config generator
 (Visual Studio) で `Release\` 配下に出すと参照されない点に注意。
 
-### worker trust (第三者環境での注意)
+### worker admission と実行時provenance
 
-harness の secure dispatch 経路 (image dispatch) は、dispatch 時点で
-`target\minihost-build\` のローカルビルド worker をハッシュして admission し、
-実行される staged copy がそのバイトと一致することを保証する。凍結 trust
-定数は撤去済みなので (`docs/EVIDENCE_POLICY_2026-07-18.md` section 3 の
-amendment を参照)、第三者環境でも worker をビルドすればそのまま該当経路が
-動く。定数の再生成や手動でのハッシュ合わせは不要になった。
+harness の image dispatch は、dispatch 時点で`target\minihost-build\`の
+ローカルビルドworkerをハッシュしてadmissionし、実行されるcopyがそのバイトと
+一致することを確認する。凍結trust定数は撤去済みなので
+(`docs/EVIDENCE_POLICY_2026-07-18.md` section 3)、第三者環境でもworkerを
+ビルドすれば動き、定数の再生成や手動のhash合わせは不要である。
 
-- receipt 駆動の経路 (L2 / render / smart / SmartFX render request) は従来
-  どおり approval receipt に記録された worker identity と照合し、不一致は
-  fail-closed のまま。
-- worker が未ビルド・空・読めない場合、image dispatch は起動前に失敗する。
+L2 / render / smart / SmartFX render requestを含むplug-in実行経路は、選択時の
+identityをlaunch拒否条件にしない。実際に読み込んだplug-in bytesとmoduleを
+毎回recordし、差分は再discovery・再検証・evidence不成立として扱う。workerが
+未ビルド・空・読めない場合は、必要な実行ファイルが無いため起動前に失敗する。
 
 ## After Effects SDK
 
@@ -198,6 +232,12 @@ amendment を参照)、第三者環境でも worker をビルドすればその�
   VS 2026 固定の既定値ではないため、VS 2022 のみの環境でもそのまま動く。
   `-Generator` 引数で明示上書きもできる
   (`tools/refresh-runtime-evidence.ps1` は実際に VS 2022 generator を渡している)。
+  環境変数 `AEXCOMPAT_CMAKE_GENERATOR` でも上書きできる (#1510)。CI はこれで
+  `Ninja Multi-Config` を指定し、`AEXCOMPAT_COMPILE_CACHE=sccache` と併せて
+  コンパイルを sccache に通している。Ninja 系 generator は `-A` を受け付けず、
+  cl / link / rc / mt を PATH から解決する (vcvars 済みの環境が要る)。この
+  generator 差分の configure 引数は `tools/resolve-cmake-configure-args.ps1`
+  が組み立て、CI の job 環境は `tools/export-msvc-dev-env.ps1` が作る。
 - CMake の最低要件は各 `CMakeLists.txt` の `cmake_minimum_required` で 3.20。
   ただし `Visual Studio 18 2026` generator を使う場合は、その generator を
   認識するより新しい CMake が必要 (bundled 4.3.1 で検証。3.24 は
@@ -273,39 +313,36 @@ powershell -File tools\build-pf-adv-time-probe.ps1 -Generator "Visual Studio 17 
 
 ## CI (GitHub Actions)
 
-CI は 2 本の workflow に分かれる。いずれも push (main) / pull request ごとに
-windows runner で走る。
+`.github/workflows/windows-clean-clone.yml` の1本が push (main)、pull request、
+scheduleでWindows runner上を走り、SDKを取得できるかで検証範囲を切り替える。
 
-- `.github/workflows/windows-clean-clone.yml`: source-only 検証。SDK なしの
-  clean clone 相当で `cargo check` / `cargo test` (hosted runner の restricted
-  token では起動できない 2 テストを `--skip`) と `uv run python -m pytest -q`
-  を実行する。
-- `.github/workflows/ae-sdk-tests.yml`: SDK 込み検証 + built artifact 検証。
-  - private release `ci-sdk-ae25.2` の asset
-    `AfterEffectsSDK-ae25.2-win.zip` を `GITHUB_TOKEN` でダウンロード・展開し、
-    `AFTER_EFFECTS_SDK_ROOT` を設定する (Gyroflow が CI で Adobe SDK zip を
-    取得するのと同じ方式)。zip の SHA-256 は workflow に pin されており、
-    不一致は fail-closed。SDK 世代を更新するときは新しい asset を release に
-    上げ、workflow の `SDK_RELEASE_TAG` / `SDK_ASSET` / `SDK_SHA256` を
-    合わせて更新する。
-  - minihost workers を Ninja でビルドして `target\minihost-build` に置き、
-    multi-config 時代の固定パス (`minihost-build-v18\[Release]` /
-    `minihost-timed-layers\Release` / `minihost-build\Release`) へ複製する。
-    probe .aex 群を `tools/build-*.ps1` でビルドし、probe 入力 fixture
-    (37x23 raw RGBA) を決定論的に生成する。
-  - `uv run python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
-    --validate-local-artifact-manifest` を実行する。SDK 依存テスト
-    (`tests/sdk_required_tests.txt` と `AFTER_EFFECTS_SDK_ROOT` を inline skip
-    で見るテスト) に加え、`tests/built_artifact_tests.txt` の built artifact
-    テストが実行対象になる。実行後、pytest 出力に SDK 起因 skip
-    (`set AFTER_EFFECTS_SDK_ROOT`) や成果物不在 skip (`is not built` /
-    `are not present`) が残っていれば fail させ、skip されたまま green になる
-    silent success を防ぐ。
+- 全runで`cargo build --workspace --locked`、Cargo workspace/bridgeのtest、
+  minihost workerのNinja build、`uv run python -m pytest -q`を行う。
+- fork PRなどSDK配布元へアクセスできない実行ではSDK依存stepをskipし、
+  上記のsource-only範囲を検証する。
+- private repositoryにおける同一repositoryのPR、main push、scheduleでは、
+  非公開のR2バケット `aexcompat-ci` からhash-pinnedな
+  `sdk/AfterEffectsSDK-ae25.2-win.zip` を
+  取得する (#1445)。取得成功時だけprobe AEXとSDK fixtureを追加buildし、
+  pytestへ`--run-sdk-tests`と`--run-built-artifact-tests`を追加する。
+  SDK/成果物不足によるskipが残ればworkflowをfailさせ、silent successを防ぐ。
+- 取得は `tools/fetch-r2-object.ps1` が行う。バケットは非公開のままで、
+  read-onlyのR2 APIトークンで署名 (AWS SigV4) したGetObjectを投げる。
+  資格情報はrepository secretsの `R2_SDK_ENDPOINT` /
+  `R2_SDK_ACCESS_KEY_ID` / `R2_SDK_SECRET_ACCESS_KEY` から渡す。fork PRは
+  secretsを受け取れないので、以前のprivate release時代と同じアクセス境界に
+  なる。hashが `SDK_SHA256` と一致しない限り出力ファイルは作られない。
+- SDK世代を更新するときは、新しいzipをバケットへ置いてからworkflow内の
+  `SDK_OBJECT_KEY`、`SDK_ASSET`、`SDK_SHA256` を同時に更新する。書き込みは
+  CIのread-onlyトークンではできないので、write権限のあるトークンを持った手元
+  から行う (例: rcloneのR2 remoteで
+  `rclone copyto <zip> r2:aexcompat-ci/sdk/<name>.zip`)。
 
 local artifact テスト (`--run-local-artifact-tests`、machine-bound evidence
 照合)、prebuilt テスト、AE 実機 oracle、GPU runtime 検証は CI の対象外で、
-従来どおりローカル gate で実行する。SDK asset は private repo の collaborator 限定 asset であり、SDK の
-公開再配布ではない (リポジトリへ SDK を複製しない方針は維持)。
+従来どおりローカル gate で実行する。SDK zip を置いたバケットは非公開で、資格情報を
+持つ経路からしか読めない。SDK の公開再配布ではない (リポジトリへ SDK を複製しない
+方針、およびバケットをpublic accessにしない方針は維持)。
 
 Python は CI・ローカルとも `.python-version` (3.12) に従い uv が解決する
 (OpenEXR の win_amd64 wheel が 3.14 に無く、ソースビルドで約 2.5 分かかる
@@ -345,6 +382,16 @@ Python は CI・ローカルとも `.python-version` (3.12) に従い uv が解�
 
 Per-component prerequisites on Windows x64:
 
+- **Guest workspace tests**: Rust plus an x64 LLVM installation whose `bin`
+  directory contains `libclang.dll` and `clang.exe`. Set `LIBCLANG_PATH` to
+  that directory, then run
+  `cargo test --manifest-path guest\Cargo.toml --workspace --locked`. LLVM
+  20.1.0 is verified on a maintainer workstation; the 22.1.1 recorded here
+  before 2026-08-20 was the retired self-hosted runner's. CI does not hardcode
+  this directory: it takes the first one holding both `clang.exe` and
+  `libclang.dll`, then records the version it loaded (#1457), so a runner-image
+  update cannot silently change what bindgen links against. This Windows gate
+  covers the Unicorn backend; the macOS-only native carrier is a separate check.
 - **Rust broker / harness**: Rust toolchain plus MSVC Build Tools and the
   Windows SDK (the default `x86_64-pc-windows-msvc` target needs the MSVC
   linker). No After Effects SDK.
@@ -365,14 +412,16 @@ Per-component prerequisites on Windows x64:
   with self-computed expectations, so CI runs it too) and
   `tests/local_artifact_tests.txt` (`--run-local-artifact-tests`;
   machine-bound evidence comparison, local-only).
-- **C++ workers (minihost)**: build with the Ninja generator into
-  `target\minihost-build\` so the harness and gate scripts find the four
-  `aex_*_worker.exe` binaries directly under that directory. No SDK needed.
-  The harness's image dispatch admits the locally built workers at dispatch
-  time (frozen trust constants were retired; see
-  `docs/EVIDENCE_POLICY_2026-07-18.md` section 3), so third-party builds work
-  as soon as the workers exist. Receipt-driven routes still verify workers
-  against the identity recorded in their approval receipts.
+- **C++ worker (minihost)**: build with the Ninja generator into
+  `target\minihost-build\` so the harness and gate scripts find
+  `aex_worker.exe` directly under that directory. It is a single executable
+  that picks its discovery/classic/smart route at run time from a leading
+  `--kind discovery|classic|smart` pair. No SDK needed. The harness's image
+  dispatch admits the locally built worker at dispatch time (frozen trust
+  constants were retired; see `docs/EVIDENCE_POLICY_2026-07-18.md` section 3),
+  so third-party builds work as soon as the worker exists. Plug-in identity is
+  recorded from the bytes that actually load; a selection-time mismatch
+  triggers rediscovery or evidence rejection rather than refusing launch.
 - **After Effects SDK**: set `AFTER_EFFECTS_SDK_ROOT` to a directory that
   directly contains `Examples\`. The verified configuration uses the AE 25.2
   SDK generation. Provenance receipts record the verified SDK header file
@@ -402,21 +451,17 @@ Per-component prerequisites on Windows x64:
   `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools` with no
   override parameter, so that fixture needs VS 2022 Build Tools with v143 at
   that default location.
-- **CI**: two Windows workflows run per push / pull request.
-  `windows-clean-clone.yml` covers source-only verification (`cargo check`,
-  `cargo test` minus two launch tests the hosted runner's restricted token
-  cannot execute, and `uv run python -m pytest -q` without the SDK).
-  `ae-sdk-tests.yml` covers SDK-backed and built-artifact verification: it
-  downloads the hash-pinned SDK zip from the private release
-  `ci-sdk-ae25.2` with `GITHUB_TOKEN`, sets `AFTER_EFFECTS_SDK_ROOT`,
-  builds the minihost workers (Ninja) and the probe AEX set, mirrors the
-  workers into the multi-config layout paths, generates the deterministic
-  probe input fixture, runs
-  `uv run python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests
-  --validate-local-artifact-manifest`, and fails if any test was skipped
-  for a missing SDK or missing built artifact. Local-artifact
-  (machine-bound evidence), prebuilt, AE oracle, and GPU gates stay
-  local-only.
+- **CI**: one conditional Windows workflow, `windows-clean-clone.yml`, runs
+  for main pushes, pull requests, and schedules. Fork PRs, which receive no
+  repository secrets and therefore cannot reach the SDK, still build/test the
+  Cargo workspaces and bridges, build the minihost workers, and run
+  source-only pytest. Same-repository runs while the repository is private
+  receive the secrets and additionally fetch the
+  hash-pinned AE 25.2 SDK from the private R2 bucket via
+  `tools/fetch-r2-object.ps1`, build the probe AEX and SDK fixtures, and add
+  `--run-sdk-tests` and `--run-built-artifact-tests` to pytest; missing-SDK or
+  missing-artifact skips then fail the workflow. Local-artifact (machine-bound
+  evidence), prebuilt, AE oracle, and GPU gates stay local-only.
 - **Optional**: a matching GPU runtime for GPU render checks, and After
   Effects 25.2 itself for oracle capture only. Building the GPU SDK fixtures
   (`tools/build-sdk-invert-*.ps1`) additionally needs build-time inputs

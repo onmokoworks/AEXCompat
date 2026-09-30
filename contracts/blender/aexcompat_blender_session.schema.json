@@ -7,10 +7,104 @@
   "properties": {
     "schema_version": {"const": 1},
     "response_kind": {"const": "aexcompat_blender_session_result"},
-    "status": {"enum": ["identity_only", "fixture_transform", "unsupported", "error"]},
-    "failure_class": {"enum": ["aex_not_loaded", "request_validation_error", "empty_input"]},
-    "aex_render_performed": {"const": false},
-    "host_success": {"const": false},
+    "render_path": {"enum": ["classic", "smart"]},
+    "parameter_override": {
+      "type": "object",
+      "required": ["slot", "kind", "value", "description_sha256", "description_plugin_sha256", "description_files_unchanged", "description_matches_render_plugin"],
+      "properties": {
+        "slot": {"type": "integer", "minimum": 1},
+        "kind": {"enum": ["integer", "float", "angle"]},
+        "value": {"type": "number"},
+        "description_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_plugin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_files_unchanged": {"type": ["boolean", "null"]},
+        "description_matches_render_plugin": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "parameter_overrides": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"oneOf": [
+        {"$ref": "#/properties/parameter_override"},
+        {"$ref": "#/$defs/color_override"},
+        {"$ref": "#/$defs/point_override"}
+      ]}
+    },
+    "parameter_catalog": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"oneOf": [{
+        "type": "object",
+        "required": ["slot", "name", "kind", "minimum", "maximum", "value"],
+        "properties": {
+          "slot": {"type": "integer", "minimum": 1},
+          "name": {"type": "string"},
+          "group_path": {"$ref": "#/$defs/group_path"},
+          "kind": {"enum": ["integer", "float", "angle"]},
+          "minimum": {"type": "number"},
+          "maximum": {"type": "number"},
+          "value": {"type": "number"},
+          "choices": {
+            "type": "array", "minItems": 2, "maxItems": 16,
+            "items": {
+              "type": "object", "required": ["value", "label"],
+              "properties": {
+                "value": {"type": "integer"},
+                "label": {"type": "string", "minLength": 1}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "allOf": [{"if": {"required": ["choices"]}, "then": {"properties": {"kind": {"const": "integer"}}}}],
+        "additionalProperties": false
+      }, {
+        "type": "object",
+        "required": ["slot", "name", "kind", "color"],
+        "properties": {
+          "slot": {"type": "integer", "minimum": 1},
+          "name": {"type": "string"},
+          "group_path": {"$ref": "#/$defs/group_path"},
+          "kind": {"const": "color"},
+          "color": {"$ref": "#/$defs/argb8"}
+        },
+        "additionalProperties": false
+      }, {
+        "type": "object",
+        "required": ["slot", "name", "kind", "components"],
+        "properties": {
+          "slot": {"type": "integer", "minimum": 1},
+          "name": {"type": "string"},
+          "group_path": {"$ref": "#/$defs/group_path"},
+          "kind": {"const": "point"},
+          "components": {"$ref": "#/$defs/point2"}
+        },
+        "additionalProperties": false
+      }]}
+    },
+    "description_identity": {
+      "type": "object",
+      "required": ["description_sha256", "description_plugin_sha256", "description_files_unchanged", "description_matches_source", "source_sha256_after", "harness_sha256", "harness_sha256_after", "guest_worker_sha256", "guest_worker_sha256_after", "files_unchanged"],
+      "properties": {
+        "description_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_plugin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_files_unchanged": {"type": ["boolean", "null"]},
+        "description_matches_source": {"type": "boolean"},
+        "source_sha256_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "harness_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "harness_sha256_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "guest_worker_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "guest_worker_sha256_after": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "files_unchanged": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "status": {"enum": ["identity_only", "fixture_transform", "rendered", "described", "unsupported", "error"]},
+    "failure_class": {"enum": ["none", "aex_not_loaded", "request_validation_error", "empty_input", "unsupported_platform", "worker_unavailable", "worker_crash", "worker_failure", "session_timeout", "artifact_mismatch", "parameter_description_error"]},
+    "aex_render_performed": {"type": "boolean"},
+    "host_success": {"type": "boolean"},
     "worker_identity": {
       "type": "object",
       "required": ["name", "version", "source_sha256"],
@@ -21,11 +115,31 @@
       },
       "additionalProperties": false
     },
+    "render_identity": {
+      "type": "object",
+      "required": ["harness_sha256", "guest_worker_sha256", "post_run", "files_unchanged"],
+      "properties": {
+        "harness_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "guest_worker_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "post_run": {
+          "type": "object",
+          "required": ["plugin_sha256", "harness_sha256", "guest_worker_sha256"],
+          "properties": {
+            "plugin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "harness_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "guest_worker_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          },
+          "additionalProperties": false
+        },
+        "files_unchanged": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "plugin_identity": {
       "type": "object",
       "required": ["state", "source_relative_path", "sha256"],
       "properties": {
-        "state": {"const": "not_loaded"},
+        "state": {"enum": ["not_loaded", "loaded"]},
         "source_relative_path": {"type": ["string", "null"]},
         "sha256": {"type": ["string", "null"]}
       },
@@ -48,7 +162,103 @@
     "error": {"type": "string"}
   },
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "rendered"}}, "required": ["status"]},
+      "then": {
+        "required": ["render_identity", "frame", "input", "output", "diff"],
+        "not": {"required": ["parameter_override", "parameter_overrides"]},
+        "properties": {
+          "failure_class": {"const": "none"},
+          "aex_render_performed": {"const": true},
+          "host_success": {"const": true},
+          "plugin_identity": {
+            "properties": {
+              "state": {"const": "loaded"},
+              "source_relative_path": {"type": "string"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      },
+      "else": {"properties": {"aex_render_performed": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "described"}}, "required": ["status"]},
+      "then": {
+        "required": ["parameter_catalog", "description_identity"],
+        "not": {"anyOf": [
+          {"required": ["frame"]}, {"required": ["input"]}, {"required": ["output"]},
+          {"required": ["diff"]}, {"required": ["render_identity"]},
+          {"required": ["parameter_override"]}, {"required": ["parameter_overrides"]}
+        ]},
+        "properties": {
+          "failure_class": {"const": "none"},
+          "aex_render_performed": {"const": false},
+          "host_success": {"const": true},
+          "plugin_identity": {
+            "properties": {
+              "state": {"const": "loaded"},
+              "source_relative_path": {"type": "string"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"enum": ["identity_only", "fixture_transform", "unsupported", "error"]}}, "required": ["status"]},
+      "then": {
+        "not": {"required": ["parameter_overrides"]},
+        "properties": {
+          "host_success": {"const": false},
+          "plugin_identity": {"properties": {"state": {"const": "not_loaded"}}}
+        }
+      }
+    }
+  ],
   "$defs": {
+    "group_path": {
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": {"type": "string", "minLength": 1, "maxLength": 128,
+        "pattern": "^[^\\s\\u0000](?:[^\\u0000]*[^\\s\\u0000])?(?![\\s\\S])"}
+    },
+    "argb8": {
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "items": {"type": "integer", "minimum": 0, "maximum": 255}
+    },
+    "point2": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "items": {"type": "number", "minimum": -32768, "maximum": 32768}
+    },
+    "point_override": {
+      "type": "object",
+      "required": ["slot", "kind", "components", "description_sha256", "description_plugin_sha256", "description_files_unchanged", "description_matches_render_plugin"],
+      "properties": {
+        "slot": {"type": "integer", "minimum": 1},
+        "kind": {"const": "point"},
+        "components": {"$ref": "#/$defs/point2"},
+        "description_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_plugin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_files_unchanged": {"type": ["boolean", "null"]},
+        "description_matches_render_plugin": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "color_override": {
+      "type": "object",
+      "required": ["slot", "kind", "color", "description_sha256", "description_plugin_sha256", "description_files_unchanged", "description_matches_render_plugin"],
+      "properties": {
+        "slot": {"type": "integer", "minimum": 1},
+        "kind": {"const": "color"},
+        "color": {"$ref": "#/$defs/argb8"},
+        "description_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_plugin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "description_files_unchanged": {"type": ["boolean", "null"]},
+        "description_matches_render_plugin": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "artifact": {
       "type": "object",
       "required": ["sha256", "bytes"],

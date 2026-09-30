@@ -53,8 +53,8 @@ lifecycle boundary, not a confidentiality sandbox.
 | address space | not lowered: `RLIMIT_RSS` is not enforceable on tested macOS and a useful `RLIMIT_AS` cannot be safely imposed after framework mappings |
 | open files | `RLIMIT_NOFILE=32` |
 | output file | `RLIMIT_FSIZE=256 MiB` |
-| stdout/stderr | broker readers, 256 KiB / 128 KiB |
-| resident protocol | 64 KiB per frame in the worker and 1 MiB cumulative in the broker |
+| stdout/stderr | one-shot/non-protocol stdout 256 KiB; stderr 128 KiB; resident stdout uses the protocol limits below |
+| resident protocol | 64 KiB per request, 512 KiB per response, and 1 MiB cumulative responses per session |
 | staged artifacts/temp directory | at most 4 files and 512 MiB total; setup narrows this to 2 files |
 | child processes | public `proc_listchildpids`, limit 0; any child invalidates and terminates the group |
 | deadlines | native setup 2s; resident startup 10s; render 30s; close 2s |

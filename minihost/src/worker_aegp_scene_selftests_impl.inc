@@ -6,6 +6,8 @@ bool verify_legacy_effect_compat_suites() {
   const void* helper_suite = nullptr;
   bool ok = acquire_suite("AEGP Comp Suite", 21, &comp_suite) == 0 &&
       comp_suite == g_aegp_comp_suite10.data() &&
+      g_aegp_comp_suite10[1] ==
+          reinterpret_cast<void*>(&aegp_get_item_from_comp) &&
       acquire_suite("AEGP PF Interface Suite", 1, &interface_suite) == 0 &&
       interface_suite == &g_pf_interface_suite &&
       acquire_suite("AE Plugin Helper Suite", 1, &helper_suite) == 0 &&
@@ -21,6 +23,16 @@ bool verify_legacy_effect_compat_suites() {
       aegp_get_comp_bg_color(&g_aegp_comp_item, &color) != 0 &&
       std::memcmp(&color, &color_sentinel, sizeof(color)) == 0 &&
       aegp_get_comp_bg_color(&g_aegp_comp, nullptr) != 0;
+
+  using GetItemFromComp = int32_t(__cdecl*)(void*, void**);
+  auto get_item_from_comp =
+      reinterpret_cast<GetItemFromComp>(g_aegp_comp_suite10[1]);
+  void* item = nullptr;
+  ok = ok && get_item_from_comp(&g_aegp_comp, &item) == 0 &&
+      item == &g_aegp_comp_item;
+  void* item_sentinel = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && get_item_from_comp(&g_layer, &item_sentinel) != 0 &&
+      item_sentinel == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
 
   AegpTime time{77, 99};
   const AegpTime time_sentinel = time;
@@ -146,7 +158,7 @@ bool verify_aegp_resizer_3d_chain() {
   const auto saved_in_points = g_aegp_layer_in_points;
   const auto saved_durations = g_aegp_layer_durations;
   g_aegp_active_camera_layer_index = 2;
-  g_aegp_layer_in_points[2] = {0, 30};
+  g_aegp_layer_in_points[2] = {30, 30};
   g_aegp_layer_durations[2] = {300, 30};
   g_full_resolution_width = 1920;
   g_full_resolution_height = 1080;
@@ -154,6 +166,8 @@ bool verify_aegp_resizer_3d_chain() {
 
   bool ok = acquire_suite("AEGP Layer Suite", 14, &layer_suite) == 0 &&
       layer_suite == g_aegp_layer_suite8.data() &&
+      g_aegp_layer_suite8[14] ==
+          reinterpret_cast<void*>(&aegp_get_layer_current_time) &&
       g_aegp_layer_suite8[38] == reinterpret_cast<void*>(&aegp_get_layer_to_world_xform) &&
       acquire_suite("AEGP Stream Suite", 7, &stream_suite) == 0 &&
       stream_suite == g_aegp_stream_suite2.data() &&
@@ -165,6 +179,27 @@ bool verify_aegp_resizer_3d_chain() {
       item_suite == &g_aegp_legacy_item_suite6 &&
       reinterpret_cast<void**>(&g_aegp_legacy_item_suite6)[16] ==
           reinterpret_cast<void*>(&aegp_get_item_dimensions);
+  using GetLayerCurrentTime =
+      int32_t(__cdecl*)(void*, int16_t, AegpTime*);
+  auto get_layer_current_time =
+      reinterpret_cast<GetLayerCurrentTime>(g_aegp_layer_suite8[14]);
+  const int32_t saved_scene_frame = g_aegp_scene_frame;
+  g_aegp_scene_frame = 45;
+  AegpTime current_time{-1, 1};
+  ok = ok && get_layer_current_time(&g_aegp_layers[2], 1, &current_time) == 0 &&
+      current_time.value == 45 && current_time.scale == 30;
+  current_time = {-1, 1};
+  ok = ok && get_layer_current_time(&g_aegp_layers[2], 0, &current_time) == 0 &&
+      current_time.value == 15 && current_time.scale == 30;
+  const AegpTime current_time_sentinel{77, 99};
+  current_time = current_time_sentinel;
+  ok = ok && get_layer_current_time(&g_aegp_comp, 1, &current_time) != 0 &&
+      current_time.value == current_time_sentinel.value &&
+      current_time.scale == current_time_sentinel.scale &&
+      get_layer_current_time(&g_aegp_layers[2], 2, &current_time) != 0 &&
+      current_time.value == current_time_sentinel.value &&
+      current_time.scale == current_time_sentinel.scale;
+  g_aegp_scene_frame = saved_scene_frame;
   AegpMatrix4 matrix{};
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0;
   for (std::size_t row = 0; row < 4; ++row) {

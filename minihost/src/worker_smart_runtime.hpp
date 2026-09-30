@@ -1,5 +1,6 @@
 #pragma once
 
+#include "worker_world_safety.hpp"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -28,6 +29,18 @@ struct PixelCheckout {
   void* view_world{};
   std::array<int32_t, 4> rect{-1, -1, -1, -1};
   bool checked_out{};
+  // PreRender answered this one as an empty layer parameter, so it has no
+  // pixels by construction and `checkout_pixels` hands back the host's own
+  // empty world rather than treating the absent world as a fault (issue #898).
+  bool empty_layer_param{};
+  // Distinguishes an unused PreRender registration from a pixel lease that
+  // was already checked back in. The former may be retired once without ever
+  // asking for pixels; the latter must still reject a duplicate checkin.
+  bool ever_checked_out{};
+  // A failed pixel request is not an unused registration. Its later checkin
+  // remains a failure instead of laundering the earlier missing/empty-world
+  // refusal into a successful cleanup.
+  bool checkout_attempted{};
 };
 
 struct State {
@@ -50,6 +63,36 @@ struct State {
   uint32_t current_time_scale{1};
   uint32_t rejected_temporal_checkouts{};
   int32_t secondary_layer_slot{6};
+  // How many parameters the plug-in declared, which bounds what
+  // `checkout_layer` may name: the SDK defines its index as "0 = input, 1..n =
+  // param". A parameter inside that range that this host has no world for is
+  // answered with an empty rect (issue #898); anything outside it is still an
+  // unknown layer.
+  int32_t param_count{};
+  uint32_t empty_layer_param_checkouts{};
+  // The layer handed back for one of those: the session's own geometry with
+  // nothing in it. A layer parameter with no layer is transparent, not absent -
+  // that is what an unset matte or an unconnected second view composites as -
+  // so the answer is a real PF_EffectWorld the plug-in can measure, sample and
+  // copy, whose every pixel is zero.
+  //
+  // Allocated by the dispatch through the host's own new-world path, so the
+  // world registry owns it and every host callback resolves it. The two shapes
+  // tried before this each broke a real plug-in: a null pointer behind
+  // PF_Err_NONE, which 3DGlasses answers PF_Err_BAD_CALLBACK_PARAM to, and a
+  // 120-byte zeroed world describing a 0x0 layer, which DeepGlow2 answers
+  // PF_Err_INTERNAL_STRUCT_DAMAGED to. A hand-built full-size world fails too,
+  // for a host reason rather than a plug-in one: `PF_COPY` resolves its
+  // arguments through the registry and refuses a world the registry does not
+  // own (issues #958, #962).
+  aexcompat::world_safety::EffectWorldStorage empty_layer_world{};
+  bool empty_layer_world_live{};
+  /// Allocates `empty_layer_world` through the host's own new-world path and
+  /// returns whether it did. Installed by the dispatch, which is the layer that
+  /// may reach the world registry; called on the first checkout that needs the
+  /// layer and not before, so a frame whose plug-in never asks for one pays
+  /// neither the allocation nor its share of the registry's budget.
+  bool (*allocate_empty_layer)(void* world_storage){};
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t pixel_aspect_numerator{1};
@@ -64,6 +107,11 @@ struct State {
   std::array<int32_t, 4> map_checkout_result_rect{-1, -1, -1, -1};
   uint32_t malformed_checkout_requests{};
   uint32_t empty_checkout_pixel_denials{};
+  // Kept apart from the denials above: that counter means "the plug-in asked
+  // for pixels it was told did not exist and was refused", and folding the
+  // empty-layer-parameter checkouts into it would make a report reader unable
+  // to tell a refusal from the answer this host now gives.
+  uint32_t empty_layer_param_pixel_checkouts{};
   bool gpu_render_dispatched{};
 
   void clear_transient();
@@ -86,6 +134,8 @@ struct Snapshot {
   std::array<int32_t, 4> map_checkout_result_rect{-1, -1, -1, -1};
   uint32_t malformed_checkout_requests{};
   uint32_t empty_checkout_pixel_denials{};
+  uint32_t empty_layer_param_checkouts{};
+  uint32_t empty_layer_param_pixel_checkouts{};
   bool pixel_checkouts_balanced{true};
 };
 

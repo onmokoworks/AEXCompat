@@ -1,7 +1,11 @@
 #![cfg(windows)]
 
 use aexcompat_broker::gpu_platform_collector::{
-    collect_gpu_platform_identity, enumerate_gpu_adapters, privacy_bounded_identity_report,
+    collect_active_driver_module_identity, collect_gpu_platform_identity, enumerate_gpu_adapters,
+    privacy_bounded_identity_report,
+};
+use aexcompat_broker::pnp_opencl_runtime_collector::{
+    PnpOpenClArchitecture, PnpOpenClClassification, collect_pnp_opencl_runtime_candidates,
 };
 use aexcompat_broker::runtime_module_policy::{
     RuntimeBackend, parse_and_validate_for_platform, validate_platform_binding,
@@ -120,6 +124,56 @@ fn windows_real_gpu_collector_binds_policy_and_rejects_driver_change() {
     let mut changed = identity.clone();
     changed.driver_catalog_sha256[0] ^= 0xff;
     assert!(validate_platform_binding(&policy, &changed).is_err());
+}
+
+#[test]
+#[ignore = "requires a present GPU and an installed native OpenCL driver catalog member"]
+fn windows_real_opencl_module_is_bound_to_active_driver_catalog() {
+    let adapters = enumerate_gpu_adapters().unwrap();
+    let collection = collect_pnp_opencl_runtime_candidates();
+    let candidates = collection.candidates.iter().filter(|candidate| {
+        candidate.architecture == PnpOpenClArchitecture::Native
+            && candidate.classification == PnpOpenClClassification::IdentityVerified
+            && candidate.loader_selected
+    });
+    let mut accepted = None;
+    for candidate in candidates {
+        let Some(path) = candidate.path.as_deref() else {
+            continue;
+        };
+        for adapter in &adapters {
+            if let Ok((platform, module)) = collect_active_driver_module_identity(
+                adapter.adapter_luid,
+                RuntimeBackend::Opencl,
+                path,
+            ) {
+                accepted = Some((platform, module));
+                break;
+            }
+        }
+    }
+    let (platform, module) =
+        accepted.expect("no native OpenCL module belongs to an active GPU catalog");
+    assert_eq!(
+        module.signing_catalog_sha256,
+        Some(platform.driver_catalog_sha256)
+    );
+    assert_eq!(
+        module.authenticode,
+        aexcompat_broker::runtime_module_identity::AuthenticodeEvidence::Catalog
+    );
+    assert!(module.size > 0);
+
+    let unrelated =
+        PathBuf::from(std::env::var_os("WINDIR").unwrap()).join("System32\\appverifUI.dll");
+    assert!(
+        collect_active_driver_module_identity(
+            platform.adapter_luid,
+            RuntimeBackend::Opencl,
+            &unrelated,
+        )
+        .is_err()
+    );
 }
 
 fn hex(bytes: &[u8]) -> String {

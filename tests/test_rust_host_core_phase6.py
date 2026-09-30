@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import subprocess
 import tempfile
 import unittest
@@ -8,16 +7,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENE = ROOT / "broker/crates/host-core/src/scene.rs"
-FFI = ROOT / "broker/crates/host-core-ffi/src/lib.rs"
-ABI_HEADER = ROOT / "broker/crates/broker/include/aexcompat_host_core_abi.h"
-ADAPTER = ROOT / "broker/crates/broker/include/aexcompat_host_core_adapter.hpp"
-NATIVE = (
-    ROOT
-    / "tests/native/"
-    "rust_host_core_scene_owner_relation_dual_run_selftest.cpp"
-)
-DOC = ROOT / "docs/RUST_HOST_CORE_MIGRATION_2026-07-31.md"
 STANDALONE_GATE = (
     ROOT / "tools/test-rust-host-core-scene-owner-relation.ps1"
 )
@@ -77,22 +66,6 @@ class RustHostCorePhase6Tests(unittest.TestCase):
             self.assertGreaterEqual(report["checks"], 25)
             self.assertIs(report["cpp_registry"], True)
             self.assertIs(report["balanced"], True)
-
-
-    def test_document_limits_phase6_to_the_owner_edge(self):
-        document = " ".join(DOC.read_text(encoding="utf-8").split())
-        for marker in (
-            "Phase 6 scene object owner-edge gate (Issue #630)",
-            "48-byte",
-            "object",
-            "owner",
-            "C++ registry remains authoritative",
-            "Production worker routing remains unchanged",
-            "Issue #98",
-            "does not require After Effects",
-            "does not compare pixels",
-        ):
-            self.assertIn(marker, document)
 
 
 if __name__ == "__main__":

@@ -47,21 +47,46 @@ fn schedule_iterate_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), S
             + pending.y as u64 * pending.source_rowbytes
             + pending.x as u64 * pending.pixel_bytes
     };
+    let scheduled_pixels = if !pending.zero_outside_source {
+        pending.right - pending.x
+    } else if input != HOST_ZERO_PIXEL {
+        pending.right.min(pending.source_width) - pending.x
+    } else if pending.source_data == 0
+        || pending.y < 0
+        || pending.y >= pending.source_height
+        || pending.x >= pending.source_width
+    {
+        pending.right - pending.x
+    } else {
+        pending.right.min(0) - pending.x
+    };
+    if scheduled_pixels <= 0 {
+        return Err(format!(
+            "{} scheduled an empty pixel batch",
+            pending.callback_name
+        ));
+    }
     let callback_rsp = pending
         .caller_rsp
-        .checked_sub(0x30)
+        .checked_sub(0x60)
         .ok_or_else(|| format!("{} callback stack underflow", pending.callback_name))?;
+    let mut callback_frame = [0u8; 0x50];
+    callback_frame[..8].copy_from_slice(&pending.continuation.to_le_bytes());
+    callback_frame[0x28..0x30].copy_from_slice(&output.to_le_bytes());
+    callback_frame[0x30..0x38].copy_from_slice(&pending.pixel_function.to_le_bytes());
+    callback_frame[0x38..0x40].copy_from_slice(&(scheduled_pixels as u64).to_le_bytes());
+    callback_frame[0x40..0x48].copy_from_slice(
+        &(if input == HOST_ZERO_PIXEL {
+            0
+        } else {
+            pending.pixel_bytes
+        })
+        .to_le_bytes(),
+    );
+    callback_frame[0x48..0x50].copy_from_slice(&pending.pixel_bytes.to_le_bytes());
     unicorn
-        .mem_write(callback_rsp, &pending.continuation.to_le_bytes())
-        .map_err(|error| format!("{} callback return address: {error}", pending.callback_name))?;
-    unicorn
-        .mem_write(callback_rsp + 0x28, &output.to_le_bytes())
-        .map_err(|error| {
-            format!(
-                "{} callback output argument: {error}",
-                pending.callback_name
-            )
-        })?;
+        .mem_write(callback_rsp, &callback_frame)
+        .map_err(|error| format!("{} callback frame: {error}", pending.callback_name))?;
     for (register, value) in [
         (RegisterX86::RSP, callback_rsp),
         (RegisterX86::RCX, pending.refcon),
@@ -74,7 +99,14 @@ fn schedule_iterate_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), S
             pending.y.wrapping_add(pending.origin_y) as u32 as u64,
         ),
         (RegisterX86::R9, input),
-        (RegisterX86::RIP, pending.pixel_function),
+        (
+            RegisterX86::RIP,
+            if scheduled_pixels > 1 {
+                HOST_ITERATE_ROW_TRAMPOLINE
+            } else {
+                pending.pixel_function
+            },
+        ),
     ] {
         unicorn
             .reg_write(register, value)
@@ -86,6 +118,12 @@ fn schedule_iterate_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), S
         .as_mut()
         .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?
         .callback_phase = IterateCallbackPhase::Pixel;
+    unicorn
+        .get_data_mut()
+        .pending_iterate
+        .as_mut()
+        .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?
+        .scheduled_pixels = scheduled_pixels;
     Ok(())
 }
 
@@ -98,35 +136,26 @@ fn schedule_iterate_progress(unicorn: &mut Unicorn<'_, GuestState>) -> Result<()
         .ok_or_else(|| "PF iterate progress has no pending call".to_string())?;
     let rows = i64::from(pending.bottom - pending.top);
     let completed_rows = i64::from(pending.y - pending.top);
-    let reverse_progress = pending.progress_final < pending.progress_base;
-    let progress_span = if reverse_progress {
-        i64::from(pending.progress_base) - i64::from(pending.progress_final)
-    } else {
-        i64::from(pending.progress_final) - i64::from(pending.progress_base)
-    };
-    if progress_span > i64::from(i32::MAX) {
+    let Some((current, total)) = crate::compose_iterate_progress(
+        pending.progress_base,
+        pending.progress_final,
+        completed_rows as i32,
+        rows as i32,
+    )
+    .map_err(|()| format!("{} progress span exceeds i32", pending.callback_name))?
+    else {
         return Err(format!(
-            "{} progress span exceeds i32",
+            "{} progress callback scheduled without a positive total",
             pending.callback_name
         ));
-    }
-    let current = if reverse_progress {
-        progress_span * completed_rows / rows
-    } else {
-        i64::from(pending.progress_base) + progress_span * completed_rows / rows
-    };
-    let total = if reverse_progress {
-        progress_span
-    } else {
-        i64::from(pending.progress_final)
     };
     schedule_iterate_host_callback(
         unicorn,
         &pending,
         pending.progress_function,
         pending.effect_ref,
-        current as i32 as u32 as u64,
-        total as i32 as u32 as u64,
+        current as u32 as u64,
+        total as u32 as u64,
         IterateCallbackPhase::Progress,
     )
 }
@@ -213,6 +242,16 @@ fn emulate_iterate8_origin(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
 
 fn emulate_iterate16(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     emulate_iterate_common(unicorn, false, 8, HOST_ITERATE16_CONTINUE, "Iterate16");
+}
+
+fn emulate_iterate_float(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    emulate_iterate_common(
+        unicorn,
+        false,
+        16,
+        HOST_ITERATE_FLOAT_CONTINUE,
+        "IterateFloat",
+    );
 }
 
 fn emulate_iterate_common(
@@ -423,6 +462,7 @@ fn emulate_iterate_common(
             continuation,
             callback_name,
             callback_phase: IterateCallbackPhase::Pixel,
+            scheduled_pixels: 0,
             abort_function,
             progress_function,
             effect_ref,
@@ -439,67 +479,78 @@ fn emulate_iterate_common(
 }
 
 fn continue_iterate(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
-    let result =
-        (|| {
-            let callback_error = unicorn
-                .reg_read(RegisterX86::RAX)
-                .map_err(|error| format!("PF iterate callback return: {error}"))?;
-            if callback_error as u32 != 0 {
-                return finish_iterate(unicorn, callback_error as u32 as u64);
-            }
-            let phase = unicorn
-                .get_data()
-                .pending_iterate
-                .as_ref()
-                .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?
-                .callback_phase;
-            match phase {
-                IterateCallbackPhase::Pixel => {
-                    let row_completed =
-                        {
-                            let pending =
-                                unicorn.get_data_mut().pending_iterate.as_mut().ok_or_else(
-                                    || "PF iterate continuation has no pending call".to_string(),
-                                )?;
-                            pending.x += 1;
-                            if pending.x >= pending.right {
-                                pending.x = pending.left;
-                                pending.y += 1;
-                                true
-                            } else {
-                                false
-                            }
-                        };
-                    let pending =
-                        unicorn.get_data().pending_iterate.as_ref().ok_or_else(|| {
-                            "PF iterate continuation has no pending call".to_string()
-                        })?;
-                    if row_completed && pending.progress_function != 0 {
-                        schedule_iterate_progress(unicorn)
-                    } else if pending.y >= pending.bottom {
-                        finish_iterate(unicorn, 0)
-                    } else if row_completed && pending.abort_function != 0 {
-                        schedule_iterate_abort(unicorn)
+    let result = (|| {
+        let callback_error = unicorn
+            .reg_read(RegisterX86::RAX)
+            .map_err(|error| format!("PF iterate callback return: {error}"))?;
+        if callback_error as u32 != 0 {
+            return finish_iterate(unicorn, callback_error as u32 as u64);
+        }
+        let phase = unicorn
+            .get_data()
+            .pending_iterate
+            .as_ref()
+            .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?
+            .callback_phase;
+        match phase {
+            IterateCallbackPhase::Pixel => {
+                let row_completed = {
+                    let pending = unicorn
+                        .get_data_mut()
+                        .pending_iterate
+                        .as_mut()
+                        .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?;
+                    pending.x += pending.scheduled_pixels;
+                    if pending.x >= pending.right {
+                        pending.x = pending.left;
+                        pending.y += 1;
+                        true
                     } else {
-                        schedule_iterate_pixel(unicorn)
+                        false
                     }
+                };
+                let pending = unicorn
+                    .get_data()
+                    .pending_iterate
+                    .as_ref()
+                    .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?;
+                let progress_is_reportable = row_completed
+                    && pending.progress_function != 0
+                    && crate::compose_iterate_progress(
+                        pending.progress_base,
+                        pending.progress_final,
+                        pending.y - pending.top,
+                        pending.bottom - pending.top,
+                    )
+                    .map_err(|()| format!("{} progress span exceeds i32", pending.callback_name))?
+                    .is_some();
+                if progress_is_reportable {
+                    schedule_iterate_progress(unicorn)
+                } else if pending.y >= pending.bottom {
+                    finish_iterate(unicorn, 0)
+                } else if row_completed && pending.abort_function != 0 {
+                    schedule_iterate_abort(unicorn)
+                } else {
+                    schedule_iterate_pixel(unicorn)
                 }
-                IterateCallbackPhase::Progress => {
-                    let pending =
-                        unicorn.get_data().pending_iterate.as_ref().ok_or_else(|| {
-                            "PF iterate continuation has no pending call".to_string()
-                        })?;
-                    if pending.y < pending.bottom && pending.abort_function != 0 {
-                        schedule_iterate_abort(unicorn)
-                    } else if pending.y >= pending.bottom {
-                        finish_iterate(unicorn, 0)
-                    } else {
-                        schedule_iterate_pixel(unicorn)
-                    }
-                }
-                IterateCallbackPhase::Abort => schedule_iterate_pixel(unicorn),
             }
-        })();
+            IterateCallbackPhase::Progress => {
+                let pending = unicorn
+                    .get_data()
+                    .pending_iterate
+                    .as_ref()
+                    .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?;
+                if pending.y < pending.bottom && pending.abort_function != 0 {
+                    schedule_iterate_abort(unicorn)
+                } else if pending.y >= pending.bottom {
+                    finish_iterate(unicorn, 0)
+                } else {
+                    schedule_iterate_pixel(unicorn)
+                }
+            }
+            IterateCallbackPhase::Abort => schedule_iterate_pixel(unicorn),
+        }
+    })();
     if let Err(error) = result {
         unicorn.get_data_mut().callback_error = Some(error);
         let _ = unicorn.emu_stop();
@@ -537,6 +588,26 @@ fn install_iterate8_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
             bytes[slot * 8..slot * 8 + 8].copy_from_slice(&stub.to_le_bytes());
         }
         uc("write PF Iterate8 Suite", unicorn.mem_write(table, &bytes))?;
+    }
+    Ok(())
+}
+
+fn install_typed_iterate_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+    for (name, table, callback) in [
+        ("PF iterate16 Suite", HOST_ITERATE16_SUITE, HOST_ITERATE16),
+        (
+            "PF iterateFloat Suite",
+            HOST_ITERATE_FLOAT_SUITE,
+            HOST_ITERATE_FLOAT,
+        ),
+    ] {
+        let expected = typed_iterate_suite_table_address(name, 1)
+            .expect("known typed PF iterate Suite version");
+        debug_assert_eq!(table, expected);
+        uc(
+            "write typed PF iterate Suite",
+            unicorn.mem_write(table, &callback.to_le_bytes()),
+        )?;
     }
     Ok(())
 }
@@ -766,6 +837,287 @@ fn emulate_ansi_numeric_callback(unicorn: &mut Unicorn<'_, GuestState>, address:
     };
 }
 
+fn install_persistent_data_suite_v3(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), GuestError> {
+    let mut table = [0u8; 18 * 8];
+    for (slot, address) in HOST_PERSISTENT_DATA_CALLBACKS_V3.into_iter().enumerate() {
+        table[slot * 8..slot * 8 + 8].copy_from_slice(&address.to_le_bytes());
+        uc(
+            "write AEGP Persistent Data v3 callback",
+            unicorn.mem_write(address, &[0xc3]),
+        )?;
+        uc(
+            "install AEGP Persistent Data v3 callback",
+            unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+                if slot == 0 {
+                    emulate_get_application_blob(unicorn);
+                    return;
+                }
+                if slot == 3 {
+                    emulate_persistent_does_key_exist(unicorn);
+                    return;
+                }
+                if slot == 13 {
+                    emulate_persistent_set_string(unicorn);
+                    return;
+                }
+                if slot == 14 {
+                    emulate_persistent_set_long(unicorn);
+                    return;
+                }
+                let state = unicorn.get_data_mut();
+                record_named_unsupported_suite_call(
+                    &mut state.unsupported_suite_calls,
+                    &mut state.dropped_unsupported_suite_calls,
+                    "AEGP Persistent Data Suite",
+                    3,
+                    slot,
+                );
+                let _ = unicorn.reg_write(RegisterX86::RAX, 3);
+            }),
+        )?;
+    }
+    uc(
+        "write AEGP Persistent Data Suite v3 table",
+        unicorn.mem_write(HOST_PERSISTENT_DATA_SUITE_V3, &table),
+    )?;
+    Ok(())
+}
+
+fn emulate_get_application_blob(unicorn: &mut Unicorn<'_, GuestState>) {
+    const A_ERR_PARAMETER: u64 = 3;
+    let output = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let writable =
+        output != 0 && guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false);
+    if !writable
+        || unicorn
+            .mem_write(output, &HOST_PERSISTENT_BLOB_TOKEN.to_le_bytes())
+            .is_err()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    unicorn.get_data_mut().persistent_blob_active = true;
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn emulate_persistent_does_key_exist(unicorn: &mut Unicorn<'_, GuestState>) {
+    const A_ERR_PARAMETER: u64 = 3;
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let section = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let key = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R9).unwrap_or_default();
+    let section = read_crt_stdio_c_string(unicorn, section, 4096, "persistent section");
+    let key = read_crt_stdio_c_string(unicorn, key, 4096, "persistent key");
+    let valid = unicorn.get_data().persistent_blob_active
+        && handle == HOST_PERSISTENT_BLOB_TOKEN
+        && section.is_ok()
+        && key.is_ok()
+        && output != 0
+        && guest_range_has_permission(unicorn, output, 1, Prot::WRITE).unwrap_or(false);
+    if !valid {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let identity = (section.unwrap(), key.unwrap());
+    let present = unicorn
+        .get_data()
+        .persistent_strings
+        .contains_key(&identity)
+        || unicorn.get_data().persistent_longs.contains_key(&identity);
+    if unicorn.mem_write(output, &[u8::from(present)]).is_err() {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn emulate_persistent_set_string(unicorn: &mut Unicorn<'_, GuestState>) {
+    const A_ERR_PARAMETER: u64 = 3;
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let section = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let key = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let value = unicorn.reg_read(RegisterX86::R9).unwrap_or_default();
+    if !unicorn.get_data().persistent_blob_active || handle != HOST_PERSISTENT_BLOB_TOKEN {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let fields = (
+        read_crt_stdio_c_string(unicorn, section, 4096, "persistent section"),
+        read_crt_stdio_c_string(unicorn, key, 4096, "persistent key"),
+        read_crt_stdio_c_string(unicorn, value, 65536, "persistent value"),
+    );
+    match fields {
+        (Ok(section), Ok(key), Ok(value)) => {
+            let state = unicorn.get_data_mut();
+            state
+                .persistent_longs
+                .remove(&(section.clone(), key.clone()));
+            state.persistent_strings.insert((section, key), value);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        _ => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        }
+    }
+}
+
+fn emulate_persistent_set_long(unicorn: &mut Unicorn<'_, GuestState>) {
+    const A_ERR_PARAMETER: u64 = 3;
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let section = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let key = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let value = unicorn.reg_read(RegisterX86::R9).unwrap_or_default() as u32 as i32;
+    if !unicorn.get_data().persistent_blob_active || handle != HOST_PERSISTENT_BLOB_TOKEN {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let fields = (
+        read_crt_stdio_c_string(unicorn, section, 4096, "persistent section"),
+        read_crt_stdio_c_string(unicorn, key, 4096, "persistent key"),
+    );
+    match fields {
+        (Ok(section), Ok(key)) => {
+            let state = unicorn.get_data_mut();
+            state
+                .persistent_strings
+                .remove(&(section.clone(), key.clone()));
+            state.persistent_longs.insert((section, key), value);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        _ => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        }
+    }
+}
+
+fn install_pf_app_suite_v6(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+    let mut table = [0u8; 11 * 8];
+    for (slot, address) in HOST_PF_APP_CALLBACKS_V6.into_iter().enumerate() {
+        table[slot * 8..slot * 8 + 8].copy_from_slice(&address.to_le_bytes());
+        uc(
+            "write PF AE App Suite v6 callback",
+            unicorn.mem_write(address, &[0xc3]),
+        )?;
+        uc(
+            "install PF AE App Suite v6 callback",
+            unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+                emulate_pf_app_callback_v6(unicorn, slot);
+            }),
+        )?;
+    }
+    uc(
+        "write PF AE App Suite v6 table",
+        unicorn.mem_write(HOST_PF_APP_SUITE_V6, &table),
+    )?;
+    Ok(())
+}
+
+fn emulate_pf_app_callback_v6(unicorn: &mut Unicorn<'_, GuestState>, slot: usize) {
+    const PF_ERR_BAD_CALLBACK_PARAM: u64 = 4;
+    let output = match slot {
+        0 | 5 => unicorn.reg_read(RegisterX86::RCX).unwrap_or_default(),
+        1 => unicorn.reg_read(RegisterX86::RDX).unwrap_or_default(),
+        _ => {
+            let state = unicorn.get_data_mut();
+            record_named_unsupported_suite_call(
+                &mut state.unsupported_suite_calls,
+                &mut state.dropped_unsupported_suite_calls,
+                "PF AE App Suite",
+                6,
+                slot,
+            );
+            let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+            return;
+        }
+    };
+    let value: Vec<u8> = match slot {
+        0 => [0x3030u16; 3]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+        1 => {
+            let color_type = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default() as i16;
+            if color_type < 0 || (color_type > 127 && !(1000..=1004).contains(&color_type)) {
+                let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+                return;
+            }
+            let channel = 0x2020u16 + (color_type as u16 & 7) * 0x0808;
+            [channel; 3]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        }
+        5 => vec![1],
+        _ => unreachable!("unsupported slots return above"),
+    };
+    let writable = output != 0
+        && guest_range_has_permission(unicorn, output, value.len() as u64, Prot::WRITE)
+            .unwrap_or(false);
+    let result = if writable {
+        unicorn.mem_write(output, &value).is_ok()
+    } else {
+        false
+    };
+    let _ = unicorn.reg_write(
+        RegisterX86::RAX,
+        if result { 0 } else { PF_ERR_BAD_CALLBACK_PARAM },
+    );
+}
+
+fn install_effect_ui_suite_v1(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+    uc(
+        "write PF Effect UI Suite v1",
+        unicorn.mem_write(
+            HOST_EFFECT_UI_SUITE_V1,
+            &HOST_SET_OPTIONS_BUTTON_NAME.to_le_bytes(),
+        ),
+    )?;
+    uc(
+        "write PF SetOptionsButtonName callback",
+        unicorn.mem_write(HOST_SET_OPTIONS_BUTTON_NAME, &[0xc3]),
+    )?;
+    uc(
+        "install PF SetOptionsButtonName callback",
+        unicorn.add_code_hook(
+            HOST_SET_OPTIONS_BUTTON_NAME,
+            HOST_SET_OPTIONS_BUTTON_NAME,
+            emulate_set_options_button_name,
+        ),
+    )?;
+    Ok(())
+}
+
+fn emulate_set_options_button_name(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    const PF_ERR_BAD_CALLBACK_PARAM: u64 = 4;
+    let effect_ref = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let name = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    if effect_ref != 1 || name == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+        return;
+    }
+    let mut bytes = Vec::new();
+    for offset in 0..256u64 {
+        let Some(address) = name.checked_add(offset) else {
+            let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+            return;
+        };
+        let mut byte = [0u8; 1];
+        if unicorn.mem_read(address, &mut byte).is_err() {
+            let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+            return;
+        }
+        if byte[0] == 0 {
+            unicorn.get_data_mut().options_button_name = Some(bytes);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            return;
+        }
+        bytes.push(byte[0]);
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+}
+
 fn install_pf_ansi_suite_v2(unicorn: &mut Unicorn<'static, GuestState>) -> Result<(), GuestError> {
     for address in [
         HOST_PF_ANSI_ATAN,
@@ -943,31 +1295,52 @@ fn is_msvc_i32_throw_info(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) ->
     unicorn.mem_read(type_name + 16, &mut name).is_ok() && name == *b".H\0"
 }
 
-fn msvc_throw_type_name(
-    unicorn: &Unicorn<'_, GuestState>,
-    throw_info: u64,
-) -> Option<String> {
+fn msvc_throw_type_name(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) -> Option<String> {
     const MAX_TYPE_NAME_BYTES: u64 = 128;
 
-    let (image_start, image_end) = unicorn.get_data().image_region?;
-    if throw_info < image_start || throw_info.checked_add(16)? > image_end {
+    let state = unicorn.get_data();
+    let image_start = guest_module_from_address(state, throw_info)?;
+    let image_end = if state.image_region?.0 == image_start {
+        state.image_region?.1
+    } else {
+        state
+            .loaded_libraries
+            .values()
+            .find(|library| library.base == image_start)?
+            .end
+    };
+    let rva_address = |rva: u32, size: u64| {
+        let address = image_start.checked_add(u64::from(rva))?;
+        if address.checked_add(size)? > image_end
+            || !guest_range_has_permission(unicorn, address, size, Prot::READ).ok()?
+        {
+            return None;
+        }
+        Some(address)
+    };
+    if throw_info < image_start
+        || throw_info.checked_add(16)? > image_end
+        || !guest_range_has_permission(unicorn, throw_info, 16, Prot::READ).ok()?
+    {
         return None;
     }
     let catchable_array_rva = read_guest_u32(unicorn, throw_info.checked_add(12)?)?;
-    let catchable_array = image_rva_address(unicorn, catchable_array_rva, 8)?;
+    let catchable_array = rva_address(catchable_array_rva, 8)?;
     let catchable_count = read_guest_u32(unicorn, catchable_array)?;
     if catchable_count == 0 || catchable_count > 32 {
         return None;
     }
     let catchable_type_rva = read_guest_u32(unicorn, catchable_array.checked_add(4)?)?;
-    let catchable_type = image_rva_address(unicorn, catchable_type_rva, 28)?;
+    let catchable_type = rva_address(catchable_type_rva, 28)?;
     let type_descriptor_rva = read_guest_u32(unicorn, catchable_type.checked_add(4)?)?;
-    let type_descriptor = image_rva_address(unicorn, type_descriptor_rva, 17)?;
+    let type_descriptor = rva_address(type_descriptor_rva, 17)?;
     let name_start = type_descriptor.checked_add(16)?;
     let mut bytes = Vec::new();
     for offset in 0..MAX_TYPE_NAME_BYTES {
         let address = name_start.checked_add(offset)?;
-        if address >= image_end {
+        if address >= image_end
+            || !guest_range_has_permission(unicorn, address, 1, Prot::READ).ok()?
+        {
             return None;
         }
         let byte = unicorn.mem_read_as_vec(address, 1).ok()?[0];
@@ -986,10 +1359,7 @@ fn msvc_throw_type_name(
     None
 }
 
-fn read_msvc_x64_string(
-    unicorn: &Unicorn<'_, GuestState>,
-    object: u64,
-) -> Option<String> {
+fn read_msvc_x64_string(unicorn: &Unicorn<'_, GuestState>, object: u64) -> Option<String> {
     const SSO_CAPACITY: u64 = 15;
     const MAX_STRING_BYTES: u64 = 512;
     const MAX_CAPACITY: u64 = 1 << 20;
@@ -1012,7 +1382,9 @@ fn read_msvc_x64_string(
         u64::from_le_bytes(bytes[..8].try_into().ok()?)
     };
     let byte_count = size.checked_add(1)?;
-    let text = unicorn.mem_read_as_vec(data, usize::try_from(byte_count).ok()?).ok()?;
+    let text = unicorn
+        .mem_read_as_vec(data, usize::try_from(byte_count).ok()?)
+        .ok()?;
     if text.last() != Some(&0) {
         return None;
     }
@@ -1060,6 +1432,9 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     if try_emulate_selector_abort(unicorn) {
         return;
     }
+    if try_emulate_ocio_missing_file_rule(unicorn) {
+        return;
+    }
     // `_CxxThrowException` is noreturn. Returning through the import stub for
     // an exception we cannot faithfully dispatch would execute compiler
     // unreachable code and can corrupt selector/session state. Keep all
@@ -1075,14 +1450,186 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
             .reg_read(RegisterX86::RCX)
             .ok()
             .and_then(|exception| cv_exception_message(unicorn, exception, &throw_type));
+        let std_message = unicorn
+            .reg_read(RegisterX86::RCX)
+            .ok()
+            .and_then(|exception| {
+                if !throw_type.contains("OpenColorIO") {
+                    return None;
+                }
+                let bytes = unicorn.mem_read_as_vec(exception + 8, 8).ok()?;
+                let what = u64::from_le_bytes(bytes.try_into().ok()?);
+                let message =
+                    read_crt_stdio_c_string(unicorn, what, 4096, "exception what").ok()?;
+                Some(String::from_utf8_lossy(&message).into_owned())
+            });
         let message_suffix = cv_message
+            .or(std_message)
             .map(|message| format!(", cv_message={message}"))
             .unwrap_or_default();
+        let caller = unicorn
+            .reg_read(RegisterX86::RSP)
+            .ok()
+            .and_then(|rsp| unicorn.mem_read_as_vec(rsp, 8).ok())
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or_default();
+        // Keep a bounded view of plausible saved return addresses. This is
+        // diagnostic only, but it lets us identify the enclosing FH4 frames
+        // without enabling the much more expensive instruction trace.
+        let stack_code = unicorn
+            .reg_read(RegisterX86::RSP)
+            .ok()
+            .and_then(|rsp| unicorn.mem_read_as_vec(rsp, 1024).ok())
+            .map(|bytes| {
+                bytes
+                    .chunks_exact(8)
+                    .enumerate()
+                    .filter_map(|(slot, bytes)| {
+                        let address = u64::from_le_bytes(bytes.try_into().ok()?);
+                        let module = guest_module_from_address(unicorn.get_data(), address)?;
+                        Some(format!(
+                            "+{:#x}:{:#x}+{:#x}",
+                            slot * 8,
+                            module,
+                            address - module
+                        ))
+                    })
+                    .take(24)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .unwrap_or_default();
+        let heap_live = unicorn.get_data().crt_heap.live_bytes();
+        let heap_allocations = unicorn.get_data().crt_heap.allocations().count();
+        let heap_largest = unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .map(|(_, allocation)| allocation.requested_size)
+            .max()
+            .unwrap_or(0);
+        let heap_failure = format!("{:?}", unicorn.get_data().last_crt_heap_failure);
+        let guest_assets = unicorn
+            .get_data()
+            .guest_files
+            .reports
+            .iter()
+            .rev()
+            .take(8)
+            .map(|report| report.name.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
+        let environment = unicorn
+            .get_data()
+            .environment_overrides
+            .iter()
+            .map(|(name, value)| {
+                format!(
+                    "{}={}",
+                    String::from_utf8_lossy(name),
+                    value
+                        .as_deref()
+                        .map(String::from_utf8_lossy)
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
         unicorn.get_data_mut().callback_error = Some(format!(
-            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}{message_suffix})"
+            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}, caller={caller:#x}, stack_code={stack_code}, crt_heap_live={heap_live}, crt_heap_allocations={heap_allocations}, crt_heap_largest={heap_largest}, crt_heap_failure={heap_failure}, guest_assets={guest_assets}, environment={environment}{message_suffix})"
         ));
     }
     let _ = unicorn.emu_stop();
+}
+
+/// OpenColorIO 2.4 probes the optional `ColorSpaceNamePathSearch` file rule by
+/// calling `FileRules::getIndexForRule` inside a local try/catch. The Windows
+/// runtime normally unwinds the callee and resumes the catch continuation. We
+/// reproduce that concrete FH4 edge while the general dispatcher is absent.
+/// Every address is validated relative to the mapped OpenColorIO image and the
+/// saved return address, so unrelated throws still fail closed.
+fn try_emulate_ocio_missing_file_rule(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
+    const THROW_RETURN_RVA: u64 = 0x0d5a22;
+    const CALL_RETURN_RVA: u64 = 0x0d359a;
+    const CATCH_CONTINUATION_RVA: u64 = 0x0d359d;
+    const THROW_FRAME_TO_RETURN: u64 = 0x180;
+
+    let Some(library) = guest_library_by_name(unicorn.get_data(), "OpenColorIO_2_4.dll") else {
+        return false;
+    };
+    let base = library.base;
+    let rsp = match unicorn.reg_read(RegisterX86::RSP) {
+        Ok(rsp) => rsp,
+        Err(_) => return false,
+    };
+    let read_u64 = |unicorn: &Unicorn<'_, GuestState>, address: u64| {
+        unicorn
+            .mem_read_as_vec(address, 8)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+    };
+    if read_u64(unicorn, rsp) != Some(base + THROW_RETURN_RVA)
+        || read_u64(unicorn, rsp + THROW_FRAME_TO_RETURN) != Some(base + CALL_RETURN_RVA)
+    {
+        return false;
+    }
+    let throw_info = match unicorn.reg_read(RegisterX86::RDX) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    if msvc_throw_type_name(unicorn, throw_info).as_deref()
+        != Some(".?AVException@OpenColorIO_v2_4@@")
+    {
+        return false;
+    }
+    let exception = match unicorn.reg_read(RegisterX86::RCX) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let Some(message) =
+        cv_exception_message(unicorn, exception, ".?AVException@OpenColorIO_v2_4@@").or_else(
+            || {
+                let bytes = unicorn.mem_read_as_vec(exception + 8, 8).ok()?;
+                let what = u64::from_le_bytes(bytes.try_into().ok()?);
+                let message =
+                    read_crt_stdio_c_string(unicorn, what, 4096, "exception what").ok()?;
+                Some(String::from_utf8_lossy(&message).into_owned())
+            },
+        )
+    else {
+        return false;
+    };
+    if message != "File rules: rule name 'ColorSpaceNamePathSearch' not found." {
+        return false;
+    }
+
+    // Apply the unwind codes for getIndexForRule (0xd5900..0xd5a23).
+    // RSP here includes the return address pushed by _CxxThrowException.
+    for (register, offset) in [
+        (RegisterX86::R14, 0x168),
+        (RegisterX86::RDI, 0x170),
+        (RegisterX86::RSI, 0x178),
+        (RegisterX86::RBX, 0x198),
+        (RegisterX86::RBP, 0x1a0),
+    ] {
+        let Some(value) = read_u64(unicorn, rsp + offset) else {
+            return false;
+        };
+        if unicorn.reg_write(register, value).is_err() {
+            return false;
+        }
+    }
+    let caller_rsp = rsp + THROW_FRAME_TO_RETURN + 8;
+    if unicorn.reg_write(RegisterX86::RSP, caller_rsp).is_err()
+        || unicorn
+            .reg_write(RegisterX86::RIP, base + CATCH_CONTINUATION_RVA)
+            .is_err()
+    {
+        return false;
+    }
+    true
 }
 
 fn try_emulate_selector_abort(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
@@ -1142,19 +1689,36 @@ fn try_emulate_selector_abort(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
     true
 }
 
+fn read_suite_name(unicorn: &Unicorn<'_, GuestState>, pointer: u64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if pointer == 0 {
+        return bytes;
+    }
+    while bytes.len() < 256 {
+        let Some(address) = pointer.checked_add(bytes.len() as u64) else {
+            break;
+        };
+        // Guest mappings are page based. Stay on the current page so a valid
+        // NUL-terminated name at its end does not probe an unmapped next page.
+        let page_remaining = (PAGE_SIZE - (address & (PAGE_SIZE - 1))) as usize;
+        let length = page_remaining.min(256 - bytes.len());
+        let mut chunk = [0u8; 256];
+        if unicorn.mem_read(address, &mut chunk[..length]).is_err() {
+            break;
+        }
+        if let Some(nul) = chunk[..length].iter().position(|byte| *byte == 0) {
+            bytes.extend_from_slice(&chunk[..nul]);
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..length]);
+    }
+    bytes
+}
+
 fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let name_pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let version = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
-    let mut bytes = Vec::new();
-    if name_pointer != 0 {
-        for offset in 0..256u64 {
-            let mut byte = [0u8; 1];
-            if unicorn.mem_read(name_pointer + offset, &mut byte).is_err() || byte[0] == 0 {
-                break;
-            }
-            bytes.push(byte[0]);
-        }
-    }
+    let bytes = read_suite_name(unicorn, name_pointer);
     let name = String::from_utf8_lossy(&bytes);
     record_suite_request(
         &mut unicorn.get_data_mut().suite_requests,
@@ -1169,6 +1733,36 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         && output != 0
         && unicorn
             .mem_write(output, &HOST_HANDLE_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if name == "PF Effect UI Suite"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_EFFECT_UI_SUITE_V1.to_le_bytes())
+            .is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if name == "PF AE App Suite"
+        && version == 6
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_PF_APP_SUITE_V6.to_le_bytes())
+            .is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if name == "AEGP Persistent Data Suite"
+        && version == 3
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_PERSISTENT_DATA_SUITE_V3.to_le_bytes())
             .is_ok()
     {
         finish_acquire_suite_success(unicorn);
@@ -1217,6 +1811,13 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     if name == "PF Iterate8 Suite"
         && output != 0
         && let Some(table) = iterate8_suite_table_address(version)
+        && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if output != 0
+        && let Some(table) = typed_iterate_suite_table_address(name.as_ref(), version)
         && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
     {
         finish_acquire_suite_success(unicorn);
@@ -2450,6 +3051,13 @@ fn emulate_get_world_pixel_format(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
                 .worlds
                 .get(&world)
                 .map(|record| record.pixel_format)
+        })
+        .or_else(|| {
+            unicorn
+                .get_data()
+                .resident_world_formats
+                .get(&world)
+                .copied()
         })
         .or_else(|| {
             (world != 0

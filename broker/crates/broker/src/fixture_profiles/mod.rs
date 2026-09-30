@@ -46,14 +46,14 @@ static SCATTERMAP: RegisteredProfile = RegisteredProfile {
     },
     parameterized_render: ParameterizedRenderAdapter::ScatterMap,
     classic_worker: Some(WorkerSpec {
-        executable: "target/minihost-build/aex_render_worker.exe",
+        executable: "target/minihost-build/aex_worker.exe",
         request_mode: "--render-request",
         selection: SelectionPolicy {
             allowlist_path: "target/render-allowlist/active.local.json",
         },
     }),
     smart_worker: Some(WorkerSpec {
-        executable: "target/minihost-build/aex_smart_worker.exe",
+        executable: "target/minihost-build/aex_worker.exe",
         request_mode: "--smart-request",
         selection: SelectionPolicy {
             allowlist_path: "target/smart-allowlist/active.local.json",
@@ -67,7 +67,7 @@ static MASKOFFSET: RegisteredProfile = RegisteredProfile {
     parameterized_render: ParameterizedRenderAdapter::MaskOffsetRectangle,
     classic_worker: None,
     smart_worker: Some(WorkerSpec {
-        executable: "target/minihost-build/aex_smart_worker.exe",
+        executable: "target/minihost-build/aex_worker.exe",
         request_mode: "--smart-mask-request",
         selection: SelectionPolicy {
             allowlist_path: "target/smart-allowlist/maskoffset.active.local.json",

@@ -1,9 +1,11 @@
+import dis
 import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
+import _native_selftest
 import pytest
 
 
@@ -22,12 +24,6 @@ TEST_CLASSES = (
         "requires AFTER_EFFECTS_SDK_ROOT and a native build toolchain",
     ),
     (
-        ROOT / "tests" / "prebuilt_required_tests.txt",
-        "prebuilt_required",
-        "--run-prebuilt-tests",
-        "requires a named native build artifact produced before pytest",
-    ),
-    (
         ROOT / "tests" / "built_artifact_tests.txt",
         "built_artifact",
         "--run-built-artifact-tests",
@@ -42,7 +38,7 @@ def canonical_release_worker(tmp_path_factory, request):
         pytest.skip("native worker self-tests require Windows")
 
     # ae-sdk-tests.yml は前段の Build minihost workers ステップで同一 checkout
-    # から aex_render_worker.exe をビルド済みなので、ここで再ビルドせず
+    # から aex_worker.exe をビルド済みなので、ここで再ビルドせず
     # そのバイナリを指せる (#681 の二重ビルド解消)。指定が壊れている場合は
     # fail-closed (黙ってビルドに fallback すると workflow 側の期待とずれる)。
     override = os.environ.get("AEXCOMPAT_CANONICAL_WORKER")
@@ -129,13 +125,13 @@ def _build_canonical_release_worker(build: Path) -> Path:
             f'@call "{vcvars}" >nul && '
             f'"{cmake}" -S "{source}" -B "{ninja_build}" -G Ninja '
             f"-DCMAKE_BUILD_TYPE=Release && "
-            f'"{cmake}" --build "{ninja_build}" --target aex_render_worker'
+            f'"{cmake}" --build "{ninja_build}" --target aex_worker'
         )
         batch = ninja_build / "build-worker.bat"
         batch.write_text(command + "\n", encoding="ascii")
         completed = subprocess.run(
             ["cmd", "/d", "/c", str(batch)], check=False, timeout=420)
-        worker = ninja_build / "aex_render_worker.exe"
+        worker = ninja_build / "aex_worker.exe"
         if completed.returncode == 0 and worker.is_file():
             return worker
         print("canonical worker: Ninja build failed "
@@ -178,12 +174,12 @@ def _build_canonical_release_worker(build: Path) -> Path:
     command = (
         f'@call "{vcvars}" >nul && '
         f'"{cmake}" -S "{source}" -B "{build}" -G "{generator}" -A x64 && '
-        f'"{cmake}" --build "{build}" --config Release --target aex_render_worker'
+        f'"{cmake}" --build "{build}" --config Release --target aex_worker'
     )
     batch = build / "build-worker.bat"
     batch.write_text(command + "\n", encoding="ascii")
     subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=420)
-    worker = build / "Release" / "aex_render_worker.exe"
+    worker = build / "Release" / "aex_worker.exe"
     assert worker.is_file(), f"canonical worker was not produced: {worker}"
     return worker
 
@@ -202,6 +198,51 @@ def _manifest_entries(path):
     return set(entries)
 
 
+def _calls_native_selftest_run(function, seen=None):
+    if seen is None:
+        seen = set()
+    if function in seen:
+        return False
+    seen.add(function)
+    code = getattr(function, "__code__", None)
+    globals_ = getattr(function, "__globals__", {})
+    if code is None:
+        return False
+
+    instructions = tuple(dis.get_instructions(code))
+    for index, instruction in enumerate(instructions):
+        if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}:
+            continue
+        value = globals_.get(instruction.argval)
+        if value is _native_selftest.run:
+            return True
+        if value is _native_selftest and index + 1 < len(instructions):
+            following = instructions[index + 1]
+            if following.opname in {"LOAD_ATTR", "LOAD_METHOD"} and following.argval == "run":
+                return True
+
+    for instruction in instructions:
+        if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}:
+            continue
+        helper = globals_.get(instruction.argval)
+        if (
+            callable(helper)
+            and getattr(helper, "__globals__", None) is globals_
+            and _calls_native_selftest_run(helper, seen)
+        ):
+            return True
+    return False
+
+
+def _native_selftest_run_node_ids(items):
+    node_ids = set()
+    for item in items:
+        function = getattr(item, "obj", None)
+        if _calls_native_selftest_run(function):
+            node_ids.add(item.nodeid.replace("\\", "/"))
+    return node_ids
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-local-artifact-tests",
@@ -214,12 +255,6 @@ def pytest_addoption(parser):
         action="store_true",
         default=False,
         help="run tests requiring the installed After Effects SDK",
-    )
-    parser.addoption(
-        "--run-prebuilt-tests",
-        action="store_true",
-        default=False,
-        help="run tests requiring prebuilt native artifacts",
     )
     parser.addoption(
         "--run-built-artifact-tests",
@@ -259,11 +294,24 @@ def pytest_collection_modifyitems(config, items):
     if config.getoption("--validate-local-artifact-manifest"):
         collected = {item.nodeid.replace("\\", "/") for item in items}
         required = set(all_entries)
+        built_artifact_entries = next(
+            entries
+            for _, marker, _, _, entries in manifests
+            if marker == "built_artifact"
+        )
         missing = sorted(required - collected)
         if missing:
             raise pytest.UsageError(
                 "local-artifact manifest contains uncollected node ids: "
                 + ", ".join(missing)
+            )
+        unregistered_native_selftests = sorted(
+            _native_selftest_run_node_ids(items) - built_artifact_entries
+        )
+        if unregistered_native_selftests:
+            raise pytest.UsageError(
+                "tests that call _native_selftest.run are absent from "
+                "built_artifact_tests.txt: " + ", ".join(unregistered_native_selftests)
             )
 
     # canonical_release_worker (minihost の MSVC ビルド、数分) を含む

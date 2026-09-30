@@ -96,6 +96,22 @@ bool verify_pf_color_param_suite() {
             {1.0f, 1.0f / 32768.0f, 2.0f / 32768.0f, 3.0f / 32768.0f});
   add_color(103, {255, 200, 100, 50}, {255, 40, 50, 60},
             {0.75f, 1.5f, -0.25f, 2.0f}, {1.0f, 0.1f, 0.2f, 0.3f});
+  // #1060 collision fixture: a POINT and a COLOUR share disk_id 0, exactly as
+  // Beam leaves every parameter's uu.id. A by-id lookup for the colour finds
+  // the POINT first, whose type is not 5, so the old code answered
+  // PF_Err_UNRECOGNIZED_PARAM_TYPE for a valid colour. Value matching must skip
+  // the POINT and resolve the colour.
+  {
+    ParamRecord point{};
+    point.index = static_cast<int32_t>(params.size() + 1);
+    point.disk_id = 0;
+    point.type = 6;  // POINT: no colour payload
+    point.has_color = false;
+    params.push_back(point);
+  }
+  add_color(0, {50, 60, 70, 80}, {1, 2, 3, 4},
+            {50.0f / 255.0f, 60.0f / 255.0f, 70.0f / 255.0f, 80.0f / 255.0f},
+            {1.0f / 255.0f, 2.0f / 255.0f, 3.0f / 255.0f, 4.0f / 255.0f});
 
   const void* acquired = nullptr;
   bool ok = g_hooks.acquire_suite("PF ColorParamSuite", 1, &acquired) == 0 &&
@@ -124,16 +140,39 @@ bool verify_pf_color_param_suite() {
   ok = ok && g_hooks.floating_point_from_color(g_hooks.effect, current_float.data(), &out) == 0 &&
       out.alpha == 0.75f && out.red == 1.5f && out.green == -0.25f && out.blue == 2.0f;
 
+  // #1060 regression: the colour fixture carries disk_id 0, shared with the
+  // POINT that precedes it. A by-id lookup lands on the POINT and (old code)
+  // returned kPfUnrecognizedParamType; value matching skips it and resolves the
+  // colour's float.
+  auto collided = definition(params[4], true);
+  ok = ok && g_hooks.floating_point_from_color(g_hooks.effect, collided.data(), &out) == 0 &&
+      out.alpha == 50.0f / 255.0f && out.red == 60.0f / 255.0f &&
+      out.green == 70.0f / 255.0f && out.blue == 80.0f / 255.0f;
+
+  // #1060 core: an unknown disk_id must still resolve by value, since the id is
+  // no longer the lookup key. by_id short-circuits to end() and the value scan
+  // carries it to the same colour.
+  auto unknown_id = collided;
+  write<int32_t>(unknown_id, 0, 7777);
+  ok = ok && g_hooks.floating_point_from_color(g_hooks.effect, unknown_id.data(), &out) == 0 &&
+      out.alpha == 50.0f / 255.0f && out.red == 60.0f / 255.0f &&
+      out.green == 70.0f / 255.0f && out.blue == 80.0f / 255.0f;
+
   const PixelFloat sentinel{9.0f, 8.0f, 7.0f, 6.0f};
   out = sentinel;
-  auto invalid_index = current8;
-  write<int32_t>(invalid_index, 0, 9999);
+  // A type-5 definition whose value matches no colour parameter is the only
+  // remaining error path: kPfBadCallbackParam, output untouched. (The former
+  // "unknown disk_id -> kPfInvalidIndex" contract is gone: the id is no longer
+  // the lookup key, so an unknown id that still carries a known value resolves.)
+  auto unmatched = current8;
+  const std::array<unsigned char, 4> stranger{3, 5, 7, 9};
+  std::memcpy(unmatched.data() + 56, stranger.data(), stranger.size());
   auto invalid_type = current8;
   write<int32_t>(invalid_type, kParamType, 6);
   ok = ok && g_hooks.floating_point_from_color(nullptr, current8.data(), &out) == kPfBadCallbackParam &&
       g_hooks.floating_point_from_color(g_hooks.effect, nullptr, &out) == kPfBadCallbackParam &&
       g_hooks.floating_point_from_color(g_hooks.effect, current8.data(), nullptr) == kPfBadCallbackParam &&
-      g_hooks.floating_point_from_color(g_hooks.effect, invalid_index.data(), &out) == kPfInvalidIndex &&
+      g_hooks.floating_point_from_color(g_hooks.effect, unmatched.data(), &out) == kPfBadCallbackParam &&
       g_hooks.floating_point_from_color(g_hooks.effect, invalid_type.data(), &out) ==
           kPfUnrecognizedParamType && std::memcmp(&out, &sentinel, sizeof(out)) == 0;
   ok = g_hooks.release_suite("PF ColorParamSuite", 1) == 0 && ok;

@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-eframe = "0.31"
+eframe = "0.33"
+egui-shadcn = "=0.3.1"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

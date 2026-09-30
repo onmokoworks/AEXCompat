@@ -1,4 +1,5 @@
 #include "worker_host_suite_catalog.hpp"
+#include "worker_dynamic_suite_registry.hpp"
 #include "worker_pf_ansi_runtime.hpp"
 #include "worker_suite_registry.hpp"
 
@@ -13,7 +14,7 @@ struct OwnedCatalog {
   std::mutex mutex;
   std::vector<StaticSuite> suites;
   StaticProviderCatalog static_catalog{};
-  Provider providers[2]{};
+  Provider providers[3]{};
   ProviderCatalog provider_catalog{};
   bool configured{};
   AssemblyHooks assembly{};
@@ -23,6 +24,11 @@ struct OwnedCatalog {
   std::array<void*, 1> duck{};
   std::array<void*, 1> effect_ui{};
   std::array<void*, 10> adv_app1{};
+  // Slot count is a bound, not an observation: no caller has been seen
+  // calling a slot of this suite (Timecode.aex acquires and releases it only),
+  // so 32 stubs are published and any call past them would run into the next
+  // table below and be attributed to that suite (issue #1210).
+  std::array<void*, 32> ae_timecode_helper1{};
   std::array<void*, 11> adv_app2{};
   std::array<void*, 2> drawbot_draw{};
   std::array<void*, 13> drawbot_supplier{};
@@ -38,6 +44,7 @@ struct OwnedCatalog {
   std::array<void*, 21> ansi2{};
   std::array<void*, 14> dynamic_stream2{};
   std::array<void*, 13> aegp_world{};
+  std::array<void*, 12> aegp_world2{};
   std::array<void*, 14> layer_render_options1{};
   std::array<void*, 15> layer_render_options2{};
   std::array<void*, 17> render_options1{};
@@ -57,7 +64,8 @@ OwnedCatalog& state() {
 
 bool configure_suite_assembly(const AssemblyHooks& hooks) {
   if (!hooks.duck || !hooks.effect_ui ||
-      !hooks.adv_info || !hooks.adv_info3 || !hooks.dynamic_stream_set_flag)
+      !hooks.adv_info || !hooks.adv_info3 || !hooks.adv_info3_plus ||
+      !hooks.dynamic_stream_set_flag)
     return false;
   auto& catalog = state();
   std::lock_guard<std::mutex> lock(catalog.mutex);
@@ -90,8 +98,9 @@ const void* provide_path_query1(void*) { auto& c=state(); c.path_query=c.assembl
 const void* provide_path_data1(void*) { auto& c=state(); c.path_data=c.assembly.path_data; return c.path_data.data(); }
 const void* provide_duck1(void*) { auto& c=state(); c.duck[0]=c.assembly.duck; return c.duck.data(); }
 const void* provide_effect_ui1(void*) { auto& c=state(); c.effect_ui[0]=c.assembly.effect_ui; return c.effect_ui.data(); }
-const void* provide_adv_app1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_1>(c.adv_app1); c.adv_app1[6]=c.assembly.adv_info; c.adv_app1[8]=c.assembly.adv_info3; return c.adv_app1.data(); }
-const void* provide_adv_app2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_2>(c.adv_app2); c.adv_app2[6]=c.assembly.adv_info; c.adv_app2[8]=c.assembly.adv_info3; return c.adv_app2.data(); }
+const void* provide_adv_app1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_1>(c.adv_app1); c.adv_app1[6]=c.assembly.adv_info; c.adv_app1[8]=c.assembly.adv_info3; c.adv_app1[9]=c.assembly.adv_info3_plus; return c.adv_app1.data(); }
+const void* provide_ae_timecode_helper1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::ae_timecode_helper_1>(c.ae_timecode_helper1); return c.ae_timecode_helper1.data(); }
+const void* provide_adv_app2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_2>(c.adv_app2); c.adv_app2[6]=c.assembly.adv_info; c.adv_app2[8]=c.assembly.adv_info3; c.adv_app2[9]=c.assembly.adv_info3_plus; return c.adv_app2.data(); }
 const void* provide_drawbot_draw1(void*) { auto& c=state(); c.drawbot_draw=c.assembly.drawbot_draw; return c.drawbot_draw.data(); }
 const void* provide_drawbot_supplier1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::drawbot_supplier_1>(c.drawbot_supplier); c.drawbot_supplier[0]=c.assembly.drawbot_new_pen; c.drawbot_supplier[1]=c.assembly.drawbot_new_brush; c.drawbot_supplier[6]=c.assembly.drawbot_new_path; c.drawbot_supplier[12]=c.assembly.drawbot_release; return c.drawbot_supplier.data(); }
 const void* provide_drawbot_surface2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::drawbot_surface_2>(c.drawbot_surface); c.drawbot_surface[2]=c.assembly.drawbot_paint_rect; c.drawbot_surface[3]=c.assembly.drawbot_fill_path; c.drawbot_surface[4]=c.assembly.drawbot_stroke_path; return c.drawbot_surface.data(); }
@@ -115,6 +124,15 @@ const void* provide_ansi2(void*) {
 }
 const void* provide_dynamic_stream2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::aegp_dynamic_stream_2>(c.dynamic_stream2); c.dynamic_stream2[5]=c.assembly.dynamic_stream_set_flag; return c.dynamic_stream2.data(); }
 const void* provide_aegp_world_suite3(void*) { auto& c=state(); c.aegp_world=c.assembly.aegp_world; return c.aegp_world.data(); }
+const void* provide_aegp_world_suite2(void*) {
+  auto& c = state();
+  // Suite2 predates the 32-bit-float base-address slot. Its first seven
+  // entries match Suite3 and its remaining five follow Suite3 slot 7.
+  std::copy_n(c.assembly.aegp_world.begin(), 7, c.aegp_world2.begin());
+  std::copy(c.assembly.aegp_world.begin() + 8, c.assembly.aegp_world.end(),
+            c.aegp_world2.begin() + 7);
+  return c.aegp_world2.data();
+}
 const void* provide_layer_render_options1(void*) { auto& c=state(); c.layer_render_options1=c.assembly.layer_render_options1; return c.layer_render_options1.data(); }
 const void* provide_layer_render_options2(void*) { auto& c=state(); c.layer_render_options2=c.assembly.layer_render_options2; return c.layer_render_options2.data(); }
 const void* provide_render_options1(void*) { auto& c=state(); c.render_options1=c.assembly.render_options1; return c.render_options1.data(); }
@@ -141,7 +159,12 @@ bool configure_host_suite_catalog(const CatalogConfiguration& configuration) {
   catalog.static_catalog = {catalog.suites.data(), catalog.suites.size()};
   catalog.providers[0] = configuration.scene_provider;
   catalog.providers[1] = {&resolve_static_provider, &catalog.static_catalog};
-  catalog.provider_catalog = {catalog.providers, 2, nullptr, nullptr};
+  catalog.providers[2] = {&dynamic_suites::resolve, nullptr};
+  // Keep the dynamic companion registry on the production SPBasicSuite
+  // resolution path.  The first two providers cover scene-owned and static
+  // host suites; AEGP companions publish their process-local suites through
+  // the third provider.
+  catalog.provider_catalog = {catalog.providers, 3, nullptr, nullptr};
   catalog.configured = true;
   return true;
 }
@@ -162,13 +185,24 @@ int32_t acquire_catalog_suite(const char* name, int32_t version,
       return 4;
     }
   }
-  return acquire_host_suite(catalog.provider_catalog, name, version, suite,
-                            trace_writer);
+  const int32_t result = acquire_host_suite(
+      catalog.provider_catalog, name, version, suite, trace_writer);
+  if (result != 0) return result;
+  const int32_t retained = dynamic_suites::retain(name, version, *suite);
+  if (retained == 0 || retained == dynamic_suites::kSuiteNotFound) return 0;
+  // The generic tracker accepted the lease but the dynamic owner could not.
+  // Roll the tracker back so neither side reports a reference it does not own.
+  release_host_suite(name, version, trace_writer);
+  if (suite) *suite = nullptr;
+  return retained;
 }
 
 int32_t release_catalog_suite(const char* name, int32_t version,
                               TraceWriter* trace_writer) {
-  return release_host_suite(name, version, trace_writer);
+  const int32_t host_result = release_host_suite(name, version, trace_writer);
+  if (host_result != 0) return host_result;
+  const int32_t dynamic_result = dynamic_suites::release(name, version);
+  return dynamic_result == dynamic_suites::kSuiteNotFound ? 0 : dynamic_result;
 }
 
 }  // namespace aexcompat::worker_runtime::host_suites

@@ -12,8 +12,8 @@ struct Request {
   parameter_execution::BufferOut* output{};
   smart_setup::Plan const* plan{};
   smart_setup::ParameterState* parameters{};
-  std::array<std::byte, 120>* input_world{};
-  std::array<std::byte, 120>* output_world{};
+  aexcompat::world_safety::EffectWorldStorage* input_world{};
+  aexcompat::world_safety::EffectWorldStorage* output_world{};
   world_safety::DispatchWorldFormatScope* formats{};
   render_safety::InputPixelBuffer* source{};
   render_safety::OutputPixelBuffer* guarded{};

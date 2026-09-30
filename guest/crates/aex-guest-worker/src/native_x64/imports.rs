@@ -30,6 +30,7 @@ pub(super) fn native_import_is_implemented(name: &str) -> bool {
             | "memset"
             | "expf"
             | "floorf"
+            | "lround"
             | "powf"
             | "pow"
             | "omp_get_max_threads"
@@ -46,6 +47,7 @@ pub(super) fn native_import_callback(name: &str) -> u64 {
         "memset" => callback_address!(native_memset),
         "expf" => callback_address!(native_expf),
         "floorf" => callback_address!(native_floorf),
+        "lround" => callback_address!(native_lround),
         "powf" => callback_address!(native_powf),
         "pow" => callback_address!(native_pow),
         "omp_get_max_threads" => callback_address!(native_omp_get_max_threads),
@@ -271,6 +273,14 @@ pub(super) unsafe extern "win64" fn native_expf(value: f32) -> f32 {
 }
 pub(super) unsafe extern "win64" fn native_floorf(value: f32) -> f32 {
     value.floor()
+}
+pub(super) unsafe extern "win64" fn native_lround(value: f64) -> i32 {
+    let rounded = value.round();
+    if !rounded.is_finite() || rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+        i32::MIN
+    } else {
+        rounded as i32
+    }
 }
 pub(super) unsafe extern "win64" fn native_powf(left: f32, right: f32) -> f32 {
     left.powf(right)

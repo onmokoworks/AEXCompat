@@ -4,9 +4,6 @@ from _render_session import run_session_render
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "instruments/pf-aegp-async-cancel-probe/pf_aegp_async_cancel_probe.cpp"
-HOST = ROOT / "minihost/src/worker_entry_wiring.cpp"
-ASYNC_RUNTIME = ROOT / "minihost/src/worker_aegp_async_layer_runtime.cpp"
 
 
 

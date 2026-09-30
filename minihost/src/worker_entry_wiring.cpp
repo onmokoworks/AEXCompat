@@ -5,6 +5,8 @@
 #include <io.h>
 #include <excpt.h>
 
+#include "worker_pf_progress_info.hpp"
+#include "worker_pf_world_facade.hpp"
 #include "trace_writer.hpp"
 
 #include <array>
@@ -57,7 +59,10 @@
 #include "worker_pf_color_selftests.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_aefx_ace_suite.hpp"
+#include "worker_pf_private_effect_suite.hpp"
+#include "worker_aegp_persistent_data_suite.hpp"
 #include "worker_flt_blur_suite.hpp"
+#include "worker_pf_private_callbacks.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -147,6 +152,7 @@
 #include "worker_render_report.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_target.hpp"
+#include "worker_system_sound_suppression.hpp"
 
 
 // Worker-entry wiring moved from worker_main (issue #165): the component
@@ -158,6 +164,7 @@
 namespace aexcompat::l2_detail {
 
 using aexcompat::parameter_selftests::verify_parameter_animation_transport;
+using aexcompat::parameter_selftests::verify_parameter_registry_capacity;
 using aexcompat::parameter_selftests::verify_pf_param_utils_suite3;
 using namespace aexcompat::pf_ae_channel;
 using namespace aexcompat::pf_state_runtime;
@@ -180,8 +187,30 @@ using AegpStreamValue = aexcompat::scene_runtime::AegpStreamValue;
 bool world_lifetimes_balanced();
 
 // Host identity and entry-owned helpers that stay in l2_main.
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 bool is_render_worker();
+// Asks the production `make_bootstrap_abi_hooks` whether it left a utility
+// callback null. Defined beside it in l2_main so the answer comes from the
+// assignment list that ships, not from one a test wrote (issue #981).
+bool verify_production_utility_callback_table();
+bool verify_production_iterate_utility_callbacks();
+// Calls the production composite_rect slot through in_data->utils (issue #1252).
+bool verify_production_composite_rect_callback();
+// Calls the production gaussian_kernel slot through in_data->utils (issue #1253).
+bool verify_production_gaussian_kernel_callback();
+// Calls the production checkout_param / checkin_param slots through
+// in_data->inter for slots past the published table (issue #1251).
+bool verify_checkout_param_beyond_table();
+// Calls AE's private get_callback_addr ids -5 / -2 through in_data->utils
+// (issue #985).
+bool verify_pf_private_callbacks();
+// The BEE-layout effect layer handle and the AE Timecode Helper gate suite
+// through the production suites (issue #1210).
+bool verify_bee_scene_facade();
+// The PF_ProgressInfo layout of the production effect ref (issue #1275) and
+// the PF_World facade behind registered worlds (issue #1276).
+bool verify_pf_progress_info();
+bool verify_pf_world_facade();
 void* aegp_comp_item_handle();
 bool suite_leases_balanced();
 uint32_t suite_acquire_count();
@@ -475,7 +504,8 @@ int configure_worker_entry_bootstrap() {
       &g_aegp_comp_item, &g_aegp_comp, &g_layer, &g_effect,
       &g_full_resolution_width,
       &g_full_resolution_height, &aexcompat::worker_runtime::smart::width,
-      &aexcompat::worker_runtime::smart::height};
+      &aexcompat::worker_runtime::smart::height,
+      &g_render_context_state.pixel_aspect_ratio};
   const SceneRuntimeContext scene_runtime_host{
       {&suite_leases_balanced}, &g_aegp_comp_item, &g_aegp_comp,
       &g_full_resolution_width, &g_full_resolution_height,
@@ -529,7 +559,8 @@ int configure_worker_entry_bootstrap() {
        pf_host_context.hooks.resolve_dispatch_world_format,
        pf_host_context.hooks.pixel_format,
        pf_host_context.hooks.set_pixel_format,
-       &bounded_argb8_world},
+       &bounded_argb8_world,
+       &aexcompat::world_registry::hosts_world_pixels},
       {&g_transform_world_calls, &g_last_transform_x, &g_last_transform_y,
        &g_last_transform_opacity}};
   bootstrap_hooks.adv_time = {&acquire_suite, &release_suite, &suite_acquire_count,
@@ -544,8 +575,54 @@ int configure_worker_entry_bootstrap() {
             return resolve_dispatch_world_format(world, result);
           },
           &acquire_suite,
-          &release_suite}))
+          &release_suite,
+          // Foreign-operand admission (issue #1069): the same bounds check,
+          // registry-known refusal, and host-owned-base refusal the copy
+          // callbacks use (issue #1037's pattern), plus the session's
+          // negotiated pixel format as the anchor when neither operand
+          // resolves - that anchor is FLT's own (copy refuses the
+          // both-foreign case), justified in resolve_blur_worlds.
+          [](void* world, int32_t pixel_bytes, unsigned char*& pixels,
+             int32_t& rowbytes, int32_t& width, int32_t& height) -> bool {
+            return bounded_typed_world(world, pixel_bytes, pixels, rowbytes,
+                                       width, height);
+          },
+          &aexcompat::world_safety::dispatch_world_reference_known,
+          &aexcompat::world_registry::hosts_world_pixels,
+          []() -> const char* { return smart_state().pixel_format.c_str(); }}))
     return 1;
+  // AE's private get_callback_addr ids (issue #985) share the FLT blur suite's
+  // operand admission; the sampling runtime hands the pointers out.
+  if (!aexcompat::pf_private::configure(
+          {&g_effect, &aexcompat::flt_blur::resolve_in_place_world}))
+    return 1;
+  // A PF_World facade trap (worker_pf_world_facade, issue #1276) records its
+  // slot in the report's unsupported_suite_calls list as `PF_World vtable`.
+  aexcompat::worker_runtime::pf_world_facade::set_trap_recorder(
+      [](uint32_t slot) noexcept {
+        (void)aexcompat::worker_runtime::record_unsupported_suite_call(
+            aexcompat::worker_runtime::UnsupportedSuiteId::pf_world_vtable, slot);
+      });
+  // The facade's CopyRect resolves both operands through the host's own
+  // registry before copying a pixel - the same gate the other copy callbacks
+  // use - so the geometry a plug-in can overwrite in the LayerDef never drives
+  // the copy. Without this hook the slot refuses every call.
+  aexcompat::worker_runtime::pf_world_facade::set_world_resolver(
+      [](const void* layer_def,
+         aexcompat::worker_runtime::pf_world_facade::ResolvedWorld& out) noexcept {
+        aexcompat::world_safety::DispatchWorldFormat resolved{};
+        if (!aexcompat::world_registry::resolve_dispatch_world_format(layer_def, resolved))
+          return false;
+        const int32_t pixel_bytes =
+            resolved.pixel_format == aexcompat::world_registry::kPixelFormatArgb32 ? 4
+            : resolved.pixel_format == aexcompat::world_registry::kPixelFormatArgb64 ? 8
+            : resolved.pixel_format == aexcompat::world_registry::kPixelFormatArgb128 ? 16
+            : 0;
+        if (pixel_bytes == 0) return false;
+        out = {resolved.data, resolved.rowbytes, resolved.width, resolved.height,
+               pixel_bytes};
+        return true;
+      });
   return aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
 }
 
@@ -572,7 +649,9 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
       {{&escape, &selftest_trigger_guarded_crash, &suite_leases_balanced},
        {&verify_aegp_installed_effect_catalog_suite4,
         &aexcompat::l2_detail::verify_aegp_layer_suite1_slots,
-        &verify_parameter_animation_transport, &verify_pf_param_utils_suite3,
+        &aexcompat::l2_detail::verify_aegp_loaded_plugin_effect_streams,
+        &verify_parameter_animation_transport, &verify_parameter_registry_capacity,
+        &verify_pf_param_utils_suite3,
         &verify_pre_checkout_result_contract,
         &aexcompat::worker_runtime::smart::checkout_intersection_self_test,
         &aexcompat::render::smart_geometry_rect_self_test,
@@ -589,12 +668,31 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &aexcompat::pf_color_selftests::verify_pf_color_param_suite,
         &verify_iterate_suites,
         &verify_world_transform_composite_rect, &verify_world_transform_affine,
-        &verify_world_transform_blend, &verify_world_transform_transfer_mask,
+        &verify_world_transform_blend, &verify_world_transform_convolve,
+        &verify_world_transform_transfer_mask,
         +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); },
         &verify_pf_batch_sampling_suite, &verify_pf_ae_channel_native_provider,
         &verify_aegp_layer_render_options_suite2,
         &verify_utils_handle_callbacks_wired,
-        &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest}});
+        &verify_production_utility_callback_table,
+        &verify_production_iterate_utility_callbacks,
+        &verify_production_composite_rect_callback,
+        &verify_production_gaussian_kernel_callback,
+        &verify_checkout_param_beyond_table,
+        &verify_pf_private_callbacks,
+        &verify_bee_scene_facade,
+        &verify_pf_progress_info,
+        &verify_pf_world_facade,
+        &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest,
+        &aexcompat::pf_private_effect::selftest,
+        &aexcompat::worker_runtime::persistent_data::selftest,
+        &aexcompat::worker_runtime::selftest_native_stdout_routing,
+        &aexcompat::worker_runtime::persistent_data::selftest4,
+        &aexcompat::worker_runtime::system_sound_suppression::selftest,
+        &aexcompat::render_pixel_transport::verify_argb32f_depth_conversion,
+        &aexcompat::render_pixel_transport::verify_pixel_depth_conform,
+        &aexcompat::worker_runtime::effect_bootstrap::
+            verify_dispatch_pixel_depth_rule}});
   // Compatibility anchors for selftests whose command catalog now lives in
   // worker_fixed_selftest_routing.cpp.
   // --self-test-world-transform-affine

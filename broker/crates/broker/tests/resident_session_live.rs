@@ -5,8 +5,6 @@
 //! pf_parameter_echo_probe fixture from this checkout; skips (with a message)
 //! when either is not built.
 
-mod common;
-
 #[cfg(test)]
 #[cfg(windows)]
 mod windows_e2e {
@@ -36,12 +34,12 @@ mod windows_e2e {
 
     fn built_artifacts() -> Option<(PathBuf, PathBuf, String)> {
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-parameter-echo-probe-build/Release/pf_parameter_echo_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping resident-session live test: build aex_render_worker.exe and \
+                "skipping resident-session live test: build aex_worker.exe and \
                  pf_parameter_echo_probe.aex first"
             );
             return None;
@@ -62,11 +60,6 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_parameter_updates_change_the_real_render() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "per_frame_parameter_updates_change_the_real_render",
-        ) {
-            return;
-        }
         let Some((root, aex, sha)) = built_artifacts() else {
             return;
         };
@@ -88,6 +81,7 @@ mod windows_e2e {
             )
             .expect("valid classic selection"),
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width,
             height,
             pixel_format: RenderPixelFormat::Argb8,
@@ -192,6 +186,7 @@ mod windows_e2e {
             )
             .expect("valid classic selection"),
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width,
             height,
             pixel_format: RenderPixelFormat::Argb8,

@@ -4,8 +4,17 @@ worker isolation の「実装されている機構」「対処している失敗
 1 枚に固定する参照文書。エージェントセッションが isolation を security sandbox と
 誤読する事故が繰り返されているため、その再発防止を目的とする (issue #641)。
 
+> **Historical snapshot, not the current route inventory (2026-09-28).**
+> This dated inventory and its later addenda describe past implementation
+> states. The single execution floor and record policy in
+> `CLAUDE.md` is current. #751 moved native AEX loading to in-place paths,
+> #815 moved GPU sessions, and #816 removed sealed plug-in staging. The
+> two-tier description and sealed-versus-normal route table below are
+> historical; do not use them to describe a current launch or security
+> guarantee. See `docs/ENFORCEMENT_AUDIT_2026-08-05.md` for the decision.
+
 規範 (何をしてよいか) は `CLAUDE.md` の Execution Floor and Safety Rules が正本。
-本書は実装状態の記述であり、方針を追加しない。実装が変わったらこの文書を更新する。
+本書は当時の実装状態の記述であり、方針を追加しない。
 
 > 追記 2 (2026-08-05, issue #731): restricted token・保護 DACL・staged tree の
 > deny ACE は**撤去済み**。§2 の該当機構と §7 の "token" 列は歴史記述として
@@ -53,11 +62,20 @@ evidence." どのモードもこの昇格基準を満たしていない。
 - `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` で継承ハンドルを明示列挙。渡るのは
   stdout/stderr パイプの書き込み端、trace/minidump/session の各ハンドルのみ。
   sentinel テスト (`run_sentinel_check`) が非継承を検証している。
-- 既定では専用 desktop (`CreateDesktopW` + 保護 DACL) 上で起動し、モーダル
-  ダイアログは `worker_dialog.rs` が WM_CLOSE で掃除する (issue #351 の UI
-  封じ込め)。例外として `_on_current_desktop` 系 (GUI ハーネス用の
-  `WorkerDesktopPolicy::Current`) は呼び出し元 desktop で起動し、その場合
-  dialog sweep は付かない。
+- 既定では broker 専用 desktop (`CreateDesktopW` + 保護 DACL) 上で起動し、
+  モーダルダイアログは `worker_dialog.rs` が WM_CLOSE で掃除する (issue #351 の
+  UI 封じ込め)。この desktop は broker プロセス寿命の 1 枚を全 worker で共有する
+  (2026-08-11, issue #1194: per-worker 生成は desktop create/destroy のたびに
+  OS 側で DWM composition state がリークし、長時間 sweep で対話セッション全体が
+  劣化するため)。window の帰属・掃除は desktop ではなく Job Object membership で
+  判定するので、共有しても broker の報告は worker ごとに分かれる。ただし共有の
+  帰結として、並行 worker は互いの window を列挙・メッセージ送信でき、desktop
+  スコープの hook も張れる (従来も同一トークンで sibling desktop を開けたので
+  新しい権限ではないが、既定で到達可能になった)。悪意あるプラグインが並行実行
+  中の別 worker の UI 系診断や挙動を乱すことはできる。worker は元々 confidentiality
+  boundary ではない (§TL;DR)。例外として
+  `_on_current_desktop` 系 (GUI ハーネス用の `WorkerDesktopPolicy::Current`) は
+  呼び出し元 desktop で起動し、その場合 dialog sweep は付かない。
 - stdout 24 MiB / stderr 64 KiB の取得上限とパス redaction。
 - 正常終了後も job を terminate し、継承パイプを握った子孫プロセスが収集を止め
   られないようにしている。

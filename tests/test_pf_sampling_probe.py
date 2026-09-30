@@ -14,7 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "instruments" / "pf-sampling-probe"
 SOURCE = PROBE / "pf_sampling_probe.cpp"
-WORKER = ROOT / "target/minihost-build/aex_render_worker.exe"
+WORKER = ROOT / "target/minihost-build/aex_worker.exe"
 AEX = ROOT / "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex"
 INPUT = ROOT / "target/gpu-effects/opencl-input.rgba"
 

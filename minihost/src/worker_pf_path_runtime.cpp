@@ -1,4 +1,5 @@
 #include "worker_pf_path_runtime.hpp"
+#include "worker_extended_diag.hpp"
 #include "worker_world_registry.hpp"
 
 #include <algorithm>
@@ -130,6 +131,18 @@ bool flatten(const mask_runtime::CurveSnapshot& curve,int quality,std::vector<Ra
 }
 bool inside(const std::vector<RasterPoint>& p,double x,double y){bool value=false;for(size_t i=0,j=p.size()-1;i<p.size();j=i++){if(((p[i].y>y)!=(p[j].y>y))&&(x<(p[j].x-p[i].x)*(y-p[i].y)/(p[j].y-p[i].y)+p[i].x))value=!value;}return value;}
 double edge_distance(const std::vector<RasterPoint>& p,double x,double y,double fx,double fy){fx=std::max(fx,1e-6);fy=std::max(fy,1e-6);double best=std::numeric_limits<double>::infinity();for(size_t i=0,j=p.size()-1;i<p.size();j=i++){double ax=p[j].x/fx,ay=p[j].y/fy,bx=p[i].x/fx,by=p[i].y/fy,px=x/fx,py=y/fy,dx=bx-ax,dy=by-ay,l=dx*dx+dy*dy,t=l==0?0:std::clamp(((px-ax)*dx+(py-ay)*dy)/l,0.0,1.0);best=std::min(best,std::hypot(px-(ax+t*dx),py-(ay+t*dy)));}return best;}
+// AEXCOMPAT_EXTENDED_DIAG trace of the enumeration/checkout entry points, so a
+// plug-in that acquires the suite and then fails without any visible host
+// refusal (issue #1253: Scribble / Inner-Outer-Key / Reshape_New answered
+// PF_Err_OUT_OF_MEMORY with no `-> 4` in the trace) shows whether it asked the
+// host how many paths there are, and what it was told. Off by default.
+void diag_paths(const char* name, void* effect, int32_t index_or_id, int32_t value,
+                int32_t result) {
+  if (!aexcompat::l2_detail::extended_diag_enabled()) return;
+  std::cerr << "extended_diag:path_" << name << " effect=" << effect
+            << " arg=" << index_or_id << " value=" << value << " -> " << result
+            << "\n" << std::flush;
+}
 bool supported_world_view(const WorldView& view) {
   return (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb32 &&
           view.pixel_bytes == 4) ||
@@ -145,10 +158,41 @@ HostHooks host_hooks(){return g_hooks;}
 void reset(){std::lock_guard lock(g_mutex);g_checkouts.clear();g_preps.clear();g_report={};}
 Snapshot snapshot(){std::lock_guard lock(g_mutex);auto result=g_report;result.live_preps=static_cast<uint32_t>(g_preps.size());return result;}
 bool lifetimes_balanced(){std::lock_guard lock(g_mutex);return g_report.checkout_calls==g_report.checkin_calls&&g_checkouts.empty()&&g_report.preps_created==g_report.preps_disposed&&g_preps.empty();}
-int32_t __cdecl num_paths(void* effect,int32_t* count){auto p=paths();if(!effect||!count)return 4;*count=static_cast<int32_t>(p.size());return 0;}
-int32_t __cdecl path_info(void* effect,int32_t index,int32_t* id){auto p=paths();if(!effect||!id||index<0||static_cast<size_t>(index)>=p.size())return 4;*id=p[index].id;return 0;}
-int32_t __cdecl checkout_path(void* effect,int32_t id,int32_t,int32_t step,uint32_t scale,void** out){auto p=paths();auto* found=find(p,id);std::lock_guard lock(g_mutex);if(!effect||!out||step<=0||!scale||!found){++g_report.invalid_operations;return 4;}++g_checkouts[found->handle];++g_report.checkout_calls;*out=found->handle;return 0;}
-int32_t __cdecl checkin_path(void* effect,int32_t id,int32_t changed,void* path){std::lock_guard lock(g_mutex);auto it=g_checkouts.find(path);auto p=paths();auto* found=find(p,id);if(!effect||changed||!found||found->handle!=path||it==g_checkouts.end()||!it->second){++g_report.invalid_operations;return 4;}if(!--it->second)g_checkouts.erase(it);++g_report.checkin_calls;return 0;}
+int32_t __cdecl num_paths(void* effect,int32_t* count){auto p=paths();if(!effect||!count){diag_paths("num_paths",effect,-1,-1,4);return 4;}*count=static_cast<int32_t>(p.size());diag_paths("num_paths",effect,-1,*count,0);return 0;}
+int32_t __cdecl path_info(void* effect,int32_t index,int32_t* id){auto p=paths();if(!effect||!id||index<0||static_cast<size_t>(index)>=p.size()){diag_paths("info",effect,index,-1,4);return 4;}*id=p[index].id;diag_paths("info",effect,index,*id,0);return 0;}
+// PF_CheckoutPath / PF_CheckinPath.
+//
+// A unique_id that names no path on the layer is not a bad call: the SDK
+// contract (AE_EffectSuites.h, PF_PathQuerySuite1) is that PF_CheckoutPath
+// "can return NULL ptr if path doesn't exist", and PF_PathDef documents that a
+// path param's path_id is PF_PathID_NONE (0) when no mask is chosen and may
+// name a deleted mask otherwise. AE-shipped effects lean on that: Scribble
+// checks out its "Mask" param's path_id unconditionally (0 with no mask) and
+// throws its "Not enough memory to execute Scribble" AbortException on any
+// non-zero PF_CheckoutPath result, then tests the pointer for NULL to mean
+// "no mask" (Scribble.aex FUN_18006ccb0 / FUN_18006d280, issue #1253);
+// Inner-Outer-Key and Reshape check the returned pointer the same way. So an
+// absent path answers PF_Err_NONE with *pathPP = NULL, and the matching
+// PF_CheckinPath of that NULL pointer for the same absent id answers
+// PF_Err_NONE too. Everything that does name host state stays fail-closed: a
+// non-NULL pointer that is not the live checkout of that id, a checkin of NULL
+// for an id that does resolve to a path, a checkout with a null out pointer,
+// a non-positive time step or a zero time scale are still rejected and
+// counted, exactly as before.
+int32_t __cdecl checkout_path(void* effect,int32_t id,int32_t,int32_t step,uint32_t scale,void** out){
+  auto p=paths();auto* found=find(p,id);std::lock_guard lock(g_mutex);
+  // An invocation carrying a fixed scene or a `v2|` mask trailer installs the
+  // enumeration hook before PF Path Query is asked. An ordinary render with no
+  // mask context leaves the runtime unhooked; that is the everyday "no masks"
+  // state, not a misconfiguration, and answers like any absent path.
+  if(!effect||!out||step<=0||!scale){++g_report.invalid_operations;diag_paths("checkout",effect,id,step,4);return 4;}
+  if(!found){*out=nullptr;++g_report.absent_checkouts;diag_paths("checkout_absent",effect,id,step,0);return 0;}
+  ++g_checkouts[found->handle];++g_report.checkout_calls;*out=found->handle;diag_paths("checkout",effect,id,step,0);return 0;}
+int32_t __cdecl checkin_path(void* effect,int32_t id,int32_t changed,void* path){
+  std::lock_guard lock(g_mutex);auto it=g_checkouts.find(path);auto p=paths();auto* found=find(p,id);
+  if(effect&&!changed&&!found&&!path){++g_report.absent_checkins;diag_paths("checkin_absent",effect,id,changed,0);return 0;}
+  if(!effect||changed||!found||found->handle!=path||it==g_checkouts.end()||!it->second){++g_report.invalid_operations;diag_paths("checkin",effect,id,changed,4);return 4;}
+  if(!--it->second)g_checkouts.erase(it);++g_report.checkin_calls;diag_paths("checkin",effect,id,changed,0);return 0;}
 int32_t __cdecl path_is_open(void* effect,void* path,int8_t* open){std::lock_guard lock(g_mutex);mask_runtime::CurveSnapshot c;if(!effect||!open||!checked(path,c))return 4;*open=c.open?1:0;return 0;}
 int32_t __cdecl path_num_segments(void* effect,void* path,int32_t* count){std::lock_guard lock(g_mutex);mask_runtime::CurveSnapshot c;if(!effect||!count||!checked(path,c))return 4;auto n=vertices(c);*count=static_cast<int32_t>(c.open&&n?n-1:n);return 0;}
 int32_t __cdecl path_vertex_info(void* effect,void* path,int32_t index,PathVertex* out){std::lock_guard lock(g_mutex);mask_runtime::CurveSnapshot c;if(!effect||!out||index<0||!checked(path,c)||static_cast<size_t>(index)>=c.vertices.size())return 4;auto&v=c.vertices[index];*out={v.x,v.y,v.tangent_in_x,v.tangent_in_y,v.tangent_out_x,v.tangent_out_y};return 0;}

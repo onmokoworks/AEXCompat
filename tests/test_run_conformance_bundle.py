@@ -1,5 +1,4 @@
 import hashlib
-from tests import source_owners
 import importlib.util
 import io
 import json
@@ -305,13 +304,31 @@ def test_generic_nonzero_exit_is_refined_by_report_evidence():
     assert selector["classification"] == "selector_error"
     assert selector["selector"]["error_code"] == 25
 
-    unsupported = module.normalize_structured_failure(
+    unadvertised_depth = module.normalize_structured_failure(
         "argb8",
-        {"classification": "nonzero_exit", "depth_supported": False},
+        {"classification": "nonzero_exit", "depth_supported": False,
+         "advertised_depth_supported": False},
         input_world,
         "smartfx",
     )
-    assert unsupported["classification"] == "unsupported"
+    # Depth fallback makes raw advertisement non-gating on session renders.
+    # A generic failure with stale depth_supported=false must not conceal its
+    # unknown cause as an unsupported format.
+    assert unadvertised_depth["classification"] == "nonzero_exit"
+    unsupported_path = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "nonzero_exit", "smart_render_supported": False},
+        input_world,
+        "smartfx",
+    )
+    assert unsupported_path["classification"] == "unsupported"
+    classic_without_smartfx = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "nonzero_exit", "smart_render_supported": False},
+        input_world,
+        "classic",
+    )
+    assert classic_without_smartfx["classification"] == "nonzero_exit"
 
     missing = module.normalize_structured_failure(
         "argb8",
@@ -1019,21 +1036,4 @@ def test_captured_oracle_is_compared_per_depth(tmp_path):
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["oracle"]["state"] for item in report["results"]} == {"captured"}
     assert {item["oracle"]["exact"] for item in report["results"]} == {True}
-
-def test_source_has_no_host_reimplementation():
-    source = RUNNER.read_text(encoding="utf-8")
-    assert "capture_output" not in source
-    assert "LoadLibrary" not in source
-
-def test_harness_exposes_depth_variants_of_typed_request_cli():
-    source = source_owners.harness_windows_text()
-    for flag in (
-        '"--render-experimental-request"',
-        '"--render-experimental-request-16"',
-        '"--render-experimental-request-32"',
-        '"--render-experimental-smart-request"',
-        '"--render-experimental-smart-request-16"',
-        '"--render-experimental-smart-request-32-cpu"',
-    ):
-        assert flag in source
 

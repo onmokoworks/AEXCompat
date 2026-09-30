@@ -15,9 +15,10 @@
 use crate::image_render::{
     GpuRuntimePolicyInput, INTERACTIVE_RENDER_TIMEOUT_MS, InteractiveParameter, MAX_DIMENSION,
     MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
-    RenderUiAction, decode_bounded_image, decode_sha256_hex, encode_interactive_payload,
-    isolated_worker_diagnostics, native_rgba_to_preview, parameter_animation_sidecar_json,
-    runtime_backend, validate_animation_bindings,
+    RenderUiAction, decode_bounded_image, decode_sha256_hex, encode_default_interactive_payload,
+    encode_interactive_payload, isolated_worker_diagnostics, native_rgba_to_preview,
+    parameter_animation_sidecar_json, propagate_bee_facade, runtime_backend,
+    validate_animation_bindings,
 };
 use crate::runtime_module_policy::{WorkerModuleValidation, authenticate_gpu_worker_report};
 use crate::secure_image_dispatch::{
@@ -83,8 +84,9 @@ pub const EXIT_INVARIANT_FAILURE: u32 = 24;
 /// (`kSessionSequenceSetupFailed`, -47: the session can never render). The
 /// worker exits fail-closed right after sending such a response, so the
 /// broker must invalidate the session rather than surface them as reusable
-/// frame-local diagnostics. Time-scale (-40) and time-range (-46) rejections
-/// stay frame-local by the worker's contract.
+/// frame-local diagnostics. Time-scale (-40), time-range (-46) and the
+/// audio-passthrough ui_action refusal (-48, issue #1048) stay frame-local by
+/// the worker's contract.
 fn is_fatal_session_error(render_error: i64) -> bool {
     matches!(render_error, -47 | -45..=-41)
 }
@@ -112,6 +114,19 @@ fn admissible_return_message(message: &FrameReturnMessage) -> bool {
         && message.selector.len() <= 64
         && message
             .selector
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// What the worker's guarded selector call returns in place of a faulting
+/// selector's result (`kAuditFailure`), and the only `render_error` a
+/// `selector_crash` may accompany (issue #983).
+const SELECTOR_FAULT_SUBSTITUTE: i64 = 512;
+
+fn admissible_selector_name(selector: &str) -> bool {
+    !selector.is_empty()
+        && selector.len() <= 64
+        && selector
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
@@ -146,6 +161,31 @@ const FRAME_HEIGHT_OFFSET: usize = 36;
 const MAX_BATCH_FRAMES: usize = 10_000;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const CLOSE_COLLECT_TIMEOUT: Duration = Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS);
+
+/// How long a close-handshake write failure waits for the process object to
+/// catch up with the pipe. Windows closes a dying process's handles before it
+/// signals the process itself, so a worker that exits on its own leaves a
+/// window where the write already fails while `has_exited` still reports it
+/// running. Only a worker that is genuinely alive and unreachable pays this.
+const EXIT_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Waits up to [`EXIT_SETTLE_TIMEOUT`] for `process` to report its exit.
+pub(crate) fn settled_as_exited(process: Option<&SecureSessionProcess>) -> bool {
+    let Some(process) = process else {
+        return false;
+    };
+    let deadline = Instant::now() + EXIT_SETTLE_TIMEOUT;
+    loop {
+        if process.has_exited() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// After a broker-initiated job termination the process is already gone;
 /// collection just drains readers and accounting.
 const POST_TERMINATION_COLLECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -481,6 +521,84 @@ impl SessionGeometry {
 /// still fail-closes on `section_bytes() > SECTION_HARD_CAP_BYTES` as pure
 /// defense in depth; there is no longer a section-fit eligibility carve-out that
 /// keeps a large-layer render on the one-shot path.
+
+/// Host-controlled world transformations for a metamorphic diagnostic run.
+/// This is never inferred from the plug-in identity and is absent on ordinary
+/// renders. The worker revalidates the same bounds before creating any world.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DiagnosticWorldLayout {
+    pub input_row_padding: u32,
+    pub input_padding_byte: Option<u8>,
+    pub input_pixel_format: Option<RenderPixelFormat>,
+    pub output_row_padding: u32,
+    pub input_origin_x: i32,
+    pub input_origin_y: i32,
+    pub request_rect: Option<[i32; 4]>,
+    pub extent_hint: Option<[i32; 4]>,
+}
+
+impl DiagnosticWorldLayout {
+    fn encoded(
+        self,
+        width: u32,
+        height: u32,
+        format: RenderPixelFormat,
+        smart: bool,
+    ) -> io::Result<String> {
+        let input_bytes =
+            u32::try_from(self.input_pixel_format.unwrap_or(format).bytes_per_pixel()).unwrap();
+        let output_bytes = u32::try_from(format.bytes_per_pixel()).unwrap();
+        let valid_rect = |rect: [i32; 4]| {
+            rect[0] >= 0
+                && rect[1] >= 0
+                && rect[2] > rect[0]
+                && rect[3] > rect[1]
+                && i64::from(rect[2]) <= i64::from(width)
+                && i64::from(rect[3]) <= i64::from(height)
+        };
+        if self.input_row_padding > 256
+            || self.output_row_padding > 256
+            || self.input_row_padding % input_bytes != 0
+            || self.output_row_padding % output_bytes != 0
+            || self.input_origin_x.unsigned_abs() > MAX_DIMENSION
+            || self.input_origin_y.unsigned_abs() > MAX_DIMENSION
+            || self
+                .request_rect
+                .is_some_and(|rect| !smart || !valid_rect(rect))
+            || self.extent_hint.is_some_and(|rect| !valid_rect(rect))
+        {
+            return Err(invalid("render diagnostic world layout is invalid"));
+        }
+        let request = self.request_rect.unwrap_or([-1; 4]);
+        let extent = self.extent_hint.unwrap_or([-1; 4]);
+        let legacy = format!(
+            "v1|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            self.input_row_padding,
+            self.output_row_padding,
+            self.input_origin_x,
+            self.input_origin_y,
+            request[0],
+            request[1],
+            request[2],
+            request[3],
+            extent[0],
+            extent[1],
+            extent[2],
+            extent[3]
+        );
+        Ok(match (self.input_padding_byte, self.input_pixel_format) {
+            (fill, Some(input_format)) => format!(
+                "v3|{}|{}|{}",
+                &legacy[3..],
+                fill.unwrap_or(0x5a),
+                input_format.bytes_per_pixel()
+            ),
+            (Some(fill), None) => format!("v2|{}|{fill}", &legacy[3..]),
+            (None, None) => legacy,
+        })
+    }
+}
+
 pub struct SessionOpenRequest<'a> {
     pub repository: &'a Path,
     pub plugin_path: &'a Path,
@@ -515,6 +633,8 @@ pub struct SessionOpenRequest<'a> {
     /// `encode_spatial_context`; carried in the session launch argv so the
     /// hoisted SEQUENCE_SETUP and every frame observe it (issue #98 W1-3).
     pub spatial_trailer: Option<String>,
+    /// Validated single authored camera snapshot, parsed before plug-in dispatch.
+    pub camera_trailer: Option<String>,
     /// Static render-environment trailer (`render:v1|`), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
@@ -547,6 +667,10 @@ pub struct SessionOpenRequest<'a> {
     /// `session-layers:v2|` launch trailer.
     pub layers: &'a [SessionLayer],
     pub dependencies: Vec<ApprovedImageArtifact>,
+    /// Discovery-confirmed AEGP providers initialized in this worker before
+    /// the PF module. Their broker-owned manifest stays alive with the
+    /// resident session and declares the exact suites each provider exposed.
+    pub companions: Vec<crate::companion_manifest::ApprovedCompanion>,
     /// In-place load mode (issue #751): non-empty opens the session on the
     /// plug-in's real path with these directories admitted into the worker's
     /// DLL search set, instead of staging a sealed tree. Mutually exclusive
@@ -576,6 +700,54 @@ pub struct SessionOpenRequest<'a> {
     /// every GPU-backed launch, exactly like the one-shot GPU path. A policy is
     /// inert, but accepted, for classic/CPU sessions that never attempt GPU.
     pub gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
+    /// Per-launch environment inputs (issue #910): extra child environment
+    /// variables and the opt-in minidump directory, carried explicitly so a
+    /// caller never has to set them on the broker process (which every
+    /// concurrent session would then see).
+    pub launch_environment: crate::secure_launch::LaunchEnvironment,
+}
+
+/// Stable identity of one effect registered by a PluginData bundle (#1260).
+/// Both fields are required: the index makes selection unambiguous within the
+/// bounded registration order, while the exact match-name bytes prevent a
+/// changed/reordered bundle from silently dispatching another effect.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginDataEffectSelector {
+    pub index: u32,
+    pub match_name_hex: String,
+}
+
+impl PluginDataEffectSelector {
+    pub(crate) fn encoded(&self) -> io::Result<String> {
+        if self.index >= 64
+            || self.match_name_hex.is_empty()
+            || self.match_name_hex.len() > 512
+            || !self.match_name_hex.len().is_multiple_of(2)
+            || !self
+                .match_name_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid("PluginData effect selector is invalid"));
+        }
+        for pair in self.match_name_hex.as_bytes().chunks_exact(2) {
+            let value = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+            if value < 0x20 || value == 0x7f {
+                return Err(invalid("PluginData effect selector contains unsafe bytes"));
+            }
+        }
+        Ok(format!("v1|{}|{}", self.index, self.match_name_hex))
+    }
+}
+
+fn append_plugin_data_selector_args(
+    args: &mut Vec<String>,
+    selector: Option<&PluginDataEffectSelector>,
+) -> io::Result<()> {
+    if let Some(selector) = selector {
+        args.extend(["--plugin-data-selector-v1".to_owned(), selector.encoded()?]);
+    }
+    Ok(())
 }
 
 /// A secondary layer whose RGBA8 pixels travel as an inherited per-layer file
@@ -603,6 +775,24 @@ pub struct SessionLayer {
     pub dynamic: bool,
 }
 
+/// A per-layer world shape carried beside (not inside) the inherited RGBA8
+/// HANDLE transport. Ordinary sessions omit this and retain the v2 trailer.
+#[derive(Clone, Debug)]
+pub struct SessionLayerLayout {
+    pub slot: u32,
+    pub pixel_format: RenderPixelFormat,
+    pub row_padding: u32,
+    pub padding_byte: u8,
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub extent: [i32; 4],
+}
+
+pub struct SessionWorldCapture<'a> {
+    pub stage: &'a str,
+    pub file: &'a std::fs::File,
+}
+
 #[derive(Debug)]
 pub enum FrameStatus {
     /// The frame rendered and every per-frame invariant held. `pixels` are
@@ -614,6 +804,14 @@ pub enum FrameStatus {
         /// effect (#261); `pixels` is packed at exactly `width*height*bpp`.
         width: u32,
         height: u32,
+        /// The frame's top-left relative to the layer origin. Negative when an
+        /// effect grew its output past the layer (#914), and positive when a
+        /// classic effect cropped: both render paths fill it now, the smart one
+        /// from `result_rect`'s top-left and the classic one by negating
+        /// `PF_OutData::origin` (#984). Zero when nothing resized, which is
+        /// where the output already starts.
+        origin_x: i32,
+        origin_y: i32,
     },
     /// A frame-local compatibility diagnostic (selector error, time scale
     /// mismatch). The session stays usable; continuing is the caller's call.
@@ -625,7 +823,29 @@ pub enum FrameStatus {
         /// there, and plug-ins write their own reason, so this is often the
         /// whole diagnosis (issue #707). Absent when the plug-in said nothing.
         return_message: Option<FrameReturnMessage>,
+        /// The frame failed because a selector raised an SEH exception, rather
+        /// than because the plug-in returned `render_error` normally. This is
+        /// essential when the worker's fail-closed substitute (512) collides
+        /// with a real PF_Err value (issue #983). Present only with
+        /// `render_error == 512`: the worker attaches it to the substitute it
+        /// explains and to nothing else, and the session fails closed on any
+        /// other shape. The fault named is the one whose substituted 512 is
+        /// this `render_error`, not merely the last fault of the frame: a frame
+        /// whose 512 was decided before its first fault (the plug-in's own 512
+        /// from RENDER and then a FRAME_SETDOWN fault, say) carries none. The
+        /// converse does not hold: a 512 without this field is a 512 that no
+        /// SEH fault explains, not proof the plug-in returned it itself, since
+        /// an escaped C++ exception, a failed module audit, and a guard
+        /// refusal substitute the same number without a fault. The fault
+        /// fingerprint (site, module, RVA, unwind) stays on the worker's
+        /// `stage:selector_seh` stderr line (issue #1212); this is the
+        /// bounded, frame-scoped discriminator.
+        selector_crash: Option<SelectorCrash>,
     },
+    /// The Smart selector returned success, but the guarded output retained
+    /// its initialization sentinel. This typed host observation is not a
+    /// plug-in-returned numeric -6.
+    SmartOutputUntouched,
     // An expand-output effect that overruns the launch slot no longer surfaces to
     // the caller: `render_frame` grows the shared section in place and waits for
     // the worker's follow-up ok (protocol §3, issue #262), so it always resolves
@@ -638,6 +858,44 @@ pub enum FrameStatus {
 pub struct FrameOutcome {
     pub frame_index: u32,
     pub status: FrameStatus,
+    pub depth_provenance: Option<FrameDepthProvenance>,
+    pub performance: FramePerformance,
+}
+
+/// Advisory phase measurements for one frame. The broker-owned clock measures
+/// transport and validation; the worker clock measures only its own phases.
+/// Neither is used to change the frame verdict or deadline.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct FramePerformance {
+    pub broker_frame_wall_ns: u64,
+    pub broker_input_write_ns: u64,
+    pub broker_output_verify_ns: Option<u64>,
+    pub worker_setup_ns: Option<u64>,
+    pub worker_render_ns: Option<u64>,
+    pub render_selector_ns: Option<u64>,
+    pub worker_finalize_ns: Option<u64>,
+    pub worker_live_commit_bytes: Option<u64>,
+    pub worker_peak_commit_bytes: Option<u64>,
+    pub worker_job_peak_commit_bytes: Option<u64>,
+    pub output_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerFramePerformance {
+    worker_setup_ns: Option<u64>,
+    worker_render_ns: Option<u64>,
+    render_selector_ns: Option<u64>,
+    worker_finalize_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FrameDepthProvenance {
+    pub advertised_out_flags: u32,
+    pub advertised_out_flags2: u32,
+    pub advertised_depth_supported: bool,
+    pub planned_dispatch_pixel_bytes: Option<u32>,
+    pub dispatch_pixel_bytes: Option<u32>,
 }
 
 /// Why a session stopped accepting frames. Everything here is fail-closed:
@@ -660,12 +918,112 @@ struct FrameDoneOutput {
     /// the layout cross-check the per-frame SHA-256 used to carry (#690).
     packed_bytes: u64,
     guards_intact: bool,
+    /// Where the frame sits relative to the layer origin. An effect that grows
+    /// its output starts these pixels above and left of the layer's (0,0), so
+    /// this is negative; a classic effect that crops starts them inside it, so
+    /// this is positive. A caller placing the frame back into a fixed-size
+    /// image needs it to know which part covers the layer (#914). SmartFX fills
+    /// it from `result_rect`'s top-left; classic negates `PF_OutData::origin`
+    /// on an accepted resize (#984). Absent (0) when nothing resized and on any
+    /// worker that predates the field, which is where the output already
+    /// starts.
+    #[serde(default)]
+    origin_x: i32,
+    #[serde(default)]
+    origin_y: i32,
     /// A SmartFX frame whose PreRender returned a legally empty result_rect
     /// (#278): width/height are 0 and there are no output pixels. Absent (false)
     /// for every normal frame, where a zero dimension stays an invariant
     /// failure. Only the worker's smart session frame loop sets it.
     #[serde(default)]
     empty_result: bool,
+    #[serde(default)]
+    advertised_out_flags: Option<u32>,
+    #[serde(default)]
+    advertised_out_flags2: Option<u32>,
+    #[serde(default)]
+    advertised_depth_supported: Option<bool>,
+    #[serde(default)]
+    planned_dispatch_pixel_bytes: Option<u32>,
+    #[serde(default)]
+    dispatch_pixel_bytes: Option<u32>,
+}
+
+impl FrameDoneOutput {
+    fn depth_provenance(
+        &self,
+        requested_pixel_bytes: u32,
+    ) -> Result<Option<FrameDepthProvenance>, &'static str> {
+        let supplied = self.advertised_out_flags.is_some()
+            || self.advertised_out_flags2.is_some()
+            || self.advertised_depth_supported.is_some()
+            || self.planned_dispatch_pixel_bytes.is_some()
+            || self.dispatch_pixel_bytes.is_some();
+        if !supplied {
+            return Ok(None);
+        }
+        let (
+            Some(advertised_out_flags),
+            Some(advertised_out_flags2),
+            Some(advertised_depth_supported),
+        ) = (
+            self.advertised_out_flags,
+            self.advertised_out_flags2,
+            self.advertised_depth_supported,
+        )
+        else {
+            return Err("frame depth provenance is incomplete");
+        };
+        let valid_depth = |depth: u32| matches!(depth, 4 | 8 | 16);
+        let deep = advertised_out_flags & (1 << 25) != 0;
+        let floating = advertised_out_flags2 & (1 << 12) != 0;
+        let expected_plan = match requested_pixel_bytes {
+            16 => {
+                if floating {
+                    16
+                } else if deep {
+                    8
+                } else {
+                    4
+                }
+            }
+            8 => {
+                if deep {
+                    8
+                } else if floating {
+                    16
+                } else {
+                    4
+                }
+            }
+            4 => 4,
+            _ => return Err("requested frame depth is invalid"),
+        };
+        if self.planned_dispatch_pixel_bytes.is_some() != self.dispatch_pixel_bytes.is_some()
+            || self
+                .planned_dispatch_pixel_bytes
+                .is_some_and(|depth| !valid_depth(depth))
+            || self
+                .dispatch_pixel_bytes
+                .is_some_and(|depth| !valid_depth(depth))
+            || (self.width != 0 && self.dispatch_pixel_bytes.is_none())
+            || self
+                .planned_dispatch_pixel_bytes
+                .is_some_and(|depth| depth != expected_plan)
+            || (self.planned_dispatch_pixel_bytes.is_some()
+                && advertised_depth_supported
+                    != (self.planned_dispatch_pixel_bytes == Some(requested_pixel_bytes)))
+        {
+            return Err("frame depth provenance contradicts the rendered frame");
+        }
+        Ok(Some(FrameDepthProvenance {
+            advertised_out_flags,
+            advertised_out_flags2,
+            advertised_depth_supported,
+            planned_dispatch_pixel_bytes: self.planned_dispatch_pixel_bytes,
+            dispatch_pixel_bytes: self.dispatch_pixel_bytes,
+        }))
+    }
 }
 
 /// A selector's own account of why it failed, as left in
@@ -683,6 +1041,13 @@ pub struct FrameReturnMessage {
     pub display_requested: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SelectorCrash {
+    pub selector: String,
+    pub exception_code: u32,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FrameDone {
@@ -690,14 +1055,20 @@ struct FrameDone {
     #[serde(rename = "type")]
     kind: String,
     frame_index: u32,
+    #[serde(default)]
+    performance: Option<WorkerFramePerformance>,
     status: String,
     #[serde(default)]
     output: Option<FrameDoneOutput>,
     render_error: i64,
     #[serde(default)]
+    smart_output_untouched: bool,
+    #[serde(default)]
     missing_dependency: Option<String>,
     #[serde(default)]
     return_message: Option<FrameReturnMessage>,
+    #[serde(default)]
+    selector_crash: Option<SelectorCrash>,
     #[serde(default)]
     generation: Option<u32>,
     /// Present only on a "resize_needed" status (#262): the dimensions the
@@ -751,6 +1122,7 @@ pub struct RenderSession {
     last_output_generation: u32,
     frames_ok: u32,
     frames_errored: u32,
+    smart_output_untouched_frames: u32,
     parameter_update_frames: u32,
     opened: Instant,
     plugin_sha256: String,
@@ -765,6 +1137,8 @@ pub struct RenderSession {
     /// the whole session; the worker read it at launch, and the drop removes
     /// the document from target/image-transport.
     _in_place_transport: Option<crate::cluster_manifest::ClusterManifestTransport>,
+    /// Keeps `--companion-manifest-v1` alive for the resident worker lifetime.
+    _companion_transport: Option<crate::companion_manifest::CompanionManifestTransport>,
     /// Keeps the AEXRMA1 document alive for the whole GPU session. Staged
     /// launches copy it into the sealed tree; in-place launches read this
     /// broker-owned absolute transport path before loading plug-in code.
@@ -875,7 +1249,64 @@ impl RenderSession {
     /// slot in place mid-session (protocol §3, issue #262), so there is no
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, None)
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            None,
+            None,
+            None,
+            &[],
+            None,
+        )
+    }
+
+    /// Opens a private-desktop session with explicit, bounded world variants.
+    /// The regular `open` path never supplies this diagnostic-only option.
+    pub fn open_diagnostic(
+        request: SessionOpenRequest<'_>,
+        layout: DiagnosticWorldLayout,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            None,
+            None,
+            Some(layout),
+            &[],
+            None,
+        )
+    }
+
+    pub fn open_diagnostic_with_layer_layouts(
+        request: SessionOpenRequest<'_>,
+        layout: DiagnosticWorldLayout,
+        layer_layouts: &[SessionLayerLayout],
+        captures: &[SessionWorldCapture<'_>],
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            None,
+            None,
+            Some(layout),
+            layer_layouts,
+            Some(captures),
+        )
+    }
+
+    pub fn open_plugin_data_effect(
+        request: SessionOpenRequest<'_>,
+        selector: &PluginDataEffectSelector,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            None,
+            Some(selector),
+            None,
+            &[],
+            None,
+        )
     }
 
     /// Opens a session for an explicitly interactive GUI harness. This is
@@ -884,14 +1315,36 @@ impl RenderSession {
     pub(crate) fn open_on_current_desktop(
         request: SessionOpenRequest<'_>,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current, None)
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Current,
+            None,
+            None,
+            None,
+            &[],
+            None,
+        )
     }
 
     fn open_with_desktop_policy(
         request: SessionOpenRequest<'_>,
         desktop_policy: WorkerDesktopPolicy,
         cluster: Option<ClusterRenderPlugins>,
+        plugin_data_selector: Option<&PluginDataEffectSelector>,
+        diagnostic_layout: Option<DiagnosticWorldLayout>,
+        layer_layouts: &[SessionLayerLayout],
+        captures: Option<&[SessionWorldCapture<'_>]>,
     ) -> io::Result<RenderSession> {
+        let diagnostic_layout = diagnostic_layout
+            .map(|layout| {
+                layout.encoded(
+                    request.width,
+                    request.height,
+                    request.pixel_format,
+                    request.smart,
+                )
+            })
+            .transpose()?;
         if request.time_step <= 0
             // A zero-duration render (total_time == 0) is valid: the shared
             // RenderTiming::is_valid admits it at current_time == 0, and the
@@ -915,6 +1368,11 @@ impl RenderSession {
         // entry all refer to it (design §2.2). The manifest's own structural
         // bounds are enforced by the dispatch when it builds the document.
         if let Some(cluster) = &cluster {
+            if plugin_data_selector.is_some() {
+                return Err(invalid(
+                    "PluginData effect selection is not supported in a cluster session",
+                ));
+            }
             let launch_sha256 = decode_sha256_hex(request.plugin_sha256)?;
             if cluster.plugins.first().map(|plugin| plugin.expected_sha256) != Some(launch_sha256) {
                 return Err(invalid("cluster plugins[0] must match the launch plugin"));
@@ -937,6 +1395,20 @@ impl RenderSession {
         )?;
         if request.layers.len() > 64 {
             return Err(invalid("render session layer count exceeds 64"));
+        }
+        for (index, shape) in layer_layouts.iter().enumerate() {
+            if !request
+                .layers
+                .iter()
+                .any(|layer| layer.slot == shape.slot && layer.timed.is_none() && !layer.dynamic)
+                || layer_layouts[..index]
+                    .iter()
+                    .any(|other| other.slot == shape.slot)
+            {
+                return Err(invalid(
+                    "secondary world layout slot is missing or duplicated",
+                ));
+            }
         }
         // Validate each layer. Layer pixels travel as inherited per-layer file
         // HANDLEs (#268), not section slots, so a secondary or timed layer of any
@@ -1056,7 +1528,7 @@ impl RenderSession {
             ));
         }
         let command = session_command(request.pixel_format, request.smart, effective_backend)?;
-        // A pre-encoded payload is bounded here the way `encode_interactive_payload`
+        // A pre-encoded payload is bounded here the way the default encoder
         // bounds the one it builds, so no caller can widen the launch argv past
         // the limit the worker's parser is written against.
         let payload = match request.payload_override {
@@ -1066,7 +1538,7 @@ impl RenderSession {
                 }
                 payload.to_owned()
             }
-            None => encode_interactive_payload(request.parameters.unwrap_or_default())?,
+            None => encode_default_interactive_payload(request.parameters.unwrap_or_default())?,
         };
         // The sidecar mirrors the one-shot transport: validated bindings,
         // JSON under <repository>/target/image-transport (the only directory
@@ -1207,6 +1679,8 @@ impl RenderSession {
             request.total_time.to_string(),
             request.time_scale.to_string(),
         ];
+        let companion_transport =
+            crate::companion_manifest::write_transport(request.repository, &request.companions)?;
         // The secondary-layer trailer sits ahead of the context trailers in
         // the positional tail (issue #98 W1-4). The pixels travel as inherited
         // file HANDLEs (#268), so each entry now carries its layer's read handle
@@ -1215,12 +1689,86 @@ impl RenderSession {
         // value is identical in the worker; the worker reads exactly w*h*4 bytes
         // from it into the layer's private vector.
         if !request.layers.is_empty() {
-            let mut encoded = String::from("session-layers:v2|");
+            let mixed_depth = layer_layouts
+                .iter()
+                .any(|shape| shape.pixel_format != request.pixel_format);
+            let mut encoded = String::from(if layer_layouts.is_empty() {
+                "session-layers:v2|"
+            } else if mixed_depth {
+                "session-layers:v4|"
+            } else {
+                "session-layers:v3|"
+            });
             for (index, layer) in request.layers.iter().enumerate() {
                 if index != 0 {
                     encoded.push(';');
                 }
                 let handle = layer_handles[index] as usize;
+                if !layer_layouts.is_empty() {
+                    if layer.timed.is_some() || layer.dynamic {
+                        return Err(invalid("world layouts require static secondary layers"));
+                    }
+                    let shape = layer_layouts.iter().find(|shape| shape.slot == layer.slot);
+                    let padding = shape.map_or(0, |shape| shape.row_padding);
+                    let fill = shape.map_or(0x5a, |shape| shape.padding_byte);
+                    let origin_x = shape.map_or(0, |shape| shape.origin_x);
+                    let origin_y = shape.map_or(0, |shape| shape.origin_y);
+                    let extent = shape
+                        .map_or([0, 0, layer.width as i32, layer.height as i32], |shape| {
+                            shape.extent
+                        });
+                    let layer_format =
+                        shape.map_or(request.pixel_format, |shape| shape.pixel_format);
+                    let bytes = layer_format.bytes_per_pixel() as u32;
+                    if padding > 256
+                        || padding % bytes != 0
+                        || origin_x.unsigned_abs() > MAX_DIMENSION
+                        || origin_y.unsigned_abs() > MAX_DIMENSION
+                        || extent[0] < 0
+                        || extent[1] < 0
+                        || extent[2] <= extent[0]
+                        || extent[3] <= extent[1]
+                        || extent[2] > layer.width as i32
+                        || extent[3] > layer.height as i32
+                    {
+                        return Err(invalid("secondary world layout is invalid"));
+                    }
+                    if mixed_depth {
+                        encoded.push_str(&format!(
+                            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                            layer.slot,
+                            layer.width,
+                            layer.height,
+                            handle,
+                            bytes,
+                            padding,
+                            fill,
+                            origin_x,
+                            origin_y,
+                            extent[0],
+                            extent[1],
+                            extent[2],
+                            extent[3]
+                        ));
+                    } else {
+                        encoded.push_str(&format!(
+                            "{},{},{},{},{},{},{},{},{},{},{},{}",
+                            layer.slot,
+                            layer.width,
+                            layer.height,
+                            handle,
+                            padding,
+                            fill,
+                            origin_x,
+                            origin_y,
+                            extent[0],
+                            extent[1],
+                            extent[2],
+                            extent[3]
+                        ));
+                    }
+                    continue;
+                }
                 match (layer.timed, layer.dynamic) {
                     (Some((time, time_scale)), _) => encoded.push_str(&format!(
                         "{},{},{},{},{},{}",
@@ -1305,8 +1853,55 @@ impl RenderSession {
                 dump.path.to_string_lossy().into_owned(),
             ]);
         }
+        let mut capture_handles = Vec::new();
+        for capture in captures.unwrap_or_default() {
+            if capture.stage.is_empty()
+                || capture.stage.len() > 96
+                || !capture
+                    .stage
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                || !(capture.stage
+                    == if request.smart {
+                        "smart-input"
+                    } else {
+                        "classic-input"
+                    }
+                    || capture.stage.starts_with(if request.smart {
+                        "smart-layer-slot"
+                    } else {
+                        "classic-layer-slot"
+                    }))
+            {
+                return Err(invalid("world capture stage is invalid for this session"));
+            }
+            if capture_handles.len() >= 16
+                || captures
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|other| other.stage == capture.stage)
+                    .count()
+                    != 1
+            {
+                return Err(invalid("world capture stages must be unique and bounded"));
+            }
+            let handle = capture.file.as_raw_handle() as HANDLE;
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
+                == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            args_after_plugin.extend([
+                "--capture-world-handle-v1".to_owned(),
+                format!("{}|{}", capture.stage, handle as usize),
+            ]);
+            capture_handles.push(handle);
+        }
         if request.output_checksum_detail {
             args_after_plugin.extend(["--output-checksum-detail-v1".to_owned(), "1".to_owned()]);
+        }
+        if let Some(layout) = &diagnostic_layout {
+            args_after_plugin.extend(["--render-diagnostic-layout-v1".to_owned(), layout.clone()]);
         }
         // Conformance render settings ride the same shared auxiliary option the
         // one-shot path forwards (#275); the worker peels it from the tail and
@@ -1325,6 +1920,20 @@ impl RenderSession {
                 sidecar.0.to_string_lossy().into_owned(),
             ]);
         }
+        if let Some(transport) = &companion_transport {
+            // Auxiliary pairs must be at argv's tail. The worker strips them
+            // backwards before interpreting any layer/context positional
+            // trailers, so inserting this beside the fixed session arguments
+            // makes every layered companion launch malformed.
+            args_after_plugin.extend([
+                "--companion-manifest-v1".to_owned(),
+                transport.path().to_string_lossy().into_owned(),
+            ]);
+        }
+        append_plugin_data_selector_args(&mut args_after_plugin, plugin_data_selector)?;
+        if let Some(camera) = &request.camera_trailer {
+            args_after_plugin.extend(["--scene-camera-v1".to_owned(), camera.clone()]);
+        }
         // The session always launches at the render dimensions; an expand grows
         // the output slot in place mid-session (#262), so there is no launch-time
         // output-capacity trailer.
@@ -1339,6 +1948,7 @@ impl RenderSession {
             let policy_input = request
                 .gpu_runtime_policy
                 .expect("gpu attempt was validated to carry a policy at open");
+            crate::gpu_runtime_policy_generator::validate_active_gpu_policy(policy_input.policy)?;
             let backend =
                 runtime_backend(effective_backend).expect("GPU attempt has a runtime backend");
             // Reuse the preflight's session identity so the manifest the worker
@@ -1360,6 +1970,8 @@ impl RenderSession {
         } else {
             None
         };
+        let mut inherited_sidecars = layer_handles.clone();
+        inherited_sidecars.extend(capture_handles);
         let child_handles = SessionChildHandles {
             request_read: request_read.raw(),
             response_write: response_write.raw(),
@@ -1367,7 +1979,7 @@ impl RenderSession {
             // Per-layer inherited read handles (#268); their numeric values also
             // ride the session-layers trailer so the worker knows which handle
             // carries which layer.
-            layers: layer_handles.clone(),
+            layers: inherited_sidecars,
         };
         let mut cluster_state = None;
         let mut in_place_transport = None;
@@ -1377,7 +1989,7 @@ impl RenderSession {
                 worker_kind: if request.smart {
                     WorkerKind::Smart
                 } else {
-                    WorkerKind::Render
+                    WorkerKind::Classic
                 },
                 plugins: cluster.plugins,
                 dependency_search_dirs: request.dependency_search_dirs.clone(),
@@ -1386,6 +1998,7 @@ impl RenderSession {
                 module_bound: cluster.module_bound,
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
+                launch_environment: request.launch_environment.clone(),
             };
             let launch = match desktop_policy {
                 WorkerDesktopPolicy::Dedicated => {
@@ -1414,7 +2027,7 @@ impl RenderSession {
                 worker_kind: if request.smart {
                     WorkerKind::Smart
                 } else {
-                    WorkerKind::Render
+                    WorkerKind::Classic
                 },
                 plugin,
                 dependencies,
@@ -1422,6 +2035,7 @@ impl RenderSession {
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
                 timeout: Some(request.frame_deadline),
+                launch_environment: request.launch_environment.clone(),
             };
             if gpu_attempt {
                 let policy_input = request
@@ -1542,12 +2156,14 @@ impl RenderSession {
             last_output_generation: 0,
             frames_ok: 0,
             frames_errored: 0,
+            smart_output_untouched_frames: 0,
             parameter_update_frames: 0,
             opened: Instant::now(),
             plugin_sha256: request.plugin_sha256.to_ascii_lowercase(),
             smart: request.smart,
             cluster: cluster_state,
             _in_place_transport: in_place_transport,
+            _companion_transport: companion_transport,
             _runtime_authorization,
             _animation_sidecar: animation_sidecar,
             _layer_sidecars: layer_sidecars,
@@ -1564,7 +2180,15 @@ impl RenderSession {
         request: SessionOpenRequest<'_>,
         cluster: ClusterRenderPlugins,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, Some(cluster))
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            Some(cluster),
+            None,
+            None,
+            &[],
+            None,
+        )
     }
 
     pub fn invalidation(&self) -> Option<&SessionInvalidation> {
@@ -1968,9 +2592,12 @@ impl RenderSession {
                 "per-frame parameter message exceeds the protocol message cap",
             ));
         }
+        let frame_started = Instant::now();
+        let input_started = Instant::now();
         self.transport.write_input_slot(rgba);
         self.transport
             .write_header_u32(INPUT_GENERATION_OFFSET, expected_generation);
+        let broker_input_write_ns = input_started.elapsed().as_nanos() as u64;
         if !self.transport.send_message(&message) {
             return Err(self.invalidate(
                 "request_pipe_closed",
@@ -2082,11 +2709,35 @@ impl RenderSession {
             {
                 done.return_message = None;
             }
+            // Fail closed rather than drop: unlike `return_message` this is
+            // the host's own claim about the frame, so a shape the worker
+            // cannot legitimately produce (a zero exception code, a selector
+            // name outside the worker's vocabulary, or a crash attached to an
+            // error other than the 512 the guard substitutes for a fault) is a
+            // protocol violation, not plug-in text to be discarded.
+            if done.selector_crash.as_ref().is_some_and(|crash| {
+                crash.exception_code == 0
+                    || !admissible_selector_name(&crash.selector)
+                    || done.render_error != SELECTOR_FAULT_SUBSTITUTE
+            }) {
+                return Err(self.invalidate(
+                    "malformed_selector_crash",
+                    format!("frame {frame_index} carried an invalid selector crash diagnostic"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
             match done.status.as_str() {
                 "error" => {
                     if done.output.is_some()
                         || done.generation.is_some()
                         || done.render_error == 0
+                        || (done.smart_output_untouched
+                            && (!self.smart
+                                || done.render_error != -6
+                                || done.missing_dependency.is_some()
+                                || done.return_message.is_some()
+                                || done.selector_crash.is_some()))
                         || carries_resize_fields
                     {
                         return Err(self.invalidate(
@@ -2147,16 +2798,58 @@ impl RenderSession {
                     // is still host-owned, so the session continues; whether to
                     // proceed is the caller's decision.
                     self.frames_errored += 1;
+                    if done.smart_output_untouched {
+                        self.smart_output_untouched_frames += 1;
+                    }
+                    let memory = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.memory_commit_snapshot());
+                    let job_peak = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.job_peak_commit_bytes());
                     return Ok(FrameOutcome {
                         frame_index,
-                        status: FrameStatus::FrameError {
-                            render_error: done.render_error,
-                            missing_dependency: done.missing_dependency,
-                            return_message: done.return_message,
+                        depth_provenance: None,
+                        performance: FramePerformance {
+                            broker_frame_wall_ns: frame_started.elapsed().as_nanos() as u64,
+                            broker_input_write_ns,
+                            worker_setup_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_setup_ns),
+                            worker_render_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_render_ns),
+                            render_selector_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.render_selector_ns),
+                            worker_finalize_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_finalize_ns),
+                            worker_live_commit_bytes: memory.map(|snapshot| snapshot.0),
+                            worker_peak_commit_bytes: memory.map(|snapshot| snapshot.1),
+                            worker_job_peak_commit_bytes: job_peak,
+                            ..FramePerformance::default()
+                        },
+                        status: if done.smart_output_untouched {
+                            FrameStatus::SmartOutputUntouched
+                        } else {
+                            FrameStatus::FrameError {
+                                render_error: done.render_error,
+                                missing_dependency: done.missing_dependency,
+                                return_message: done.return_message,
+                                selector_crash: done.selector_crash,
+                            }
                         },
                     });
                 }
                 "ok" => {
+                    let output_verify_started = Instant::now();
                     let (Some(output), Some(generation)) = (done.output, done.generation) else {
                         return Err(self.invalidate(
                             "malformed_ok_response",
@@ -2165,7 +2858,13 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     };
-                    if carries_resize_fields || done.missing_dependency.is_some() {
+                    // The `selector_crash` arm is belt-and-braces: the shape
+                    // check above already refused any crash outside a 512.
+                    if carries_resize_fields
+                        || done.missing_dependency.is_some()
+                        || done.smart_output_untouched
+                        || done.selector_crash.is_some()
+                    {
                         return Err(self.invalidate(
                             "malformed_ok_response",
                             format!("frame {frame_index} ok response carried resize fields"),
@@ -2186,6 +2885,19 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     }
+                    let depth_provenance = match output
+                        .depth_provenance(self.geometry.pixel_format.bytes_per_pixel() as u32)
+                    {
+                        Ok(depth) => depth,
+                        Err(detail) => {
+                            return Err(self.invalidate(
+                                "frame_invariant_failure",
+                                format!("frame {frame_index}: {detail}"),
+                                true,
+                                POST_TERMINATION_COLLECT_TIMEOUT,
+                            ));
+                        }
+                    };
                     // Read only the frame's actual packed bytes, not the whole
                     // launch slot: a shrink-output effect fills less than the
                     // slot, and the worker packs exactly these bytes (#261).
@@ -2213,12 +2925,49 @@ impl RenderSession {
                         .read_output_slot(self.geometry.output_slot_offset(), actual_bytes);
                     self.frames_ok += 1;
                     self.last_output_generation = expected_generation;
+                    let broker_output_verify_ns = output_verify_started.elapsed().as_nanos() as u64;
+                    let memory = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.memory_commit_snapshot());
+                    let job_peak = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.job_peak_commit_bytes());
                     return Ok(FrameOutcome {
                         frame_index,
+                        depth_provenance,
+                        performance: FramePerformance {
+                            broker_frame_wall_ns: frame_started.elapsed().as_nanos() as u64,
+                            broker_input_write_ns,
+                            broker_output_verify_ns: Some(broker_output_verify_ns),
+                            worker_setup_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_setup_ns),
+                            worker_render_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_render_ns),
+                            render_selector_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.render_selector_ns),
+                            worker_finalize_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_finalize_ns),
+                            worker_live_commit_bytes: memory.map(|snapshot| snapshot.0),
+                            worker_peak_commit_bytes: memory.map(|snapshot| snapshot.1),
+                            worker_job_peak_commit_bytes: job_peak,
+                            output_bytes: Some(actual_bytes as u64),
+                        },
                         status: FrameStatus::Rendered {
                             pixels,
                             width: output.width,
                             height: output.height,
+                            origin_x: output.origin_x,
+                            origin_y: output.origin_y,
                         },
                     });
                 }
@@ -2228,7 +2977,12 @@ impl RenderSession {
                     // carries only width/height. Bound the requested size so a
                     // misbehaving worker cannot force an unbounded re-open, and
                     // require it to actually exceed the current slot.
-                    if done.output.is_some() || done.generation.is_some() || done.render_error != 0
+                    // The `selector_crash` arm is belt-and-braces: the shape
+                    // check above already refused any crash outside a 512.
+                    if done.output.is_some()
+                        || done.generation.is_some()
+                        || done.render_error != 0
+                        || done.selector_crash.is_some()
                     {
                         return Err(self.invalidate(
                             "malformed_resize_response",
@@ -2262,16 +3016,16 @@ impl RenderSession {
                         || requested_pixels <= current_pixels
                     {
                         return Err(self.invalidate(
-                        "resize_out_of_range",
-                        format!(
+                            "resize_out_of_range",
+                            format!(
                             "frame {frame_index} resize_needed {width}x{height} is out of range \
                              (current capacity {}x{})",
                             self.geometry.output_capacity_width,
                             self.geometry.output_capacity_height
                         ),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
                     }
                     // The header and generation must be untouched, like an error
                     // response: nothing was written to the slot.
@@ -2703,9 +3457,22 @@ impl RenderSession {
             if self.invalidation.is_none()
                 && !self.transport.send_message("{\"v\":1,\"type\":\"close\"}")
             {
-                self.invalidation = Some(SessionInvalidation {
-                    reason: "close_send_failed",
-                    detail: "the close message could not be delivered".into(),
+                // The liveness check above races the send: a worker that exits
+                // between the two breaks the pipe, and reporting the failed
+                // write would name the symptom instead of the exit that caused
+                // it. Re-check before deciding which of the two this was.
+                self.process_exit_observed =
+                    self.process_exit_observed || settled_as_exited(self.process.as_ref());
+                self.invalidation = Some(if self.process_exit_observed {
+                    SessionInvalidation {
+                        reason: "premature_exit",
+                        detail: "the worker exited before the close handshake".into(),
+                    }
+                } else {
+                    SessionInvalidation {
+                        reason: "close_send_failed",
+                        detail: "the close message could not be delivered".into(),
+                    }
                 });
             }
         }
@@ -2720,11 +3487,27 @@ impl RenderSession {
             }) => {
                 let report: Option<Value> =
                     crate::worker_module_audit::parse_report_prefix(&result.stdout).ok();
+                let mut diagnostics = isolated_worker_diagnostics(result, elapsed_ms);
+                // The facade counters ride the diagnostics rather than only the
+                // final report, so a corpus sweep can read them off an ordinary
+                // record instead of needing `--close-report` (issue #1264).
+                // The block is windowed per plug-in in the worker, so after a
+                // cluster swap it describes the plug-in current at close, not
+                // the launch-time one this close names by hash. After a swap
+                // that failed at the load step (exit 25) it covers only that
+                // failed attempt; a swap rejected before the outgoing plug-in
+                // was unloaded leaves the outgoing plug-in's window intact. The sibling
+                // `unsupported_suite_calls` is not propagated here (the close
+                // never carried it), so on this path the positive half stands
+                // alone: read `trap_count` for the negative half.
+                if let Some(report) = &report {
+                    propagate_bee_facade(&mut diagnostics, report);
+                }
                 (
                     json!({
                         "classification": result.classification.as_str(),
                         "exit_code": result.exit_code,
-                        "diagnostics": isolated_worker_diagnostics(result, elapsed_ms),
+                        "diagnostics": diagnostics,
                     }),
                     report,
                 )
@@ -2737,6 +3520,28 @@ impl RenderSession {
                 None,
             ),
         };
+        // A worker can accept the close write and then crash before producing
+        // its terminal report.  The pre-send liveness checks cannot classify
+        // that ordering, but leaving it as `invalidated=false` makes the close
+        // summary contradict the collected OS outcome.  Preserve a distinct
+        // reason so callers can separate this from a pre-handshake exit and
+        // continue to gate any recovery on the exact crash/report evidence.
+        if self.invalidation.is_none()
+            && final_report.is_none()
+            && matches!(
+                &collected,
+                Some(CollectedExit {
+                    result: Some(result),
+                    ..
+                }) if result.classification == crate::ExitClassification::Crashed
+            )
+        {
+            self.invalidation = Some(SessionInvalidation {
+                reason: "worker_exited_during_close",
+                detail: "the worker crashed after the close request but before its final report"
+                    .into(),
+            });
+        }
         // Cluster sessions check the final report's module audit against the
         // launch manifest's declared set (design §5), replacing the one-shot
         // fixed-cap validator the cluster dispatch disabled at launch. Since
@@ -2778,6 +3583,7 @@ impl RenderSession {
             "height": self.geometry.height,
             "frames_ok": self.frames_ok,
             "frames_errored": self.frames_errored,
+            "smart_output_untouched_frames": self.smart_output_untouched_frames,
             "parameter_update_frames": self.parameter_update_frames,
             "invalidated": self.invalidation.is_some(),
             "invalidated_reason": self.invalidation.as_ref().map(|invalidation| json!({
@@ -2871,6 +3677,20 @@ pub(crate) fn validate_final_report(
     report: &Value,
     smart: bool,
 ) -> Result<FinalReportValidation, CloseReportInvariant> {
+    validate_final_report_mode(report, smart, FinalReportMode::Normal)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FinalReportMode {
+    Normal,
+    AbandonedSmartOutputUntouched,
+}
+
+fn validate_final_report_mode(
+    report: &Value,
+    smart: bool,
+    mode: FinalReportMode,
+) -> Result<FinalReportValidation, CloseReportInvariant> {
     if report.get("status") != Some(&json!("render_completed")) {
         return Err(CloseReportInvariant::Status);
     }
@@ -2897,21 +3717,26 @@ pub(crate) fn validate_final_report(
         if report.get("session_render_error") != Some(&json!(0)) {
             return Err(CloseReportInvariant::SmartRenderError);
         }
+        if mode == FinalReportMode::AbandonedSmartOutputUntouched
+            && (report.get("pre_render_error") != Some(&json!(0))
+                || report.get("smart_render_selector_error") != Some(&json!(0))
+                || report.get("smart_render_error") != Some(&json!(-6))
+                || report.get("output_pixels_valid") != Some(&Value::Bool(false))
+                || report.get("empty_result_rect") != Some(&Value::Bool(false))
+                || report.get("result_rects_valid") != Some(&Value::Bool(true)))
+        {
+            return Err(CloseReportInvariant::SmartRenderError);
+        }
         if report.get("session_sequence_setup_error") != Some(&json!(0)) {
             return Err(CloseReportInvariant::SmartSequenceSetup);
         }
         if report.get("session_sequence_setdown_error") != Some(&json!(0)) {
             return Err(CloseReportInvariant::SmartSequenceSetdown);
         }
-        // The tolerated non-owned global lease is a classic length-one
-        // compatibility exception.  SmartFX keeps its original strict close
-        // contract: a live suite lease must never make its session clean.
-        if matches!(
-            lease_validation,
-            FinalReportValidation::CleanWithSuiteLeaseWarning { .. }
-        ) {
-            return Err(CloseReportInvariant::UnexpectedLiveSuiteLease);
-        }
+        // The typed lease validator above is render-path independent: an
+        // explicit, non-faulting, count-consistent residual lease is contained
+        // by worker exit on SmartFX just as it is on the classic length-one
+        // path. All malformed or faulting evidence still fails closed there.
     } else {
         if report.get("render_error") != Some(&json!(0)) {
             return Err(CloseReportInvariant::ClassicRenderError);
@@ -3100,6 +3925,102 @@ pub(crate) fn validate_close_report(
     validate_final_report(report, smart)
 }
 
+/// Validates a discarded Smart attempt whose only frame outcome was the
+/// broker-authenticated untouched-output condition. No pixels from this
+/// attempt are accepted; this authorization only permits one fresh Classic
+/// attempt under the caller's unchanged request.
+pub fn validate_abandoned_smart_untouched_close(close: &Value) -> Result<(), &'static str> {
+    if close.get("invalidated") != Some(&Value::Bool(false)) {
+        return Err("close_invalidated");
+    }
+    if close
+        .pointer("/worker/classification")
+        .and_then(Value::as_str)
+        != Some("ok")
+    {
+        return Err("worker_not_ok");
+    }
+    if close.get("frames_errored").and_then(Value::as_u64) != Some(1)
+        || close
+            .get("smart_output_untouched_frames")
+            .and_then(Value::as_u64)
+            != Some(1)
+    {
+        return Err("unexpected_frame_history");
+    }
+    let report = close.get("final_report").ok_or("final_report_missing")?;
+    validate_final_report_mode(report, true, FinalReportMode::AbandonedSmartOutputUntouched)
+        .map(|_| ())
+        .map_err(CloseReportInvariant::as_str)
+}
+
+/// Authorizes one fresh Classic attempt after the Smart worker was terminated
+/// by Windows heap-corruption detection during Smart Render, or after its valid
+/// frame reply but before it read the close request. The same exact crash after
+/// close delivery is eligible only when no final report was produced. No pixels
+/// or report from the crashed process are accepted. This is kept deliberately
+/// narrower than a generic crash fallback: transport failures, host invariant
+/// exits, other exception codes, and other close-time crashes remain terminal.
+pub fn validate_abandoned_smart_heap_corruption_close(close: &Value) -> Result<(), &'static str> {
+    const STATUS_HEAP_CORRUPTION: u64 = 0xC000_0374;
+
+    if close.get("render_path").and_then(Value::as_str) != Some("smart") {
+        return Err("not_smart_render");
+    }
+    let invalidated_reason = close
+        .pointer("/invalidated_reason/reason")
+        .and_then(Value::as_str);
+    if close.get("invalidated") != Some(&Value::Bool(true))
+        || !matches!(
+            invalidated_reason,
+            Some("worker_exited" | "premature_exit" | "worker_exited_during_close")
+        )
+    {
+        return Err("not_worker_exit");
+    }
+    if close
+        .pointer("/worker/classification")
+        .and_then(Value::as_str)
+        != Some("crashed")
+        || close.pointer("/worker/exit_code").and_then(Value::as_u64)
+            != Some(STATUS_HEAP_CORRUPTION)
+    {
+        return Err("not_heap_corruption");
+    }
+    let diagnostics = close
+        .pointer("/worker/diagnostics")
+        .and_then(Value::as_object)
+        .ok_or("worker_diagnostics_missing")?;
+    let smart_stage = |key: &str| {
+        matches!(
+            diagnostics.get(key).and_then(Value::as_str),
+            Some("smart_render" | "smart_render_cpu")
+        )
+    };
+    if !smart_stage("failure_stage") && !smart_stage("active_stage") {
+        return Err("not_smart_render_stage");
+    }
+    if close.get("final_report") != Some(&Value::Null) {
+        return Err("unexpected_final_report");
+    }
+    if close.get("session_clean") != Some(&Value::Bool(false))
+        || close.get("frames_ok").and_then(Value::as_u64).is_none()
+        || close.get("frames_errored").and_then(Value::as_u64) != Some(0)
+    {
+        return Err("unexpected_crash_history");
+    }
+    Ok(())
+}
+
+/// Public close gate for a completed session whose pixels may be published.
+/// It reuses the canonical report validator rather than trusting the summary
+/// `session_clean` convenience bit.
+pub fn validate_completed_session_close(close: &Value, smart: bool) -> Result<(), &'static str> {
+    validate_close_report(close, smart)
+        .map(|_| ())
+        .map_err(CloseReportInvariant::as_str)
+}
+
 #[cfg(test)]
 fn final_report_clean(report: &Value, smart: bool) -> bool {
     validate_final_report(report, smart).is_ok()
@@ -3172,6 +4093,10 @@ pub fn run_video_batch(
     repository: &Path,
     request_path: &Path,
     output_path: &Path,
+    // Per-launch environment for the session this batch opens (issue #910).
+    // The CLI passes the default; a test drives the fixture worker through it
+    // without touching the broker process environment.
+    launch_environment: &crate::secure_launch::LaunchEnvironment,
 ) -> io::Result<bool> {
     let metadata = fs::metadata(request_path)?;
     if metadata.len() > MAX_REQUEST_BYTES {
@@ -3199,6 +4124,9 @@ pub fn run_video_batch(
     );
 
     let plugin_path = PathBuf::from(&request.plugin);
+    if plugin_path.parent().is_none() {
+        return Err(invalid("batch plugin path has no parent directory"));
+    }
     let plugin_bytes = fs::read(&plugin_path)?;
     if plugin_bytes.is_empty() {
         return Err(invalid("plugin file is empty"));
@@ -3213,6 +4141,35 @@ pub fn run_video_batch(
     let (width, height) = (first.width(), first.height());
     drop(first);
 
+    // A layer parameter's path is not part of the scalar parameter payload.
+    // Decode it once at session open and carry its pixels through the same
+    // inherited-handle transport used by one-shot renders. Otherwise the
+    // worker sees a declared but empty layer for every frame.
+    let selected_layers = request
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.kind == "layer" && parameter.layer_path.is_some())
+        .collect::<Vec<_>>();
+    if selected_layers.len() > 8 {
+        return Err(invalid("secondary layer count exceeds the transport limit"));
+    }
+    let mut layers = Vec::with_capacity(selected_layers.len());
+    for parameter in selected_layers {
+        let path = parameter
+            .layer_path
+            .as_ref()
+            .expect("selected layer has a path");
+        let decoded = decode_bounded_image(path, "secondary")?;
+        layers.push(SessionLayer {
+            slot: parameter.slot,
+            width: decoded.width(),
+            height: decoded.height(),
+            rgba: decoded.into_rgba8().into_raw(),
+            timed: None,
+            dynamic: false,
+        });
+    }
+
     let mut session = RenderSession::open(SessionOpenRequest {
         repository,
         plugin_path: &plugin_path,
@@ -3226,14 +4183,18 @@ pub fn run_video_batch(
         output_checksum_detail: request.output_checksum_detail,
         mask_trailer: None,
         spatial_trailer: None,
+        camera_trailer: None,
         render_environment_trailer: None,
         audio_trailer: None,
         alpha_as_coverage_params: &request.alpha_as_coverage_params,
         // The video-batch entry does not apply conformance render settings.
         conformance_render_settings: None,
-        layers: &[],
+        layers: &layers,
         dependencies: Vec::new(),
-        dependency_search_dirs: Vec::new(),
+        companions: Vec::new(),
+        dependency_search_dirs: crate::after_effects_install::in_place_dependency_search_dirs(
+            &plugin_path,
+        ),
         width,
         height,
         pixel_format: request.pixel_format,
@@ -3244,6 +4205,7 @@ pub fn run_video_batch(
         smart: request.smart,
         gpu_backend: request.gpu_backend,
         gpu_runtime_policy: None,
+        launch_environment: launch_environment.clone(),
     })?;
 
     let raw_extension = request.pixel_format.raw_extension();
@@ -3266,6 +4228,7 @@ pub fn run_video_batch(
                     pixels,
                     width: frame_width,
                     height: frame_height,
+                    ..
                 } if frame_width == 0 && frame_height == 0 => {
                     // A legally empty SmartFX result (#278): the frame rendered
                     // no pixels, so there is no PNG or raw sidecar to write (a 0x0
@@ -3307,6 +4270,7 @@ pub fn run_video_batch(
                     pixels,
                     width: frame_width,
                     height: frame_height,
+                    ..
                 } => {
                     let output_png = output_directory.join(format!("frame-{frame_index:06}.png"));
                     let preview = native_rgba_to_preview(&pixels, request.pixel_format)?;
@@ -3348,12 +4312,20 @@ pub fn run_video_batch(
                     render_error,
                     missing_dependency,
                     return_message,
+                    selector_crash,
                 } => Ok(json!({
                     "frame_index": frame_index,
                     "status": "error",
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
                     "return_message": return_message,
+                    "selector_crash": selector_crash,
+                })),
+                FrameStatus::SmartOutputUntouched => Ok(json!({
+                    "frame_index": frame_index,
+                    "status": "error",
+                    "render_error": -6,
+                    "host_failure_reason": "smart_output_untouched",
                 })),
             }
         })();
@@ -3414,7 +4386,9 @@ mod audio;
 mod discovery;
 
 pub use audio::{AudioRenderSession, AudioSessionOpenRequest, AudioSpanOutcome, AudioSpanStatus};
-pub use discovery::{DiscoverySession, InPlaceDiscoverySessionOpenRequest, InspectOutcome};
+pub use discovery::{
+    CleanupCrashAuthorization, DiscoverySession, InPlaceDiscoverySessionOpenRequest, InspectOutcome,
+};
 
 #[cfg(test)]
 mod tests;

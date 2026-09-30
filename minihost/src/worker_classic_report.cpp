@@ -90,9 +90,12 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
   const auto& audio_report = audio_telemetry();
   classic_report.audio = {
       audio_report.usage_advertised, audio_report.checkout_allowed, audio_report.source_available,
+      audio_report.unadvertised_checkout_calls,
       audio_report.rejected_unadvertised_checkouts, audio_report.rejected_format_requests,
-      audio_report.handle_exhaustions, audio_report.peak_live_handles, audio_report.checkout_calls,
-      audio_report.checkin_calls, audio_report.get_data_calls, audio_report.invalid_operations,
+      audio_report.handle_exhaustions, audio_report.peak_live_handles,
+      audio_report.last_checkout_index, audio_report.checkout_calls,
+      audio_report.checkin_calls, audio_report.automatic_checkins,
+      audio_report.get_data_calls, audio_report.invalid_operations,
       audio_report.last_checkout_start_time, audio_report.last_checkout_duration,
       audio_report.last_checkout_time_scale, audio_report.last_window_start_sample,
       audio_report.last_window_sample_count, audio_report.last_window_silence_samples,
@@ -106,16 +109,26 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
       in.resetup_handle_replaced, in.flattened_handle_host_disposed, in.copied_flattened_sequence,
       in.get_flattened_sequence_data_error, in.original_sequence_preserved};
   const auto& smart_runtime_state = aexcompat::worker_runtime::smart::state();
-  const int32_t bytes_per_pixel = smart_runtime_state.pixel_format == "argb32f" ? 16 :
+  const int32_t world_pixel_bytes = smart_runtime_state.pixel_format == "argb32f" ? 16 :
       (smart_runtime_state.pixel_format == "argb16" ? 8 : 4);
+  const int32_t bytes_per_pixel =
+      in.session_pixel_bytes != 0 ? in.session_pixel_bytes : world_pixel_bytes;
+  // A run that never built a world leaves the format empty, and it stays
+  // empty: naming a depth for a frame that does not exist would be a
+  // fabricated fact in a diagnostic.
+  const std::string frame_pixel_format = smart_runtime_state.pixel_format.empty()
+      ? smart_runtime_state.pixel_format
+      : (bytes_per_pixel == 16 ? "argb32f"
+                               : (bytes_per_pixel == 8 ? "argb16" : "argb8"));
   classic_report.frame = {
       in.setdown_error,
       escape(in.frame_return_message),
-      in.case_id, smart_runtime_state.pixel_format, in.render_width, in.render_height,
+      in.case_id, frame_pixel_format, in.render_width, in.render_height,
       in.render_rowbytes,
       in.render_width * bytes_per_pixel,
       std::max(0, in.render_rowbytes - in.render_width * bytes_per_pixel),
-      in.input_hash, in.output_hash, in.guards_intact, world_debug_report_json()};
+      in.input_hash, in.output_hash, in.guards_intact, world_debug_report_json(),
+      in.output_coverage};
   const report::CustomUiSnapshot classic_custom_ui{
       g_render_click_enabled, g_render_click_error, g_render_click_out_flags,
       g_render_click_changed_value, g_render_draw_enabled, g_render_draw_error,
@@ -159,7 +172,8 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
       classic_report, classic_custom_ui, report::capture_classic_subsystems(),
       report::capture_gpu_diagnostics(), report::capture_seh_diagnostics(), classic_requested,
       aexcompat::worker_runtime::classic::last_selector_dispatched(),
-      in.depth_supported, in.render_error});
+      in.depth_supported, in.advertised_depth_supported,
+      in.dispatch_pixel_bytes, in.render_error});
   report::emit(report_snapshot, std::cout);
 }
 

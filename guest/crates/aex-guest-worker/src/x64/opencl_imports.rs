@@ -22,10 +22,7 @@ fn install_opencl_import_bridge(
     Ok(())
 }
 
-fn emulate_opencl_import(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    symbol: OpenClBridgeSymbol,
-) {
+fn emulate_opencl_import(unicorn: &mut Unicorn<'_, GuestState>, symbol: OpenClBridgeSymbol) {
     let operation = opencl_operation_name(symbol);
     unicorn
         .get_data_mut()
@@ -98,11 +95,8 @@ fn emulate_cl_create_program_with_source(
     let mut source = Vec::new();
     for index in 0..count {
         let pointer_address = checked_opencl_array_address(strings, index, size_of::<u64>())?;
-        let pointer = read_opencl_guest_u64(
-            unicorn,
-            pointer_address,
-            "OpenCL source string pointer",
-        )?;
+        let pointer =
+            read_opencl_guest_u64(unicorn, pointer_address, "OpenCL source string pointer")?;
         if pointer == 0 {
             return Err(OpenClRuntimeError::new(
                 CL_INVALID_VALUE,
@@ -113,11 +107,8 @@ fn emulate_cl_create_program_with_source(
             0
         } else {
             let length_address = checked_opencl_array_address(lengths, index, size_of::<u64>())?;
-            let raw = read_opencl_guest_u64(
-                unicorn,
-                length_address,
-                "OpenCL source string length",
-            )?;
+            let raw =
+                read_opencl_guest_u64(unicorn, length_address, "OpenCL source string length")?;
             usize::try_from(raw).map_err(|_| {
                 OpenClRuntimeError::new(
                     CL_INVALID_VALUE,
@@ -134,12 +125,7 @@ fn emulate_cl_create_program_with_source(
                 )
             })?;
         let bytes = if explicit_length == 0 {
-            read_opencl_c_string_bytes(
-                unicorn,
-                pointer,
-                remaining,
-                "OpenCL source string",
-            )?
+            read_opencl_c_string_bytes(unicorn, pointer, remaining, "OpenCL source string")?
         } else {
             if explicit_length > remaining {
                 return Err(OpenClRuntimeError::new(
@@ -150,19 +136,17 @@ fn emulate_cl_create_program_with_source(
                     ),
                 ));
             }
-            read_opencl_guest_bytes(
-                unicorn,
-                pointer,
-                explicit_length,
-                "OpenCL source string",
-            )?
+            read_opencl_guest_bytes(unicorn, pointer, explicit_length, "OpenCL source string")?
         };
         source.extend_from_slice(&bytes);
     }
     let source = String::from_utf8(source).map_err(|error| {
         OpenClRuntimeError::new(
             CL_INVALID_VALUE,
-            format!("OpenCL program source is not UTF-8 at byte {}", error.utf8_error().valid_up_to()),
+            format!(
+                "OpenCL program source is not UTF-8 at byte {}",
+                error.utf8_error().valid_up_to()
+            ),
         )
     })?;
     unicorn
@@ -190,9 +174,7 @@ fn emulate_cl_build_program(
     if device_count > MAX_OPENCL_BUILD_DEVICES {
         return Err(OpenClRuntimeError::new(
             CL_INVALID_VALUE,
-            format!(
-                "OpenCL build device count {device_count} exceeds {MAX_OPENCL_BUILD_DEVICES}"
-            ),
+            format!("OpenCL build device count {device_count} exceeds {MAX_OPENCL_BUILD_DEVICES}"),
         ));
     }
     if (device_count == 0) != (device_list == 0) {
@@ -230,11 +212,10 @@ fn emulate_cl_build_program(
             )
         })?)
     };
-    unicorn.get_data_mut().gpu_runtime.build_opencl_program(
-        program,
-        &devices,
-        options.as_deref(),
-    )
+    unicorn
+        .get_data_mut()
+        .gpu_runtime
+        .build_opencl_program(program, &devices, options.as_deref())
 }
 
 fn emulate_cl_create_kernel(
@@ -410,9 +391,7 @@ fn complete_opencl_pointer_call(
     {
         stop_opencl_bridge_for_callback_error(
             unicorn,
-            format!(
-                "{operation} could not write errcode_ret at {errcode_pointer:#x}: {error}"
-            ),
+            format!("{operation} could not write errcode_ret at {errcode_pointer:#x}: {error}"),
         );
         return;
     }
@@ -604,12 +583,14 @@ fn read_opencl_c_string_bytes(
             .unwrap_or(usize::MAX)
             .min(remaining_with_terminator)
             .min(PAGE_SIZE as usize);
-        let chunk = unicorn.mem_read_as_vec(cursor, chunk_bytes).map_err(|error| {
-            OpenClRuntimeError::new(
-                CL_INVALID_VALUE,
-                format!("{field} at {cursor:#x} is unreadable: {error}"),
-            )
-        })?;
+        let chunk = unicorn
+            .mem_read_as_vec(cursor, chunk_bytes)
+            .map_err(|error| {
+                OpenClRuntimeError::new(
+                    CL_INVALID_VALUE,
+                    format!("{field} at {cursor:#x} is unreadable: {error}"),
+                )
+            })?;
         if let Some(terminator) = chunk.iter().position(|byte| *byte == 0) {
             value.extend_from_slice(&chunk[..terminator]);
             return Ok(value);
@@ -628,10 +609,7 @@ fn read_opencl_c_string_bytes(
     ))
 }
 
-fn stop_opencl_bridge_for_callback_error(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    detail: String,
-) {
+fn stop_opencl_bridge_for_callback_error(unicorn: &mut Unicorn<'_, GuestState>, detail: String) {
     if unicorn.get_data().callback_error.is_none() {
         unicorn.get_data_mut().callback_error = Some(detail);
     }
@@ -659,11 +637,7 @@ mod opencl_import_bridge_tests {
             .mem_map(STACK_BASE, STACK_SIZE, Prot::READ | Prot::WRITE)
             .unwrap();
         unicorn
-            .mem_map(
-                DATA_BASE,
-                TEST_DATA_SIZE,
-                Prot::READ | Prot::WRITE,
-            )
+            .mem_map(DATA_BASE, TEST_DATA_SIZE, Prot::READ | Prot::WRITE)
             .unwrap();
         install_opencl_import_bridge(
             &mut unicorn,
@@ -735,11 +709,7 @@ mod opencl_import_bridge_tests {
         unicorn.reg_read(RegisterX86::RAX).unwrap()
     }
 
-    fn write_c_string(
-        unicorn: &mut Unicorn<'static, GuestState>,
-        address: u64,
-        value: &str,
-    ) {
+    fn write_c_string(unicorn: &mut Unicorn<'static, GuestState>, address: u64, value: &str) {
         unicorn.mem_write(address, value.as_bytes()).unwrap();
         unicorn
             .mem_write(address + value.len() as u64, &[0])
@@ -801,11 +771,7 @@ mod opencl_import_bridge_tests {
         program
     }
 
-    fn build_program(
-        unicorn: &mut Unicorn<'static, GuestState>,
-        program: u64,
-        device: u64,
-    ) {
+    fn build_program(unicorn: &mut Unicorn<'static, GuestState>, program: u64, device: u64) {
         let device_list = DATA_BASE + 0x0b00;
         unicorn
             .mem_write(device_list, &device.to_le_bytes())
@@ -820,11 +786,7 @@ mod opencl_import_bridge_tests {
         );
     }
 
-    fn create_kernel(
-        unicorn: &mut Unicorn<'static, GuestState>,
-        program: u64,
-        name: &str,
-    ) -> u64 {
+    fn create_kernel(unicorn: &mut Unicorn<'static, GuestState>, program: u64, name: &str) -> u64 {
         let name_address = DATA_BASE + 0x0c00;
         let errcode = DATA_BASE + 0x0d00;
         write_c_string(unicorn, name_address, name);
@@ -858,11 +820,7 @@ mod opencl_import_bridge_tests {
     #[test]
     fn mock_bridge_marshals_all_six_imports_and_rejects_forged_tokens() {
         let mut unicorn = test_unicorn();
-        let tokens = unicorn
-            .get_data_mut()
-            .gpu_runtime
-            .begin_mock(0)
-            .unwrap();
+        let tokens = unicorn.get_data_mut().gpu_runtime.begin_mock(0).unwrap();
         let rejected_errcode = DATA_BASE + 0x0780;
         assert_eq!(
             call_import(
@@ -908,11 +866,7 @@ mod opencl_import_bridge_tests {
             CL_INVALID_ARG_SIZE as u32 as u64
         );
         assert_eq!(
-            call_import(
-                &mut unicorn,
-                SET_KERNEL_ARG_STUB,
-                &[kernel, 0, 16, 0],
-            ),
+            call_import(&mut unicorn, SET_KERNEL_ARG_STUB, &[kernel, 0, 16, 0],),
             CL_INVALID_ARG_VALUE as u32 as u64
         );
 
@@ -1032,11 +986,7 @@ mod opencl_import_bridge_tests {
         assert_eq!(evidence.live_programs, 1);
         assert_eq!(evidence.live_kernels, 0);
 
-        let counts = unicorn
-            .get_data_mut()
-            .gpu_runtime
-            .end()
-            .unwrap();
+        let counts = unicorn.get_data_mut().gpu_runtime.end().unwrap();
         assert_eq!(counts, ObjectCounts::default());
         let evidence = unicorn.get_data().gpu_runtime.opencl_evidence();
         assert!(evidence.cleanup_balanced);
@@ -1169,11 +1119,7 @@ mod opencl_import_bridge_tests {
         assert_eq!(before_end.native_kernels, 0);
         assert_eq!(before_end.native_buffers, 0);
         assert_eq!(
-            unicorn
-                .get_data_mut()
-                .gpu_runtime
-                .end()
-                .unwrap(),
+            unicorn.get_data_mut().gpu_runtime.end().unwrap(),
             ObjectCounts::default()
         );
         let evidence = unicorn.get_data().gpu_runtime.opencl_evidence();

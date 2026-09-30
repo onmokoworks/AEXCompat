@@ -1,4 +1,6 @@
 #include "worker_pf_state_runtime.hpp"
+#include "worker_callback_diagnostics.hpp"
+#include "worker_extended_diag.hpp"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -8,6 +10,7 @@
 #include <cstring>
 #include <mutex>
 #include <new>
+#include <iostream>
 #include <unordered_map>
 #include <utility>
 
@@ -112,15 +115,31 @@ uint64_t g_effect_sequence_invalidation_count{};
 int32_t __cdecl get_effect_sequence_data(
     void* owner, PfConstHandle* sequence_handle) {
   if (sequence_handle) *sequence_handle = nullptr;
-  if (!owner || !sequence_handle) return kPfBadCallbackParam;
+  const auto finish = [](int32_t result,
+                         aexcompat::callback_diagnostics::Reason reason) {
+    aexcompat::callback_diagnostics::record(
+        aexcompat::callback_diagnostics::Callback::EffectSequenceData, result, reason);
+    if (aexcompat::l2_detail::extended_diag_enabled()) {
+      std::cerr << "extended_diag:effect_sequence_data -> " << result;
+      if (result != 0)
+        std::cerr << " (" << aexcompat::callback_diagnostics::REASON_NAMES[
+            static_cast<std::size_t>(reason)] << ')';
+      std::cerr << '\n' << std::flush;
+    }
+    return result;
+  };
+  if (!owner || !sequence_handle)
+    return finish(kPfBadCallbackParam,
+                  aexcompat::callback_diagnostics::Reason::InvalidArguments);
   std::lock_guard<std::mutex> lock(g_effect_sequence_mutex);
   const auto found = std::find_if(
       g_live_effect_sequences.begin(), g_live_effect_sequences.end(),
       [owner](const auto& live) { return live.effect_ref == owner; });
   if (found == g_live_effect_sequences.end() || !found->sequence_handle)
-    return kPfBadCallbackParam;
+    return finish(kPfBadCallbackParam,
+                  aexcompat::callback_diagnostics::Reason::NoActiveState);
   *sequence_handle = found->sequence_handle;
-  return 0;
+  return finish(0, aexcompat::callback_diagnostics::Reason::None);
 }
 
 }  // namespace

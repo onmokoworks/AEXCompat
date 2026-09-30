@@ -71,11 +71,9 @@ DEPTH_COMMANDS = {
 }
 PIXEL_BYTES = {"argb8": 4, "argb16": 8, "argb32f": 16}
 RAW_SUFFIX = {"argb8": "rgba8", "argb16": "rgba16le", "argb32f": "rgba32f-le"}
-NATIVE_WORKERS = (
-    "target/minihost-build/aex_l2_worker.exe",
-    "target/minihost-build/aex_render_worker.exe",
-    "target/minihost-build/aex_smart_worker.exe",
-)
+# One binary serves discovery, classic and smart since #1495; the routes are
+# chosen with --kind rather than by picking an executable.
+NATIVE_WORKERS = ("target/minihost-build/aex_worker.exe",)
 RESERVED_BUNDLE_FILES = {"manifest.json", "report.json"}
 RESERVED_BUNDLE_DIRECTORIES = {"diagnostics", "outputs", "raw", "requests", "target"}
 SUCCESS_CLASSIFICATIONS = frozenset({"ok", "empty_result"})
@@ -538,7 +536,7 @@ def normalize_structured_failure(
     missing = schema_valid_missing_suites(raw_missing)
     # The native harness reports a process-level classification that is usually
     # the generic `nonzero_exit`, alongside report evidence (render_error,
-    # pre_render_error, depth_supported, missing_suites). Treat `nonzero_exit`
+    # pre_render_error, smart_render_supported, missing_suites). Treat `nonzero_exit`
     # (and any unrecognized value) as refinable so the evidence branches below
     # can upgrade it to the actionable selector_error/unsupported/missing_suite,
     # while keeping specific classes (crashes, timeouts, loader/host errors) final.
@@ -559,7 +557,7 @@ def normalize_structured_failure(
             classification = "missing_suite"
         elif meaningful_selector_error(value) is not None:
             classification = "selector_error"
-        elif value.get("depth_supported") is False or value.get("smart_render_supported") is False:
+        elif render_path == "smartfx" and value.get("smart_render_supported") is False:
             classification = "unsupported"
         else:
             classification = "nonzero_exit"

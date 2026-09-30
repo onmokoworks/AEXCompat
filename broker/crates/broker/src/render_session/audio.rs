@@ -50,6 +50,9 @@ pub struct AudioSessionOpenRequest<'a> {
     pub channels: u32,
     pub time_scale: u32,
     pub frame_deadline: Duration,
+    /// Per-launch environment inputs (issue #910), forwarded to the worker
+    /// launch instead of the broker mutating its own environment.
+    pub launch_environment: crate::secure_launch::LaunchEnvironment,
 }
 
 #[derive(Debug)]
@@ -139,7 +142,7 @@ impl AudioRenderSession {
         if geometry.section_bytes() as u64 > SECTION_HARD_CAP_BYTES {
             return Err(invalid("audio session section exceeds the hard cap"));
         }
-        let payload = encode_interactive_payload(request.parameters.unwrap_or_default())?;
+        let payload = encode_default_interactive_payload(request.parameters.unwrap_or_default())?;
 
         let (request_read, request_write) = inheritable_pipe(false)?;
         let (response_read, response_write) = inheritable_pipe(true)?;
@@ -191,13 +194,14 @@ impl AudioRenderSession {
         ];
         let dispatch = SecureImageDispatch {
             repository: request.repository,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin,
             dependencies: request.dependencies,
             dependency_search_dirs: request.dependency_search_dirs,
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
             timeout: Some(request.frame_deadline),
+            launch_environment: request.launch_environment,
         };
         let child_handles = SessionChildHandles {
             request_read: request_read.raw(),
@@ -206,7 +210,10 @@ impl AudioRenderSession {
             // Audio sessions carry no layers.
             layers: Vec::new(),
         };
-        let process = dispatch_secure_image_session(dispatch, &child_handles)?;
+        let process = crate::secure_image_dispatch::dispatch_secure_image_standard_session(
+            dispatch,
+            &child_handles,
+        )?;
         drop(request_read);
         drop(response_write);
 
@@ -606,9 +613,22 @@ impl AudioRenderSession {
             if self.invalidation.is_none()
                 && !self.transport.send_message("{\"v\":1,\"type\":\"close\"}")
             {
-                self.invalidation = Some(SessionInvalidation {
-                    reason: "close_send_failed",
-                    detail: "the close message could not be delivered".into(),
+                // The liveness check above races the send: a worker that exits
+                // between the two breaks the pipe, and reporting the failed
+                // write would name the symptom instead of the exit that caused
+                // it. Re-check before deciding which of the two this was.
+                self.process_exit_observed =
+                    self.process_exit_observed || super::settled_as_exited(self.process.as_ref());
+                self.invalidation = Some(if self.process_exit_observed {
+                    SessionInvalidation {
+                        reason: "premature_exit",
+                        detail: "the worker exited before the close handshake".into(),
+                    }
+                } else {
+                    SessionInvalidation {
+                        reason: "close_send_failed",
+                        detail: "the close message could not be delivered".into(),
+                    }
                 });
             }
         }

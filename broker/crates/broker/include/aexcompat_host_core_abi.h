@@ -24,6 +24,17 @@
 #define AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_OWNED_SNAPSHOT_V1 \
   UINT64_C(2)
 #define AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPACITY 16u
+#define AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_ABI_VERSION 1u
+#define AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_ABI_DESCRIPTOR_MAGIC \
+  UINT64_C(0x41455850414E4931)
+#define AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_CAPABILITY_EVALUATE_V1 \
+  UINT64_C(1)
+#define AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_MAX_KEYS 256u
+#define AEX_HOST_ANIMATION_KIND_SCALAR 1u
+#define AEX_HOST_ANIMATION_KIND_COLOR 2u
+#define AEX_HOST_ANIMATION_KIND_COMPONENTS 3u
+#define AEX_HOST_ANIMATION_HOLD 1u
+#define AEX_HOST_ANIMATION_LINEAR 2u
 
 #if defined(_WIN32)
 #define AEXCOMPAT_HOST_CORE_CALL __cdecl
@@ -148,6 +159,31 @@ typedef struct AexHostSceneTopologySummary {
   uint32_t reserved;
 } AexHostSceneTopologySummary;
 
+typedef struct AexHostRationalTime {
+  int32_t value;
+  uint32_t scale;
+} AexHostRationalTime;
+
+typedef struct AexHostAnimationKey {
+  AexHostRationalTime time;
+  uint32_t kind;
+  uint32_t interpolation;
+  double scalar;
+  double components[3];
+  uint8_t color[4];
+  uint32_t component_count;
+  uint64_t reserved;
+} AexHostAnimationKey;
+
+typedef struct AexHostAnimationValue {
+  uint32_t kind;
+  uint32_t component_count;
+  double scalar;
+  double components[3];
+  uint8_t color[4];
+  uint8_t reserved[4];
+} AexHostAnimationValue;
+
 typedef struct AexHostReportSnapshot {
   uint32_t abi_version;
   uint32_t struct_size;
@@ -212,6 +248,21 @@ typedef struct AexHostSceneTopologyAbiDescriptorV1 {
   uint64_t capabilities;
 } AexHostSceneTopologyAbiDescriptorV1;
 
+typedef struct AexHostParameterAnimationAbiDescriptorV1 {
+  uint64_t magic;
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t time_size;
+  uint32_t time_alignment;
+  uint32_t key_size;
+  uint32_t key_alignment;
+  uint32_t output_size;
+  uint32_t output_alignment;
+  uint32_t max_keys;
+  uint32_t reserved;
+  uint64_t capabilities;
+} AexHostParameterAnimationAbiDescriptorV1;
+
 extern const AexHostCoreAbiDescriptorV1 aex_host_core_abi_descriptor_v1;
 extern const AexHostSceneIdentityAbiDescriptorV1
     aex_host_core_scene_identity_abi_descriptor_v1;
@@ -219,6 +270,8 @@ extern const AexHostSceneOwnerRelationAbiDescriptorV1
     aex_host_core_scene_owner_relation_abi_descriptor_v1;
 extern const AexHostSceneTopologyAbiDescriptorV1
     aex_host_core_scene_topology_abi_descriptor_v1;
+extern const AexHostParameterAnimationAbiDescriptorV1
+    aex_host_core_parameter_animation_abi_descriptor_v1;
 
 typedef int32_t(AEXCOMPAT_HOST_CORE_CALL *AexHostCoreSessionCreateV1Fn)(
     const AexHostCallContext *context,
@@ -270,6 +323,19 @@ typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
                     *AexHostCoreSceneTopologySnapshotDestroyV1Fn)(
     const AexHostCallContext *context,
     AexHostOpaqueHandle handle);
+
+typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
+                    *AexHostCoreParameterAnimationEvaluateV1Fn)(
+    const AexHostRationalTime *now,
+    const AexHostAnimationKey *keys,
+    uint32_t key_count,
+    AexHostAnimationValue *output);
+
+int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_parameter_animation_evaluate_v1(
+    const AexHostRationalTime *now,
+    const AexHostAnimationKey *keys,
+    uint32_t key_count,
+    AexHostAnimationValue *output);
 
 int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_session_create_v1(
     const AexHostCallContext *context,
@@ -477,6 +543,26 @@ static_assert(offsetof(AexHostSceneTopologyAbiDescriptorV1, capacity) == 40);
 static_assert(offsetof(AexHostSceneTopologyAbiDescriptorV1, reserved) == 44);
 static_assert(
     offsetof(AexHostSceneTopologyAbiDescriptorV1, capabilities) == 48);
+
+static_assert(sizeof(AexHostRationalTime) == 8);
+static_assert(alignof(AexHostRationalTime) == 4);
+static_assert(offsetof(AexHostRationalTime, scale) == 4);
+static_assert(sizeof(AexHostAnimationKey) == 64);
+static_assert(alignof(AexHostAnimationKey) == 8);
+static_assert(offsetof(AexHostAnimationKey, scalar) == 16);
+static_assert(offsetof(AexHostAnimationKey, components) == 24);
+static_assert(offsetof(AexHostAnimationKey, color) == 48);
+static_assert(offsetof(AexHostAnimationKey, component_count) == 52);
+static_assert(offsetof(AexHostAnimationKey, reserved) == 56);
+static_assert(sizeof(AexHostAnimationValue) == 48);
+static_assert(alignof(AexHostAnimationValue) == 8);
+static_assert(offsetof(AexHostAnimationValue, scalar) == 8);
+static_assert(offsetof(AexHostAnimationValue, components) == 16);
+static_assert(offsetof(AexHostAnimationValue, color) == 40);
+static_assert(sizeof(AexHostParameterAnimationAbiDescriptorV1) == 56);
+static_assert(alignof(AexHostParameterAnimationAbiDescriptorV1) == 8);
+static_assert(
+    offsetof(AexHostParameterAnimationAbiDescriptorV1, capabilities) == 48);
 
 static_assert(AEX_HOST_SCENE_OBJECT_KIND_PROJECT == 1);
 static_assert(AEX_HOST_SCENE_OBJECT_KIND_ITEM == 2);

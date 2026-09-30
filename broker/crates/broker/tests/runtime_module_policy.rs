@@ -398,10 +398,10 @@ fn classification_cannot_be_substituted() {
 }
 
 #[test]
-fn rejects_hardlinked_module() {
+fn accepts_hardlinked_module() {
     let f = Fixture::new();
     fs::hard_link(&f.module, f.root.join("alias.dll")).unwrap();
-    assert!(parse_and_validate_at(&f.json(""), UNIX_EPOCH).is_err());
+    parse_and_validate_at(&f.json(""), UNIX_EPOCH).unwrap();
 }
 
 fn hex(bytes: &[u8]) -> String {

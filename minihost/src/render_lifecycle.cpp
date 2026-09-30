@@ -7,13 +7,19 @@ namespace aexcompat::render_lifecycle {
 
 namespace {
 
-void transfer_pointer(void* destination, std::size_t destination_offset,
-                      const void* source, std::size_t source_offset) {
-  void* value{};
+template <typename T>
+void transfer(void* destination, std::size_t destination_offset,
+              const void* source, std::size_t source_offset) {
+  T value{};
   std::memcpy(&value, static_cast<const unsigned char*>(source) + source_offset,
               sizeof(value));
   std::memcpy(static_cast<unsigned char*>(destination) + destination_offset,
               &value, sizeof(value));
+}
+
+void transfer_pointer(void* destination, std::size_t destination_offset,
+                      const void* source, std::size_t source_offset) {
+  transfer<void*>(destination, destination_offset, source, source_offset);
 }
 
 void clear_pointer(void* destination, std::size_t offset) {
@@ -22,7 +28,76 @@ void clear_pointer(void* destination, std::size_t offset) {
               sizeof(value));
 }
 
+// FRAME_SETUP receives `out_data->width/height` already holding the extent the
+// host is offering, which is the output world's own extent. An effect that
+// expands revises them; one that does not leaves them, and the host reads back
+// what it wrote - so "unchanged" arrives as the offered extent rather than as a
+// zero the caller has to interpret.
+//
+// Leaving them zero is not the same thing. AE's own Basic_3D derives its answer
+// from what it finds there: from 0x0 it answered 1x1, which is a shrink it never
+// declared `PF_OutFlag_I_SHRINK_BUFFER` for, so the host refused the resize and
+// the frame died as an output-validation failure without RENDER ever running
+// (issue #984). Given the extent, it answers the extent and renders.
+//
+// Origin is frame-local even on routes that do not negotiate an extent.
+// SmartFX states geometry through PRE_RENDER, but its resident session reuses
+// these input/output buffers. Clear each named slot before FRAME_SETUP so an
+// empty or invalid PRE_RENDER cannot inherit the previous frame's answer
+// (issue #996).
+void clear_output_origin(const Layout& layout, void* input, void* output) {
+  // The two structs describe one answer. A partial layout opts out rather than
+  // clearing only half and leaving the other half stale.
+  if (!layout.out_origin || !layout.in_origin) return;
+  const int32_t undecided_origin[2]{};
+  std::memcpy(static_cast<unsigned char*>(output) + layout.out_origin,
+              undecided_origin, sizeof(undecided_origin));
+  std::memcpy(static_cast<unsigned char*>(input) + layout.in_origin,
+              undecided_origin, sizeof(undecided_origin));
+}
+
+// The extent is overwritten on every classic frame, not filled only when
+// unset. A value found there is an earlier frame's answer, so carrying it
+// forward would hand FRAME_SETUP the extent the host used two frames ago. A
+// layout missing any extent offset opts out; offset zero is a real field, not
+// an absent destination.
+void offer_output_extent(const Layout& layout, void* output, const void* world) {
+  if (!world || !layout.out_width || !layout.out_height || !layout.world_width ||
+      !layout.world_height)
+    return;
+  transfer<int32_t>(output, layout.out_width, world, layout.world_width);
+  transfer<int32_t>(output, layout.out_height, world, layout.world_height);
+}
+
+FrameSetupOutput capture_frame_setup_output(const Layout& layout,
+                                            const void* output) {
+  FrameSetupOutput geometry;
+  if (!output || !layout.out_width || !layout.out_height || !layout.out_origin)
+    return geometry;
+  geometry.available = true;
+  std::memcpy(&geometry.width,
+              static_cast<const unsigned char*>(output) + layout.out_width,
+              sizeof(geometry.width));
+  std::memcpy(&geometry.height,
+              static_cast<const unsigned char*>(output) + layout.out_height,
+              sizeof(geometry.height));
+  std::memcpy(&geometry.origin_x,
+              static_cast<const unsigned char*>(output) + layout.out_origin,
+              sizeof(geometry.origin_x));
+  std::memcpy(&geometry.origin_y,
+              static_cast<const unsigned char*>(output) + layout.out_origin +
+                  sizeof(geometry.origin_x),
+              sizeof(geometry.origin_y));
+  return geometry;
+}
+
 }  // namespace
+
+void prepare_frame_setup_input(const Layout& layout, void* input, void* output,
+                               const void* world) {
+  clear_output_origin(layout, input, output);
+  offer_output_extent(layout, output, world);
+}
 
 RenderLifecycle begin_frame(const Hooks& hooks, const Layout& layout,
                             void* input, void* output, void** params, void* world) {
@@ -31,6 +106,7 @@ RenderLifecycle begin_frame(const Hooks& hooks, const Layout& layout,
     lifecycle.setup_error = 512;
     return lifecycle;
   }
+  prepare_frame_setup_input(layout, input, output, world);
   std::cerr << "stage:frame_setup_begin\n" << std::flush;
   const int32_t frame_error = hooks.invoke_frame(
       hooks.context, layout.frame_setup, input, output, params, world);
@@ -39,6 +115,7 @@ RenderLifecycle begin_frame(const Hooks& hooks, const Layout& layout,
     lifecycle.setup_error = frame_error;
     return lifecycle;
   }
+  lifecycle.frame_setup_output = capture_frame_setup_output(layout, output);
   lifecycle.frame_started = true;
   transfer_pointer(input, layout.in_frame_data, output, layout.out_frame_data);
   return lifecycle;
@@ -85,6 +162,7 @@ RenderLifecycle begin_render(const Hooks& hooks, const Layout& layout,
       begin_frame(hooks, layout, input, output, params, world);
   lifecycle.frame_started = frame.frame_started;
   lifecycle.setup_error = frame.setup_error;
+  lifecycle.frame_setup_output = frame.frame_setup_output;
   return lifecycle;
 }
 

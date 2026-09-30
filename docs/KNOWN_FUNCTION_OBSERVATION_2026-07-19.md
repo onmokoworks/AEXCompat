@@ -255,7 +255,7 @@ Trade-offs versus the alternatives the issue listed:
   its own plug-in hash and admission checks internally, and (c) the Job Object plus
   the launcher's bounded wait keep the crash-containment floor. Not a
   confidentiality sandbox - same caveat as the default tier.
-- **(rejected) Enumerate `aex_render_worker.exe` by process name and attach.**
+- **(rejected) Enumerate `aex_worker.exe` by process name and attach.**
   Racy at both ends: it attaches after some render code has already executed
   (missing early calls) and can mis-target a concurrent worker. The broker also
   creates the worker `CREATE_SUSPENDED` → assigns the Job → `ResumeThread` →

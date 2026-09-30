@@ -1,6 +1,6 @@
 """Behavioral self-tests for the SmartFX resident session frame loop (v1.1).
 
-Drives ``aex_smart_worker.exe --smart-session-v1`` over the same transport as
+Drives ``aex_worker.exe --kind smart --smart-session-v1`` over the same transport as
 the classic session tests (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md), using
 the reproducible ``pf_smart_geometry_probe.aex`` fixture. The probe selects a
 geometry scenario per render time (current_time % 4), which doubles as the
@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from test_render_session_worker import (
+    probe_variant,
     EXIT_INVARIANT_FAILURE,
     HEIGHT,
     OUTPUT_GENERATION_OFFSET,
@@ -26,8 +27,7 @@ from test_render_session_worker import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "target" / "minihost-build" / "aex_smart_worker.exe"
-RENDER_WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 PROBE = (
     ROOT / "target" / "pf-smart-geometry-probe-build" / "Release"
     / "pf_smart_geometry_probe.aex"
@@ -45,16 +45,20 @@ TOTAL_TIME = 300
 
 def _require_artifacts():
     if not WORKER.is_file():
-        pytest.skip("aex_smart_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if not PROBE.is_file():
         pytest.skip("pf_smart_geometry_probe.aex is not built")
 
 
-def _spawn(transport, command="--smart-session-v1", worker=None):
-    binary = worker or WORKER
-    aex_sha = hashlib.sha256(PROBE.read_bytes()).hexdigest()
+def _spawn(transport, command="--smart-session-v1", kind="smart", variant=None):
+    # `variant` names a depth-advertisement variant of the same probe; the
+    # probe selects it from a marker in its own file name, so the variant
+    # travels with the plug-in the run loaded instead of sitting in an ambient
+    # environment variable every other test would inherit.
+    probe = PROBE if variant is None else probe_variant(variant, PROBE)
+    aex_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
     process = subprocess.Popen(
-        [str(binary), command, str(PROBE), aex_sha, "v2|",
+        [str(WORKER), "--kind", kind, command, str(probe), aex_sha, "v2|",
          str(WIDTH), str(HEIGHT), "1", str(TOTAL_TIME), str(TIME_SCALE)],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -157,6 +161,129 @@ def test_smart_session_deep32_cpu_command_renders_a_float_frame():
         assert report["pixel_format"] == "argb32f"
         assert report["case_id"] == "request_cpu"
         assert report["session_frames_attempted"] == 1
+        # The advertised path: the plug-in itself saw float32 worlds. Asserted
+        # so this test cannot quietly become the narrowed one - the slot is
+        # argb32f either way.
+        assert report["advertised_depth_supported"] is True
+        assert report["dispatch_pixel_bytes"] == 16
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_smart_session_narrows_a_plug_in_that_does_not_advertise_the_depth():
+    """After Effects does not refuse an effect that lacks DEEP_COLOR_AWARE in a
+    deep project. A plug-in advertising neither deep depth has only 8 bits to
+    be handed, so it renders at 8-bit precision inside a 32-bpc session rather
+    than not at all (this host's rule; AE is measured only on the float-above-
+    16 case, docs/DEPTH_FALLBACK_OBSERVATION_2026-09-17.md). The session slot,
+    the frame message and the final report all describe the frame at the
+    session's depth - the narrowing is between the host and the plug-in, and a
+    caller reading the slot must not have to know it happened.
+    """
+    _require_artifacts()
+    transport = SessionTransport(depth_code=32, output_pixel_bytes=16)
+    process = _spawn(transport, command="--smart-session32-cpu-v1",
+                     variant="shallow")
+    try:
+        transport.write_input(57, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", json.dumps(done)
+        output = done["output"]
+        # The slot is float32 even though the plug-in rendered 8-bit.
+        assert output["pixel_format"] == "argb32f"
+        assert output["rowbytes"] == WIDTH * 16
+        slot = transport.output_bytes(WIDTH * HEIGHT * 16)
+        assert output["packed_bytes"] == len(slot)
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+        report = json.loads(stdout.strip())
+        assert report["status"] == "render_completed"
+        # The final report describes the same frame as the message above.
+        assert report["pixel_format"] == "argb32f"
+        assert report["rowbytes"] == WIDTH * 16
+        assert report["bytes_written_per_row"] == WIDTH * 16
+        assert report["undefined_tail_bytes_per_row"] == 0
+        # ... and records that the plug-in itself never saw that depth.
+        assert report["advertised_depth_supported"] is False
+        assert report["depth_supported"] is True
+        assert report["dispatch_pixel_bytes"] == 4
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_smart_session_dispatches_a_float_only_plug_in_at_float32():
+    """The smart twin of the classic float-only case, and the configuration
+    measured against After Effects: a SmartFX effect with FLOAT_COLOR_AWARE and
+    without DEEP_COLOR_AWARE in a 16-bpc project. It is handed float32 worlds
+    and the frame is narrowed into the 16-bit slot.
+    """
+    _require_artifacts()
+    transport = SessionTransport(depth_code=16, output_pixel_bytes=8)
+    process = _spawn(transport, command="--smart-session16-v1",
+                     variant="floatonly")
+    try:
+        transport.write_input(57, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", json.dumps(done)
+        output = done["output"]
+        assert output["pixel_format"] == "argb16"
+        assert output["rowbytes"] == WIDTH * 8
+        slot = transport.output_bytes(WIDTH * HEIGHT * 8)
+        assert output["packed_bytes"] == len(slot)
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+        report = json.loads(stdout.strip())
+        assert report["status"] == "render_completed"
+        assert report["pixel_format"] == "argb16"
+        assert report["rowbytes"] == WIDTH * 8
+        assert report["undefined_tail_bytes_per_row"] == 0
+        assert report["advertised_depth_supported"] is False
+        assert report["depth_supported"] is True
+        assert report["dispatch_pixel_bytes"] == 16
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_smart_session_depth_follows_global_setup_not_a_later_rewrite():
+    """`out_data` is one buffer that every selector writes into and nothing
+    restores between frames, so a plug-in that assigns rather than ORs its
+    out-flags in PARAMS_SETUP erases what GLOBAL_SETUP advertised. The depth a
+    session hands the plug-in its worlds in is decided by the advertisement,
+    not by whatever is in that buffer when a frame starts: a host that reads it
+    live would dispatch this probe at 8 bits while its report still says it
+    advertised float32.
+    """
+    _require_artifacts()
+    transport = SessionTransport(depth_code=32, output_pixel_bytes=16)
+    process = _spawn(transport, command="--smart-session32-cpu-v1",
+                     variant="rewrite")
+    try:
+        transport.write_input(57, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", json.dumps(done)
+        assert done["output"]["pixel_format"] == "argb32f"
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+        report = json.loads(stdout.strip())
+        assert report["status"] == "render_completed"
+        assert report["advertised_depth_supported"] is True
+        # 16, not 4: the rewrite in PARAMS_SETUP did not move the dispatch.
+        assert report["dispatch_pixel_bytes"] == 16
     finally:
         if process.poll() is None:
             process.kill()
@@ -244,14 +371,12 @@ def test_smart_session_grows_for_a_result_larger_than_the_session():
 
 def test_session_commands_are_bound_to_their_worker_kind():
     _require_artifacts()
-    if not RENDER_WORKER.is_file():
-        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
-    # The render worker must not accept the smart session command and the
-    # smart worker must not accept the classic one; both exit with the
+    # The classic kind must not accept the smart session command and the
+    # smart kind must not accept the classic one; both exit with the
     # command-rejection code before any session transport is touched.
-    for binary, command in ((RENDER_WORKER, "--smart-session-v1"),
-                            (WORKER, "--render-session-v1")):
+    for kind, command in (("classic", "--smart-session-v1"),
+                          ("smart", "--render-session-v1")):
         transport = SessionTransport()
-        process = _spawn(transport, command=command, worker=binary)
+        process = _spawn(transport, command=command, kind=kind)
         code, _, _ = _finish(process)
-        assert code == 2, (binary.name, command, code)
+        assert code == 2, (kind, command, code)

@@ -1,38 +1,3 @@
-from pathlib import Path
-import re
-import source_owners
-
-
-ROOT = Path(__file__).resolve().parents[1]
-MAIN = source_owners.L2_SOURCE.read_text(encoding="utf-8")
-HEADER = (ROOT / "minihost" / "src" / "worker_session.hpp").read_text(
-    encoding="utf-8"
-)
-SOURCE = (ROOT / "minihost" / "src" / "worker_session.cpp").read_text(
-    encoding="utf-8"
-)
-EARLY = (ROOT / "minihost" / "src" / "l2_mode_execution.cpp").read_text(
-    encoding="utf-8"
-)
-CMAKE = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
-
-
-
-
-def test_post_acquisition_returns_finalize_through_the_session():
-    owned = MAIN[MAIN.index("WorkerSession session("):
-                 MAIN.index("int aexcompat::worker_target::run")]
-    assert re.search(r"\breturn\s+\d+\s*;", owned) is None
-
-
-
-
-
-
-
-
-
-
 def test_pre_unload_hook_event_log_contract_covers_finish_and_destructor_paths():
     # A fake event log captures the lifecycle promised by the concrete call
     # ordering above. Repeated finish/destructor cleanup must not run the hook
@@ -66,5 +31,3 @@ def test_pre_unload_hook_event_log_contract_covers_finish_and_destructor_paths()
     finish()
     finish()  # destructor fallback after an explicit finish
     assert events == ["hook", "audit", "FreeLibrary"]
-
-

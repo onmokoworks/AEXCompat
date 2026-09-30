@@ -48,6 +48,17 @@ struct SwapPluginResult {
   worker_runtime::parameter_execution::EffectEntry entry{};
   int32_t global_setup_error{-1};
   int32_t params_setup_error{-1};
+  // PF_OutFlag_AUDIO_EFFECT_ONLY from the incoming member's GLOBAL_SETUP.
+  // The frame loop replaces its current-plugin passthrough state only after a
+  // complete authenticated swap result reaches it.
+  bool audio_effect_only{};
+  /// The incoming member's advertised out-flags, snapshotted by its bootstrap
+  /// right after GLOBAL_SETUP. Carried rather than read back out of the shared
+  /// `out_data`, which PARAMS_SETUP and every later selector write into: a
+  /// plug-in that assigns instead of ORs would otherwise move the session's
+  /// dispatch depth with no diagnostic (the #843 shape, one selector earlier).
+  uint32_t advertised_out_flags{};
+  uint32_t advertised_out_flags2{};
   bool hard_failure{};
 };
 struct SwapPluginHook {
@@ -108,6 +119,7 @@ class SessionChannels {
   SessionChannels(const SessionChannels&) = delete;
   SessionChannels& operator=(const SessionChannels&) = delete;
   ~SessionChannels();
+  void close();
 
   // Parses the three AEXCOMPAT_RENDER_SESSION_*_HANDLE variables, validates
   // handle types, maps the section, and checks the mapped size covers the

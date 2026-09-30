@@ -121,8 +121,8 @@ void configure_host_world_fallback(HostNewWorld new_world,
   g_host = {new_world, dispose_world, owns_world, recognizes_smart_world};
 }
 
-bool begin_cuda_context(uint32_t active_device_index) {
-  const bool started = cuda_backend().begin(active_device_index);
+bool begin_cuda_context(uint32_t active_device_index, void* borrowed_context) {
+  const bool started = cuda_backend().begin(active_device_index, borrowed_context);
   if (cuda_backend().device_count() != 0)
     last_cuda_device_count = cuda_backend().device_count();
   last_cuda_device_index = active_device_index;
@@ -131,8 +131,10 @@ bool begin_cuda_context(uint32_t active_device_index) {
 
 bool end_cuda_context() { return cuda_backend().end(); }
 
-bool begin_backend_context(int32_t framework, uint32_t active_device_index) {
-  if (framework == 3) return begin_cuda_context(active_device_index);
+bool begin_backend_context(int32_t framework, uint32_t active_device_index,
+                           void* borrowed_context) {
+  if (framework == 3)
+    return begin_cuda_context(active_device_index, borrowed_context);
   if (framework == 1) return opencl::begin_context(active_device_index);
   if (framework == 4) return directx::begin_context(active_device_index);
   return true;

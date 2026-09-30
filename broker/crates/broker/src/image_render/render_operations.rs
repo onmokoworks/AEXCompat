@@ -69,8 +69,10 @@ pub fn render_scattermap_fixture(
         None,
         None,
         dependencies,
+        Vec::new(),
         None,
         false,
+        None,
     )
 }
 
@@ -139,11 +141,19 @@ fn render_audio_via_length_one_session(
         plugin_sha256: approved_sha256,
         parameters: Some(parameters),
         dependencies: Vec::new(),
-        dependency_search_dirs: Vec::new(),
+        dependency_search_dirs: match plugin_path.parent() {
+            Some(_) => crate::after_effects_install::in_place_dependency_search_dirs(plugin_path),
+            None => {
+                return AudioWrapperOutcome::Fallback(
+                    "plugin path has no parent directory to search for dependencies".to_string(),
+                );
+            }
+        },
         max_samples: samples.len() as u32,
         channels: 1,
         time_scale: SAMPLE_RATE,
         frame_deadline: Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        launch_environment: Default::default(),
     }) {
         Ok(session) => session,
         Err(error) => {
@@ -496,7 +506,7 @@ pub fn render_experimental_image_with_approved_dependencies(
     gpu_backend: RenderGpuBackend,
     dependencies: Vec<ApprovedImageArtifact>,
 ) -> io::Result<Value> {
-    render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy(
+    render_experimental_image_with_approved_dependencies_and_search_dirs(
         repository,
         plugin_path,
         approved_sha256,
@@ -510,6 +520,45 @@ pub fn render_experimental_image_with_approved_dependencies(
         custom_ui_action,
         gpu_backend,
         dependencies,
+        Vec::new(),
+    )
+}
+
+/// Interactive in-place render with the same explicitly approved runtime
+/// roots used for Effect Controls inspection. The secure session boundary
+/// canonicalizes and bounds the roots again; this API does not turn a root
+/// into an approved dependency artifact.
+pub fn render_experimental_image_with_approved_dependencies_and_search_dirs(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    host_context: Option<&crate::render_request::HostContext>,
+    custom_ui_action: Option<RenderUiAction>,
+    gpu_backend: RenderGpuBackend,
+    dependencies: Vec<ApprovedImageArtifact>,
+    dependency_search_dirs: Vec<PathBuf>,
+) -> io::Result<Value> {
+    render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy_and_search_dirs(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timing,
+        smart,
+        pixel_format,
+        host_context,
+        custom_ui_action,
+        gpu_backend,
+        dependencies,
+        dependency_search_dirs,
         None,
     )
 }
@@ -528,6 +577,89 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
     custom_ui_action: Option<RenderUiAction>,
     gpu_backend: RenderGpuBackend,
     dependencies: Vec<ApprovedImageArtifact>,
+    gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
+) -> io::Result<Value> {
+    render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy_and_search_dirs(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timing,
+        smart,
+        pixel_format,
+        host_context,
+        custom_ui_action,
+        gpu_backend,
+        dependencies,
+        Vec::new(),
+        gpu_runtime_policy,
+    )
+}
+
+/// Shipping OpenCL route shared by the CLI and GUI. Its caller supplies normal
+/// discovered dependency roots, not a policy file or a hand-picked GPU runtime
+/// folder. Failure at generation or preflight is explicit; no CPU retry can
+/// accidentally inherit the GPU authorization.
+pub fn render_experimental_image_with_auto_opencl_policy(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    host_context: Option<&crate::render_request::HostContext>,
+    custom_ui_action: Option<RenderUiAction>,
+    dependencies: Vec<ApprovedImageArtifact>,
+    dependency_search_dirs: Vec<PathBuf>,
+) -> io::Result<Value> {
+    let policy = crate::gpu_runtime_policy_generator::generate_opencl_runtime_policy()?;
+    let prepared = prepare_gpu_runtime_policy(
+        repository,
+        plugin_path,
+        approved_sha256,
+        RenderGpuBackend::OpenCl,
+        policy,
+        dependencies.clone(),
+    )?;
+    render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy_and_search_dirs(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timing,
+        true,
+        RenderPixelFormat::Argb32f,
+        host_context,
+        custom_ui_action,
+        RenderGpuBackend::OpenCl,
+        dependencies,
+        dependency_search_dirs,
+        Some(prepared.as_input()),
+    )
+}
+
+/// Renders through the authenticated GPU policy route while retaining the
+/// dependency search roots discovered by the shipping GUI.
+pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy_and_search_dirs(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    host_context: Option<&crate::render_request::HostContext>,
+    custom_ui_action: Option<RenderUiAction>,
+    gpu_backend: RenderGpuBackend,
+    dependencies: Vec<ApprovedImageArtifact>,
+    dependency_search_dirs: Vec<PathBuf>,
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
 ) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
@@ -552,8 +684,10 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
         None,
         None,
         dependencies,
+        dependency_search_dirs,
         gpu_runtime_policy,
         false,
+        None,
     )
 }
 
@@ -617,8 +751,10 @@ pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
         None,
         None,
         dependencies,
+        Vec::new(),
         None,
         true,
+        None,
     )
 }
 
@@ -656,8 +792,10 @@ pub fn render_experimental_image_with_timed_layers(
         None,
         Some(timed_layers),
         Vec::new(),
+        Vec::new(),
         None,
         false,
+        None,
     )
 }
 
@@ -708,8 +846,10 @@ pub fn render_experimental_image_with_parameter_animation(
         Some(animations),
         None,
         Vec::new(),
+        Vec::new(),
         None,
         false,
+        None,
     )
 }
 
@@ -745,8 +885,55 @@ pub fn render_experimental_image_with_audio_sidecar(
         None,
         None,
         Vec::new(),
+        Vec::new(),
         None,
         false,
+        None,
+    )
+}
+
+pub fn render_experimental_artifact_at_time(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_directory: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    artifact_kind: RenderArtifactKind,
+) -> io::Result<Value> {
+    if artifact_kind == RenderArtifactKind::Float32Exr && pixel_format != RenderPixelFormat::Argb32f
+    {
+        return Err(invalid("render-exr requires argb32f"));
+    }
+    let bytes = fs::read(plugin_path)?;
+    let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
+    render_with_artifact(
+        repository,
+        "experimental",
+        plugin_path,
+        &actual,
+        INTERACTIVE_RENDER_TIMEOUT_MS,
+        input_path,
+        output_directory,
+        Some(encode_interactive_payload(parameters)?),
+        Some(parameters),
+        None,
+        timing,
+        smart,
+        pixel_format,
+        RenderGpuBackend::Cpu,
+        None,
+        None,
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+        false,
+        Some(artifact_kind),
     )
 }
 
@@ -813,7 +1000,7 @@ pub fn inspect_experimental_external_dependencies(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -859,7 +1046,7 @@ pub fn probe_experimental_options_dialog(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -914,7 +1101,7 @@ pub fn probe_experimental_automatic_options_dialog(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -972,7 +1159,7 @@ pub fn probe_experimental_nop_render(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1070,7 +1257,7 @@ pub fn probe_experimental_input_buffer_write(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1175,7 +1362,7 @@ fn probe_experimental_frame_resize(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1263,7 +1450,7 @@ pub fn probe_experimental_persistent_sequence(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1311,7 +1498,7 @@ pub fn probe_experimental_flattened_sequence(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1360,7 +1547,7 @@ pub fn probe_experimental_copied_flattened_sequence(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1406,6 +1593,78 @@ pub fn inspect_experimental_with_diagnostics(
         Vec::new(),
         None,
     )
+}
+
+/// Inspects one in-place plug-in through the shipping discovery-session
+/// contract. A cleanup crash can succeed only through the authenticated,
+/// single-use retry authorization minted by that session.
+pub fn inspect_experimental_via_discovery_in_place(
+    repository: &Path,
+    plugin: ApprovedImageArtifact,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    use crate::render_session::{DiscoverySession, InPlaceDiscoverySessionOpenRequest};
+
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "in-place discovery inspection requires dependency search directories",
+        ));
+    }
+    let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
+        repository,
+        plugins: vec![plugin],
+        dependency_search_dirs,
+        module_bound: crate::cluster_manifest::MAX_CLUSTER_MODULE_BOUND,
+        inspect_deadline: None,
+        launch_environment: Default::default(),
+    })?;
+    let outcome = session.inspect_plugin(0, 0)?;
+    let close = session.close();
+    finish_discovery_inspection(outcome, repository, close, |authorization, repository| {
+        inspect_experimental_cleanup_contained_in_place(authorization, repository)
+    })
+}
+
+fn finish_discovery_inspection<F>(
+    outcome: crate::render_session::InspectOutcome,
+    repository: &Path,
+    close: Value,
+    cleanup_retry: F,
+) -> io::Result<(Vec<InteractiveParameter>, Value)>
+where
+    F: FnOnce(
+        crate::render_session::CleanupCrashAuthorization,
+        &Path,
+    ) -> io::Result<(Vec<InteractiveParameter>, Value)>,
+{
+    use crate::render_session::InspectOutcome;
+
+    match outcome {
+        InspectOutcome::Inspected { report } => {
+            if close.get("session_clean") != Some(&json!(true)) {
+                return Err(invalid(format!(
+                    "discovery inspection session did not close cleanly: {close}"
+                )));
+            }
+            inspection_result_from_report(
+                report,
+                json!({
+                    "classification": "ok",
+                    "inspection_transport": "discovery_session",
+                }),
+                false,
+            )
+        }
+        InspectOutcome::InspectError { error_kind, report } => Err(invalid(format!(
+            "discovery inspection failed ({error_kind}): report={report:?}, close={close}"
+        ))),
+        InspectOutcome::CleanupCrashCheckpoint { authorization } => {
+            let (parameters, mut diagnostics) = cleanup_retry(authorization, repository)?;
+            diagnostics["inspection_transport"] = json!("discovery_cleanup_contained");
+            diagnostics["discovery_close"] = close;
+            Ok((parameters, diagnostics))
+        }
+    }
 }
 
 pub fn inspect_experimental_with_approved_dependencies(
@@ -1460,7 +1719,89 @@ pub fn inspect_experimental_in_place(
         Vec::new(),
         dependency_search_dirs,
         None,
+        "--l2-params-only",
+        None,
     )
+}
+
+pub fn inspect_experimental_in_place_plugin_data_effect(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+    selector: &crate::render_session::PluginDataEffectSelector,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "in-place inspection requires at least one dependency search directory",
+        ));
+    }
+    inspect_experimental_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        Vec::new(),
+        dependency_search_dirs,
+        None,
+        "--l2-params-only",
+        Some(selector),
+    )
+}
+
+/// Performs the single cleanup-contained retry authorized by an authenticated
+/// discovery-session checkpoint followed by an OS-classified cleanup crash.
+/// The worker recomputes the report and deliberately does not enter
+/// `GLOBAL_SETDOWN`; this route must never be used as ordinary discovery.
+pub fn inspect_experimental_cleanup_contained_in_place(
+    authorization: crate::render_session::CleanupCrashAuthorization,
+    repository: &Path,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    let (plugin_path, approved_sha256, expected_size, dependency_search_dirs) =
+        authorization.into_retry_identity();
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "cleanup-contained inspection requires dependency search directories",
+        ));
+    }
+    if fs::metadata(&plugin_path)?.len() != expected_size {
+        return Err(invalid(
+            "cleanup-contained authorized plugin size changed before retry",
+        ));
+    }
+    let inspected = inspect_experimental_impl(
+        repository,
+        &plugin_path,
+        &approved_sha256,
+        Vec::new(),
+        dependency_search_dirs,
+        None,
+        "--l2-params-inspect-cleanup-contained-v1",
+        None,
+    )?;
+    let diagnostics = &inspected.1;
+    if !cleanup_contained_report_is_valid(diagnostics) {
+        return Err(invalid(
+            "cleanup-contained inspection report failed its mode-specific contract",
+        ));
+    }
+    Ok(inspected)
+}
+
+fn cleanup_contained_report_is_valid(diagnostics: &Value) -> bool {
+    diagnostics.get("inspection_status").and_then(Value::as_str)
+        == Some("parameters_inspected_cleanup_contained")
+        && diagnostics
+            .get("global_setup_error")
+            .and_then(Value::as_i64)
+            == Some(0)
+        && diagnostics
+            .get("params_setup_error")
+            .and_then(Value::as_i64)
+            == Some(0)
+        && diagnostics
+            .get("global_setdown_error")
+            .and_then(Value::as_i64)
+            == Some(-1)
 }
 
 pub fn inspect_experimental_with_runtime_policy(

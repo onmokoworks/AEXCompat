@@ -49,6 +49,10 @@ class Context final {
   void set_definition(int32_t slot, const ParameterDefinition& definition);
   bool copy_definition(int32_t slot, void* destination,
                        std::size_t destination_size) const;
+  // True when a definition table has been published (slots 0..N) and `slot`
+  // lies past its last entry. Negative slots and gaps inside the table are
+  // not "beyond": those stay refusals in checkout_param.
+  bool beyond_definition_table(int32_t slot) const;
   void set_fallback_definition(int32_t slot,
                                const ParameterDefinition& definition);
   bool copy_fallback_definition(int32_t slot, void* destination,
@@ -57,6 +61,9 @@ class Context final {
                                bool wide_time_allowed,
                                bool shutter_dependency_advertised) noexcept;
   bool checkout_time_allowed(int32_t time, uint32_t time_scale) noexcept;
+  bool shutter_dependency_advertised() const noexcept {
+    return diagnostics_.shutter_dependency_advertised;
+  }
   void record_checkout(void* definition, int32_t index, int32_t time,
                        int32_t time_step, uint32_t time_scale);
   int32_t checkin(void* definition);

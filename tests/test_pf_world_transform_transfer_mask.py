@@ -8,8 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _worker():
     candidates = (
-        ROOT / "target/minihost-build-v18/aex_render_worker.exe",
-        ROOT / "target/minihost-build/aex_render_worker.exe",
+        ROOT / "target/minihost-build-v18/aex_worker.exe",
+        ROOT / "target/minihost-build/aex_worker.exe",
     )
     return next((path for path in candidates if path.is_file()), None)
 
@@ -18,9 +18,9 @@ def _worker():
 
 def test_transfer_mask_runtime_matrix():
     worker = _worker()
-    assert worker is not None, "build aex_render_worker before running the focused runtime test"
+    assert worker is not None, "build aex_worker.exe (pwsh -File tools/build-native.ps1) before running the focused runtime test"
     completed = subprocess.run(
-        [worker, "--self-test-world-transform-transfer-mask"],
+        [worker, "--kind", "classic", "--self-test-world-transform-transfer-mask"],
         cwd=ROOT,
         capture_output=True,
         text=True,

@@ -3,20 +3,14 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DISPATCH = ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp"
-SMART_FINALIZE = ROOT / "minihost" / "src" / "worker_smart_finalize.cpp"
-PIXEL_BUFFER = ROOT / "minihost" / "src" / "render_pixel_buffer.cpp"
-WORKERS = [
-    ROOT / "target" / "minihost-build" / "aex_l2_worker.exe",
-    ROOT / "target" / "minihost-build" / "aex_render_worker.exe",
-    ROOT / "target" / "minihost-build" / "aex_smart_worker.exe",
-]
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
+KINDS = ("discovery", "classic", "smart")
 
 def test_native_cleanup_and_output_guard_selftest():
-    for worker in WORKERS:
-        assert worker.exists(), f"missing worker: {worker}"
+    assert WORKER.exists(), f"missing worker: {WORKER}"
+    for kind in KINDS:
         completed = subprocess.run(
-            [str(worker), "--self-test-render-output-safety"],
+            [str(WORKER), "--kind", kind, "--self-test-render-output-safety"],
             cwd=ROOT,
             capture_output=True,
             text=True,

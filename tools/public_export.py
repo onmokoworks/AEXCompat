@@ -196,9 +196,6 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
     "broker/crates/broker/src/image_render/tests.rs": frozenset({
         "15eef78600a1ea1784ca9d3ef99f1d111fee85282321a70f4bb8616b61194e6d",
     }),
-    "imports/aviutlas-rust-contracts/aviutl-rs/examples/aex_effect_worker_stub.rs": frozenset({
-        "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
-    }),
     "broker/crates/broker/src/opencl_runtime_probe.rs": frozenset({
         "05e24481d49af5ff4b88980216126fdaa1506fb0e7dcdbc60d64e5bcc5a61312",
         "143b2a35c870c71948c9adb607c02dd5e1a5caba9c7a5f2a0ea3007b3c129856",
@@ -207,26 +204,6 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "79ed539cf15cd04214a808b3af03ae5e3b0799d95f61c8aa5fa2b18cc712abed",
         "b997a2dd8b1cf20e9e641dd92747b02e4823228326229dcb20446e8940b0a9a4",
         "550bc0f6847e76d51ce076b13f840f2b9e7da6962d1e978e260d11425243abb2",
-    }),
-    "imports/aviutlas-rust-contracts/aviutl-rs/examples/aex_image_probe.rs": frozenset({
-        "895be9833f4d131d0b1b3b817f8990b7c3f386cfe6f05790d5521b855b4d44e2",
-        "b89aceec2314b6ec967b354f7561e6a378dc5be81b98f0fa2465bf5e8e6fa5dd",
-        "bcf05e6abd327667a16ec643d61b74d68fe2b146b02692ebf774462a7c31c041",
-    }),
-    "imports/aviutlas-rust-contracts/aviutl-rs/tests/aex_fixture_gate_refresh_audit_contract.rs": frozenset({
-        "94f27c71474b819d2cbe28ffd78d6abd44e9b43fc1f0c0431e18d6ae7703b945",
-        "a99b652e18df81c2dec2461ad438afca96afbd8f3faec4b129e7f7a1455e4035",
-    }),
-    "imports/aviutlas-rust-contracts/aviutl-rs/tests/aex_image_probe_contract.rs": frozenset({
-        "0852eb49ff4033694fbbb9e0e37ab7ae72d5683bf012f7537d879544e7dc53a4",
-        "0b93ed2101f53d543f18ef805b42fac956f87f07e6d8f41b10a3f289e72a376e",
-        "119335d2096813a57e28c9996f2ece37350a53efbcddf1c49a4607f3af8d567d",
-        "3fe1f8c88bc840738504c51c56929877a9b523bdfe8bc75fbca45baef60b378e",
-        "41cc85d81cc165d2fafe4f4c9f9b70ee19a095f940cb59caeb86bb54147ea3de",
-        "483a2e30b315176993be09260e1458d0704c4f1cd0de3839ffe0cc65b68c69df",
-        "6eb8a75638edd992e3f77d5109d49e0dba54838e3b2b7a04c1659c7b1dadfc5f",
-        "8d24447d0091c27473ea8dfba0bb3235a18dacd0708169d744d4adfb3109d5f6",
-        "e90a9771e41d705f0f24e7571a5d9480ba99b27d9d5b7ea5dc57c94a814eaeb1",
     }),
     "instruments/common/trace_writer_selftest/main.cpp": frozenset({
         "04c2e02b6905edb3ec210148f64f1b00bfbf06659dbc24ba6a867550e14cb939",

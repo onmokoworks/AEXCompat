@@ -999,6 +999,11 @@ mod platform {
             RELEASES.get_or_init(|| Mutex::new(Vec::new()))
         }
 
+        fn release_test_lock() -> &'static Mutex<()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+        }
+
         unsafe extern "system" fn record_release(handle: *mut c_void) -> i32 {
             releases().lock().unwrap().push(handle as usize);
             CL_SUCCESS
@@ -1364,6 +1369,7 @@ mod platform {
 
         #[test]
         fn resources_release_exactly_once_in_reverse_ownership_order() {
+            let _serial = release_test_lock().lock().unwrap();
             releases().lock().unwrap().clear();
             {
                 let _context = Resource::new(1usize as *mut c_void, record_release);
@@ -1378,6 +1384,7 @@ mod platform {
 
         #[test]
         fn early_return_releases_each_owned_resource_once() {
+            let _serial = release_test_lock().lock().unwrap();
             fn fail_after_queue() -> Result<(), ()> {
                 let _context = Resource::new(1usize as *mut c_void, record_release);
                 let _queue = Resource::new(2usize as *mut c_void, record_release);

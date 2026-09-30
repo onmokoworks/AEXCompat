@@ -39,6 +39,8 @@ pub struct HostContext {
     #[serde(default)]
     pub spatial: Option<SpatialContext>,
     #[serde(default)]
+    pub active_camera: Option<ActiveCamera>,
+    #[serde(default)]
     pub render_environment: Option<RenderEnvironment>,
     #[serde(default)]
     pub aux_channels: Vec<AuxChannel>,
@@ -46,6 +48,35 @@ pub struct HostContext {
     /// No other auxiliary plane is inferred from RGBA pixels.
     #[serde(default)]
     pub alpha_as_coverage_params: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveCamera {
+    pub layer: CameraLayerIdentity,
+    pub anchor: [f64; 3],
+    pub position: [f64; 3],
+    pub scale: [f64; 3],
+    pub rotation_degrees: [f64; 3],
+    pub zoom: f64,
+    pub in_point: CameraTime,
+    pub duration: CameraTime,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraLayerIdentity {
+    pub project_id: u64,
+    pub object_id: u64,
+    pub generation: u32,
+    pub index: u8,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraTime {
+    pub value: i32,
+    pub scale: u32,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -425,6 +456,79 @@ pub(crate) fn encode_spatial_context(context: &HostContext) -> io::Result<Option
     }
 }
 
+pub(crate) fn encode_active_camera(context: &HostContext) -> io::Result<Option<String>> {
+    let Some(camera) = context.active_camera else {
+        return Ok(None);
+    };
+    if camera.layer.project_id == 0
+        || camera.layer.project_id > i32::MAX as u64
+        || camera.layer.object_id == 0
+        || camera.layer.object_id > i32::MAX as u64
+        || camera.layer.generation == 0
+        || camera.layer.index >= 3
+    {
+        return Err(invalid(
+            "active camera layer identity is outside enabled range",
+        ));
+    }
+    let start = camera.in_point;
+    let duration = camera.duration;
+    if start.value < 0
+        || duration.value <= 0
+        || start.scale == 0
+        || duration.scale == 0
+        || start.scale > 1_000_000
+        || duration.scale > 1_000_000
+        || start.value as i128 * duration.scale as i128
+            + duration.value as i128 * start.scale as i128
+            > 10 * start.scale as i128 * duration.scale as i128
+    {
+        return Err(invalid("active camera time range is invalid"));
+    }
+    if !camera.zoom.is_finite() || camera.zoom <= 0.0 || camera.zoom > 1_000_000_000.0 {
+        return Err(invalid("active camera zoom is invalid"));
+    }
+    for value in camera.anchor.into_iter().chain(camera.position) {
+        if !value.is_finite() || value.abs() > 1_000_000.0 {
+            return Err(invalid("active camera translation is invalid"));
+        }
+    }
+    for value in camera.scale {
+        if !value.is_finite() || !(0.01..=10_000.0).contains(&value) {
+            return Err(invalid("active camera scale is singular or out of range"));
+        }
+    }
+    let scale_determinant = camera.scale.into_iter().product::<f64>() / 1_000_000.0;
+    if !scale_determinant.is_finite() || scale_determinant <= 1.001e-12 {
+        return Err(invalid("active camera scale is singular or out of range"));
+    }
+    for value in camera.rotation_degrees {
+        if !value.is_finite() || value.abs() > 36_000.0 {
+            return Err(invalid("active camera rotation is invalid"));
+        }
+    }
+    let mut fields = vec![
+        camera.layer.project_id.to_string(),
+        camera.layer.object_id.to_string(),
+        camera.layer.generation.to_string(),
+        camera.layer.index.to_string(),
+        start.value.to_string(),
+        start.scale.to_string(),
+        duration.value.to_string(),
+        duration.scale.to_string(),
+    ];
+    for value in [camera.zoom]
+        .into_iter()
+        .chain(camera.anchor)
+        .chain(camera.position)
+        .chain(camera.scale)
+        .chain(camera.rotation_degrees)
+    {
+        fields.push(value.to_bits().to_string());
+    }
+    Ok(Some(format!("scene-camera:v1|{}", fields.join(","))))
+}
+
 pub(crate) fn encode_render_environment(context: &HostContext) -> io::Result<Option<String>> {
     let Some(environment) = context.render_environment else {
         return Ok(None);
@@ -492,6 +596,8 @@ fn launch_approved_in_place(
             args_after_plugin: &tail,
             repository,
             require_module_audit: true,
+            launch_environment: Default::default(),
+            staged_worker_assets: &[],
         },
         Some(Duration::from_millis(timeout_ms)),
         None,
@@ -826,6 +932,15 @@ pub fn execute_smart(
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
+    if request
+        .host_context
+        .as_ref()
+        .is_some_and(|context| context.active_camera.is_some())
+    {
+        return Err(invalid(
+            "active camera is not supported by the fixture SmartFX render route",
+        ));
+    }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
         .ok_or_else(|| invalid("unknown plugin profile"))?;
     let worker_spec = profile
@@ -1971,6 +2086,42 @@ mod tests {
     }
 
     #[test]
+    fn request_v4_accepts_an_authored_active_camera_snapshot() {
+        let request: Request = serde_json::from_str(
+            r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[]},"active_camera":{"layer":{"project_id":1,"object_id":2807,"generation":1,"index":2},"anchor":[0.0,0.0,0.0],"position":[10.0,20.0,30.0],"scale":[100.0,100.0,100.0],"rotation_degrees":[0.0,0.0,0.0],"zoom":800.0,"in_point":{"value":0,"scale":30},"duration":{"value":300,"scale":30}}}}"#,
+        )
+        .unwrap();
+        let encoded = encode_active_camera(request.host_context.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(encoded.starts_with("scene-camera:v1|1,2807,1,2,0,30,300,30,"));
+        assert_eq!(encoded.split(',').count(), 21);
+        let mut invalid = request.host_context.unwrap();
+        invalid.active_camera.as_mut().unwrap().zoom = f64::NAN;
+        assert!(encode_active_camera(&invalid).is_err());
+        invalid.active_camera.as_mut().unwrap().zoom = 800.0;
+        invalid.active_camera.as_mut().unwrap().scale = [0.01; 3];
+        assert!(encode_active_camera(&invalid).is_err());
+    }
+
+    #[test]
+    fn fixture_smart_route_rejects_camera_it_cannot_render() {
+        let root = repository();
+        let request = root.join("target/render-requests/camera.json");
+        let output = root.join("target/smart-request-render-results/camera.json");
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+        fs::write(
+            &request,
+            br#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[]},"active_camera":{"layer":{"project_id":1,"object_id":2807,"generation":1,"index":2},"anchor":[0,0,0],"position":[0,0,0],"scale":[100,100,100],"rotation_degrees":[0,0,0],"zoom":800,"in_point":{"value":0,"scale":30},"duration":{"value":300,"scale":30}}}}"#,
+        )
+        .unwrap();
+        let error = execute_smart(&root, &request, &output).unwrap_err();
+        assert!(error.to_string().contains("active camera"), "{error}");
+        assert!(!output.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn spatial_context_is_bounded_and_transport_stable() {
         let context: HostContext = serde_json::from_str(
             r#"{"mask_scene":{"masks":[]},"spatial":{"downsample_x":{"numerator":1,"denominator":2},"downsample_y":{"numerator":3,"denominator":4},"pixel_aspect_ratio":{"numerator":10,"denominator":11}}}"#,
@@ -2076,6 +2227,7 @@ mod tests {
                 }],
             },
             spatial: None,
+            active_camera: None,
             render_environment: None,
             aux_channels: Vec::new(),
             alpha_as_coverage_params: Vec::new(),

@@ -131,10 +131,20 @@ CALLBACK_TABLES = {
         "utils.subpixel_sample",
         "utils.area_sample",
         "utils.end_sampling",
+        # composite_rect (PF_UtilCallbacks+0x28) was missing from the emitted
+        # contract, so the host wired blend at 0x30 and left 0x28 null; Write_on
+        # calls it from RENDER to put the input layer behind its strokes and
+        # jumped to address 0 (issue #1252). Same shape as #777 / #981.
+        "utils.composite_rect",
         "utils.blend",
         "utils.convolve",
         "utils.copy",
         "utils.fill",
+        # gaussian_kernel (PF_UtilCallbacks+0x50) was missing from the emitted
+        # contract, so the host left 0x50 null; Inner/Outer Key builds its
+        # 1D blur kernel through it from RENDER and jumped to address 0
+        # (issue #1253). Same shape as #777 / #981 / #1252.
+        "utils.gaussian_kernel",
         "utils.premultiply",
         "utils.premultiply_color",
         "utils.subpixel_sample16",
@@ -144,6 +154,9 @@ CALLBACK_TABLES = {
         "utils.iterate16",
         "utils.iterate",
         "utils.iterate_origin",
+        "utils.iterate_lut",
+        "utils.iterate_origin16",
+        "utils.iterate_origin_non_clip_src16",
         "utils.new_world",
         "utils.dispose_world",
         "utils.transfer_rect",
@@ -160,6 +173,19 @@ CALLBACK_TABLES = {
         "utils.ansi_strcpy",
         "utils.ansi_asin",
         "utils.ansi_acos",
+        # The rest of the ANSI block (issue #981). Eleven of its nineteen
+        # entries were emitted, so the host wired eleven and handed plug-ins a
+        # null pointer for the other eight; a plug-in calling one of them
+        # jumped to address 0, exactly as the 16-bit sampling pair did in
+        # issue #777.
+        "utils.ansi_atan",
+        "utils.ansi_atan2",
+        "utils.ansi_exp",
+        "utils.ansi_floor",
+        "utils.ansi_fmod",
+        "utils.ansi_log",
+        "utils.ansi_log10",
+        "utils.ansi_tan",
         "utils.get_platform_data",
         "utils.get_pixel_data8",
         "utils.get_pixel_data16",
@@ -168,6 +194,8 @@ CALLBACK_TABLES = {
         "utils.host_unlock_handle",
         "utils.host_dispose_handle",
         "utils.host_get_handle_size",
+        "utils.iterate_origin_non_clip_src",
+        "utils.iterate_generic",
         "utils.host_resize_handle",
         # Legacy application-specific callback `app` at PF_UtilCallbacks+0xC8
         # (issue #362 selector families: PIN-era effects such as Drop_Shadow
@@ -393,8 +421,8 @@ def render_rust(data: dict[str, Any], source: Path) -> str:
         f"pub const {name}: usize = {value};" for name, value in constants(data)
     )
     tables = "\n".join(
-        f"pub const {table_name}: [usize; {len(field_names)}] = ["
-        + ", ".join(f"{ident(name)}_OFFSET" for name in field_names)
+        f"pub const {table_name}: [usize; {len(field_names)}] = [\n"
+        + "".join(f"    {ident(name)}_OFFSET,\n" for name in field_names)
         + "];"
         for table_name, field_names in CALLBACK_TABLES.items()
     )

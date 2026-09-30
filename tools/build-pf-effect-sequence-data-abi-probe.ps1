@@ -13,9 +13,10 @@ $build = Join-Path $repository "target\pf-effect-sequence-data-abi-probe-build"
 $header = Join-Path $AfterEffectsSdk "Examples\Headers\AE_GeneralPlug.h"
 if (-not (Test-Path -LiteralPath $header)) { throw "After Effects SDK headers were not found: $header" }
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
-& $CMake -S $source -B $build -G $Generator -A $Architecture
+& $CMake -S $source -B $build -G $Generator @ConfigureArgs
 if ($LASTEXITCODE -ne 0) { throw "configure failed" }
 & $CMake --build $build --config $Configuration --target pf_effect_sequence_data_abi_probe
 if ($LASTEXITCODE -ne 0) { throw "build failed" }

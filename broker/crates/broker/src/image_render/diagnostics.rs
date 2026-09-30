@@ -24,6 +24,7 @@ pub(crate) const MAX_RGBA_TRANSPORT_BYTES: u64 = MAX_PIXELS * 4;
 const MAX_PARAMETERS: u32 = 1024;
 pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 const MAX_STAGE_EVENTS: usize = 32;
+const MAX_ACTIVE_STAGES: usize = MAX_STAGE_EVENTS;
 const MAX_MISSING_SUITES: usize = 16;
 const MAX_UNSUPPORTED_SUITE_CALLS: usize = 32;
 const MAX_SUITE_CALL_SLOT_PROBE_SLOTS: u64 = 32;
@@ -31,6 +32,7 @@ const MAX_SUITE_CALL_SLOT_PROBE_TARGETS: usize = 8;
 const MAX_SUITE_NAME_LEN: usize = 64;
 const MAX_SUITE_TIMELINE_EVENTS: usize = 512;
 const MAX_SELECTOR_INVOCATIONS: usize = 64;
+const MAX_SELECTOR_UNWIND_FRAMES: usize = 12;
 const MAX_HOST_CALLBACK_TIMELINE_RECORDS: usize = 128;
 const MAX_COMPUTE_CACHE_TIMELINE_RECORDS: usize = 128;
 const MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS: usize = 128;
@@ -41,7 +43,11 @@ const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
 
 fn conformance_render_settings_transport() -> io::Result<Option<String>> {
-    let Ok(encoded) = std::env::var(CONFORMANCE_RENDER_SETTINGS_ENV) else {
+    let encoded = if let Some(value) = fixture_render_settings_override() {
+        value
+    } else if let Ok(value) = std::env::var(CONFORMANCE_RENDER_SETTINGS_ENV) {
+        value
+    } else {
         return Ok(None);
     };
     let fields = encoded.split('|').collect::<Vec<_>>();
@@ -88,6 +94,15 @@ pub fn smart_render_advertised(out_flags2: u64) -> bool {
     out_flags2 & PF_OUTFLAG2_SUPPORTS_SMART_RENDER != 0
 }
 
+// #816 made a non-empty search root set part of the in-place protocol. Use the
+// same AE Support Files default as other in-place entry points (#1641).
+fn search_root(plugin_path: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+    plugin_path
+        .parent()
+        .ok_or_else(|| invalid("plugin path has no parent directory to search for dependencies"))?;
+    Ok(crate::after_effects_install::in_place_dependency_search_dirs(plugin_path))
+}
+
 fn dispatch_approved_image(
     repository: &Path,
     worker_kind: WorkerKind,
@@ -107,10 +122,11 @@ fn dispatch_approved_image(
         },
         // Session approval currently covers only the selected plugin image.
         dependencies: vec![],
-        dependency_search_dirs: Vec::new(),
+        dependency_search_dirs: search_root(plugin_path)?,
         args_before_plugin,
         args_after_plugin,
         timeout,
+        launch_environment: Default::default(),
     })
 }
 
@@ -124,6 +140,17 @@ fn dispatch_approved_image_with_dependencies(
     args_after_plugin: &[String],
     timeout: Option<Duration>,
 ) -> io::Result<crate::secure_launch::SecureLaunchResult> {
+    let mut dependency_search_dirs = search_root(plugin_path)?;
+    for dependency in &dependencies {
+        let parent = dependency
+            .path
+            .parent()
+            .ok_or_else(|| invalid("approved dependency has no parent directory"))?
+            .to_path_buf();
+        if !dependency_search_dirs.contains(&parent) {
+            dependency_search_dirs.push(parent);
+        }
+    }
     dispatch_secure_image(SecureImageDispatch {
         repository,
         worker_kind,
@@ -132,11 +159,12 @@ fn dispatch_approved_image_with_dependencies(
             expected_sha256: decode_sha256_hex(approved_sha256)?,
             expected_size: fs::metadata(plugin_path)?.len(),
         },
-        dependencies,
-        dependency_search_dirs: Vec::new(),
+        dependencies: vec![],
+        dependency_search_dirs,
         args_before_plugin,
         args_after_plugin,
         timeout,
+        launch_environment: Default::default(),
     })
 }
 
@@ -212,13 +240,14 @@ pub fn prepare_gpu_runtime_policy(
 ) -> io::Result<PreparedGpuRuntimePolicy> {
     let backend = runtime_backend(gpu_backend)
         .ok_or_else(|| invalid("the CPU backend has no GPU runtime module policy"))?;
+    crate::gpu_runtime_policy_generator::validate_active_gpu_policy(&policy)?;
     let authorization = prepare_runtime_authorization_transport(repository, &policy, backend)?;
     let session_identity = authorization.session_identity;
     let args_before_plugin = vec!["--gpu-module-report-v1".to_owned()];
     let args_after_plugin = vec![
         approved_sha256.to_ascii_lowercase(),
         "--runtime-module-authorization-v1".to_owned(),
-        authorization.basename.clone(),
+        authorization.artifact.path.to_string_lossy().into_owned(),
     ];
     // The manifest rides as a sealed dependency next to the plug-in, exactly like
     // the params-inspect path, so the worker resolves it by basename. The caller's
@@ -242,8 +271,10 @@ pub fn prepare_gpu_runtime_policy(
     drop(authorization);
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
-            "GPU module-audit preflight worker did not succeed (classification: {})",
-            isolated.classification.as_str()
+            "GPU module-audit preflight worker did not succeed (classification: {}, exit_code: {}, stderr: {})",
+            isolated.classification.as_str(),
+            isolated.exit_code,
+            isolated.stderr.trim()
         )));
     }
     let stdout = isolated.stdout.trim();
@@ -449,6 +480,50 @@ pub fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::Dynami
         .map_err(|error| invalid(format!("{role} image decode failed: {error}")))
 }
 
+/// How much of the worker's stderr the extended trace carries out. The tail
+/// rather than the head: the interesting end of a failing selector is the last
+/// thing it did, and the head is the same start-up lines every run.
+///
+/// Visible to the crate because `windows_process::STDERR_CAPTURE_LIMIT` has to
+/// stay above it: the capture is what this cuts from, so two equal limits
+/// leave nothing to cut and this function silently becomes a no-op over the
+/// head of the stream (issue #1290).
+pub(crate) const MAX_STDERR_TAIL_BYTES: usize = 64 * 1024;
+
+/// The tail of the worker's stderr, or `None` unless `AEXCOMPAT_EXTENDED_DIAG`
+/// is set.
+fn extended_diagnostics_stderr_tail(stderr: &str) -> Option<String> {
+    if std::env::var_os("AEXCOMPAT_EXTENDED_DIAG").is_none() {
+        return None;
+    }
+    Some(stderr_tail(stderr))
+}
+
+/// The cut itself, without the environment gate: on a line boundary so the
+/// first line is whole, and truncated from the front with a marker rather than
+/// silently. Separate from the gate so the composition with the capture's own
+/// retention is testable (issue #1290) - the two were individually right while
+/// the pair handed the report the head of the stream.
+pub(crate) fn stderr_tail(stderr: &str) -> String {
+    if stderr.len() <= MAX_STDERR_TAIL_BYTES {
+        return stderr.to_owned();
+    }
+    // Cut forward to the next line rather than at the byte: the index lands on
+    // a char boundary (it follows a newline) and on something a reader can
+    // parse. Indexing the byte slice is what keeps the search itself from
+    // needing a boundary. No newline past the cut leaves an empty tail, which
+    // is the honest answer for a single enormous line.
+    let cut = stderr.len() - MAX_STDERR_TAIL_BYTES;
+    let start = stderr.as_bytes()[cut..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(stderr.len(), |newline| cut + newline + 1);
+    format!(
+        "[truncated to the last {MAX_STDERR_TAIL_BYTES} bytes]\n{}",
+        &stderr[start..]
+    )
+}
+
 /// Diagnostics for a dispatched worker run, including the kill evidence from
 /// Job Object accounting (issue #21): why a dead worker died (timeout versus
 /// allocations failing at the memory cap) and how much memory it peaked at.
@@ -467,6 +542,15 @@ pub(crate) fn isolated_worker_diagnostics(
         .as_object_mut()
         .expect("worker_diagnostics returns an object");
     object.insert("kill_reason".into(), json!(isolated.kill_reason));
+    // The worker's own trace, when the operator asked for one. Everything above
+    // is derived from this stream, and a derivation only answers the questions
+    // it was written for: a plug-in failing inside a selector leaves its account
+    // in the host-callback trace, which nothing else carries out of the worker.
+    // Off unless AEXCOMPAT_EXTENDED_DIAG is set, because the trace is unbounded
+    // in shape (it can carry paths a report should not) and large.
+    if let Some(tail) = extended_diagnostics_stderr_tail(&isolated.stderr) {
+        object.insert("stderr_tail".into(), json!(tail));
+    }
     object.insert(
         "memory_limit_reached".into(),
         json!(isolated.memory_limit_reached),
@@ -535,7 +619,10 @@ fn worker_diagnostics(
         "render",
         // Per frame, unlike "render" which brackets the whole session. Without
         // these a classic session's frame errors carried no stage at all
-        // (issue #722). Only "classic_render" is the plug-in's own selector:
+        // (issue #722). The UI draw and teardown names are also plug-in
+        // dispatches; they bracket kEvent calls before and after RENDER and
+        // report an error only when that UI failure becomes the frame error
+        // (issue #735). "classic_render" is the RENDER selector itself:
         // "classic_output_resize" is the host refusing the requested output
         // resize before RENDER runs, and "classic_finalize" appears only when
         // the host's own finalize changed the error the selector returned.
@@ -544,7 +631,9 @@ fn worker_diagnostics(
         // reason none of them is the "output_validation" that session.rs
         // assigns from `output_pixels_valid`: that is a smart-only check on the
         // pixels that came back, not a refused resize.
+        "classic_ui_draw",
         "classic_render",
+        "classic_ui_teardown",
         "classic_output_resize",
         "classic_finalize",
         "smart_render",
@@ -558,6 +647,21 @@ fn worker_diagnostics(
         "audio_render",
         "audio_setdown",
         "global_setdown",
+        // Not a selector either: one entry into the Premiere GPU-filter route
+        // (xGPUFilterEntry, the VR family), whose `_end` carries a `reason`
+        // naming how it ended - `committed` when it produced the frame, or the
+        // decline that sent the render back to the ordinary PF path (issue
+        // #1271). The route's faults are contained, so without this a plug-in
+        // whose GPU route died on entry would land in `rendered` off the PF
+        // path with nothing in the record saying the route was tried at all.
+        "pr_gpu_route",
+        // Not a selector either: the host emitting the effect's input in place
+        // of a frame a SmartFX PreRender promised nothing for (an empty
+        // `result_rect`; issue #1285). The render selector is skipped, so
+        // without this a copied frame would land in `rendered` with nothing in
+        // the record saying the plug-in did not draw it. The `_end` carries a
+        // `reason`: `input_copied`, or why the host declined to copy.
+        "smart_empty_result_passthrough",
         // Not a selector: the worker's own refusal to run with a utility
         // callback table whose entries do not sit at the offsets the generated
         // contract names for them. It aborts immediately after, so without this
@@ -572,6 +676,10 @@ fn worker_diagnostics(
     let mut plugin_kind: Option<&str> = None;
     let mut minidump: Option<String> = None;
     let load_failure = load_failure_marker(stderr, exit_code);
+    let unhandled_exception = unhandled_exception_marker(stderr, classification, exit_code);
+    let mut suite_acquire_failures = suite_acquire_failures(stderr);
+    let mut callback_addr_denials = callback_addr_denials(stderr);
+    let mut callback_denials = callback_denials(stderr);
 
     for line in stderr.lines() {
         plugin_kind = plugin_kind.or_else(|| match line.trim() {
@@ -603,14 +711,42 @@ fn worker_diagnostics(
             .split_whitespace()
             .filter_map(|item| {
                 let (name, value) = item.split_once('=')?;
-                if !matches!(name, "error" | "pre_error" | "render_error") {
-                    return None;
+                match name {
+                    "error" | "pre_error" | "render_error" => {
+                        value.parse::<i64>().ok().map(|value| (name, json!(value)))
+                    }
+                    // Why the host refused, when the numeric code alone cannot
+                    // say: the classic output resize has several refusals that
+                    // all report 4, and without this they are distinguishable
+                    // only in a stderr tail that most runs do not carry
+                    // (issue #984).
+                    //
+                    // Shape-checked, not merely length-capped. The plug-in
+                    // shares the worker's stderr and can print any `stage:` line
+                    // it likes, so an unconstrained value would let plug-in
+                    // authored text - a user's file path, say - into a report
+                    // the repository treats as shareable. Every reason the host
+                    // emits is a lower-case identifier, which is what this
+                    // admits; anything else is dropped rather than truncated,
+                    // because a truncated path is still a path.
+                    "reason"
+                        if !value.is_empty()
+                            && value.len() <= 32
+                            && value
+                                .bytes()
+                                .all(|byte| byte.is_ascii_lowercase() || byte == b'_') =>
+                    {
+                        Some((name, json!(value)))
+                    }
+                    _ => None,
                 }
-                value.parse::<i64>().ok().map(|value| (name, value))
             })
-            .map(|(name, value)| (name.to_owned(), json!(value)))
+            .map(|(name, value)| (name.to_owned(), value))
             .collect::<serde_json::Map<_, _>>();
         if state == "begin" {
+            if active_stages.len() == MAX_ACTIVE_STAGES {
+                active_stages.remove(0);
+            }
             active_stages.push(stage.to_owned());
         } else {
             if let Some(index) = active_stages.iter().rposition(|active| active == stage) {
@@ -653,15 +789,303 @@ fn worker_diagnostics(
         "last_completed_stage": last_completed_stage,
         "missing_suites": [],
         "missing_suites_truncated": false,
+        // What the worker refused to hand out, read off its own stderr rather
+        // than out of its final report. `missing_suites` comes from the report
+        // and is filled by `propagate_missing_suites`, which the inspection and
+        // image-render paths call and the render session's close does not - and
+        // a session that ends on a frame error often has no parsable report at
+        // all, so on exactly the runs a sweep is classifying, the suite a
+        // plug-in could not acquire was reaching nobody (issue #957).
+        "suite_acquire_failures": Value::Array(std::mem::take(&mut suite_acquire_failures.0)),
+        "suite_acquire_failures_truncated": suite_acquire_failures.1,
+        // The utility `get_callback_addr` requests the worker refused, read off
+        // its `stage:callback_addr_denied` lines the same way. A refused id is
+        // what a `frame_error:516` frame otherwise cannot attribute: the
+        // plug-in answers PF_Err_BAD_CALLBACK_PARAM and says nothing, and the
+        // requested id was recoverable only by disassembly (issue #985).
+        "callback_addr_denials": Value::Array(std::mem::take(&mut callback_addr_denials.0)),
+        "callback_addr_denials_truncated": callback_addr_denials.1,
+        // Host-callback refusals with the condition that refused them, same
+        // source. Which callback answered 516 is in the extended-diag trace;
+        // which of its checks said no is what this carries (issue #995).
+        "callback_denials": Value::Array(std::mem::take(&mut callback_denials.0)),
+        "callback_denials_truncated": callback_denials.1,
         "unsupported_suite_calls": [],
         "unsupported_suite_calls_truncated": false,
+        // Filled by `propagate_bee_facade` when the worker's report carried
+        // one. Present as null rather than absent so a consumer can tell "this
+        // run produced no parsable report" from "the facade block was empty",
+        // the same way `suite_call_slot_probe` beside it does.
+        "bee_facade": Value::Null,
+        "callback_history": [],
         "suite_call_slot_probe": null,
         "suite_timeline": [],
         "suite_timeline_truncated": false,
         "plugin_kind": plugin_kind,
         "minidump": minidump,
         "load_failure": load_failure,
+        "unhandled_exception": unhandled_exception,
     })
+}
+
+/// Accept only the bounded, path-free last-chance marker from a worker that
+/// actually exited with that exception code. stderr is shared with the
+/// plug-in, so this is a diagnostic hint, not authenticated provenance.
+fn unhandled_exception_marker(stderr: &str, classification: &str, exit_code: u32) -> Option<Value> {
+    if classification != "crashed" {
+        return None;
+    }
+    stderr.lines().rev().find_map(|line| {
+        let body = line.trim().strip_prefix("stage:unhandled_seh ")?;
+        let mut fields = body.split_whitespace();
+        let code_text = fields.next()?.strip_prefix("code=0x")?;
+        if !(1..=8).contains(&code_text.len())
+            || !code_text
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return None;
+        }
+        let code = u32::from_str_radix(code_text, 16).ok()?;
+        if code != exit_code {
+            return None;
+        }
+        let site = fields.next()?.strip_prefix("site=")?;
+        if site == "unknown" {
+            return fields
+                .next()
+                .is_none()
+                .then(|| json!({"code": code, "site": site}));
+        }
+        if !matches!(site, "worker" | "module") {
+            return None;
+        }
+        let module = fields.next()?.strip_prefix("module=")?;
+        if module.is_empty()
+            || module.len() > 64
+            || !module
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return None;
+        }
+        let rva_text = fields.next()?.strip_prefix("rva=0x")?;
+        if !(1..=16).contains(&rva_text.len())
+            || !rva_text
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || fields.next().is_some()
+        {
+            return None;
+        }
+        let rva = u64::from_str_radix(rva_text, 16).ok()?;
+        Some(json!({"code": code, "site": site, "module": module, "rva": rva}))
+    })
+}
+
+/// How many distinct suites a single run may report as unacquirable. A plug-in
+/// probing versions downward asks for several in a row, and a malformed stream
+/// must not be able to grow the diagnostic without bound.
+const MAX_SUITE_ACQUIRE_FAILURES: usize = 32;
+
+/// The suites the worker refused, from its `stage:suite_acquire_failed` lines,
+/// and whether the list was cut short. Deduplicated on (name, version): a
+/// plug-in that retries the same acquire every frame would otherwise fill the
+/// list with one fact.
+///
+/// The name is held to the same shape the report side accepts, through the same
+/// predicate, so a suite name and a line of a plug-in's own chatter cannot be
+/// confused; anything else is dropped rather than passed through.
+fn suite_acquire_failures(stderr: &str) -> (Vec<Value>, bool) {
+    let mut failures: Vec<(String, i64)> = Vec::new();
+    let mut truncated = false;
+    for line in stderr.lines() {
+        let Some(body) = line.trim().strip_prefix("stage:suite_acquire_failed ") else {
+            continue;
+        };
+        let Some((name, version)) = body.split_once(" version=") else {
+            continue;
+        };
+        let Some(name) = name.strip_prefix("name=") else {
+            continue;
+        };
+        // Dropping a line is the same loss as running out of room for it, so
+        // it sets the same flag: a name or a version this cannot vouch for is
+        // still a suite the worker refused, and a list that hides its own gaps
+        // reads as a complete one.
+        let Ok(version) = version.trim().parse::<i64>() else {
+            truncated = true;
+            continue;
+        };
+        if !schema_safe_suite_name(name) || !(0..=MAX_SUITE_VERSION).contains(&version) {
+            truncated = true;
+            continue;
+        }
+        let entry = (name.to_owned(), version);
+        if failures.contains(&entry) {
+            continue;
+        }
+        // Reporting the cut, not just making it: a bounded list read as a
+        // complete one turns "the sweep did not look further" into "there was
+        // nothing further", which is the reading this field exists to prevent.
+        if failures.len() >= MAX_SUITE_ACQUIRE_FAILURES {
+            truncated = true;
+            break;
+        }
+        failures.push(entry);
+    }
+    let failures = failures
+        .into_iter()
+        .map(|(name, version)| json!({ "name": name, "version": version }))
+        .collect();
+    (failures, truncated)
+}
+
+/// How many distinct refused `get_callback_addr` requests a single run may
+/// report. One id per call site is the observed shape; the bound exists so a
+/// plug-in probing ids in a loop cannot grow the diagnostic without bound.
+const MAX_CALLBACK_ADDR_DENIALS: usize = 32;
+
+/// The utility `get_callback_addr` requests the worker refused, from its
+/// `stage:callback_addr_denied` lines, and whether the list was cut short.
+/// Deduplicated on (id, quality, mode): a plug-in that retries the same
+/// request every frame would otherwise fill the list with one fact.
+///
+/// stderr is mixed worker/plug-in output, so the line is held to the exact
+/// shape the worker emits - three named integer fields and nothing else.
+/// Anything that does not parse is dropped and flagged rather than passed
+/// through, for the same reason `suite_acquire_failures` does it: a value
+/// this cannot vouch for must not reach a shareable report.
+fn callback_addr_denials(stderr: &str) -> (Vec<Value>, bool) {
+    let mut denials: Vec<(i64, i64, i64)> = Vec::new();
+    let mut truncated = false;
+    for line in stderr.lines() {
+        let Some(body) = line.trim().strip_prefix("stage:callback_addr_denied ") else {
+            continue;
+        };
+        let mut fields = body.split_whitespace();
+        let mut field = |key: &str, low: i64, high: i64| -> Option<i64> {
+            fields
+                .next()?
+                .strip_prefix(key)?
+                .parse::<i64>()
+                .ok()
+                .filter(|value| (low..=high).contains(value))
+        };
+        // The worker prints `id` and `quality` as int32 and `mode` as uint32;
+        // a value outside those ranges is a fabricated line, not a denial.
+        let parsed = (|| {
+            Some((
+                field("id=", i32::MIN.into(), i32::MAX.into())?,
+                field("quality=", i32::MIN.into(), i32::MAX.into())?,
+                field("mode=", 0, u32::MAX.into())?,
+            ))
+        })();
+        let (Some(entry), None) = (parsed, fields.next()) else {
+            truncated = true;
+            continue;
+        };
+        if denials.contains(&entry) {
+            continue;
+        }
+        if denials.len() >= MAX_CALLBACK_ADDR_DENIALS {
+            truncated = true;
+            break;
+        }
+        denials.push(entry);
+    }
+    let denials = denials
+        .into_iter()
+        .map(|(id, quality, mode)| json!({ "id": id, "quality": quality, "mode": mode }))
+        .collect();
+    (denials, truncated)
+}
+
+/// Bounds and identifier shapes for `callback_denials`. Both fields are
+/// worker-owned vocabulary, never plug-in text. Callback names share the
+/// 64-byte schema bound used by the structured callback timeline; refusal
+/// reasons remain the smaller 32-byte vocabulary.
+const MAX_CALLBACK_DENIALS: usize = 32;
+
+fn worker_denial_callback(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn worker_denial_reason(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// Host-callback refusals with the condition that refused them, from the
+/// worker's `stage:callback_denied callback=<name> reason=<identifier>` lines.
+/// The numeric error a refusal answers (usually 516) reaches the plug-in,
+/// which typically passes it through as its frame error and says nothing; the
+/// callback that refused is visible in the extended-diag trace, but *why* it
+/// refused was recoverable only by rebuilding the worker with prints
+/// (issue #995, Tile refused by one of transform_world's dozen checks).
+///
+/// Same discipline as the parsers above: exactly two fields of worker-owned
+/// identifier shape, dedup on the pair, bounded, and anything else is dropped
+/// and flagged rather than passed through.
+fn callback_denials(stderr: &str) -> (Vec<Value>, bool) {
+    let mut denials: Vec<(String, String, Option<i64>)> = Vec::new();
+    let mut truncated = false;
+    for line in stderr.lines() {
+        let Some(body) = line.trim().strip_prefix("stage:callback_denied ") else {
+            continue;
+        };
+        let mut fields = body.split_whitespace();
+        let parsed = (|| {
+            let callback = fields.next()?.strip_prefix("callback=")?;
+            let reason = fields.next()?.strip_prefix("reason=")?;
+            if !worker_denial_callback(callback) || !worker_denial_reason(reason) {
+                return None;
+            }
+            // Where one scalar is the whole story - which transfer mode, how
+            // many matrices - the marker carries the plug-in's value. The
+            // value is plug-in-authored, so it is admitted only as an integer,
+            // and only in the range the worker's call sites can emit (int32,
+            // uint32 and uint16 arguments): outside it, the line is a
+            // fabrication, not a denial.
+            let value =
+                match fields.next() {
+                    None => None,
+                    Some(field) => Some(field.strip_prefix("value=")?.parse::<i64>().ok().filter(
+                        |value| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(value),
+                    )?),
+                };
+            Some((callback.to_owned(), reason.to_owned(), value))
+        })();
+        let (Some(entry), None) = (parsed, fields.next()) else {
+            truncated = true;
+            continue;
+        };
+        if denials.contains(&entry) {
+            continue;
+        }
+        if denials.len() >= MAX_CALLBACK_DENIALS {
+            truncated = true;
+            break;
+        }
+        denials.push(entry);
+    }
+    let denials = denials
+        .into_iter()
+        .map(|(callback, reason, value)| match value {
+            Some(value) => {
+                json!({ "callback": callback, "reason": reason, "value": value })
+            }
+            None => json!({ "callback": callback, "reason": reason }),
+        })
+        .collect();
+    (denials, truncated)
 }
 
 fn load_failure_marker(stderr: &str, exit_code: u32) -> Option<Value> {
@@ -786,6 +1210,73 @@ fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
     diagnostics["missing_suites_truncated"] = Value::Bool(truncated);
 }
 
+/// Carries the BEE facade's own counters (issue #1264) onto the diagnostics.
+///
+/// `unsupported_suite_calls` beside it only ever names slots nobody
+/// implemented, so an empty list there cannot separate "a slot was reached and
+/// held" from "nothing reached the facade". This block is the other half:
+/// which vtable slots were dispatched, how many times the effect layer was
+/// handed out, and how many traps fired - all counted over the one plug-in
+/// this record is about.
+///
+/// Rebuilt from validated integers rather than copied, like every sibling
+/// propagator here: this is the boundary against the worker's stdout, the
+/// result lands in a shareable sweep artifact, and a shape assertion that
+/// holds only because of what the producer happens to emit is not a check.
+/// The slot list is capped for the same reason - only a handful of slots are
+/// implemented, so a longer list is a malformed report, not a bigger session.
+pub(crate) fn propagate_bee_facade(diagnostics: &mut Value, worker_report: &Value) {
+    /// Enough for every implemented slot several times over; a report naming
+    /// more is not describing this facade.
+    const MAX_SLOTS: usize = 32;
+    /// The BEE_AVLayer vtable has 246 slots; a slot index past this is not one
+    /// the worker can dispatch, so the entry is a malformed report, not data.
+    const MAX_SLOT_INDEX: u64 = 1024;
+    let Some(reported) = worker_report.get("bee_facade").and_then(Value::as_object) else {
+        return;
+    };
+    let counter = |key: &str| {
+        reported
+            .get(key)
+            .and_then(Value::as_u64)
+            .map_or(Value::Null, |value| json!(value))
+    };
+    let mut slots = Vec::new();
+    let mut truncated = false;
+    match reported.get("layer_vtable_calls") {
+        Some(Value::Array(entries)) => {
+            for entry in entries {
+                if slots.len() >= MAX_SLOTS {
+                    truncated = true;
+                    break;
+                }
+                let (Some(slot), Some(call_count)) = (
+                    entry.get("slot").and_then(Value::as_u64),
+                    entry.get("call_count").and_then(Value::as_u64),
+                ) else {
+                    truncated = true;
+                    continue;
+                };
+                if slot >= MAX_SLOT_INDEX {
+                    truncated = true;
+                    continue;
+                }
+                slots.push(json!({"slot": slot, "call_count": call_count}));
+            }
+        }
+        // The worker always writes the list, so a missing key is as malformed
+        // as a non-array where the list belongs, and an empty list would read
+        // as "no slot was dispatched" - say it was not legible instead.
+        _ => truncated = true,
+    }
+    diagnostics["bee_facade"] = json!({
+        "effect_layer_hand_outs": counter("effect_layer_hand_outs"),
+        "trap_count": counter("trap_count"),
+        "layer_vtable_calls": Value::Array(slots),
+        "layer_vtable_calls_truncated": truncated,
+    });
+}
+
 fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Value) {
     let mut calls = Vec::new();
     let mut seen = BTreeSet::new();
@@ -842,6 +1333,38 @@ fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Va
     }
     diagnostics["unsupported_suite_calls"] = Value::Array(calls);
     diagnostics["unsupported_suite_calls_truncated"] = Value::Bool(truncated);
+    let history = worker_report
+        .get("callback_history")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .rev()
+                .take(32)
+                .rev()
+                .filter_map(|entry| {
+                    let sequence = entry.get("sequence")?.as_u64()?;
+                    let callback = entry.get("callback")?.as_str()?;
+                    let result = entry.get("result")?.as_i64()?;
+                    let reason = entry.get("reason")?.as_str()?;
+                    if callback.len() > 64
+                        || reason.len() > 64
+                        || result < i32::MIN as i64
+                        || result > i32::MAX as i64
+                    {
+                        return None;
+                    }
+                    Some(json!({
+                        "sequence": sequence,
+                        "callback": callback,
+                        "result": result,
+                        "reason": reason,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    diagnostics["callback_history"] = Value::Array(history);
 }
 
 fn probe_hex(value: &Value) -> Option<&str> {
@@ -1493,6 +2016,62 @@ fn propagate_selector_invocations(diagnostics: &mut Value, worker_report: &Value
                 continue;
             }
         };
+        let (unwind_stop, unwind_frames) =
+            match (record.get("unwind_stop"), record.get("unwind_frames")) {
+                (Some(Value::Null), Some(Value::Null)) => (Value::Null, Value::Null),
+                (Some(Value::String(stop)), Some(Value::Array(frames)))
+                    if seh_caught
+                        && matches!(
+                            stop.as_str(),
+                            "end_of_chain"
+                                | "chain_lost"
+                                | "frame_cap"
+                                | "no_unwind_entry"
+                                | "return_slot_unreadable"
+                                | "walk_faulted"
+                                | "low_stack"
+                        )
+                        && frames.len() <= MAX_SELECTOR_UNWIND_FRAMES =>
+                {
+                    let mut normalized = Vec::with_capacity(frames.len());
+                    let mut valid = true;
+                    for frame in frames {
+                        let Some(frame) = frame.as_object().filter(|frame| frame.len() == 2) else {
+                            valid = false;
+                            break;
+                        };
+                        let Some(from_return_slot) =
+                            frame.get("from_return_slot").and_then(Value::as_bool)
+                        else {
+                            valid = false;
+                            break;
+                        };
+                        let Some(site) = frame
+                            .get("site")
+                            .and_then(Value::as_object)
+                            .filter(|site| site.len() == 4)
+                            .map(|_| frame.get("site").unwrap())
+                            .and_then(safe_pointer_classification)
+                        else {
+                            valid = false;
+                            break;
+                        };
+                        normalized.push(json!({
+                            "from_return_slot": from_return_slot,
+                            "site": site,
+                        }));
+                    }
+                    if !valid {
+                        truncated = true;
+                        continue;
+                    }
+                    (json!(stop), Value::Array(normalized))
+                }
+                _ => {
+                    truncated = true;
+                    continue;
+                }
+            };
         let Some(global_data_handoff) = record
             .get("global_data_handoff")
             .and_then(safe_global_data_handoff)
@@ -1535,6 +2114,8 @@ fn propagate_selector_invocations(diagnostics: &mut Value, worker_report: &Value
             "fault_address": fault_address,
             "registers": registers,
             "stack_pointer_values": stack_pointer_values,
+            "unwind_stop": unwind_stop,
+            "unwind_frames": unwind_frames,
             "global_data_handoff": global_data_handoff,
             "effect_ref_at_entry": effect_ref_at_entry,
             "appl_id_at_entry": appl_id_at_entry,

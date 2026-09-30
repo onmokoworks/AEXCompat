@@ -32,7 +32,10 @@ int invoke_render(void* opaque) {
 
 int invoke_cleanup(void* opaque) {
   const auto& request = *static_cast<const Request*>(opaque);
-  return request.hooks.cleanup ? request.hooks.cleanup(request.opaque) : 0;
+  const int cleanup_error =
+      request.hooks.cleanup ? request.hooks.cleanup(request.opaque) : 0;
+  if (auto* context = active_context()) context->automatic_checkin();
+  return cleanup_error;
 }
 
 bool dependencies_ready(void* opaque) {
@@ -113,6 +116,12 @@ bool Context::copy_definition(int32_t slot, void* destination,
   return true;
 }
 
+bool Context::beyond_definition_table(int32_t slot) const {
+  // Tables are published contiguously from slot 0, so "past the last slot"
+  // already excludes negative slots.
+  return !definitions_.empty() && slot > definitions_.rbegin()->first;
+}
+
 void Context::set_fallback_definition(
     int32_t slot, const ParameterDefinition& definition) {
   fallback_definitions_[slot] = definition;
@@ -139,12 +148,10 @@ void Context::configure_checkout_time(int32_t current_time, uint32_t time_scale,
 }
 
 bool Context::checkout_time_allowed(int32_t time, uint32_t time_scale) noexcept {
-  const bool current = time_scale != 0 && current_time_scale_ != 0 &&
-      static_cast<int64_t>(time) * current_time_scale_ ==
-          static_cast<int64_t>(current_time_) * time_scale;
-  if (current || wide_time_allowed_) return true;
-  ++diagnostics_.rejected_temporal_checkouts;
-  return false;
+  (void)time;
+  // WIDE_TIME_INPUT is a cache-dependency declaration, not permission for a
+  // plug-in to request a parameter value at another valid time.
+  return time_scale != 0 && current_time_scale_ != 0;
 }
 
 void Context::record_checkout(void* definition, int32_t index, int32_t time,
@@ -260,11 +267,44 @@ int32_t __cdecl abort_render(void* effect_ref) {
   return 0;
 }
 
+// Out-of-range progress values are accepted and clamped, not refused. Wave
+// Warp's RENDER reports progress as `2 * row + 3` against a total of
+// `2 * height`, so its final row always reports `total + 1`; refusing that
+// answered 4 for the last row of every frame, which the plug-in surfaced as
+// "insufficient memory for Wave Warp." (issue #1037). The same shape recurred
+// on the rest of the range: PW reports `current = -1` (issue #1079) and
+// Write-on reports `total = 0` (issue #1055), and both fold the refusal into
+// the same frame_error:4. That first-party effects ship all three shapes and
+// render in AE is the evidence that AE reads PF_PROGRESS as an abort poll and
+// does not validate the ratio (an inference from the plug-ins' behaviour, not
+// an observation of AE's own callback - the same inference #777 records for a
+// null effect_ref). A non-positive total carries no ratio, so the call counts
+// but the last-progress telemetry keeps its previous value.
+// The remaining refusal (null effect_ref) answers with an always-on denial
+// marker because this callback's 4 is otherwise invisible: it reaches the
+// plug-in, which folds it into its own frame error and names neither the
+// callback nor the argument. The marker is latched to the first refusal per
+// reason per worker process: progress is a per-scanline callback, and a
+// plug-in that keeps passing the same bad arguments would otherwise stream an
+// unbounded line per row into the captured stderr (the other
+// `stage:callback_denied` emitters sit on per-call callbacks and do not have
+// this problem). The per-reason bitmask latch is kept although only one
+// reason remains, so a future refusal gets its own line rather than sharing
+// the null-ref one; the broker's parser deduplicates repeats anyway.
 int32_t __cdecl report_progress(void* effect_ref, int32_t current, int32_t total) {
-  if (!effect_ref || total <= 0 || current < 0 || current > total) return 4;
+  static std::atomic<uint32_t> reported_reasons{};
+  const auto denied = [](uint32_t reason_bit, const char* reason, int64_t value) {
+    if ((reported_reasons.fetch_or(reason_bit) & reason_bit) == 0)
+      std::cerr << "stage:callback_denied callback=report_progress reason="
+                << reason << " value=" << value << "\n" << std::flush;
+    return 4;
+  };
+  if (!effect_ref) return denied(1u << 0, "null_effect_ref", 0);
   ++g_progress_calls;
-  g_last_progress_current = current;
-  g_last_progress_total = total;
+  if (total > 0) {
+    g_last_progress_current = std::clamp(current, 0, total);
+    g_last_progress_total = total;
+  }
   return 0;
 }
 

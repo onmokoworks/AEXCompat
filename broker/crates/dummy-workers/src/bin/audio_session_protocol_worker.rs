@@ -2,7 +2,7 @@
 //!
 //! Speaks the worker side of docs/RENDER_SESSION_PROTOCOL_2026-07-19.md §10
 //! over the inherited audio transport exactly like
-//! `aex_render_worker --render-audio-session-v1`, so broker `AudioRenderSession`
+//! `aex_worker --kind classic --render-audio-session-v1`, so broker `AudioRenderSession`
 //! integration tests can exercise the render_span protocol, generation
 //! checking, and close handshake against a real isolated process without a
 //! native minihost build. The "render" negates each f32 input sample.
@@ -137,7 +137,15 @@ mod worker {
         // directories joined by ';', bounded at 16. Mirror the image session
         // fixture's shape gate so a malformed broker join fails the audio
         // in-place tests too instead of passing silently.
-        let args: Vec<String> = std::env::args().collect();
+        // Drop the `--kind <route>` pair the broker puts in front of every
+        // worker launch (#1495); the real worker consumes it in `wmain` before
+        // its positional contract starts, so this emulation must too.
+        let mut args: Vec<String> = std::env::args().collect();
+        if args.len() >= 3 && args[1] == "--kind" {
+            args = std::iter::once(args[0].clone())
+                .chain(args[3..].iter().cloned())
+                .collect();
+        }
         if let Some(position) = args.iter().position(|arg| arg == "--dependency-dirs-v1") {
             let Some(value) = args.get(position + 1) else {
                 return 3;

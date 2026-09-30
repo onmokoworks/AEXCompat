@@ -1,7 +1,9 @@
 #include "worker_aegp_pf_interface_suite.hpp"
 
 #include "render_subsystem.h"
+#include "worker_pf_progress_info.hpp"
 #include "worker_aegp_scene.hpp"
+#include "worker_bee_scene_facade.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_pf_state_runtime.hpp"
 #include "worker_smart_runtime.hpp"
@@ -16,8 +18,8 @@ using aexcompat::pf_state_runtime::effect_is_live;
 
 // Worker-entry owned effect/layer identity objects stay in l2_main with the
 // callback ABI that hands them out; the callbacks here read them cross-TU.
-extern OpaqueHostObject g_effect;
-extern OpaqueHostObject g_layer;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
+extern aexcompat::worker_runtime::bee_facade::LayerObject g_layer;
 
 namespace {
 auto& smart_state_ref() { return aexcompat::worker_runtime::smart::state(); }
@@ -45,10 +47,32 @@ bool valid_camera_spatial_context() {
       valid_spatial_ratio(g_render_context_state.downsample_y) &&
       valid_spatial_ratio(g_render_context_state.pixel_aspect_ratio);
 }
+
+int32_t scene_frame_width() {
+  return g_render_context_state.frame_width > 0
+      ? g_render_context_state.frame_width : smart_state().width;
+}
+
+int32_t scene_frame_height() {
+  return g_render_context_state.frame_height > 0
+      ? g_render_context_state.frame_height : smart_state().height;
+}
 }  // namespace
 
 int32_t __cdecl get_effect_layer(void* effect, void** layer) {
   if (effect != &g_effect || !layer) return 4;
+  // The handle is a BEE.dll-compatible object (issue #1210): an Adobe-bundled
+  // effect that reads it as a `BEE_AVLayer*` finds the host's scene contract
+  // (30 fps, 300 frames, the comp dimensions the AEGP item suite reports)
+  // behind it. Refreshed at every hand-out so the values match the current
+  // render context.
+  namespace bee = aexcompat::worker_runtime::bee_facade;
+  bee::SceneValues values{};
+  values.comp_width = g_full_resolution_width > 0
+      ? g_full_resolution_width : scene_frame_width();
+  values.comp_height = g_full_resolution_height > 0
+      ? g_full_resolution_height : scene_frame_height();
+  if (!bee::prepare_effect_layer(g_layer, values)) return 4;
   *layer = &g_layer;
   return 0;
 }
@@ -145,6 +169,13 @@ int32_t __cdecl get_effect_camera(
   if (g_aegp_active_camera_layer_index >= 0) {
     const auto index = static_cast<std::size_t>(g_aegp_active_camera_layer_index);
     if (index >= g_aegp_layers.size()) return 4;
+    if (scene_runtime_state().authored_camera_live) {
+      scene_model::Identity current{};
+      if (!scene_model::registry().identity_for_legacy(
+              &g_aegp_layers[index], scene_model::ObjectKind::layer, current) ||
+          current != scene_runtime_state().authored_camera_identity)
+        return 4;
+    }
     if (layer_active_at_time(index, *comp_time)) result = &g_aegp_layers[index];
   }
   *camera_layer = result;
@@ -159,9 +190,9 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
       !image_plane_height || !valid_comp_time(*comp_time)) return 4;
   if (!valid_camera_spatial_context()) return 4;
   const int32_t width = g_full_resolution_width > 0
-      ? g_full_resolution_width : smart_state().width;
+      ? g_full_resolution_width : scene_frame_width();
   const int32_t height = g_full_resolution_height > 0
-      ? g_full_resolution_height : smart_state().height;
+      ? g_full_resolution_height : scene_frame_height();
   if (width <= 0 || height <= 0 || width > INT16_MAX || height > INT16_MAX)
     return 4;
 

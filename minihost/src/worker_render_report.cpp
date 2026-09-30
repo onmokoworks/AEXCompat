@@ -1,16 +1,19 @@
 #include "worker_render_report.hpp"
 #include "worker_callback_diagnostics.hpp"
+#include "runtime_module_audit.hpp"
 
 #include "gpu_directx_backend.hpp"
 #include "gpu_memory_world_transport.hpp"
 #include "gpu_opencl_backend.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
+#include "worker_bee_scene_facade.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_parameter_runtime.hpp"
 #include "worker_pf_path_runtime.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_suite_call_slot_probe.hpp"
+#include "worker_suite_registry.hpp"
 #include "worker_world_registry.hpp"
 
 #include <cstddef>
@@ -106,16 +109,22 @@ void finish_requested_parameters(
       << ",\"requested_mix\":" << std::setprecision(17) << value.mix
       << ",\"requested_invert_map\":" << value.invert_map
       << ",\"render_performed\":" << (value.render_performed ? "true" : "false")
+      << ",\"worker_admitted_plugin_sha256\":\""
+      << aexcompat::worker_runtime::module_audit_report().worker_admitted_plugin_sha256
+      << '"'
       << ",\"module_audit\":" << value.module_audit_json
       << conformance_render_settings_report_json() << "}\n";
 }
 
 void emit_classic_complete(ReportSnapshot& output, const ClassicEmission& value) {
   begin_classic(output, value.report.head);
-  append_classic_audio(output, value.report.audio);
+  append_audio(output, value.report.audio);
   output.stream() << ",\"render_selector_dispatched\":"
       << (value.selector_dispatched ? "true" : "false")
       << ",\"depth_supported\":" << (value.depth_supported ? "true" : "false")
+      << ",\"advertised_depth_supported\":"
+      << (value.advertised_depth_supported ? "true" : "false")
+      << ",\"dispatch_pixel_bytes\":" << value.dispatch_pixel_bytes
       << ",\"render_error\":" << value.render_error;
   append_classic_sequence(output, value.report.sequence);
   append_classic_frame(output, value.report.frame);
@@ -166,17 +175,20 @@ void append_classic_sequence(ReportSnapshot& report, const ClassicReport::Sequen
       << ",\"original_sequence_preserved\":" << (value.original_preserved ? "true" : "false");
 }
 
-void append_classic_audio(ReportSnapshot& report, const ClassicReport::Audio& value) {
+void append_audio(ReportSnapshot& report, const ClassicReport::Audio& value) {
   report.stream()
       << ",\"audio_usage_advertised\":" << (value.usage_advertised ? "true" : "false")
       << ",\"audio_checkout_allowed\":" << (value.checkout_allowed ? "true" : "false")
       << ",\"audio_source_available\":" << (value.source_available ? "true" : "false")
+      << ",\"unadvertised_audio_checkout_calls\":" << value.unadvertised_checkout_calls
       << ",\"rejected_unadvertised_audio_checkouts\":" << value.rejected_unadvertised_checkouts
       << ",\"rejected_audio_format_requests\":" << value.rejected_format_requests
       << ",\"audio_handle_exhaustions\":" << value.handle_exhaustions
       << ",\"peak_live_audio_handles\":" << value.peak_live_handles
+      << ",\"last_audio_checkout_index\":" << value.last_checkout_index
       << ",\"audio_checkout_calls\":" << value.checkout_calls
       << ",\"audio_checkin_calls\":" << value.checkin_calls
+      << ",\"automatic_audio_checkins\":" << value.automatic_checkins
       << ",\"audio_get_data_calls\":" << value.get_data_calls
       << ",\"invalid_audio_operations\":" << value.invalid_operations
       << ",\"last_audio_checkout_start_time\":" << value.last_checkout_start_time
@@ -206,6 +218,30 @@ void append_classic_frame(ReportSnapshot& report, const ClassicReport::Frame& va
       << value.output_sha256 << "\",\"guard_bytes_intact\":"
       << (value.guard_bytes_intact ? "true" : "false")
       << aexcompat::callback_diagnostics::report_field_json() << value.world_debug_json;
+  append_output_coverage(report, value.output_coverage);
+}
+
+void append_output_coverage(
+    ReportSnapshot& report,
+    const aexcompat::worker_runtime::output_coverage::Result& coverage) {
+  report.stream() << ",\"output_coverage\":{"
+      << "\"inspected\":" << (coverage.geometry_valid ? "true" : "false")
+      << ",\"promised_pixels\":" << coverage.promised_pixels
+      << ",\"unwritten_pixels\":" << coverage.unwritten_pixels
+      << ",\"unwritten_percent\":"
+      << (coverage.promised_pixels == 0 ? 0.0 :
+          100.0 * static_cast<double>(coverage.unwritten_pixels) /
+              static_cast<double>(coverage.promised_pixels))
+      << ",\"bbox\":[" << coverage.bbox[0] << ',' << coverage.bbox[1] << ','
+      << coverage.bbox[2] << ',' << coverage.bbox[3] << ']'
+      << ",\"max_row_run\":" << coverage.max_row_run
+      << ",\"max_column_run\":" << coverage.max_column_run
+      << ",\"validation_failed\":"
+      << (coverage.host_validation_failed ? "true" : "false")
+      << ",\"failure_reason\":"
+      << (coverage.host_validation_failed && coverage.geometry_valid &&
+          coverage.unwritten_pixels != 0
+              ? "\"partial_unwritten_output\"" : "null") << '}';
 }
 
 void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& value) {
@@ -293,6 +329,9 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ",\"guid_mix_in_size_limit\":" << v.host_context[7]
       << ",\"guid_mix_in_last_result\":" << v.host_context[8]
       << ",\"depth_supported\":" << (v.depth_supported ? "true" : "false")
+      << ",\"advertised_depth_supported\":"
+      << (v.advertised_depth_supported ? "true" : "false")
+      << ",\"dispatch_pixel_bytes\":" << v.dispatch_pixel_bytes
       << ",\"pre_render_error\":" << v.selector_errors[0]
       << ",\"smart_render_error\":" << v.selector_errors[1]
       << ",\"smart_render_selector_error\":" << v.selector_errors[2]
@@ -317,11 +356,16 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << v.map_checkout_result[3] << ']'
       << ",\"malformed_checkout_request_count\":" << v.malformed_checkout_requests
       << ",\"empty_checkout_pixel_denial_count\":" << v.empty_checkout_pixel_denials
+      << ",\"empty_layer_param_checkout_count\":" << v.empty_layer_param_checkouts
+      << ",\"empty_layer_param_pixel_checkout_count\":"
+      << v.empty_layer_param_pixel_checkouts
       << ",\"returns_extra_pixels\":" << (v.returns_extra_pixels ? "true" : "false")
       << ",\"result_within_request\":" << (v.result_within_request ? "true" : "false")
       << ",\"extra_pixels_contract_violation\":"
       << (v.extra_pixels_contract_violation ? "true" : "false")
       << ",\"empty_result_rect\":" << (v.empty_result_rect ? "true" : "false")
+      << ",\"empty_result_passthrough\":"
+      << (v.empty_result_passthrough ? "true" : "false")
       << ",\"global_setdown_error\":" << v.global_setdown_error
       << ",\"case_id\":\"" << v.case_id << "\",\"pixel_format\":\"" << v.pixel_format
       << "\",\"width\":" << v.dimensions[0] << ",\"height\":" << v.dimensions[1]
@@ -541,6 +585,7 @@ void append_classic_subsystems(
       << ",\"live_suite_lease_count\":" << value.suite_counts[2]
       << ",\"live_suite_reference_count\":" << value.suite_counts[3]
       << ",\"live_suite_leases\":\"" << value.live_suite_leases << '"'
+      << ",\"suite_fault_observed\":" << (value.suite_fault ? "true" : "false")
       << ",\"handle_lifetimes_balanced\":" << (value.handle_balanced ? "true" : "false")
       << ",\"pf_path_lifetimes_balanced\":" << (value.path_balanced ? "true" : "false")
       << ",\"pf_path_checkout_calls\":" << value.path_counts[0]
@@ -550,6 +595,8 @@ void append_classic_subsystems(
       << ",\"pf_path_preps_disposed\":" << value.path_counts[4]
       << ",\"invalid_pf_path_operations\":" << value.path_counts[5]
       << ",\"pf_path_reject_reason\":" << value.path_counts[6]
+      << ",\"pf_path_absent_checkouts\":" << value.path_counts[8]
+      << ",\"pf_path_absent_checkins\":" << value.path_counts[9]
       << ",\"pf_path_last_feather\":[" << value.path_feather[0] << ',' << value.path_feather[1] << ']'
       << ",\"pf_path_last_opacity\":" << value.path_opacity
       << ",\"pf_path_last_quality\":" << value.path_quality
@@ -661,14 +708,29 @@ ClassicSubsystemDiagnostics capture_classic_subsystems() {
        i64(l2_detail::live_suite_reference_count())},
       l2_detail::missing_suites_report_json() +
           l2_detail::unsupported_suite_calls_report_json() +
+          // The positive counterpart to the line above: which BEE facade slots
+          // a plug-in actually took, and whether the facade was handed out at
+          // all. Without it an empty `unsupported_suite_calls` cannot tell
+          // "the facade held" from "nothing reached it" (issue #1264).
+          worker_runtime::bee_facade::report_json() +
           l2_detail::suite_timeline_report_json() +
           worker_runtime::suite_call_slot_probe::report_json(),
       l2_detail::live_suite_lease_summary(),
+      // #1182 (owner-directed): a rejected suite release - the plug-in releasing
+      // a suite it never acquired (Basic_Text/Path_Text/Numbers release "PF Param
+      // Utils Suite" v3 without acquiring it) - is contained by the registry as a
+      // no-op that returns rejection and touches no host state, so it cannot
+      // corrupt anything. It is recorded in the suite_timeline (result != 0) as a
+      // reproducible diagnostic and counted below, but it is a benign warning, not
+      // a session-failing fault. Handle and world double-dispose faults are
+      // separate fields and stay fail-closed.
+      false,
       worker_runtime::handles::handle_lifetimes_balanced(),
       aexcompat::pf_path_runtime::lifetimes_balanced(),
       {i64(path.checkout_calls), i64(path.checkin_calls), i64(path.mask_calls),
        i64(path.preps_created), i64(path.preps_disposed),
-       i64(path.invalid_operations), i64(path.reject_reason), i64(path.live_preps)},
+       i64(path.invalid_operations), i64(path.reject_reason), i64(path.live_preps),
+       i64(path.absent_checkouts), i64(path.absent_checkins)},
       {path.last_feather_x, path.last_feather_y}, path.last_opacity,
       i64(path.last_quality),
       {i64(path.last_bounds[0]), i64(path.last_bounds[1]),

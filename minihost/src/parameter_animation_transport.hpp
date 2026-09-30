@@ -30,6 +30,8 @@ struct ParameterTimeline {
 
 bool rational_less(int32_t left_value, uint32_t left_scale,
                    int32_t right_value, uint32_t right_scale);
+ParameterAnimationKey evaluate_parameter_animation(
+    const ParameterTimeline& timeline, int32_t time, uint32_t scale);
 bool load_parameter_animation(const std::filesystem::path& path,
                               std::vector<ParameterTimeline>& result);
 

@@ -16,6 +16,16 @@ struct Hooks {
   const char* (__cdecl *pixel_format)(){};
   bool (__cdecl *set_pixel_format)(const char*){};
   bool (*bounded_argb8_world)(void*, unsigned char*&, int32_t&, int32_t&, int32_t&){};
+  // Whether the world's pixel pointer is the base of a host-issued pixel
+  // allocation (production wires `world_registry::hosts_world_pixels`:
+  // PF_NEW_WORLD worlds plus AEGP platform/owned backings). Gate for the
+  // foreign-operand fallback in the copy callbacks: a host-issued allocation
+  // must stay under its own registry's fail-closed geometry check (issue
+  // #700) and never be re-admitted by the declared-stride bounds check alone.
+  // Dispatch-registered references are gated separately inside the fallback
+  // (`world_safety::dispatch_world_reference_known`). Null disables the
+  // fallback outright.
+  bool (*world_pixels_owned)(void*){};
 };
 
 struct Telemetry {
@@ -44,6 +54,8 @@ int32_t __cdecl convolve_world(void*, void*, const LegacyRect*, uint32_t, int32_
                                void*, void*, void*, void*, void*);
 int32_t __cdecl blend_world(void*, const void*, const void*, int32_t, void*);
 int32_t __cdecl copy_world8(void*, void*, void*, const LegacyRect*, const LegacyRect*);
+int32_t __cdecl private_copy_world_area8(void*, void*, void*, const LegacyRect*,
+                                         const LegacyRect*);
 int32_t __cdecl copy_world_hq(void*, void*, void*, const LegacyRect*, const LegacyRect*);
 int32_t __cdecl transform_world(void*, int32_t, uint32_t, int32_t, const void*,
                                 const void*, const void*, const void*, int32_t, uint8_t,
@@ -53,7 +65,11 @@ int32_t __cdecl transfer_rect(void*, int32_t, uint32_t, int32_t, const LegacyRec
 
 bool verify_legacy_fill_matte_callbacks();
 bool verify_world_transform_blend();
+bool verify_world_transform_convolve();
 bool verify_bad_callback_param_contract();
+bool verify_copy_world_clipping();
+bool verify_copy_foreign_world_gate();
+bool verify_transform_world_foreign_operand(bool admitted);
 bool verify_world_transform_affine();
 bool verify_world_transform_transfer_mask();
 int32_t __cdecl composite_rect8(void*, LegacyRect*, int32_t, void*, int32_t,

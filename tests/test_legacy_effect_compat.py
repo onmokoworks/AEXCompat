@@ -4,21 +4,17 @@ import tempfile
 from pathlib import Path
 
 import pytest
-import source_owners
 
-ROOT = Path(__file__).resolve().parents[1]
-SOURCES = source_owners.contract_files("legacy_effect_compat")
-SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
+from _msvc_compile import compile_driver
 
-def source_text() -> str:
-    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
+
 
 def test_sdk_headers_confirm_legacy_suite_abis_and_signatures() -> None:
     if SDK_HEADERS is None or not SDK_HEADERS.is_dir():
         pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
-    source = r'''
+    source = r"""
 #include <cstddef>
 #include <type_traits>
 #include "AEConfig.h"
@@ -47,11 +43,25 @@ static_assert(sizeof(PF_HelperSuite1) == sizeof(void*));
 static_assert(offsetof(PF_HelperSuite1, PF_GetCurrentTool) == 0);
 static_assert(std::is_same_v<decltype(PF_HelperSuite1::PF_GetCurrentTool), CurrentTool>);
 int main() { return 0; }
-'''
+"""
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    vswhere = (
+        Path(program_files_x86)
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
     installation = subprocess.check_output(
-        [str(vswhere), "-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+        [
+            str(vswhere),
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ],
         text=True,
     ).strip()
     vcvars = Path(installation) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
@@ -62,16 +72,8 @@ int main() { return 0; }
         cpp.write_text(source, encoding="ascii")
         batch.write_text(
             f'@call "{vcvars}" >nul\n'
-            f'@cl /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{SDK_HEADERS}" '
+            f'@{compile_driver()} /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{SDK_HEADERS}" '
             f'/I"{SDK_HEADERS / "SP"}" /Fo"{obj}" "{cpp}"\n',
             encoding="ascii",
         )
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
-
-def test_helper_v1_has_independent_lease_and_headless_none_policy() -> None:
-    text = source_text()
-    helper = text[text.index("int32_t __cdecl get_current_tool") :]
-    helper = helper[: helper.index("\n}")]
-    assert "if (!tool) return kBadCallbackParam;" in helper
-    assert "*tool = kToolNone;" in helper
-    assert "current_tool().load" not in helper

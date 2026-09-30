@@ -44,6 +44,8 @@ def test_selection_is_balanced_disjoint_and_ordered_by_size_then_sha():
         entry("v2-excluded", "5" * 64, 10, "v2"),
         entry("v2-large", "7" * 64, 30, "v2"),
         entry("v2-small", "6" * 64, 20, "v2"),
+        entry("v3-large", "9" * 64, 30, "v3"),
+        entry("v3-small", "8" * 64, 20, "v3"),
     ]
 
     selected = SELECT.select_tranche(
@@ -62,6 +64,10 @@ def test_selection_is_balanced_disjoint_and_ordered_by_size_then_sha():
     assert [item["sha256"] for item in selected if item["registration_abi"] == "v2"] == [
         "6" * 64,
         "7" * 64,
+    ]
+    assert [item["sha256"] for item in selected if item["registration_abi"] == "v3"] == [
+        "8" * 64,
+        "9" * 64,
     ]
 
 

@@ -7,22 +7,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE_ROOT = ROOT / "broker/crates/host-core/src/lib.rs"
-SCENE = ROOT / "broker/crates/host-core/src/scene.rs"
-FFI = ROOT / "broker/crates/host-core-ffi/src/lib.rs"
-ABI_HEADER = ROOT / "broker/crates/broker/include/aexcompat_host_core_abi.h"
-ADAPTER = ROOT / "broker/crates/broker/include/aexcompat_host_core_adapter.hpp"
-PHASE7_NATIVE = (
-    ROOT
-    / "tests/native/"
-    "rust_host_core_scene_topology_snapshot_dual_run_selftest.cpp"
-)
-NATIVE = (
-    ROOT
-    / "tests/native/"
-    "rust_host_core_scene_topology_owned_dual_run_selftest.cpp"
-)
-DOC = ROOT / "docs/RUST_HOST_CORE_MIGRATION_2026-07-31.md"
 STANDALONE_GATE = (
     ROOT / "tools/test-rust-host-core-scene-topology-owned.ps1"
 )

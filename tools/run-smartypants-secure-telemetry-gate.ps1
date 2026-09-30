@@ -4,7 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $harness = Join-Path $repo 'broker\target\release\aexcompat-harness.exe'
-$worker = Join-Path $repo 'target\minihost-build\aex_smart_worker.exe'
+$worker = Join-Path $repo 'target\minihost-build\aex_worker.exe'
 $fixture = Join-Path $repo 'target\sdk-fixtures\smartypants\SmartyPants.aex'
 $runRoot = Join-Path $repo 'target\smartypants-secure-telemetry-gate'
 $input = Join-Path $runRoot 'input.png'

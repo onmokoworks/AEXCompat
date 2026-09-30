@@ -18,8 +18,10 @@ fn render_with_artifact(
     parameter_animation: Option<&[ParameterAnimation]>,
     timed_layers: Option<&[TimedLayerImage]>,
     dependencies: Vec<ApprovedImageArtifact>,
+    explicit_dependency_search_dirs: Vec<PathBuf>,
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
     deep_png_output: bool,
+    artifact_kind: Option<RenderArtifactKind>,
 ) -> io::Result<Value> {
     if !timing.is_valid() {
         return Err(invalid("render timing is invalid"));
@@ -36,6 +38,13 @@ fn render_with_artifact(
     if deep_png_output && pixel_format != RenderPixelFormat::Argb16 {
         return Err(invalid(
             "16-bit deep PNG output requires the Argb16 render format",
+        ));
+    }
+    if artifact_kind == Some(RenderArtifactKind::Float32Exr)
+        && pixel_format != RenderPixelFormat::Argb32f
+    {
+        return Err(invalid(
+            "FLOAT32 EXR output requires the Argb32f render format",
         ));
     }
     const MAX_AUDIO_SAMPLES: usize = 10_000_000;
@@ -109,8 +118,10 @@ fn render_with_artifact(
             "output image already exists",
         ));
     }
-    let preserved_output = pixel_format
-        .raw_extension()
+    let preserved_output = artifact_kind
+        .is_none()
+        .then(|| pixel_format.raw_extension())
+        .flatten()
         .map(|extension| output_path.with_extension(extension));
     if preserved_output.as_ref().is_some_and(|path| path.exists()) {
         return Err(io::Error::new(
@@ -344,6 +355,10 @@ fn render_with_artifact(
             Some(context) => crate::render_request::encode_spatial_context(context)?,
             None => None,
         };
+        let camera_trailer = match host_context {
+            Some(context) => crate::render_request::encode_active_camera(context)?,
+            None => None,
+        };
         let render_environment_trailer = match host_context {
             Some(context) => crate::render_request::encode_render_environment(context)?,
             None => None,
@@ -405,6 +420,7 @@ fn render_with_artifact(
             layers: session_layers,
             mask_trailer,
             spatial_trailer,
+            camera_trailer,
             render_environment_trailer,
             audio: session_audio,
             alpha_as_coverage_params,
@@ -416,6 +432,7 @@ fn render_with_artifact(
             pixel_format,
             deep_png_output,
             dependencies: &dependencies,
+            explicit_dependency_search_dirs: &explicit_dependency_search_dirs,
             rgba: &rgba,
             width,
             height,
@@ -431,6 +448,7 @@ fn render_with_artifact(
             // to CPU when the policy is absent, requires one for any real GPU
             // attempt, and ignores it entirely below float32 or on classic.
             gpu_runtime_policy,
+            artifact_kind,
         });
         match session_outcome {
             SessionWrapperOutcome::Report(report) => return Ok(report),
@@ -530,6 +548,7 @@ struct SessionWrapperRequest<'a> {
     layers: Vec<crate::render_session::SessionLayer>,
     mask_trailer: Option<String>,
     spatial_trailer: Option<String>,
+    camera_trailer: Option<String>,
     render_environment_trailer: Option<String>,
     /// The session's audio source, or `None` when the render carries no audio.
     /// The trailer and the sidecar digest travel together so the gate, the
@@ -551,6 +570,10 @@ struct SessionWrapperRequest<'a> {
     pixel_format: RenderPixelFormat,
     deep_png_output: bool,
     dependencies: &'a [ApprovedImageArtifact],
+    /// Operator-approved in-place runtime roots. These are validated again by
+    /// the secure dispatch boundary and are kept distinct from artifact
+    /// identities: selecting a directory never manufactures a DLL approval.
+    explicit_dependency_search_dirs: &'a [PathBuf],
     rgba: &'a [u8],
     width: u32,
     height: u32,
@@ -570,6 +593,7 @@ struct SessionWrapperRequest<'a> {
     /// transport. `None` for CPU or policy-less renders; the session-eligibility
     /// gate only sets `Some` for Argb32f with a GPU backend.
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
+    artifact_kind: Option<RenderArtifactKind>,
 }
 
 enum SessionWrapperOutcome {
@@ -586,6 +610,36 @@ enum SessionWrapperOutcome {
     /// turns this into an explicit fail-closed error so a session
     /// infrastructure failure surfaces instead of being masked.
     Fallback(String),
+}
+
+fn in_place_session_search_dirs(
+    plugin_path: &Path,
+    dependencies: &[ApprovedImageArtifact],
+    explicit_roots: &[PathBuf],
+) -> io::Result<Vec<PathBuf>> {
+    let parent = plugin_path
+        .parent()
+        .ok_or_else(|| invalid("plugin path has no parent directory to search for dependencies"))?;
+    let mut roots = if explicit_roots.is_empty() {
+        crate::after_effects_install::in_place_dependency_search_dirs(plugin_path)
+    } else {
+        vec![parent.to_path_buf()]
+    };
+    for dependency in dependencies {
+        let dependency_parent = dependency
+            .path
+            .parent()
+            .ok_or_else(|| invalid("approved dependency has no parent directory"))?;
+        if !roots.iter().any(|root| root == dependency_parent) {
+            roots.push(dependency_parent.to_path_buf());
+        }
+    }
+    for root in explicit_roots {
+        if !roots.iter().any(|seen| seen == root) {
+            roots.push(root.clone());
+        }
+    }
+    Ok(roots)
 }
 
 // The whole `image_render` module is `#[cfg(windows)]` (lib.rs), and the render
@@ -612,6 +666,14 @@ fn render_classic_via_length_one_session(
         Err(error) => return SessionWrapperOutcome::Failure(error),
     };
     let output_checksum_detail = output_checksum_detail_requested();
+    let dependency_search_dirs = match in_place_session_search_dirs(
+        request.plugin_path,
+        request.dependencies,
+        request.explicit_dependency_search_dirs,
+    ) {
+        Ok(roots) => roots,
+        Err(error) => return SessionWrapperOutcome::Failure(error),
+    };
     let session_request = SessionOpenRequest {
         repository: request.repository,
         plugin_path: request.plugin_path,
@@ -625,12 +687,16 @@ fn render_classic_via_length_one_session(
         layers: &request.layers,
         mask_trailer: request.mask_trailer.clone(),
         spatial_trailer: request.spatial_trailer.clone(),
+        camera_trailer: request.camera_trailer.clone(),
         render_environment_trailer: request.render_environment_trailer.clone(),
         audio_trailer: request.audio.as_ref().map(|audio| audio.trailer.clone()),
         alpha_as_coverage_params: request.alpha_as_coverage_params,
         conformance_render_settings: request.conformance_render_settings,
-        dependencies: request.dependencies.to_vec(),
-        dependency_search_dirs: Vec::new(),
+        dependencies: Vec::new(),
+        companions: Vec::new(),
+        // #816 made a non-empty search root set part of the in-place protocol,
+        // so an empty one fails session open for every route that reaches here.
+        dependency_search_dirs,
         width: request.width,
         height: request.height,
         pixel_format: request.pixel_format,
@@ -646,12 +712,55 @@ fn render_classic_via_length_one_session(
         // exactly like the one-shot GPU path. `None` keeps CPU/policy-less
         // renders on the CPU session command.
         gpu_runtime_policy: request.gpu_runtime_policy,
+        launch_environment: Default::default(),
     };
+    let capture_spec = fixture_capture_override();
+    let mut capture_files = Vec::new();
+    for spec in capture_spec.as_deref().unwrap_or_default() {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&spec.path)
+        {
+            Ok(file) => capture_files.push(file),
+            Err(error) => {
+                return SessionWrapperOutcome::Failure(invalid(format!(
+                    "checkpoint capture file open failed: {error}"
+                )));
+            }
+        }
+    }
+    let captures = capture_spec
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .zip(&capture_files)
+        .map(|(spec, file)| crate::render_session::SessionWorldCapture {
+            stage: &spec.stage,
+            file,
+        })
+        .collect::<Vec<_>>();
     // A custom UI action is the explicit interactive harness route (#107/#238)
     // and must retain the caller's desktop. Plain discovery/render workers stay
     // on the private desktop boundary from RenderSession::open.
     let mut session = match if request.custom_ui_action.is_some() {
+        if fixture_world_layout_override().is_some()
+            || fixture_secondary_layouts_override().is_some()
+            || !captures.is_empty()
+        {
+            return SessionWrapperOutcome::Failure(invalid(
+                "fixture world layout cannot use the interactive desktop",
+            ));
+        }
         RenderSession::open_on_current_desktop(session_request)
+    } else if let Some(layout) = fixture_world_layout_override() {
+        let layer_layouts = fixture_secondary_layouts_override().unwrap_or_default();
+        RenderSession::open_diagnostic_with_layer_layouts(
+            session_request,
+            layout,
+            &layer_layouts,
+            &captures,
+        )
     } else {
         RenderSession::open(session_request)
     } {
@@ -677,8 +786,13 @@ fn render_classic_via_length_one_session(
         // Invalidation (worker crash, deadline, or a host-protection invariant).
         Err(error) => {
             let reason = format!("the render session was invalidated: {error}");
-            let _ = session.close();
-            return SessionWrapperOutcome::Fallback(reason);
+            let close = session.close();
+            let diagnostics = close
+                .get("worker")
+                .and_then(|worker| worker.get("diagnostics"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            return SessionWrapperOutcome::Fallback(format!("{reason}, diagnostics={diagnostics}"));
         }
     };
     // An expand-output effect that overran the launch slot no longer surfaces
@@ -710,6 +824,7 @@ fn render_classic_via_length_one_session(
     // had to move here rather than go with it.
     propagate_missing_suites(&mut diagnostics, &final_report);
     propagate_unsupported_suite_calls(&mut diagnostics, &final_report);
+    propagate_bee_facade(&mut diagnostics, &final_report);
     propagate_suite_call_slot_probe(&mut diagnostics, &final_report);
     propagate_selector_invocations(&mut diagnostics, &final_report);
     propagate_host_callback_timeline(&mut diagnostics, &final_report);
@@ -721,7 +836,11 @@ fn render_classic_via_length_one_session(
     // gate below turns that into an error carrying these diagnostics, so
     // without this the failure reads as an unattributed validation failure.
     // The deleted one-shot set the same annotation (#365).
-    if final_report.get("output_pixels_valid") == Some(&Value::Bool(false)) {
+    if final_report["output_coverage"]["validation_failed"] == true
+        || (final_report.get("output_pixels_valid") == Some(&Value::Bool(false))
+            && final_report["pre_render_error"] == 0
+            && final_report["smart_render_selector_error"] == 0)
+    {
         diagnostics["failure_stage"] = json!("output_validation");
     }
     let gate = validate_interactive_worker_report(
@@ -755,19 +874,26 @@ fn render_classic_via_length_one_session(
     };
     // The frame's actual (possibly expanded/shrunk) dimensions drive the PNG
     // encode and the public report, not the launch render dimensions (#261).
-    let (pixels, rendered_width, rendered_height) = match outcome.status {
+    let frame_depth_provenance = outcome.depth_provenance.clone();
+    let (pixels, rendered_width, rendered_height, origin_x, origin_y) = match outcome.status {
         FrameStatus::Rendered {
             pixels,
             width,
             height,
-            ..
-        } => (pixels, width, height),
+            origin_x,
+            origin_y,
+        } => (pixels, width, height, origin_x, origin_y),
         FrameStatus::FrameError { render_error, .. } => {
             // The gate above rejects any final report carrying a render
             // error, so this arm is defensive only.
             return SessionWrapperOutcome::Failure(invalid(format!(
-                "session frame reported error {render_error} past a clean final report"
+                "session frame reported error {render_error} past a clean final report: diagnostics={diagnostics}, report={final_report}"
             )));
+        }
+        FrameStatus::SmartOutputUntouched => {
+            return SessionWrapperOutcome::Failure(invalid(
+                "Smart session produced no output pixels",
+            ));
         }
     };
     // A SmartFX render whose PreRender returned a legally empty result_rect
@@ -777,8 +903,15 @@ fn render_classic_via_length_one_session(
     // one-shot smart path applies. Only a smart session can produce this
     // (validate_ok_frame requires it).
     let empty_smart_result = request.smart && rendered_width == 0 && rendered_height == 0;
+    if empty_smart_result && request.artifact_kind.is_some() {
+        return SessionWrapperOutcome::Failure(invalid(
+            "render artifact output requires a non-empty rendered world",
+        ));
+    }
     if !empty_smart_result {
-        if let Some(path) = request.preserved_output {
+        if request.artifact_kind.is_none()
+            && let Some(path) = request.preserved_output
+        {
             if let Some(parent) = path.parent() {
                 if let Err(error) = fs::create_dir_all(parent) {
                     return SessionWrapperOutcome::Failure(error);
@@ -800,7 +933,76 @@ fn render_classic_via_length_one_session(
         }
     }
     let mut deep_overrange_samples = None;
-    let png_written = if empty_smart_result {
+    let artifact_metadata = if empty_smart_result || request.artifact_kind.is_none() {
+        None
+    } else {
+        let premultiplication = final_report
+            .get("premultiplication")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "straight" | "premultiplied" | "opaque"))
+            .or_else(|| {
+                request
+                    .conformance_render_settings
+                    .and_then(|settings| settings.split('|').nth(1))
+            })
+            .ok_or_else(|| invalid("worker report lacks a valid premultiplication state"));
+        let premultiplication = match premultiplication {
+            Ok(value) => value,
+            Err(error) => return SessionWrapperOutcome::Failure(error),
+        };
+        let mut conditions = RenderArtifactConditions {
+            premultiplication: premultiplication.into(),
+            working_space: "None".into(),
+            render_mode: "software".into(),
+            comparison_identity: json!({
+                "plugin_sha256": request.plugin_sha256.to_ascii_lowercase(),
+                "input_sha256": final_report.get("input_sha256"),
+                "world_sha256": final_report.get("output_sha256"),
+                "render_path": if request.smart { "smartfx" } else { "classic" },
+                "pixel_format": request.pixel_format.report_name(),
+                "timing": {
+                    "current_time": request.timing.current_time,
+                    "time_step": request.timing.time_step,
+                    "total_time": request.timing.total_time,
+                    "time_scale": request.timing.time_scale,
+                },
+                "requested_parameters": final_report.get("requested_parameters"),
+                "origin": {"x": origin_x, "y": origin_y},
+            }),
+        };
+        if let Some(case) = fixture_case_identity_override() {
+            conditions.comparison_identity["fixture_case"] = json!(case);
+        }
+        match request.artifact_kind {
+            Some(RenderArtifactKind::Raw) => match write_raw_world_artifact(
+                request.output_path,
+                &pixels,
+                rendered_width,
+                rendered_height,
+                request.pixel_format,
+                origin_x,
+                origin_y,
+                conditions,
+            ) {
+                Ok(metadata) => Some(metadata),
+                Err(error) => return SessionWrapperOutcome::Failure(error),
+            },
+            Some(RenderArtifactKind::Float32Exr) => match write_float32_exr_artifact(
+                request.output_path,
+                &pixels,
+                rendered_width,
+                rendered_height,
+                origin_x,
+                origin_y,
+                conditions,
+            ) {
+                Ok(metadata) => Some(metadata),
+                Err(error) => return SessionWrapperOutcome::Failure(error),
+            },
+            None => unreachable!("artifact kind was checked above"),
+        }
+    };
+    let png_written = if empty_smart_result || request.artifact_kind.is_some() {
         Ok(())
     } else if request.deep_png_output {
         rgba16_transport_to_png16(&pixels).and_then(|(samples, overrange)| {
@@ -885,7 +1087,26 @@ fn render_classic_via_length_one_session(
             .map(|audio| audio.input_sha256.clone()),
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    SessionWrapperOutcome::Report(build_interactive_image_report(&final_report, facts))
+    let mut report = build_interactive_image_report(&final_report, facts);
+    report["depth_provenance"] = json!(frame_depth_provenance);
+    report["visual_diagnostics"] = visual_diagnostics::inspect(
+        Some(request.rgba),
+        (request.width, request.height),
+        &pixels,
+        (rendered_width, rendered_height),
+        request.pixel_format,
+    );
+    if let Some(metadata) = artifact_metadata {
+        report["output_transport"] = json!(match request.artifact_kind {
+            Some(RenderArtifactKind::Raw) => "native_argb_raw+strict_metadata",
+            Some(RenderArtifactKind::Float32Exr) => "float32_exr+strict_metadata",
+            None => unreachable!(),
+        });
+        report["output_png"] = Value::Null;
+        report["output_raw"] = Value::Null;
+        report["render_artifact"] = metadata;
+    }
+    SessionWrapperOutcome::Report(report)
 }
 
 /// A bounded failure summary for the public one-shot-compatible wrapper.  The
@@ -961,6 +1182,9 @@ pub struct InteractiveSessionOpen<'a> {
     /// inspection state.
     pub selection: InteractiveSessionSelection,
     pub dependencies: Vec<ApprovedImageArtifact>,
+    /// Explicit in-place runtime roots approved by the interactive caller.
+    /// Secure launch canonicalizes, bounds, and revalidates this set.
+    pub dependency_search_dirs: Vec<PathBuf>,
     pub width: u32,
     pub height: u32,
     pub pixel_format: RenderPixelFormat,
@@ -995,6 +1219,11 @@ pub struct InteractiveRenderSession {
 #[cfg(windows)]
 impl InteractiveRenderSession {
     pub fn open(request: InteractiveSessionOpen<'_>) -> io::Result<Self> {
+        let dependency_search_dirs = in_place_session_search_dirs(
+            request.plugin_path,
+            &request.dependencies,
+            &request.dependency_search_dirs,
+        )?;
         let session = crate::render_session::RenderSession::open(
             crate::render_session::SessionOpenRequest {
                 repository: request.repository,
@@ -1008,6 +1237,7 @@ impl InteractiveRenderSession {
                 output_checksum_detail: false,
                 mask_trailer: None,
                 spatial_trailer: None,
+                camera_trailer: None,
                 render_environment_trailer: None,
                 audio_trailer: None,
                 alpha_as_coverage_params: &[],
@@ -1017,7 +1247,8 @@ impl InteractiveRenderSession {
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
                 dependencies: request.dependencies,
-                dependency_search_dirs: Vec::new(),
+                companions: Vec::new(),
+                dependency_search_dirs,
                 width: request.width,
                 height: request.height,
                 pixel_format: request.pixel_format,
@@ -1025,6 +1256,7 @@ impl InteractiveRenderSession {
                 total_time: request.total_time,
                 time_scale: request.time_scale,
                 frame_deadline: Duration::from_millis(request.timeout_ms),
+                launch_environment: Default::default(),
             },
         )?;
         Ok(Self {
@@ -1087,6 +1319,8 @@ impl InteractiveRenderSession {
             parameters,
         )?;
         let render_ms = started.elapsed().as_millis() as u64;
+        let frame_depth_provenance = outcome.depth_provenance.clone();
+        let frame_performance = outcome.performance.clone();
         let session_facts = |frames_ok: u32, frames_errored: u32| {
             json!({
                 "frame_index": frame_index,
@@ -1101,6 +1335,7 @@ impl InteractiveRenderSession {
                 pixels,
                 width: frame_width,
                 height: frame_height,
+                ..
             } => {
                 self.frame_serial += 1;
                 self.frames_ok += 1;
@@ -1155,9 +1390,23 @@ impl InteractiveRenderSession {
                     // classification to report; the honest value names the
                     // resident path instead of faking an exit state.
                     "worker_classification": "resident_session",
+                    "depth_provenance": frame_depth_provenance,
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "performance_diagnostics": {
+                        "advisory": true,
+                        "timer": "monotonic_nanoseconds",
+                        "clocks": "independent_broker_and_worker",
+                        "sample": frame_performance,
+                    },
                     "passed": true,
                 });
+                report["visual_diagnostics"] = visual_diagnostics::inspect(
+                    Some(rgba),
+                    (self.width, self.height),
+                    &pixels,
+                    (frame_width, frame_height),
+                    self.pixel_format,
+                );
                 annotate_interactive_selection(&mut report, self.selection);
                 Ok(report)
             }
@@ -1165,6 +1414,7 @@ impl InteractiveRenderSession {
                 render_error,
                 missing_dependency,
                 return_message,
+                selector_crash,
             } => {
                 self.frames_errored += 1;
                 let mut report = json!({
@@ -1179,10 +1429,44 @@ impl InteractiveRenderSession {
                     "current_time": current_time,
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "performance_diagnostics": {
+                        "advisory": true,
+                        "timer": "monotonic_nanoseconds",
+                        "clocks": "independent_broker_and_worker",
+                        "sample": frame_performance,
+                    },
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
                     // The plug-in's own account of the failure (issue #707).
                     "return_message": return_message,
+                    "selector_crash": selector_crash,
+                    "passed": false,
+                });
+                annotate_interactive_selection(&mut report, self.selection);
+                Ok(report)
+            }
+            FrameStatus::SmartOutputUntouched => {
+                self.frames_errored += 1;
+                let mut report = json!({
+                    "schema_version": 1,
+                    "stage": "interactive_image_render",
+                    "plugin_id": self.plugin_id,
+                    "render_path": self.selection.path.report_name(),
+                    "smart_capability_source": self.selection.source.report_name(),
+                    "smart_capability_identity": self.selection.capability_identity,
+                    "smart_capability_version": self.selection.capability_version,
+                    "pixel_format": self.pixel_format.report_name(),
+                    "current_time": current_time,
+                    "worker_classification": "resident_session",
+                    "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "performance_diagnostics": {
+                        "advisory": true,
+                        "timer": "monotonic_nanoseconds",
+                        "clocks": "independent_broker_and_worker",
+                        "sample": frame_performance,
+                    },
+                    "render_error": -6,
+                    "host_failure_reason": "smart_output_untouched",
                     "passed": false,
                 });
                 annotate_interactive_selection(&mut report, self.selection);
@@ -1512,6 +1796,7 @@ pub(crate) fn build_interactive_image_report(
         "current_time": facts.timing.current_time, "time_step": facts.timing.time_step,
         "total_time": facts.timing.total_time, "time_scale": facts.timing.time_scale,
         "worker_classification": facts.worker_classification,
+        "image_render_supported": worker_report.get("image_render_supported"),
         "worker_diagnostics": facts.diagnostics,
         "suite_leases_balanced": worker_report.get("suite_leases_balanced"),
         "suite_lease_warning": worker_report.get("suite_lease_warning"),
@@ -1555,6 +1840,7 @@ pub(crate) fn build_interactive_image_report(
         ("output_world", "output_world"),
         ("suite_timeline", "suite_timeline"),
         ("empty_result_rect", "empty_result_rect"),
+        ("empty_result_passthrough", "empty_result_passthrough"),
         ("returns_extra_pixels", "returns_extra_pixels"),
         ("result_within_request", "result_within_request"),
         (
@@ -1648,12 +1934,15 @@ pub(crate) fn build_interactive_image_report(
             "audio_checkout_allowed",
             "audio_checkout_calls",
             "audio_checkin_calls",
+            "automatic_audio_checkins",
             "audio_get_data_calls",
             "invalid_audio_operations",
+            "unadvertised_audio_checkout_calls",
             "rejected_unadvertised_audio_checkouts",
             "rejected_audio_format_requests",
             "audio_handle_exhaustions",
             "peak_live_audio_handles",
+            "last_audio_checkout_index",
             "last_audio_checkout_start_time",
             "last_audio_checkout_duration",
             "last_audio_checkout_time_scale",
@@ -1690,6 +1979,7 @@ pub(crate) fn build_interactive_image_report(
         "smart_render_selector_error",
         "smart_render_error",
         "output_pixels_valid",
+        "output_coverage",
         "cuda_context_used",
         "cuda_upload_bytes",
         "cuda_download_bytes",
@@ -1739,6 +2029,8 @@ pub(crate) fn build_interactive_image_report(
         "pf_path_preps_disposed",
         "invalid_pf_path_operations",
         "pf_path_reject_reason",
+        "pf_path_absent_checkouts",
+        "pf_path_absent_checkins",
     ] {
         report_object.insert(field.into(), worker_report[field].clone());
     }

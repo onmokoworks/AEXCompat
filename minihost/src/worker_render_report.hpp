@@ -1,6 +1,7 @@
 #pragma once
 
 #include "worker_temporal_checkout_report.hpp"
+#include "worker_output_coverage.hpp"
 
 #include <iosfwd>
 #include <sstream>
@@ -47,6 +48,9 @@ struct CustomUiSnapshot {
 };
 
 void append_custom_ui(ReportSnapshot& report, const CustomUiSnapshot& snapshot);
+void append_output_coverage(
+    ReportSnapshot& report,
+    const aexcompat::worker_runtime::output_coverage::Result& coverage);
 
 struct RequestedParametersSnapshot {
   std::string parameters_json;
@@ -98,12 +102,15 @@ struct ClassicReport {
     bool usage_advertised{};
     bool checkout_allowed{};
     bool source_available{};
+    uint64_t unadvertised_checkout_calls{};
     uint64_t rejected_unadvertised_checkouts{};
     uint64_t rejected_format_requests{};
     uint64_t handle_exhaustions{};
     uint64_t peak_live_handles{};
+    int32_t last_checkout_index{-1};
     uint64_t checkout_calls{};
     uint64_t checkin_calls{};
+    uint64_t automatic_checkins{};
     uint64_t get_data_calls{};
     uint64_t invalid_operations{};
     int64_t last_checkout_start_time{};
@@ -133,6 +140,7 @@ struct ClassicReport {
     std::string output_sha256;
     bool guard_bytes_intact{};
     std::string world_debug_json;
+    aexcompat::worker_runtime::output_coverage::Result output_coverage{};
   } frame;
   struct Threads {
     bool concurrent{};
@@ -161,7 +169,7 @@ struct ClassicReport {
 
 void begin_classic(ReportSnapshot& report, const ClassicReport::Head& snapshot);
 void append_classic_sequence(ReportSnapshot& report, const ClassicReport::Sequence& snapshot);
-void append_classic_audio(ReportSnapshot& report, const ClassicReport::Audio& snapshot);
+void append_audio(ReportSnapshot& report, const ClassicReport::Audio& snapshot);
 void append_classic_frame(ReportSnapshot& report, const ClassicReport::Frame& snapshot);
 void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& snapshot);
 void append_classic_callbacks(ReportSnapshot& report, const ClassicReport::Callbacks& snapshot);
@@ -176,6 +184,12 @@ struct SmartReport {
     TemporalCheckoutCounters temporal_checkout_counters{};
     std::array<int64_t, 9> host_context{};
     bool depth_supported{};
+    /// What the plug-in advertised, and what it was actually dispatched
+    /// at. `depth_supported` above says whether the run served the
+    /// caller's depth; these two say how, and differ when a session
+    /// dispatched the plug-in at another depth.
+    bool advertised_depth_supported{};
+    int32_t dispatch_pixel_bytes{4};
     std::array<int64_t, 6> selector_errors{};
     std::array<bool, 2> gpu_flags{};
     std::array<int64_t, 3> checkout_time{};
@@ -201,6 +215,14 @@ struct SmartReport {
     std::string output_sha256;
     bool result_rects_valid{};
     std::string world_debug_json;
+    // Appended rather than placed beside `empty_checkout_pixel_denials`: this
+    // struct is filled positionally, so a field inserted mid-way would shift
+    // every value after it.
+    uint32_t empty_layer_param_checkouts{};
+    uint32_t empty_layer_param_pixel_checkouts{};
+    // Appended for the same reason (issue #1285). The empty result the host
+    // answered with the effect's input instead of an empty frame.
+    bool empty_result_passthrough{};
   } head;
   struct Context {
     std::array<int32_t, 4> result_rect{};
@@ -298,9 +320,12 @@ struct ClassicSubsystemDiagnostics {
   std::array<int64_t, 4> suite_counts{};  // acquires, releases, live leases, references
   std::string missing_suites_json;
   std::string live_suite_leases;
+  bool suite_fault{};
   bool handle_balanced{};
   bool path_balanced{};
-  std::array<int64_t, 8> path_counts{};
+  // checkouts, checkins, mask calls, preps created/disposed, invalid ops,
+  // reject reason, live preps, absent checkouts, absent checkins (#1253)
+  std::array<int64_t, 10> path_counts{};
   std::array<double, 2> path_feather{};
   double path_opacity{};
   int64_t path_quality{};
@@ -325,6 +350,12 @@ struct ClassicEmission {
   RequestedParametersSnapshot requested;
   bool selector_dispatched{};
   bool depth_supported{};
+  /// What the plug-in advertised, and what it was actually dispatched
+  /// at. `depth_supported` above says whether the run served the
+  /// caller's depth; these two say how, and differ when a session
+  /// dispatched the plug-in at another depth.
+  bool advertised_depth_supported{};
+  int32_t dispatch_pixel_bytes{4};
   int32_t render_error{};
 };
 

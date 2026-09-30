@@ -50,13 +50,14 @@ Copy-Item bridges\aviutl2-multifilter\target\release\aexcompat_aviutl2_multifilt
 
 ### worker の置き場所 (issue #650)
 
-AEX は別プロセスの worker (`aex_l2_worker.exe` 等) で実行するので、DLL だけでは
-動かない。worker の探索順は:
+AEX は別プロセスの worker (`aex_worker.exe`。discovery/classic/smart の3経路を
+`--kind` 引数で切り替える単一 exe) で実行するので、DLL だけでは動かない。
+worker の探索順は:
 
 1. 環境変数 `AEXCOMPAT_MULTIFILTER_REPOSITORY`
 2. `config.toml` の `repository`
 3. **プラグインの隣**: DLL と同じフォルダ、次に `<DLLのフォルダ>\aexcompat`。
-   それぞれ `target\minihost-build\aex_l2_worker.exe` がある場合にのみ採用
+   それぞれ `target\minihost-build\aex_worker.exe` がある場合にのみ採用
 
 1 と 2 は開発者が自前ビルドの worker を使うための明示指定で、そこに worker がある
 限り優先される。**worker が無い場合は 3 に降格する** (指した先が消えていても
@@ -82,7 +83,7 @@ $plugin = 'C:\ProgramData\aviutl2\Plugin'
 Copy-Item bridges\aviutl2-multifilter\target\release\aexcompat_aviutl2_multifilter.dll `
           "$plugin\aexcompat_multifilter.aux2"
 New-Item -ItemType Directory -Force "$plugin\aexcompat\target\minihost-build" | Out-Null
-Copy-Item target\minihost-build\aex_*_worker.exe "$plugin\aexcompat\target\minihost-build\"
+Copy-Item target\minihost-build\aex_worker.exe "$plugin\aexcompat\target\minihost-build\"
 ```
 
 ### ログ (issue #655)
@@ -107,7 +108,7 @@ Copy-Item target\minihost-build\aex_*_worker.exe "$plugin\aexcompat\target\minih
 
 | 状況 | 出る内容 |
 | --- | --- |
-| worker がどこにも無い | 探索する実パス (`target\minihost-build\aex_l2_worker.exe`) と設定先 |
+| worker がどこにも無い | 探索する実パス (`target\minihost-build\aex_worker.exe`) と設定先 |
 | 指定した root に worker が無い | root を出したうえで「そこには worker が無い」と明示 |
 | config.toml が読めない / パースできない | パスとエラー。設定が全部無視されることを明示 |
 | .aex が1件も見つからない | 実際に見たフォルダのパス。読めなかったフォルダがあればそれも |
@@ -171,6 +172,35 @@ TOML を手で書かなくても、AviUtl2 の設定メニュー内「AEXCompat 
 一度だけ読まれ、フィルタの config セットも AviUtl2 がロード時に凍結するため、**保存した
 変更は次回の AviUtl2 起動から反映される**。また env 上書き (上記) はファイルより常に
 優先されるので、該当の環境変数が設定されている間はダイアログにその旨の注意が出る。
+
+### フィルタ効果メニューのカテゴリ (issue #871, #876)
+
+登録される各フィルタは、AEX 自身の PiPL `catg` プロパティ (AE 本体が
+エフェクトメニューの分類に使う文字列。Adobe 純正の ZString 形式
+`$$$/…/Category/Simulation=Simulation` は `=` 以降の表示名に展開) を
+discovery 時にバイト列から読み取り、メニューカテゴリ
+**`AEXCompat\{カテゴリ}`** (取れない場合は `AEXCompat`) を初期値として登録する
+(`FILTER_PLUGIN_TABLE.label`)。これは**初期値**で、AviUtl2 は各エフェクトの
+カテゴリ (ラベル)・表示順・表示/非表示を初回登録時に `aviutl2.ini` の
+`[Effect.*]` に永続化し、以後はそちらが勝つ。既に登録済みのエフェクトの
+カテゴリや並び順を変えたい場合は、AviUtl2 の「設定」→
+「オブジェクト追加メニューの設定」で編集する (ラベルは自由入力で `\` 区切りの
+階層も可)。
+
+AE 本体同梱の `Effects\*.aex` は PiPL リソース自体を持たない (カテゴリは AE
+内部 DB にのみ存在する) ため、これらは同梱の **stem → カテゴリ対応表**
+(`src/ae_builtin_categories.rs`、表示メタデータであり識別には使わない) で
+分類する (issue #876)。カテゴリの表示言語は `category_language = 'ja' | 'en'`
+(既定 ja、設定ダイアログのドロップダウンからも変更可) で切り替えられ、AE
+標準カテゴリ約 21 種は Adobe の日本語名 (スタイライズ、ディストーション等)
+に変換される。サードパーティ独自のカテゴリ名はそのまま表示する。言語切替も
+ラベル初期値の一部なので、既に aviutl2.ini にラベルが固定されたエフェクトには
+効かない。
+
+カテゴリは discovery キャッシュに追加フィールドとして記録されるため、この
+機能より前に discovery されたエフェクトはホスト更新に伴うバックグラウンド
+再検証で埋まる (それまでは `AEXCompat` 直下)。ただし aviutl2.ini に既に
+ラベルが永続化されているエフェクトには、上記のとおり初期値は効かない。
 
 ### 依存 DLL の封入 (issue #304)
 

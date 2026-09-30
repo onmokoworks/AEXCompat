@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <new>
 #include <vector>
@@ -186,13 +187,22 @@ void convolve_axis(const std::vector<float>& input, std::vector<float>& output,
 int32_t blur_worlds(const world_safety::DispatchWorldFormat& source,
                     const world_safety::DispatchWorldFormat& destination,
                     float radius_x, float radius_y, int32_t flags,
-                    bool gaussian, int32_t iterations) {
+                    bool gaussian, int32_t iterations, const char*& reason) {
+  // Every refusal names itself; the caller emits `reason` on the always-on
+  // denial marker, so a path that forgot to set it would print an empty
+  // identifier the broker parser drops. Required out-parameter for that
+  // reason, and the caller seeds it with a real identifier as a backstop.
+  const auto refused = [&reason](const char* value) {
+    reason = value;
+    return kBadCallbackParam;
+  };
   int32_t pixel_bytes{};
-  if (!compatible_worlds(source, destination, pixel_bytes) ||
-      !valid_radius(radius_x) || !valid_radius(radius_y) ||
+  if (!compatible_worlds(source, destination, pixel_bytes))
+    return refused("world_pair");
+  if (!valid_radius(radius_x) || !valid_radius(radius_y) ||
       !valid_flags(flags) || iterations <= 0 ||
       iterations > kMaximumIterations)
-    return kBadCallbackParam;
+    return refused("invalid_arguments");
   try {
     const std::size_t values = static_cast<std::size_t>(source.width) *
         source.height * 4;
@@ -225,41 +235,328 @@ int32_t blur_worlds(const world_safety::DispatchWorldFormat& source,
     else store_pixels<float>(current, destination);
     return 0;
   } catch (const std::bad_alloc&) {
-    return kBadCallbackParam;
+    return refused("allocation_failed");
   }
+}
+
+// Answers a refused FLT call naming the condition that refused it, the
+// copy_denied shape (worker_pf_world_transform_runtime.cpp, issue #1037): the
+// plug-in folds the 4 into its own frame error and names neither the callback
+// nor the argument, so without the marker the refusing check is recoverable
+// only by rebuilding the worker with prints (issue #1069 filed Cartoon as
+// "frame_error:4 with no trace" for exactly this gap). Always on; both fields
+// are lower-case identifiers, the shape the broker's `callback_denials`
+// parser vouches for.
+int32_t flt_denied(const char* callback, const char* reason) {
+  std::cerr << "stage:callback_denied callback=" << callback
+            << " reason=" << reason << "\n" << std::flush;
+  return kBadCallbackParam;
+}
+
+// A blur operand the dispatch-format registry has never seen, admitted the way
+// copy_world8 admits its foreign operands (issue #1037's Wave Warp pattern):
+// by the declared-stride bounds check, not by ownership. Cartoon builds its
+// edge-detection scratch in its own allocations, wraps them in stack
+// PF_EffectWorlds, and hands both to FLT box_blur; AE's FLT.dll takes any
+// PF_World the caller can describe, and refusing them failed the whole frame
+// with 4 (issue #1069). The same two refusals survive for the same reasons as
+// copy_world8's: a reference the registry already knows (a registered struct
+// gone stale, or a re-declaration of a registered pixel base) stays the
+// registry's fail-closed mismatch refusal, and a pixel base the host allocated
+// keeps its own allocation's geometry check authoritative. Both guards hold on
+// every thread, including one the plug-in spawned itself: the dispatch-format
+// registry keeps its scope stack per-thread but publishes every live stack,
+// so a lookup from a plug-in-owned thread sees the same registrations the
+// dispatch thread does and reaches the same refusal (issue #1299).
+bool resolve_foreign_blur_world(const void* world, int32_t pixel_format,
+                                world_safety::DispatchWorldFormat& result) {
+  if (!g_hooks.bounded_world || !g_hooks.world_reference_known ||
+      !g_hooks.world_pixels_owned || !g_hooks.session_pixel_format ||
+      g_hooks.world_reference_known(world))
+    return false;
+  auto* mutable_world = const_cast<void*>(world);
+  if (g_hooks.world_pixels_owned(mutable_world)) return false;
+  const int32_t pixel_bytes = bytes_per_pixel(pixel_format);
+  unsigned char* pixels{};
+  int32_t rowbytes{}, width{}, height{};
+  if (!pixel_bytes || !g_hooks.bounded_world(mutable_world, pixel_bytes, pixels,
+                                             rowbytes, width, height))
+    return false;
+  result = {};
+  result.world = world;
+  result.data = pixels;
+  result.width = width;
+  result.height = height;
+  result.rowbytes = rowbytes;
+  result.pixel_format = pixel_format;
+  return true;
+}
+
+int32_t session_pixel_format_value() {
+  const char* name = g_hooks.session_pixel_format
+      ? g_hooks.session_pixel_format() : nullptr;
+  if (!name) return 0;
+  if (std::strcmp(name, "argb8") == 0) return world_registry::kPixelFormatArgb32;
+  if (std::strcmp(name, "argb16") == 0) return world_registry::kPixelFormatArgb64;
+  if (std::strcmp(name, "argb32f") == 0) return world_registry::kPixelFormatArgb128;
+  return 0;
+}
+
+// Some effects construct their own float scratch PF_Worlds while rendering an
+// ARGB16 frame. Only use a float anchor when *both* foreign operands carry
+// the observed PPix-world flags and an exact 16-byte stride per pixel. The
+// bounded-world check also enforces non-null pixels and finite geometry; the
+// registry/ownership checks below keep stale host worlds out of this fallback.
+bool foreign_float_scratch_pair(const void* source_world,
+                                const void* destination_world) {
+  if (!g_hooks.bounded_world || !g_hooks.world_reference_known ||
+      !g_hooks.world_pixels_owned) return false;
+  const auto is_float_scratch = [](const void* world) {
+    if (!world || g_hooks.world_reference_known(world) ||
+        g_hooks.world_pixels_owned(const_cast<void*>(world))) return false;
+    int32_t flags{};
+    std::memcpy(&flags, static_cast<const std::byte*>(world) + 16, sizeof(flags));
+    if (flags != 0x02000000) return false;
+    unsigned char* pixels{};
+    int32_t rowbytes{}, width{}, height{};
+    return g_hooks.bounded_world(const_cast<void*>(world), 16, pixels,
+                                 rowbytes, width, height) &&
+        rowbytes == width * 16;
+  };
+  return is_float_scratch(source_world) && is_float_scratch(destination_world);
+}
+
+// Resolves the source/destination pair, admitting foreign operands against a
+// format anchor: the resolved side's format when one side is known, else the
+// session's negotiated pixel format (Cartoon passes two foreign scratch worlds
+// inside an argb32f render, so there is no resolved side to borrow from). A
+// misanchored foreign world fails closed in the stride check -
+// `bounded_world` requires rowbytes >= width * pixel_bytes at the anchor's
+// pixel size, and `compatible_worlds` in the caller re-checks the pair as a
+// whole - so the anchor can under-read a wider world's row but never walk
+// outside what the plug-in declared.
+bool resolve_blur_worlds(const void* source_world, void* destination_world,
+                         world_safety::DispatchWorldFormat& source,
+                         world_safety::DispatchWorldFormat& destination) {
+  if (!g_hooks.resolve_world) return false;
+  const bool source_known = g_hooks.resolve_world(source_world, source);
+  const bool destination_known =
+      g_hooks.resolve_world(destination_world, destination);
+  if (source_known && destination_known) return true;
+  const int32_t session_format = session_pixel_format_value();
+  const int32_t foreign_anchor =
+      !source_known && !destination_known &&
+          session_format == world_registry::kPixelFormatArgb64 &&
+          foreign_float_scratch_pair(source_world, destination_world)
+      ? world_registry::kPixelFormatArgb128 : session_format;
+  const int32_t anchor = source_known ? source.pixel_format
+      : destination_known ? destination.pixel_format
+                          : foreign_anchor;
+  if (!bytes_per_pixel(anchor)) return false;
+  if (!source_known && !resolve_foreign_blur_world(source_world, anchor, source))
+    return false;
+  return destination_known ||
+      resolve_foreign_blur_world(destination_world, anchor, destination);
+}
+
+// The identity check is reported apart from the argument checks: a
+// multi-instance plug-in handing the wrong effect_ref is a different diagnosis
+// from a bad radius, and the marker is the only place either shows up.
+bool effect_ref_matches(void* effect_ref) noexcept {
+  return g_hooks.effect_ref && effect_ref == g_hooks.effect_ref;
 }
 
 int32_t __cdecl gaussian_blur(
     void* effect_ref, const void* source_world, float radius_x, float radius_y,
     int32_t flags, int32_t quality, int32_t progress_base,
     int32_t progress_final, void* destination_world) {
-  if (!g_hooks.effect_ref || effect_ref != g_hooks.effect_ref ||
-      !g_hooks.resolve_world || (quality != 0 && quality != 1) ||
+  if (!effect_ref_matches(effect_ref))
+    return flt_denied("flt_gaussian_blur", "effect_ref");
+  if ((quality != 0 && quality != 1) ||
       !valid_progress(progress_base, progress_final))
-    return kBadCallbackParam;
+    return flt_denied("flt_gaussian_blur", "invalid_arguments");
   world_safety::DispatchWorldFormat source{}, destination{};
-  if (!g_hooks.resolve_world(source_world, source) ||
-      !g_hooks.resolve_world(destination_world, destination))
-    return kBadCallbackParam;
-  return blur_worlds(source, destination, radius_x, radius_y, flags, true, 1);
+  if (!resolve_blur_worlds(source_world, destination_world, source, destination))
+    return flt_denied("flt_gaussian_blur", "unresolved_world");
+  const char* reason = "refused";
+  const int32_t result = blur_worlds(source, destination, radius_x, radius_y,
+                                     flags, true, 1, reason);
+  return result == 0 ? 0 : flt_denied("flt_gaussian_blur", reason);
 }
 
 int32_t __cdecl box_blur(
     void* effect_ref, const void* source_world, float radius_x, float radius_y,
     int32_t iterations, int32_t flags, int32_t progress_base,
     int32_t progress_final, void* destination_world) {
-  if (!g_hooks.effect_ref || effect_ref != g_hooks.effect_ref ||
-      !g_hooks.resolve_world || !valid_progress(progress_base, progress_final))
-    return kBadCallbackParam;
+  if (!effect_ref_matches(effect_ref))
+    return flt_denied("flt_box_blur", "effect_ref");
+  if (!valid_progress(progress_base, progress_final))
+    return flt_denied("flt_box_blur", "invalid_arguments");
   world_safety::DispatchWorldFormat source{}, destination{};
-  if (!g_hooks.resolve_world(source_world, source) ||
-      !g_hooks.resolve_world(destination_world, destination))
-    return kBadCallbackParam;
-  return blur_worlds(source, destination, radius_x, radius_y, flags, false,
-                     iterations);
+  if (!resolve_blur_worlds(source_world, destination_world, source, destination))
+    return flt_denied("flt_box_blur", "unresolved_world");
+  const char* reason = "refused";
+  const int32_t result = blur_worlds(source, destination, radius_x, radius_y,
+                                     flags, false, iterations, reason);
+  return result == 0 ? 0 : flt_denied("flt_box_blur", reason);
 }
 
-Suite1 g_suite1{&gaussian_blur, &box_blur};
+// AE's FLT_ComputeDirectionalBlurRadii, byte-for-byte from FLT.dll (0x1800324c0):
+//   rad = angle_degrees * (pi/180)
+//   *radius_x = (int)ceil(|sin(rad)| * x_scale * magnitude)
+//   *radius_y = (int)ceil(|cos(rad)| * y_scale * magnitude)
+// AE rounds toward +inf (vroundsd imm 2) then truncates to int, and returns 0
+// unconditionally. The host matches the math exactly for finite inputs and adds
+// two things AE lacks: a null-pointer guard (fail-closed, like the other slots)
+// and a bounded cast so a non-finite product cannot make the int conversion
+// undefined. Directional Blur is the only observed caller (issue #1093).
+constexpr double kDegreesToRadians =
+    3.14159265358979311599796346854418516159057617187500 / 180.0;
+
+int32_t bounded_ceil_to_int(double value) noexcept {
+  if (!std::isfinite(value)) return 0;
+  const double ceiled = std::ceil(value);
+  if (ceiled <= static_cast<double>(std::numeric_limits<int32_t>::min()))
+    return std::numeric_limits<int32_t>::min();
+  if (ceiled >= static_cast<double>(std::numeric_limits<int32_t>::max()))
+    return std::numeric_limits<int32_t>::max();
+  return static_cast<int32_t>(ceiled);
+}
+
+int32_t __cdecl compute_directional_blur_radii(
+    double x_scale, double y_scale, double angle_degrees, double magnitude,
+    int32_t* radius_x, int32_t* radius_y) {
+  if (!radius_x || !radius_y) return kBadCallbackParam;
+  const double radians = angle_degrees * kDegreesToRadians;
+  *radius_x = bounded_ceil_to_int(std::fabs(std::sin(radians)) * x_scale * magnitude);
+  *radius_y = bounded_ceil_to_int(std::fabs(std::cos(radians)) * y_scale * magnitude);
+  return 0;
+}
+
+// Slot 3 (FLT_DirectionalBlur). The tap bound mirrors slot 0/1's kMaximumRadius:
+// a smear whose half-length would exceed it is rejected rather than run, so the
+// per-pixel accumulation stays bounded even for an adversarial length.
+constexpr int32_t kMaximumDirectionalTaps = 4096;
+
+// Bilinear sample of the interleaved ARGB float buffer at fractional pixel
+// coordinates. Samples outside the source contribute transparent black (0),
+// matching FLT's padded intermediate world (FUN_18002ebb0 builds a larger
+// PF_World, so the smear fades to transparent at the source edges) and the
+// destination the plug-in pre-cleared to 0.
+float sample_bilinear(const std::vector<float>& pixels, int32_t width,
+                      int32_t height, double fx, double fy,
+                      int32_t channel) noexcept {
+  const double x0f = std::floor(fx);
+  const double y0f = std::floor(fy);
+  const int32_t x0 = static_cast<int32_t>(x0f);
+  const int32_t y0 = static_cast<int32_t>(y0f);
+  const float tx = static_cast<float>(fx - x0f);
+  const float ty = static_cast<float>(fy - y0f);
+  const auto at = [&](int32_t x, int32_t y) -> float {
+    if (x < 0 || x >= width || y < 0 || y >= height) return 0.0f;
+    return pixels[(static_cast<std::size_t>(y) * width + x) * 4 + channel];
+  };
+  const float top = at(x0, y0) + (at(x0 + 1, y0) - at(x0, y0)) * tx;
+  const float bottom = at(x0, y0 + 1) + (at(x0 + 1, y0 + 1) - at(x0, y0 + 1)) * tx;
+  return top + (bottom - top) * ty;
+}
+
+int32_t __cdecl directional_blur(
+    void* effect_ref, int32_t quality, double downsample_x, double downsample_y,
+    double length, double direction_degrees, const void* source_world,
+    void* destination_world) {
+  if (!effect_ref_matches(effect_ref))
+    return flt_denied("flt_directional_blur", "effect_ref");
+  if ((quality != 0 && quality != 1) ||
+      !std::isfinite(length) || length <= 0.0 ||
+      length > static_cast<double>(kMaximumRadius) ||
+      !std::isfinite(direction_degrees) || !std::isfinite(downsample_x) ||
+      !std::isfinite(downsample_y) || downsample_x <= 0.0 ||
+      downsample_y <= 0.0)
+    return flt_denied("flt_directional_blur", "invalid_arguments");
+  world_safety::DispatchWorldFormat source{}, destination{};
+  if (!resolve_blur_worlds(source_world, destination_world, source, destination))
+    return flt_denied("flt_directional_blur", "unresolved_world");
+  int32_t pixel_bytes{};
+  if (!compatible_worlds(source, destination, pixel_bytes))
+    return flt_denied("flt_directional_blur", "world_pair");
+
+  const double radians = direction_degrees * kDegreesToRadians;
+  const double sin_theta = std::sin(radians);
+  const double cos_theta = std::cos(radians);
+  // AE's visible smear extents (FLT FUN_180032690 param_6[4]/[5]): the blur
+  // projects onto x by |sin| and onto y by |cos|, each scaled by the matching
+  // downsample. Same sin->x / cos->y convention as slot 2.
+  const double extent_x = length * downsample_x * std::fabs(sin_theta);
+  const double extent_y = length * downsample_y * std::fabs(cos_theta);
+  const double half_length = std::hypot(extent_x, extent_y);
+  // Bound the extent as a double before the cast. downsample_x/y have no upper
+  // bound, so half_length can exceed INT32_MAX, where a double->int32 cast is
+  // undefined; on x64 it yields INT_MIN, which would slip past an int-domain
+  // bound check straight into the zero-extent branch and pass an out-of-range
+  // input off as a successful passthrough. Rejecting in the double domain keeps
+  // the tap count in [0, kMaximumDirectionalTaps] so the cast is well defined,
+  // matching slot 2's bounded_ceil_to_int guard.
+  if (!std::isfinite(half_length) ||
+      half_length > static_cast<double>(kMaximumDirectionalTaps))
+    return flt_denied("flt_directional_blur", "extent_bound");
+  const int32_t taps = static_cast<int32_t>(std::ceil(half_length));
+  // Signed half-vector of the centered smear (both directions blend around the
+  // pixel, so the sign only orients the axis, not the result).
+  const double vector_x = (sin_theta >= 0.0 ? 1.0 : -1.0) * extent_x;
+  const double vector_y = (cos_theta >= 0.0 ? 1.0 : -1.0) * extent_y;
+
+  try {
+    const std::size_t values = static_cast<std::size_t>(source.width) *
+        source.height * 4;
+    std::vector<float> input(values);
+    if (pixel_bytes == 4) load_pixels<uint8_t>(source, input);
+    else if (pixel_bytes == 8) load_pixels<uint16_t>(source, input);
+    else load_pixels<float>(source, input);
+
+    std::vector<float> output(values);
+    const int32_t width = source.width;
+    const int32_t height = source.height;
+    if (taps <= 0) {
+      // Zero-extent case: half_length underflowed to exactly 0 (both axis
+      // extents collapsed, e.g. a subnormal downsample), so the centered box is
+      // the identity. A sub-1px extent is not this case: it rounds up to one
+      // tap and runs the blur below.
+      output = input;
+    } else {
+      const double inverse_taps = 1.0 / static_cast<double>(taps);
+      const float weight = 1.0f / static_cast<float>(2 * taps + 1);
+      for (int32_t y = 0; y < height; ++y) {
+        for (int32_t x = 0; x < width; ++x) {
+          float accumulator[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+          for (int32_t tap = -taps; tap <= taps; ++tap) {
+            const double t = static_cast<double>(tap) * inverse_taps;
+            const double sample_x = static_cast<double>(x) + t * vector_x;
+            const double sample_y = static_cast<double>(y) + t * vector_y;
+            for (int32_t channel = 0; channel < 4; ++channel)
+              accumulator[channel] += sample_bilinear(input, width, height,
+                                                       sample_x, sample_y,
+                                                       channel);
+          }
+          const std::size_t destination_index =
+              (static_cast<std::size_t>(y) * width + x) * 4;
+          for (int32_t channel = 0; channel < 4; ++channel)
+            output[destination_index + channel] =
+                accumulator[channel] * weight;
+        }
+      }
+    }
+    if (pixel_bytes == 4) store_pixels<uint8_t>(output, destination);
+    else if (pixel_bytes == 8) store_pixels<uint16_t>(output, destination);
+    else store_pixels<float>(output, destination);
+    return 0;
+  } catch (const std::bad_alloc&) {
+    return flt_denied("flt_directional_blur", "allocation_failed");
+  }
+}
+
+Suite1 g_suite1{&gaussian_blur, &box_blur, &compute_directional_blur_radii,
+                &directional_blur};
 
 }  // namespace
 
@@ -273,6 +570,13 @@ bool configure(const Hooks& hooks) noexcept {
 
 const Suite1* suite1() noexcept { return &g_suite1; }
 
+bool resolve_in_place_world(void* world, world_safety::DispatchWorldFormat& format) {
+  world_safety::DispatchWorldFormat destination{};
+  if (!resolve_blur_worlds(world, world, format, destination)) return false;
+  int32_t pixel_bytes{};
+  return compatible_worlds(format, destination, pixel_bytes);
+}
+
 bool selftest() {
   constexpr int32_t width = 3;
   constexpr int32_t height = 1;
@@ -285,7 +589,8 @@ bool selftest() {
       rejected_suite != nullptr)
     return false;
   const auto* suite = static_cast<const Suite1*>(raw_suite);
-  if (!suite->gaussian_blur || !suite->box_blur) {
+  if (!suite->gaussian_blur || !suite->box_blur ||
+      !suite->compute_directional_blur_radii || !suite->directional_blur) {
     g_hooks.release_suite(kSuiteName, kSuiteVersion1);
     return false;
   }
@@ -397,6 +702,242 @@ bool selftest() {
           g_hooks.effect_ref, nullptr, 1.0f, 0.0f, 1,
           kHorizontal | kAllChannels, 0, 1, &destination_world) ==
           kBadCallbackParam;
+
+  // Foreign-operand admission (issue #1069, the copy_world8 latitude from
+  // issue #1037): worlds the registry never saw are admitted by the
+  // declared-stride bounds check. Cartoon hands box_blur two of its own
+  // scratch worlds, so both the one-sided anchor (format borrowed from the
+  // resolved side) and the both-foreign anchor (the session's negotiated
+  // format, "argb8" here) must answer. A re-declaration of a registered
+  // world's pixel base under a different geometry stays refused: that
+  // reference is the registry's to validate, and it must not degrade into
+  // foreign admission.
+  std::array<uint8_t, width * height * 4> foreign_source{
+      255, 0, 0, 0, 255, 255, 60, 30, 255, 0, 0, 0};
+  std::array<uint8_t, width * height * 4> foreign_destination{};
+  auto foreign_source_world = make_world(foreign_source.data(), width * 4);
+  auto foreign_destination_world =
+      make_world(foreign_destination.data(), width * 4);
+  destination = {};
+  ok = ok && suite->box_blur(
+      g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
+      kHorizontal | kAllChannels, 0, 1, &destination_world) == 0 &&
+      destination == expected8;
+  // The both-foreign case is pinned to an "argb8" session anchor here rather
+  // than whatever the fixed-selftest chain left in smart_state, so this check
+  // does not depend on the order the chain runs in.
+  {
+    const Hooks saved = g_hooks;
+    g_hooks.session_pixel_format = +[]() -> const char* { return "argb8"; };
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) == 0 &&
+        foreign_destination == expected8;
+    g_hooks = saved;
+  }
+  // Cartoon's ARGB16 render hands FLT two plug-in-owned float scratch worlds.
+  // Their depth must beat the session anchor, but only for the exact observed
+  // float shape. Wrong flags/stride still refuse without touching destination.
+  {
+    const Hooks saved = g_hooks;
+    g_hooks.session_pixel_format = +[]() -> const char* { return "argb16"; };
+    auto foreign_float_source = source_float_before;
+    std::array<float, width * height * 4> foreign_float_destination{};
+    auto float_source = make_world(foreign_float_source.data(), width * 16);
+    auto float_destination =
+        make_world(foreign_float_destination.data(), width * 16);
+    float_source.world_flags = 0x02000000;
+    float_destination.world_flags = 0x02000000;
+    foreign_float_destination.fill(0.0f);
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &float_source, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &float_destination) == 0 &&
+        foreign_float_source == source_float_before;
+    constexpr std::array<float, 3> box_red{1.0f / 3.0f, 1.0f / 3.0f,
+                                           1.0f / 3.0f};
+    for (int32_t x = 0; x < width; ++x)
+      ok = ok && std::abs(foreign_float_destination[x * 4 + 1] - box_red[x]) < 1e-6f;
+    foreign_float_destination.fill(-1.0f);
+    const auto float_sentinel = foreign_float_destination;
+    float_source.world_flags = 0;
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &float_source, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &float_destination) ==
+        kBadCallbackParam && foreign_float_destination == float_sentinel;
+    float_source.world_flags = 0x02000000;
+    float_source.rowbytes = width * 8;
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &float_source, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &float_destination) ==
+        kBadCallbackParam && foreign_float_destination == float_sentinel;
+    g_hooks = saved;
+  }
+  // The alias re-declares the registered source's pixel base with a wider
+  // stride but the same width/height, so the pair check still passes and the
+  // only check that can refuse it is the registry-known gate (a height
+  // mismatch would be refused by the pair check first and prove nothing about
+  // the gate). One row of three pixels never reads past the 12-byte buffer
+  // even if the gate regressed. The destination carries a sentinel that the
+  // refused call must leave in place.
+  auto aliased_registered_base = make_world(source.data(), width * 4 + 4);
+  foreign_destination.fill(0x5a);
+  const auto foreign_sentinel = foreign_destination;
+  ok = ok && suite->box_blur(
+      g_hooks.effect_ref, &aliased_registered_base, 1.0f, 0.0f, 1,
+      kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) ==
+      kBadCallbackParam &&
+      foreign_destination == foreign_sentinel;
+  // The both-foreign anchor is the session's negotiated format, so a session
+  // whose format is wider than the pair refuses it in the stride check
+  // (rowbytes 12 < width * 16): a wrong anchor never walks past the declared
+  // bytes. And with the admission hooks unset (the header's "optional as a
+  // group") the pair is refused outright, the pre-#1069 behaviour.
+  {
+    const Hooks saved = g_hooks;
+    g_hooks.session_pixel_format = +[]() -> const char* { return "argb32f"; };
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) ==
+        kBadCallbackParam &&
+        foreign_destination == foreign_sentinel;
+    g_hooks = saved;
+    g_hooks.bounded_world = nullptr;
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) ==
+        kBadCallbackParam &&
+        foreign_destination == foreign_sentinel;
+    g_hooks = saved;
+  }
+
+  // compute_directional_blur_radii (slot 2): the smear projected onto x/y,
+  // rounded up. At 90 degrees the blur is horizontal, so x takes the whole
+  // magnitude (ceil(1*2*5)=10) while y is |cos(pi/2)|=6.1e-17 rounded up to 1 -
+  // AE's own ceil-of-epsilon result, reproduced here because the host runs the
+  // same sin/cos and ceil. At 0 degrees sin is exactly 0 so x collapses to 0
+  // and y takes it all; 45 degrees splits by 1/sqrt(2). These match AE's
+  // FLT_ComputeDirectionalBlurRadii exactly.
+  int32_t radius_x = -1, radius_y = -1;
+  ok = ok &&
+      suite->compute_directional_blur_radii(2.0, 3.0, 90.0, 5.0, &radius_x,
+                                            &radius_y) == 0 &&
+      radius_x == 10 && radius_y == 1 &&
+      suite->compute_directional_blur_radii(2.0, 3.0, 0.0, 5.0, &radius_x,
+                                            &radius_y) == 0 &&
+      radius_x == 0 && radius_y == 15 &&
+      suite->compute_directional_blur_radii(1.0, 1.0, 45.0, 10.0, &radius_x,
+                                            &radius_y) == 0 &&
+      radius_x == 8 && radius_y == 8 &&
+      suite->compute_directional_blur_radii(1.0, 1.0, 0.0, 1.0, nullptr,
+                                            &radius_y) == kBadCallbackParam &&
+      suite->compute_directional_blur_radii(1.0, 1.0, 0.0, 1.0, &radius_x,
+                                            nullptr) == kBadCallbackParam;
+
+  // directional_blur (slot 3): a five-wide row with a single opaque-white
+  // impulse at x=2. Direction 90 degrees is a horizontal smear (|sin 90|=1 on
+  // x, |cos 90|~0 on y); length 1 at downsample 1 gives extent 1px, so each
+  // output pixel averages three integer-aligned taps {x-1, x, x+1}. Only the
+  // taps that land on x=2 carry the impulse, and 255/3 rounds to 85, so the
+  // white spreads to x in {1,2,3} and the edges stay clear. Bilinear sampling
+  // outside the row yields transparent black, so no channel exceeds the
+  // impulse. This checks direction, extent, and edge handling deterministically
+  // without depending on AE's RenderGraph normalization.
+  constexpr int32_t dir_width = 5;
+  constexpr int32_t dir_height = 1;
+  const auto make_dir_world = [=](void* pixels, int32_t rowbytes) {
+    world_safety::LocalEffectWorld world{};
+    world.data = pixels;
+    world.rowbytes = rowbytes;
+    world.width = dir_width;
+    world.height = dir_height;
+    world.extent_hint = {0, 0, dir_width, dir_height};
+    world.pix_aspect_ratio = {1, 1};
+    return world;
+  };
+  std::array<uint8_t, dir_width * dir_height * 4> dir_source{
+      0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0};
+  std::array<uint8_t, dir_width * dir_height * 4> dir_destination{};
+  const auto dir_source_before = dir_source;
+  auto dir_source_world = make_dir_world(dir_source.data(), dir_width * 4);
+  auto dir_destination_world =
+      make_dir_world(dir_destination.data(), dir_width * 4);
+  world_safety::DispatchWorldFormatScope dir_formats;
+  ok = ok &&
+      dir_formats.register_world(&dir_source_world,
+                                 world_registry::kPixelFormatArgb32) &&
+      dir_formats.register_world(&dir_destination_world,
+                                 world_registry::kPixelFormatArgb32);
+  const std::array<uint8_t, dir_width * dir_height * 4> dir_expected{
+      0, 0, 0, 0, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 0, 0, 0, 0};
+  ok = ok && suite->directional_blur(
+      g_hooks.effect_ref, 1, 1.0, 1.0, 1.0, 90.0, &dir_source_world,
+      &dir_destination_world) == 0 &&
+      dir_destination == dir_expected && dir_source == dir_source_before;
+  // Fail-closed rejections, all of which must return kBadCallbackParam without
+  // touching the destination:
+  //   - foreign identity;
+  //   - non-positive length (0), and over-cap length isolated from the extent
+  //     bound (5000 > kMaximumRadius but extent 5000*0.5 = 2500 < tap bound,
+  //     so only the length clause rejects it);
+  //   - non-finite length (inf);
+  //   - the extent/tap bound, both in range (2.0,4096) and via an overflow-range
+  //     downsample (1e9,4096) that would make the int cast undefined without the
+  //     pre-cast double-domain bound;
+  //   - zero, negative, and non-finite downsample on both axes;
+  //   - non-finite direction; out-of-range quality; and null/unresolvable
+  //     worlds.
+  constexpr double dir_inf = std::numeric_limits<double>::infinity();
+  constexpr double dir_nan = std::numeric_limits<double>::quiet_NaN();
+  ok = ok &&
+      suite->directional_blur(reinterpret_cast<void*>(1), 1, 1.0, 1.0, 1.0,
+                              90.0, &dir_source_world,
+                              &dir_destination_world) == kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, 0.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 0.5, 0.5, 5000.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, dir_inf, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 2.0, 1.0, 4096.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1e9, 1.0, 4096.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 0.0, 1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 0.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, -1.0, 1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, -1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, dir_inf, 1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, dir_inf, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, 1.0, dir_nan,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 2, 1.0, 1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, 1.0, 90.0,
+                              nullptr, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, 1.0, 90.0,
+                              &dir_source_world, nullptr) == kBadCallbackParam;
+  // None of the rejected calls may have written the destination.
+  ok = ok && dir_destination == dir_expected;
 
   return g_hooks.release_suite(kSuiteName, kSuiteVersion1) == 0 && ok;
 }

@@ -1,17 +1,25 @@
 #include "render_subsystem.h"
 
+#include "worker_pf_world_facade.hpp"
+
+#include <windows.h>
+
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <fstream>
+#include <limits>
 #include <sstream>
+#include <utility>
 
 namespace aexcompat::render {
 
 namespace {
 template <typename T>
-void store_world_field(std::array<std::byte, 120>& world, std::size_t offset, T value) {
+void store_world_field(aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset, T value) {
   std::memcpy(world.data() + offset, &value, sizeof(value));
 }
 
@@ -24,6 +32,71 @@ bool valid_world_layout(const WorldLayout& layout) {
 
 }  // namespace
 
+DiagnosticWorldLayout& diagnostic_world_layout() {
+  static DiagnosticWorldLayout layout;
+  return layout;
+}
+
+bool parse_diagnostic_world_layout(const wchar_t* encoded) {
+  if (!encoded) return false;
+  const std::wstring value(encoded);
+  const bool v3 = value.compare(0, 3, L"v3|") == 0;
+  const bool v2 = value.compare(0, 3, L"v2|") == 0;
+  if (!v3 && !v2 && value.compare(0, 3, L"v1|") != 0) return false;
+  if (value.size() > 168) return false;
+  std::array<int32_t, 14> fields{};
+  const std::size_t field_count = v3 ? 14 : (v2 ? 13 : 12);
+  std::size_t start = 3;
+  for (std::size_t index = 0; index < field_count; ++index) {
+    const auto end = value.find(L'|', start);
+    if ((index + 1 == field_count) != (end == std::wstring::npos)) return false;
+    const auto token = value.substr(start, end == std::wstring::npos ? end : end - start);
+    if (token.empty() || token.size() > 11) return false;
+    const auto digits = token[0] == L'-' ? 1u : 0u;
+    if (digits == token.size()) return false;
+    for (std::size_t digit = digits; digit < token.size(); ++digit)
+      if (token[digit] < L'0' || token[digit] > L'9') return false;
+    errno = 0;
+    wchar_t* tail = nullptr;
+    const long parsed = std::wcstol(token.c_str(), &tail, 10);
+    if (errno == ERANGE || !tail || *tail != L'\0' ||
+        parsed < std::numeric_limits<int32_t>::min() ||
+        parsed > std::numeric_limits<int32_t>::max()) return false;
+    fields[index] = static_cast<int32_t>(parsed);
+    start = end + 1;
+  }
+  if (fields[0] < 0 || fields[0] > 256 || fields[1] < 0 || fields[1] > 256 ||
+      fields[2] < -4096 || fields[2] > 4096 ||
+      fields[3] < -4096 || fields[3] > 4096 ||
+      ((v2 || v3) && (fields[12] < 0 || fields[12] > 255)) ||
+      (v3 && fields[13] != 4 && fields[13] != 8 && fields[13] != 16)) return false;
+  auto parse_rect = [&](std::size_t offset, bool& present,
+                        std::array<int32_t, 4>& rect) {
+    if (fields[offset] == -1 && fields[offset + 1] == -1 &&
+        fields[offset + 2] == -1 && fields[offset + 3] == -1) {
+      present = false;
+      return true;
+    }
+    rect = {fields[offset], fields[offset + 1],
+            fields[offset + 2], fields[offset + 3]};
+    present = true;
+    return rect[0] >= 0 && rect[1] >= 0 && rect[2] > rect[0] &&
+           rect[3] > rect[1] && rect[2] <= 4096 && rect[3] <= 4096;
+  };
+  DiagnosticWorldLayout parsed{};
+  parsed.enabled = true;
+  parsed.input_row_padding = fields[0];
+  if (v2 || v3) parsed.input_padding_byte = static_cast<uint8_t>(fields[12]);
+  if (v3) parsed.input_pixel_bytes = fields[13];
+  parsed.output_row_padding = fields[1];
+  parsed.input_origin_x = fields[2];
+  parsed.input_origin_y = fields[3];
+  if (!parse_rect(4, parsed.has_request_rect, parsed.request_rect) ||
+      !parse_rect(8, parsed.has_extent_hint, parsed.extent_hint)) return false;
+  diagnostic_world_layout() = parsed;
+  return true;
+}
+
 bool smart_geometry_rect_valid(const std::array<int32_t, 4>& rect) {
   const int64_t width = static_cast<int64_t>(rect[2]) - rect[0];
   const int64_t height = static_cast<int64_t>(rect[3]) - rect[1];
@@ -32,6 +105,14 @@ bool smart_geometry_rect_valid(const std::array<int32_t, 4>& rect) {
       rect[2] <= kMaxSmartRectMagnitude && rect[3] <= kMaxSmartRectMagnitude &&
       width <= 4096 && height <= 4096 && width * height <= 16'777'216;
 }
+
+namespace {
+bool smart_geometry_envelope_valid(const std::array<int32_t, 4>& rect) {
+  return rect[2] >= rect[0] && rect[3] >= rect[1] &&
+      rect[0] >= -kMaxSmartRectMagnitude && rect[1] >= -kMaxSmartRectMagnitude &&
+      rect[2] <= kMaxSmartRectMagnitude && rect[3] <= kMaxSmartRectMagnitude;
+}
+}  // namespace
 
 bool smart_rect_contained(const std::array<int32_t, 4>& inner,
                           const std::array<int32_t, 4>& outer) {
@@ -89,7 +170,7 @@ bool smart_geometry_rect_self_test() {
   return passed;
 }
 
-bool prepare_world_layout(std::array<std::byte, 120>& world,
+bool prepare_world_layout(aexcompat::world_safety::EffectWorldStorage& world,
                           const WorldLayout& layout, void* pixels) {
   if (!pixels || !valid_world_layout(layout)) return false;
   world.fill(std::byte{});
@@ -100,6 +181,164 @@ bool prepare_world_layout(std::array<std::byte, 120>& world,
   store_world_field(world, 40, layout.height);
   const std::array<int32_t, 4> extent{0, 0, layout.width, layout.height};
   std::memcpy(world.data() + 44, extent.data(), sizeof(extent));
+  // AE's PF_World shape around the LayerDef (worker_pf_world_facade, issue
+  // #1276): the depth's vtable in the storage prefix and reserved_long4
+  // pointing at it. The layout was validated above, so the depth is one of
+  // the three the facade knows.
+  return aexcompat::worker_runtime::pf_world_facade::embed(world.data(), layout.pixel_bytes);
+}
+
+bool capture_host_world(const aexcompat::world_safety::EffectWorldStorage& world,
+                        const unsigned char* owned_pixels, std::size_t owned_size,
+                        int32_t pixel_bytes,
+                        CapturedWorld& captured) {
+  if (!owned_pixels || (pixel_bytes != 4 && pixel_bytes != 8 && pixel_bytes != 16))
+    return false;
+  const auto* bytes = world.data();
+  void* world_pixels = nullptr;
+  int32_t rowbytes = 0, width = 0, height = 0, origin_x = 0, origin_y = 0;
+  std::array<int32_t, 4> extent{};
+  std::memcpy(&world_pixels, bytes + 24, sizeof(world_pixels));
+  std::memcpy(&rowbytes, bytes + 32, sizeof(rowbytes));
+  std::memcpy(&width, bytes + 36, sizeof(width));
+  std::memcpy(&height, bytes + 40, sizeof(height));
+  std::memcpy(extent.data(), bytes + 44, sizeof(extent));
+  std::memcpy(&origin_x, bytes + 104, sizeof(origin_x));
+  std::memcpy(&origin_y, bytes + 108, sizeof(origin_y));
+  if (world_pixels != owned_pixels || width <= 0 || height <= 0 ||
+      width > 4096 || height > 4096 ||
+      static_cast<int64_t>(width) * height > 16'777'216 ||
+      rowbytes < width * pixel_bytes || rowbytes > width * pixel_bytes + 256 ||
+      rowbytes % pixel_bytes != 0 ||
+      origin_x < -4096 || origin_x > 4096 ||
+      origin_y < -4096 || origin_y > 4096 ||
+      extent[0] < 0 || extent[1] < 0 ||
+      extent[2] <= extent[0] || extent[3] <= extent[1] ||
+      extent[2] > width || extent[3] > height)
+    return false;
+  const uint64_t size = static_cast<uint64_t>(rowbytes) * height;
+  if (size > (1ull << 30) || size > owned_size) return false;
+  CapturedWorld result{};
+  result.width = width;
+  result.height = height;
+  result.pixel_bytes = pixel_bytes;
+  result.rowbytes = rowbytes;
+  result.origin_x = origin_x;
+  result.origin_y = origin_y;
+  result.extent = extent;
+  result.raw_argb.assign(owned_pixels, owned_pixels + static_cast<std::size_t>(size));
+  captured = std::move(result);
+  return true;
+}
+
+bool write_captured_world_handle(uint64_t handle_value, const CapturedWorld& captured) {
+  if (handle_value == 0 || captured.width <= 0 || captured.height <= 0 ||
+      captured.width > 4096 || captured.height > 4096 ||
+      (captured.pixel_bytes != 4 && captured.pixel_bytes != 8 &&
+       captured.pixel_bytes != 16) ||
+      captured.rowbytes < captured.width * captured.pixel_bytes ||
+      captured.rowbytes > captured.width * captured.pixel_bytes + 256 ||
+      captured.rowbytes % captured.pixel_bytes != 0 ||
+      captured.origin_x < -4096 || captured.origin_x > 4096 ||
+      captured.origin_y < -4096 || captured.origin_y > 4096 ||
+      captured.extent[0] < 0 || captured.extent[1] < 0 ||
+      captured.extent[2] <= captured.extent[0] ||
+      captured.extent[3] <= captured.extent[1] ||
+      captured.extent[2] > captured.width ||
+      captured.extent[3] > captured.height ||
+      captured.raw_argb.size() !=
+          static_cast<uint64_t>(captured.rowbytes) * captured.height ||
+      captured.raw_argb.size() > (1ull << 30))
+    return false;
+  const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(handle_value));
+  std::array<unsigned char, 56> header{};
+  std::memcpy(header.data(), "AEXWRAW1", 8);
+  const std::array<int32_t, 10> shape{
+      captured.width, captured.height, captured.pixel_bytes, captured.rowbytes,
+      captured.origin_x, captured.origin_y, captured.extent[0], captured.extent[1],
+      captured.extent[2], captured.extent[3]};
+  std::memcpy(header.data() + 8, shape.data(), sizeof(shape));
+  const uint64_t count = captured.raw_argb.size();
+  std::memcpy(header.data() + 48, &count, sizeof(count));
+  const auto write_all = [handle](const unsigned char* bytes, std::size_t size) {
+    while (size != 0) {
+      DWORD written = 0;
+      const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(size, 1u << 20));
+      if (!WriteFile(handle, bytes, chunk, &written, nullptr) || written == 0)
+        return false;
+      bytes += written;
+      size -= written;
+    }
+    return true;
+  };
+  return write_all(header.data(), header.size()) &&
+      write_all(captured.raw_argb.data(), captured.raw_argb.size());
+}
+
+namespace {
+struct WorldCaptureTarget {
+  std::string stage;
+  uint64_t handle{};
+  bool written{};
+};
+std::vector<WorldCaptureTarget>& world_capture_targets() {
+  static std::vector<WorldCaptureTarget> targets;
+  return targets;
+}
+}  // namespace
+
+bool parse_world_capture_target(const wchar_t* encoded) {
+  if (!encoded || world_capture_targets().size() >= 16) return false;
+  const std::wstring value(encoded);
+  const auto separator = value.find(L'|');
+  if (separator == std::wstring::npos || separator == 0 || separator > 96 ||
+      separator + 1 >= value.size() ||
+      value.find(L'|', separator + 1) != std::wstring::npos)
+    return false;
+  std::string stage;
+  for (std::size_t index = 0; index < separator; ++index) {
+    const wchar_t letter = value[index];
+    if (!((letter >= L'a' && letter <= L'z') ||
+          (letter >= L'A' && letter <= L'Z') ||
+          (letter >= L'0' && letter <= L'9') || letter == L'-'))
+      return false;
+    stage.push_back(static_cast<char>(letter));
+  }
+  const std::wstring number = value.substr(separator + 1);
+  if (number.empty() || !std::all_of(number.begin(), number.end(), [](wchar_t digit) {
+        return digit >= L'0' && digit <= L'9';
+      })) return false;
+  try {
+    const uint64_t handle_value = std::stoull(number);
+    if (handle_value == 0) return false;
+    const HANDLE handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(handle_value));
+    DWORD flags = 0;
+    if (!GetHandleInformation(handle, &flags)) return false;
+    for (const auto& target : world_capture_targets())
+      if (target.stage == stage || target.handle == handle_value) return false;
+    world_capture_targets().push_back({std::move(stage), handle_value, false});
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool capture_requested_world(const std::string& stage,
+                             const aexcompat::world_safety::EffectWorldStorage& world,
+                             const unsigned char* owned_pixels, std::size_t owned_size,
+                             int32_t pixel_bytes) {
+  auto& targets = world_capture_targets();
+  const auto found = std::find_if(targets.begin(), targets.end(), [&](const auto& target) {
+    return target.stage == stage;
+  });
+  if (found == targets.end()) return true;
+  auto& target = *found;
+  if (target.written) return false;
+  CapturedWorld captured;
+  if (!capture_host_world(world, owned_pixels, owned_size, pixel_bytes, captured) ||
+      !write_captured_world_handle(target.handle, captured))
+    return false;
+  target.written = true;
   return true;
 }
 
@@ -136,10 +375,31 @@ ParameterProfile prepare_parameter_profile(const std::string& case_id) {
   return profile;
 }
 
+bool is_fixed_image_case(const std::string& case_id) {
+  return case_id == "default" || case_id == "identity" ||
+      case_id == "horizontal" || case_id == "vertical_no_repeat" ||
+      case_id == "mixed" || case_id == "amount_max" ||
+      case_id == "seed_max" || case_id == "mix_zero" ||
+      case_id == "odd_dimensions" || case_id == "padded_stride" ||
+      case_id == "inverted_map" || case_id == "connected_map";
+}
+
+bool output_extent_unchanged(int32_t current_width, int32_t current_height,
+                             int32_t requested_width, int32_t requested_height) {
+  if (requested_width == 0 && requested_height == 0) return true;
+  return requested_width == current_width && requested_height == current_height;
+}
+
 bool validate_output_extent(int32_t current_width, int32_t current_height,
                             int32_t requested_width, int32_t requested_height,
                             uint32_t output_flags) {
-  if (requested_width == 0 && requested_height == 0) return true;
+  // Declining is not a malformed extent, and it is one rule rather than two:
+  // the call site checks the same predicate to decide whether to resize at all,
+  // so stating it twice would let the two disagree about what a 0x0 answer
+  // means - a frame that renders in one build and fails validation in the next.
+  if (output_extent_unchanged(current_width, current_height, requested_width,
+                              requested_height))
+    return true;
   if (requested_width <= 0 || requested_height <= 0 || requested_width > 4096 ||
       requested_height > 4096 ||
       static_cast<int64_t>(requested_width) * requested_height > 16'777'216)
@@ -152,6 +412,39 @@ bool validate_output_extent(int32_t current_width, int32_t current_height,
       (!shrinks || (output_flags & kShrinkBuffer) != 0);
 }
 
+std::array<int32_t, 4> extent_hint_within(const std::array<int32_t, 4>& hint,
+                                          int32_t output_width, int32_t output_height) {
+  if (output_width < 0 || output_height < 0) return hint;
+  std::array<int32_t, 4> shrunk = hint;
+  // The top-left only moves if it is already outside the buffer, and then only
+  // as far as the buffer's own edge; the bottom-right comes back to the edge or
+  // to the top-left, whichever is further in. That keeps the rect non-inverted
+  // without ever growing it or shifting a rect that already fitted.
+  shrunk[0] = std::min(shrunk[0], output_width);
+  shrunk[1] = std::min(shrunk[1], output_height);
+  shrunk[2] = std::min(std::max(shrunk[2], shrunk[0]), output_width);
+  shrunk[3] = std::min(std::max(shrunk[3], shrunk[1]), output_height);
+  return shrunk;
+}
+
+bool validate_output_origin(int32_t origin_x, int32_t origin_y,
+                            int32_t source_width, int32_t source_height,
+                            int32_t output_width, int32_t output_height) {
+  if (source_width < 0 || source_height < 0) return false;
+  if (output_width < 0 || output_height < 0) return false;
+  if (origin_x < -kMaxSmartRectMagnitude || origin_x > kMaxSmartRectMagnitude ||
+      origin_y < -kMaxSmartRectMagnitude || origin_y > kMaxSmartRectMagnitude)
+    return false;
+  // The input rectangle, placed at this origin, has to reach the output at all.
+  // Both directions are the same statement: an expand insets the input inside a
+  // larger output (positive origin), a crop-shrink takes a window out of it
+  // (negative origin), and either way the two overlap.
+  return static_cast<int64_t>(origin_x) < output_width &&
+      static_cast<int64_t>(origin_x) + source_width > 0 &&
+      static_cast<int64_t>(origin_y) < output_height &&
+      static_cast<int64_t>(origin_y) + source_height > 0;
+}
+
 SmartOutputBounds prepare_smart_output_bounds(const void* pre_render_output,
                                               std::size_t output_size,
                                               int32_t pixel_bytes) {
@@ -162,8 +455,12 @@ SmartOutputBounds prepare_smart_output_bounds(const void* pre_render_output,
   std::memcpy(bounds.max_result_rect.data(),
               static_cast<const std::byte*>(pre_render_output) + 16,
               sizeof(bounds.max_result_rect));
+  // Only result_rect sizes the output allocation. max_result_rect is an
+  // availability envelope and may legitimately be much larger while still
+  // containing a small render result, so keep its coordinate/inversion checks
+  // without applying the allocation width/height/area caps.
   if (!smart_geometry_rect_valid(bounds.result_rect) ||
-      !smart_geometry_rect_valid(bounds.max_result_rect) ||
+      !smart_geometry_envelope_valid(bounds.max_result_rect) ||
       bounds.result_rect[0] < bounds.max_result_rect[0] ||
       bounds.result_rect[1] < bounds.max_result_rect[1] ||
       bounds.result_rect[2] > bounds.max_result_rect[2] ||
@@ -252,20 +549,28 @@ int prepare_image_request(const std::string& case_id, bool has_external_input,
   request.height = has_external_input ? external_height :
       (request.connected_map ? 7 :
        ((case_id == "odd_dimensions" || case_id == "padded_stride") ? 9 : 12));
-  request.pixel_bytes = has_external_input ? external_pixel_bytes : 4;
+  const auto& diagnostic = diagnostic_world_layout();
+  request.pixel_bytes = diagnostic.enabled && diagnostic.input_pixel_bytes != 0
+      ? diagnostic.input_pixel_bytes : (has_external_input ? external_pixel_bytes : 4);
   if (request.width <= 0 || request.height <= 0 || request.width > 4096 ||
       request.height > 4096 ||
-      (request.pixel_bytes != 4 && request.pixel_bytes != 8 && request.pixel_bytes != 16))
+      (request.pixel_bytes != 4 && request.pixel_bytes != 8 && request.pixel_bytes != 16) ||
+      (external_pixel_bytes != 4 && external_pixel_bytes != 8 && external_pixel_bytes != 16))
     return -3;
-  if (case_id != "default" && case_id != "identity" && case_id != "horizontal" &&
-      case_id != "vertical_no_repeat" && case_id != "mixed" &&
-      case_id != "amount_max" && case_id != "seed_max" && case_id != "mix_zero" &&
-      case_id != "odd_dimensions" && case_id != "padded_stride" &&
-      case_id != "inverted_map" && case_id != "connected_map" &&
-      case_id != "request" && !request.partial_extent_hint)
+  if (!is_fixed_image_case(case_id) && case_id != "request" &&
+      !request.partial_extent_hint)
     return -2;
   request.rowbytes = case_id == "padded_stride" ? 64 :
       request.width * request.pixel_bytes;
+  if (diagnostic.enabled) {
+    if (diagnostic.has_request_rect ||
+        diagnostic.input_row_padding % request.pixel_bytes != 0 ||
+        diagnostic.output_row_padding % external_pixel_bytes != 0 ||
+        (diagnostic.has_extent_hint &&
+         (diagnostic.extent_hint[2] > request.width ||
+          diagnostic.extent_hint[3] > request.height))) return -3;
+    request.rowbytes += diagnostic.input_row_padding;
+  }
   return 0;
 }
 

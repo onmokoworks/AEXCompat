@@ -1,4 +1,5 @@
 #include "worker_color_settings_runtime.hpp"
+#include "worker_cor_ace_profile.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
@@ -21,10 +22,18 @@ using aexcompat::worker_runtime::handles::unlock_aegp_mem_handle;
 using aexcompat::world_safety::LocalEffectWorld;
 using aexcompat::world_registry::aegp_world_type_from_format;
 struct ColorProfileRecord {
+  // Names a synthetic handle's identity. Zero on a record whose handle is a
+  // real `COR_ACE_Profile*`: there the object's own address is the identity,
+  // and COR hands the same address back for the same ICC bytes.
   uint64_t generation{};
   int32_t owner_plugin_id{1};
   ColorProfileKind kind{ColorProfileKind::Srgb};
   std::vector<uint8_t> icc_bytes;
+  // How many outstanding hand-outs of this handle the plug-in has yet to
+  // dispose. Always 1 for a synthetic handle (each carries a fresh
+  // generation), and up to the live cap for a real one, because COR answers
+  // equal ICC bytes with the same object (issue #1300).
+  uint32_t uses{1};
   bool live{true};
 };
 constexpr std::size_t kMaxIccProfileBytes = 16384;
@@ -35,6 +44,10 @@ HostHooks g_host_hooks{};
 AegpItemViewToken g_aegp_item_view{};
 std::mutex g_color_settings_mutex;
 std::unordered_map<void*, ColorProfileRecord> g_color_profiles;
+// Outstanding hand-outs, not map entries. The cap has to bound what the
+// plug-in holds, and with a real `COR_ACE_Profile*` many hand-outs share one
+// entry (issue #1300), so counting entries would stop bounding anything.
+std::size_t g_live_profile_uses{};
 std::atomic<uint64_t> g_color_profile_generation{1};
 ColorProfileKind g_working_color_space_kind{ColorProfileKind::Srgb};
 std::vector<uint8_t> g_working_color_space_icc;
@@ -392,32 +405,110 @@ bool color_settings_snapshot_profile(void* handle, ColorProfileRecord& record) {
   catch (...) { return false; }
   return true;
 }
+// AE's plug-in id names the caller for AE's own accounting. A plug-in that
+// never called AEGP_RegisterWithAEGP carries 0, which is what DeepGlow2 does
+// while acquiring and using AEGP suites from a normal render; refusing it made
+// this host stricter than AE about an identity AE does not appear to require
+// (issue #894). Nothing here decides ownership on this value: the profiles
+// this suite hands out are tracked by their own token, and the memory suite
+// tracks its handles under the host's own id, so admitting 0 does not loosen
+// any lifetime check.
+bool admissible_plugin_id(int32_t plugin_id) noexcept {
+  return plugin_id == 0 || plugin_id == 1;
+}
+
+// Whether the caller's comp handle names this worker's composition.
+bool caller_comp_matches(void* comp) noexcept {
+  return g_host_hooks.is_composition_handle
+      ? g_host_hooks.is_composition_handle(comp)
+      : comp == (g_host_hooks.composition_handle
+                     ? g_host_hooks.composition_handle() : nullptr);
+}
+
+// AE's `AEGP_ColorProfileP` is a `COR_ACE_Profile*` and plug-ins call COR's
+// methods on it directly, without going back through any suite (issue #1300).
+// So when COR.dll is in the process the host hands out a real one or fails the
+// callback; it does not invent a handle that faults the moment somebody
+// dereferences it.
+//
+// The synthetic handle survives only where nothing can mistake it for a COR
+// object: with COR.dll absent from the process, no plug-in and no host code
+// can reach `COR_ACE_Profile::GetID` at all, and the handle is what it has
+// always been - an opaque token this suite alone interprets. That is also the
+// world the self-test route runs in.
 int32_t color_settings_create_profile(int32_t plugin_id, ColorProfileKind kind,
                                       const std::vector<uint8_t>& icc, void** handle) {
-  if (plugin_id != 1 || !handle) return 4;
+  if (!admissible_plugin_id(plugin_id) || !handle) return 4;
   *handle = nullptr;
   if (icc.empty() || icc.size() > kMaxIccProfileBytes) return 4;
+  // The live cap is checked before the factory runs, not only after. COR's
+  // cache never releases, so building a profile the hand-out is about to refuse
+  // would spend one of its lifetime slots on nothing and turn a transient cap
+  // into a permanent one. Re-checked under the lock below, which is where it
+  // decides anything; this early look only avoids the wasted slot.
+  {
+    std::lock_guard<std::mutex> lock(g_color_settings_mutex);
+    if (g_live_profile_uses >= kMaxColorProfiles) return 4;
+  }
+  void* token = nullptr;
   uint64_t generation = 0;
-  if (!claim_profile_generation(generation)) return 4;
-  const auto token = reinterpret_cast<void*>(static_cast<uintptr_t>((generation << 3) | 7));
+  if (cor_ace::profile_factory_available()) {
+    // Outside the lock: `profile_from_icc` has its own, and the two are never
+    // held together.
+    token = cor_ace::profile_from_icc(icc.data(), icc.size());
+  } else {
+    if (!claim_profile_generation(generation)) return 4;
+    token = reinterpret_cast<void*>(static_cast<uintptr_t>((generation << 3) | 7));
+    cor_ace::note_synthetic_handle_issued();
+  }
   std::lock_guard<std::mutex> lock(g_color_settings_mutex);
-  if (g_color_profiles.size() >= kMaxColorProfiles) return 4;
+  // Fail-closed: COR is present, so a caller may dereference what it gets, and
+  // the host has nothing valid to give. `profile_from_icc` has already emitted
+  // the `callback_denied` marker naming why.
+  if (!token) { ++g_invalid_color_profile_operations; return 4; }
+  if (g_live_profile_uses >= kMaxColorProfiles) return 4;
+  // COR answers equal ICC bytes with the same object, so a second hand-out of
+  // one this suite already tracks is a second use of that record, not a
+  // rejected duplicate.
+  //
+  // The two guards below are defence in depth rather than reachable paths: a
+  // record whose `live` is false has already been erased in the same statement
+  // that cleared it, and the cache is keyed on exactly the bytes being
+  // compared, so neither can fire today. They are what would refuse a handle
+  // that stood for two different profiles if either of those ever stopped
+  // holding.
+  const auto existing = g_color_profiles.find(token);
+  if (existing != g_color_profiles.end()) {
+    if (!existing->second.live || existing->second.kind != kind ||
+        existing->second.icc_bytes != icc) {
+      ++g_invalid_color_profile_operations;
+      return 4;
+    }
+    ++existing->second.uses;
+    ++g_live_profile_uses;
+    ++g_color_profiles_created;
+    *handle = token;
+    return 0;
+  }
   ColorProfileRecord record{};
   record.generation = generation;
   record.owner_plugin_id = plugin_id;
   record.kind = kind;
   try {
     record.icc_bytes = icc;
+    record.uses = 1;
     record.live = true;
     if (!g_color_profiles.emplace(token, std::move(record)).second) return 4;
   } catch (...) { return 4; }
+  ++g_live_profile_uses;
   ++g_color_profiles_created;
   *handle = token;
   return 0;
 }
 bool color_settings_profiles_balanced() {
   std::lock_guard<std::mutex> lock(g_color_settings_mutex);
-  return g_color_profiles.empty() && g_color_profiles_created == g_color_profiles_disposed;
+  return g_color_profiles.empty() && g_live_profile_uses == 0 &&
+      g_color_profiles_created == g_color_profiles_disposed;
 }
 float color_settings_linear_to_srgb(float channel) {
   if (!(channel > 0.0f)) return 0.0f;
@@ -558,7 +649,7 @@ int32_t __cdecl color_xform_working_to_view(void* view, void** src, void** dst) 
 }
 int32_t __cdecl color_get_new_working_space_profile(int32_t plugin_id, void* comp, void** profile) {
   if (profile) *profile = nullptr;
-  if (plugin_id != 1 || comp != (g_host_hooks.composition_handle ? g_host_hooks.composition_handle() : nullptr) || !profile) return 4;
+  if (!admissible_plugin_id(plugin_id) || !caller_comp_matches(comp) || !profile) return 4;
   ColorProfileKind kind{};
   std::vector<uint8_t> icc;
   try {
@@ -574,7 +665,7 @@ int32_t __cdecl color_get_new_working_space_profile(int32_t plugin_id, void* com
 int32_t __cdecl color_get_new_profile_from_icc(int32_t plugin_id, int32_t icc_size,
                                                const void* icc_data, void** profile) {
   if (profile) *profile = nullptr;
-  if (plugin_id != 1 || !profile || !icc_data || icc_size <= 0 ||
+  if (!admissible_plugin_id(plugin_id) || !profile || !icc_data || icc_size <= 0 ||
       static_cast<std::size_t>(icc_size) > kMaxIccProfileBytes) {
     ++g_invalid_color_profile_operations; return 4;
   }
@@ -588,10 +679,16 @@ int32_t __cdecl color_get_new_profile_from_icc(int32_t plugin_id, int32_t icc_si
 int32_t __cdecl color_get_new_icc_from_profile(int32_t plugin_id, void* profile, void** icc_handle) {
   if (icc_handle) *icc_handle = nullptr;
   ColorProfileRecord record{};
-  if (plugin_id != 1 || !icc_handle || !color_settings_snapshot_profile(profile, record)) {
+  if (!admissible_plugin_id(plugin_id) || !icc_handle || !color_settings_snapshot_profile(profile, record)) {
     ++g_invalid_color_profile_operations; return 4;
   }
-  if (new_aegp_mem_handle(plugin_id, "color profile icc", static_cast<uint32_t>(record.icc_bytes.size()),
+  // The host's own id, not the caller's: memory handles are tracked under 1
+  // here (`new_aegp_mem_handle` refuses anything else), which is what makes
+  // admitting an unregistered caller above safe to do. Forwarding the caller's
+  // id instead meant an id-0 caller passed this suite's own check and then
+  // failed inside the memory suite, charging the refusal to that suite's
+  // counters - the sibling `make_utf16_handle` path has always passed 1.
+  if (new_aegp_mem_handle(1, "color profile icc", static_cast<uint32_t>(record.icc_bytes.size()),
                           1, icc_handle) != 0) return 4;
   void* bytes = nullptr;
   if (lock_aegp_mem_handle(*icc_handle, &bytes) != 0 || !bytes) {
@@ -603,21 +700,40 @@ int32_t __cdecl color_get_new_icc_from_profile(int32_t plugin_id, void* profile,
 int32_t __cdecl color_get_new_profile_description(int32_t plugin_id, void* profile, void** desc_handle) {
   if (desc_handle) *desc_handle = nullptr;
   ColorProfileRecord record{};
-  if (plugin_id != 1 || !desc_handle || !color_settings_snapshot_profile(profile, record)) {
+  if (!admissible_plugin_id(plugin_id) || !desc_handle || !color_settings_snapshot_profile(profile, record)) {
     ++g_invalid_color_profile_operations; return 4;
   }
   return make_utf16_handle(color_settings_profile_description(record.kind),
                            "color profile description", desc_handle);
 }
+// Retires one hand-out. A handle nobody was given, or one whose hand-outs have
+// all been disposed already, is refused exactly as before - the accounting that
+// makes a double dispose detectable is the use count, not the map entry, now
+// that one entry can stand for several outstanding hand-outs (issue #1300).
+// The `COR_ACE_Profile` behind a real handle is not destroyed here: it belongs
+// to COR's cache for the life of the worker (worker_cor_ace_profile.hpp).
+//
+// The one thing a real handle's identity does not survive is a later, identical
+// create: COR answers the same ICC bytes with the same address, so a handle
+// disposed down to zero uses becomes live again if somebody builds that profile
+// afterwards. That is the same aliasing AE has - its handles are heap addresses
+// too - and it is written up where the caching is (worker_cor_ace_profile.hpp).
 int32_t __cdecl color_dispose_profile(void* profile) {
   if (!profile) { ++g_invalid_color_profile_operations; return 4; }
   std::lock_guard<std::mutex> lock(g_color_settings_mutex);
   const auto found = g_color_profiles.find(profile);
-  if (found == g_color_profiles.end() || !found->second.live) {
+  if (found == g_color_profiles.end() || !found->second.live ||
+      found->second.uses == 0) {
     ++g_invalid_color_profile_operations; return 4;
   }
-  found->second.live = false;
-  g_color_profiles.erase(found);
+  // Exactly paired with the increments above: every hand-out raises both
+  // counters under this lock, and this is the only place either falls.
+  --found->second.uses;
+  --g_live_profile_uses;
+  if (found->second.uses == 0) {
+    found->second.live = false;
+    g_color_profiles.erase(found);
+  }
   ++g_color_profiles_disposed;
   return 0;
 }
@@ -640,7 +756,7 @@ int32_t __cdecl color_is_rgb_profile(void* profile, uint8_t* is_rgb) {
 }
 int32_t __cdecl color_set_working_color_space(int32_t plugin_id, void* comp, void* profile) {
   ColorProfileRecord record{};
-  if (plugin_id != 1 || comp != (g_host_hooks.composition_handle ? g_host_hooks.composition_handle() : nullptr) || !color_settings_snapshot_profile(profile, record))
+  if (!admissible_plugin_id(plugin_id) || !caller_comp_matches(comp) || !color_settings_snapshot_profile(profile, record))
     return 4;
   std::lock_guard<std::mutex> lock(g_color_settings_mutex);
   try {
@@ -689,25 +805,25 @@ int32_t __cdecl color_get_ocio_display_colorspace(int32_t plugin_id, void** disp
 int32_t __cdecl color_is_colorspace_aware_effects_enabled(int32_t plugin_id, uint8_t* enabled) {
   if (!enabled) return 4;
   *enabled = 0;
-  if (plugin_id != 1) return 4;
+  if (!admissible_plugin_id(plugin_id)) return 4;
   return 0;
 }
 int32_t __cdecl color_get_lut_interpolation_method(int32_t plugin_id, uint16_t* method) {
   if (!method) return 4;
   *method = 0;
-  if (plugin_id != 1) return 4;
+  if (!admissible_plugin_id(plugin_id)) return 4;
   return 0;
 }
 int32_t __cdecl color_get_graphics_white_luminance(int32_t plugin_id, uint16_t* luminance) {
   if (!luminance) return 4;
   *luminance = 0;
-  if (plugin_id != 1) return 4;
+  if (!admissible_plugin_id(plugin_id)) return 4;
   return 0;
 }
 int32_t __cdecl color_get_working_colorspace_id(int32_t plugin_id, AegpGuidValue* guid) {
   if (!guid) return 4;
   guid->bytes = {};
-  if (plugin_id != 1) return 4;
+  if (!admissible_plugin_id(plugin_id)) return 4;
   ColorProfileKind kind{};
   { std::lock_guard<std::mutex> lock(g_color_settings_mutex); kind = g_working_color_space_kind; }
   guid->bytes = kind == ColorProfileKind::LinearSrgb ? kWorkingLinearSrgbGuid : kWorkingSrgbGuid;
@@ -729,7 +845,7 @@ const void* suite() {
 }
 Statistics color_settings_statistics() {
   std::lock_guard<std::mutex> lock(g_color_settings_mutex);
-  return {g_color_profiles_created, g_color_profiles_disposed, g_color_profiles.size(),
+  return {g_color_profiles_created, g_color_profiles_disposed, g_live_profile_uses,
           g_invalid_color_profile_operations, g_color_xform_calls};
 }
 void reset_working_space_to_srgb() {

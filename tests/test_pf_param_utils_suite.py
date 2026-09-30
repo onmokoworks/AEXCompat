@@ -3,24 +3,21 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PARAM_SUITES = ROOT / "minihost" / "src" / "worker_pf_param_suites.cpp"
-PF_STATE_RUNTIME = ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp"
-SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_parameter_selftests.cpp"
 
 def _worker():
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
     candidates = [
         Path(configured) if configured else None,
-        ROOT / "target/minihost-build-v18/Release/aex_render_worker.exe",
-        ROOT / "target/minihost-build-v18/aex_render_worker.exe",
+        ROOT / "target/minihost-build-v18/Release/aex_worker.exe",
+        ROOT / "target/minihost-build-v18/aex_worker.exe",
     ]
     return next((path for path in candidates if path and path.is_file()), None)
 
 def test_param_utils_suite3_native_self_test():
     executable = _worker()
-    assert executable is not None, "build aex_render_worker before running the focused runtime test"
+    assert executable is not None, "build aex_worker.exe (pwsh -File tools/build-native.ps1) before running the focused runtime test"
     completed = subprocess.run(
-        [str(executable), "--self-test-pf-param-utils-suite"],
+        [str(executable), "--kind", "classic", "--self-test-pf-param-utils-suite"],
         cwd=ROOT,
         text=True,
         capture_output=True,

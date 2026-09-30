@@ -3,6 +3,727 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repository_root_prefers_worktree_cwd_to_a_separated_binary_location() {
+        let fixture = std::env::temp_dir().join(format!(
+            "aexcompat-harness-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = fixture.join("worktree");
+        std::fs::create_dir_all(root.join("guest")).unwrap();
+        std::fs::create_dir_all(root.join("broker/crates/harness")).unwrap();
+        std::fs::write(root.join("guest/Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(root.join("broker/Cargo.toml"), "[workspace]\n").unwrap();
+
+        let cwd = root.join("broker/crates/harness");
+        let separated_exe = fixture.join("target/debug/aexcompat-harness.exe");
+        assert_eq!(
+            repository_root_from_runtime_paths(Some(cwd), Some(separated_exe)),
+            Some(root)
+        );
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn aegp_roundtrip_gui_exposes_and_routes_each_shipping_action() {
+        let ui_kit = AexUiKit::default();
+        for expected in AegpRoundtripAction::ALL {
+            let click = |busy| {
+                let ctx = egui::Context::default();
+                let mut rect = egui::Rect::NOTHING;
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 500.0),
+                    )),
+                    ..Default::default()
+                });
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    let (clicked, buttons) = show_aegp_roundtrip_actions(ui, busy, &ui_kit);
+                    assert_eq!(clicked, None);
+                    assert_eq!(
+                        buttons
+                            .iter()
+                            .map(|(action, _)| *action)
+                            .collect::<Vec<_>>(),
+                        AegpRoundtripAction::ALL
+                    );
+                    rect = buttons
+                        .into_iter()
+                        .find(|(action, _)| *action == expected)
+                        .unwrap()
+                        .1;
+                });
+                let _ = ctx.end_pass();
+
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 500.0),
+                    )),
+                    events: vec![
+                        egui::Event::PointerMoved(rect.center()),
+                        egui::Event::PointerButton {
+                            pos: rect.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos: rect.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                });
+                let mut clicked = None;
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    clicked = show_aegp_roundtrip_actions(ui, busy, &ui_kit).0;
+                });
+                let _ = ctx.end_pass();
+                clicked
+            };
+            assert_eq!(click(false), Some(expected));
+            assert_eq!(click(true), None, "busy GUI must reject a second task");
+        }
+
+        let expected = [
+            (
+                "dispatch_aegp_keyframe_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_keyframe_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+            (
+                "dispatch_aegp_seek_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_seek_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+            (
+                "dispatch_aegp_trim_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_trim_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+            (
+                "dispatch_aegp_switch_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_switch_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+        ];
+        for (action, (operation, dispatch)) in AegpRoundtripAction::ALL.into_iter().zip(expected) {
+            let spec = action.spec();
+            assert_eq!(spec.operation, operation);
+            assert!(std::ptr::fn_addr_eq(spec.dispatch, dispatch));
+        }
+    }
+
+    #[test]
+    fn aegp_roundtrip_app_dispatch_preserves_selection_and_task_lifecycle() {
+        let root = temporary_directory("ui-aegp-roundtrip-dispatch");
+        let plugin = root.join("provider.aex");
+        fs::write(&plugin, b"fixture").unwrap();
+        let mut app = HarnessApp::new(root.clone());
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            sha256: "approved-hash".into(),
+            size: 7,
+            modified: Some(SystemTime::UNIX_EPOCH),
+        });
+        let (observed_sender, observed_receiver) = mpsc::channel();
+        app.dispatch_aegp_roundtrip_with(
+            AegpRoundtripAction::Seek,
+            move |repository, path, hash| {
+                observed_sender
+                    .send((
+                        repository.to_path_buf(),
+                        path.to_path_buf(),
+                        hash.to_owned(),
+                    ))
+                    .unwrap();
+                Ok(serde_json::json!({"event_requested": "seek_roundtrip"}))
+            },
+        );
+
+        assert!(app.busy);
+        assert_eq!(app.status, AegpRoundtripAction::Seek.status());
+        let observed = observed_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(observed, (root.clone(), plugin, "approved-hash".into()));
+        let result = app
+            .receiver
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.operation.as_deref(),
+            Some(AegpRoundtripAction::Seek.spec().operation)
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result.body).unwrap()["event_requested"],
+            "seek_roundtrip"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn input_image_path_uses_one_state_transition_for_picker_and_drop() {
+        let root = temporary_directory("ui-dropped-input");
+        let valid = root.join("frame.PNG");
+        let invalid = root.join("notes.txt");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&valid)
+            .unwrap();
+        fs::write(&invalid, b"not an image").unwrap();
+        assert!(is_supported_input_image(&valid));
+        assert!(!is_supported_input_image(&invalid));
+        assert!(!is_supported_input_image(&root.join("missing.png")));
+        let path_drop = egui::DroppedFile {
+            path: Some(valid.clone()),
+            ..Default::default()
+        };
+        let memory_drop = egui::DroppedFile {
+            name: "clipboard.png".into(),
+            bytes: Some(std::sync::Arc::from(&b"payload"[..])),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::shared_ui::single_supported_dropped_path(
+                std::slice::from_ref(&path_drop),
+                is_supported_input_image,
+            ),
+            Some(valid.clone())
+        );
+        assert!(
+            crate::shared_ui::single_supported_dropped_path(
+                std::slice::from_ref(&memory_drop),
+                is_supported_input_image,
+            )
+            .is_none()
+        );
+        assert!(
+            crate::shared_ui::single_supported_dropped_path(
+                &[path_drop, memory_drop],
+                is_supported_input_image,
+            )
+            .is_none()
+        );
+
+        let ctx = egui::Context::default();
+        let mut app = HarnessApp::new(root.clone());
+        app.output_image = Some(root.join("stale-output.png"));
+        app.viewer_mode = 2;
+        app.load_input_path(&ctx, valid.clone());
+        assert_eq!(app.input_image.as_deref(), Some(valid.as_path()));
+        assert_eq!(app.input_preview.as_ref().unwrap().size(), [3, 2]);
+        assert!(app.output_image.is_none());
+        assert_eq!(app.viewer_mode, 0);
+        assert_eq!(app.status, "Input image loaded. Ready to render.");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn analysis_panel_uses_shared_bounded_state() {
+        let mut state = crate::gui_state::AnalysisPaneState::default();
+        state.set_width(0.0);
+        assert_eq!(state.width, crate::gui_state::AnalysisPaneState::MIN_WIDTH);
+        state.set_width(f32::MAX);
+        assert_eq!(state.width, crate::gui_state::AnalysisPaneState::MAX_WIDTH);
+        state.set_width(540.0 + 8.0);
+        assert_eq!(state.width, 548.0);
+    }
+
+    #[test]
+    fn render_success_requires_a_displayable_output_image() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-output-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let valid = root.join("valid.png");
+        image::RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255]))
+            .save(&valid)
+            .unwrap();
+        let prepared = prepare_render_preview(true, Some("render_image"), Some(&valid))
+            .expect("valid PNG must complete the UI render boundary")
+            .expect("image render must publish a preview");
+        assert_eq!(prepared.0, valid);
+        assert_eq!(prepared.1.size, [2, 3]);
+
+        let missing = root.join("missing.png");
+        assert!(
+            prepare_render_preview(true, Some("render_image"), Some(&missing))
+                .unwrap_err()
+                .contains("not displayable")
+        );
+        assert!(
+            prepare_render_preview(true, Some("render_image"), None)
+                .unwrap_err()
+                .contains("without an output image")
+        );
+        assert!(
+            prepare_render_preview(false, Some("render_image"), Some(&missing))
+                .unwrap()
+                .is_none(),
+            "a native failure must retain its original report"
+        );
+        assert!(
+            prepare_render_preview(true, Some("render_audio"), Some(&missing))
+                .unwrap()
+                .is_none(),
+            "non-image outputs must not be decoded as previews"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ui_output_failure_preserves_native_result_and_surfaces_details() {
+        let report = report_ui_output_failure(
+            r#"{"passed":true,"worker_diagnostics":{"stage":"render"}}"#,
+            "native render output is not displayable",
+        );
+        let value: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(value["native_passed"], true);
+        assert_eq!(value["passed"], false);
+        assert_eq!(value["worker_diagnostics"]["stage"], "render");
+        assert_eq!(value["ui_output"]["displayable"], false);
+        assert_eq!(
+            native_failure_status(Some("render_image"), &report),
+            "AEX output could not be loaded."
+        );
+        assert_eq!(
+            visible_report_summary(&report).as_deref(),
+            Some("native render output is not displayable")
+        );
+
+        let missing_worker = serde_json::json!({
+            "passed": false,
+            "error": "session open failed: local worker binary is missing or unreadable"
+        });
+        let missing_worker = missing_worker.to_string();
+        assert_eq!(
+            native_failure_status(Some("render_image"), &missing_worker),
+            "Required render worker is missing or unreadable."
+        );
+        assert!(
+            visible_report_summary(&missing_worker)
+                .unwrap()
+                .contains("local worker binary is missing")
+        );
+    }
+
+    #[test]
+    fn render_worker_preflight_and_disconnected_tasks_are_explicit() {
+        let repository = Path::new("C:/aexcompat");
+        assert_eq!(
+            required_render_worker_path(repository, false),
+            repository.join("target/minihost-build/aex_worker.exe")
+        );
+        assert_eq!(
+            required_render_worker_path(repository, true),
+            repository.join("target/minihost-build/aex_worker.exe")
+        );
+
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let result = receive_task_result(&receiver).expect("disconnect must become a UI result");
+        assert!(!result.success);
+        assert!(
+            visible_report_summary(&result.body)
+                .unwrap()
+                .contains("ended without returning a result")
+        );
+    }
+
+    #[test]
+    fn poll_connects_native_image_result_to_ui_preview_and_failure_state() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-poll-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let output = root.join("output.png");
+        image::RgbaImage::from_pixel(4, 5, image::Rgba([9, 8, 7, 255]))
+            .save(&output)
+            .unwrap();
+        let mut app = HarnessApp::new(root.clone());
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TaskResult {
+                success: true,
+                body: serde_json::json!({ "passed": true }).to_string(),
+                output: Some(output.clone()),
+                identity: None,
+                operation: Some("render_image".into()),
+                diagnostic_eligible: false,
+            })
+            .unwrap();
+        app.receiver = Some(receiver);
+        app.busy = true;
+        app.rendering = true;
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        app.poll(&ctx);
+        let _ = ctx.end_pass();
+        assert_eq!(app.output_image.as_deref(), Some(output.as_path()));
+        assert_eq!(app.preview.as_ref().unwrap().size(), [4, 5]);
+        assert_eq!(app.viewer_mode, 1);
+        assert_eq!(app.status, "AEX output ready.");
+        assert!(!app.busy);
+        assert!(!app.rendering);
+
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TaskResult {
+                success: false,
+                body: serde_json::json!({
+                    "passed": false,
+                    "error": "session open failed: local worker binary is missing or unreadable"
+                })
+                .to_string(),
+                output: None,
+                identity: None,
+                operation: Some("render_image".into()),
+                diagnostic_eligible: false,
+            })
+            .unwrap();
+        app.receiver = Some(receiver);
+        app.busy = true;
+        app.rendering = true;
+        ctx.begin_pass(Default::default());
+        app.poll(&ctx);
+        let _ = ctx.end_pass();
+        assert!(app.output_image.is_none());
+        assert!(app.preview.is_none());
+        assert_eq!(
+            app.status,
+            "Required render worker is missing or unreadable."
+        );
+        assert!(
+            visible_report_summary(&app.report)
+                .unwrap()
+                .contains("local worker binary is missing")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_update_render_completion_preserves_compare_view() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-compare-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let output = root.join("output.png");
+        image::RgbaImage::from_pixel(4, 5, image::Rgba([9, 8, 7, 255]))
+            .save(&output)
+            .unwrap();
+        let ctx = egui::Context::default();
+        let mut app = HarnessApp::new(root.clone());
+        app.input_preview = Some(ctx.load_texture(
+            "compare-input",
+            egui::ColorImage::new([4, 5], vec![egui::Color32::BLACK; 20]),
+            egui::TextureOptions::LINEAR,
+        ));
+        app.viewer_mode = 2;
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TaskResult {
+                success: true,
+                body: serde_json::json!({ "passed": true }).to_string(),
+                output: Some(output),
+                identity: None,
+                operation: Some("render_image".into()),
+                diagnostic_eligible: false,
+            })
+            .unwrap();
+        app.receiver = Some(receiver);
+        app.busy = true;
+        app.rendering = true;
+        ctx.begin_pass(Default::default());
+        app.poll(&ctx);
+        let _ = ctx.end_pass();
+        assert!(app.preview.is_some());
+        assert_eq!(app.viewer_mode, 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn closing_aex_clears_plugin_authority_and_output_but_keeps_input() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-close-aex-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = HarnessApp::new(root.clone());
+        app.selection = Some(Selection {
+            path: root.join("effect.aex"),
+            size: 123,
+            sha256: "ABC".into(),
+            modified: None,
+        });
+        app.session_approved = true;
+        app.input_image = Some(root.join("input.png"));
+        app.output_image = Some(root.join("output.png"));
+        app.preview = Some(ctx.load_texture(
+            "close-output",
+            egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]),
+            egui::TextureOptions::LINEAR,
+        ));
+        app.viewer_mode = 2;
+        app.pending_live_render = true;
+        app.render_after_parameter_change = true;
+
+        app.close_selected_aex();
+
+        assert!(app.selection.is_none());
+        assert!(!app.session_approved);
+        assert!(app.parameters.is_empty());
+        assert!(app.smart_render_capability.is_none());
+        assert!(app.output_image.is_none());
+        assert!(app.preview.is_none());
+        assert_eq!(app.viewer_mode, 0);
+        assert!(!app.pending_live_render);
+        assert!(!app.render_after_parameter_change);
+        assert_eq!(
+            app.input_image.as_deref(),
+            Some(root.join("input.png").as_path())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn individual_reset_queues_the_same_supervised_or_live_transition_as_an_edit() {
+        let mut app = HarnessApp::new(std::env::temp_dir());
+        let now = Instant::now();
+
+        app.queue_parameter_transition(7, true, now);
+        assert_eq!(app.pending_parameter_slot, Some(7));
+        assert!(!app.pending_live_render);
+        assert_eq!(
+            app.live_render_due,
+            Some(now + std::time::Duration::from_millis(500))
+        );
+
+        app.pending_parameter_slot = None;
+        app.live_render_due = None;
+        app.live_render = true;
+        app.queue_parameter_transition(8, false, now);
+        assert_eq!(app.pending_parameter_slot, None);
+        assert!(app.pending_live_render);
+        assert_eq!(
+            app.live_render_due,
+            Some(now + std::time::Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn reset_all_preserves_runtime_ui_state_and_queues_live_render_only_on_change() {
+        let mut app = HarnessApp::new(std::env::temp_dir());
+        let mut default = parameter(1, "integer");
+        default.value = 10.0;
+        let mut current = default.clone();
+        current.value = 40.0;
+        current.enabled = false;
+        current.visible = false;
+        current.supervised = true;
+        current.minimum = -100.0;
+        current.maximum = 500.0;
+        app.parameter_defaults = vec![default];
+        app.parameters = vec![current];
+        app.live_render = true;
+        let now = Instant::now();
+
+        assert!(app.reset_all_parameters(now));
+        assert_eq!(app.parameters[0].value, 10.0);
+        assert!(!app.parameters[0].enabled);
+        assert!(!app.parameters[0].visible);
+        assert!(app.parameters[0].supervised);
+        assert_eq!(
+            (app.parameters[0].minimum, app.parameters[0].maximum),
+            (-100.0, 500.0)
+        );
+        assert!(app.pending_live_render);
+        assert_eq!(
+            app.live_render_due,
+            Some(now + std::time::Duration::from_millis(500))
+        );
+
+        app.pending_live_render = false;
+        app.live_render_due = None;
+        assert!(!app.reset_all_parameters(now));
+        assert!(!app.pending_live_render);
+        assert_eq!(app.live_render_due, None);
+    }
+
+    #[test]
+    fn render_input_changes_invalidate_the_previous_ui_output() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-invalidate-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut app = HarnessApp::new(root.clone());
+        let ctx = egui::Context::default();
+        app.output_image = Some(root.join("old.png"));
+        app.pixel_comparison = Some(Err("old comparison".into()));
+        app.viewer_mode = 2;
+        app.preview = Some(ctx.load_texture(
+            "old-output",
+            egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]),
+            egui::TextureOptions::LINEAR,
+        ));
+        app.invalidate_render_output();
+        assert!(app.output_image.is_none());
+        assert!(app.preview.is_none());
+        assert!(app.pixel_comparison.is_none());
+        assert_eq!(app.viewer_mode, 0);
+
+        app.output_image = Some(root.join("old-again.png"));
+        app.preview = Some(ctx.load_texture(
+            "old-output-again",
+            egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]),
+            egui::TextureOptions::LINEAR,
+        ));
+        app.viewer_mode = 2;
+        app.clear_render_output();
+        assert!(app.output_image.is_none());
+        assert!(app.preview.is_none());
+        assert_eq!(
+            app.viewer_mode, 2,
+            "Auto Update invalidation must preserve the selected compare view"
+        );
+
+        let before = app.current_render_input_fingerprint();
+        app.frame += 1;
+        assert_ne!(app.current_render_input_fingerprint(), before);
+        app.apply_custom_ui_click_to_render = true;
+        let before_click_edit = app.current_render_input_fingerprint();
+        app.custom_ui_click_point[0] += 1;
+        assert_ne!(app.current_render_input_fingerprint(), before_click_edit);
+        let before_color_edit = app.current_render_input_fingerprint();
+        app.custom_ui_click_color[2] = 0.5;
+        assert_ne!(app.current_render_input_fingerprint(), before_color_edit);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_inspection_paths_are_absolute_and_deverbatim() {
+        let relative = Path::new("Cargo.toml");
+        let canonical = canonical_deverbatim(relative).unwrap();
+        assert!(canonical.is_absolute());
+        assert!(!canonical.as_os_str().to_string_lossy().starts_with(r"\\?\"));
+        let roots = inspect_dependency_roots(relative, &[]).unwrap();
+        assert_eq!(roots, vec![canonical.parent().unwrap().to_path_buf()]);
+    }
+
+    #[test]
+    fn inspected_defaults_are_normalized_before_ui_or_cli_rendering() {
+        let parameter = aexcompat_broker::image_render::InteractiveParameter {
+            slot: 5,
+            name: "Brightness Gain".to_owned(),
+            kind: "float".to_owned(),
+            minimum: 1.0,
+            maximum: 100.0,
+            value: 0.1,
+            choices: Vec::new(),
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0; 2],
+        };
+        let arbitrary = aexcompat_broker::image_render::InteractiveParameter {
+            slot: 14,
+            name: "Ramp".to_owned(),
+            kind: "arbitrary_data".to_owned(),
+            debug_summary: None,
+            ..parameter.clone()
+        };
+        let descriptor = |slot, kind: &str| aexcompat_broker::image_render::InteractiveParameter {
+            slot,
+            name: kind.to_owned(),
+            kind: kind.to_owned(),
+            minimum: 0.0,
+            maximum: 0.0,
+            value: 0.0,
+            ..parameter.clone()
+        };
+        let radial_blur_parameters = [
+            parameter.clone(),
+            arbitrary,
+            descriptor(3, "group_start"),
+            descriptor(8, "group_end"),
+            descriptor(26, "layer"),
+        ];
+        let normalized = normalize_inspected_ui_parameters(&radial_blur_parameters);
+        assert_eq!(normalized[0].value, 1.0);
+        assert_eq!(normalized.len(), 5, "UI keeps every discovered descriptor");
+        assert_eq!(normalized[1].kind, "arbitrary_data");
+        let defaults = normalized.clone();
+        let sendable = parameters_for_native_action(&normalized, &defaults);
+        assert_eq!(
+            sendable.len(),
+            1,
+            "render omits unsendable defaults and display-only descriptors"
+        );
+        assert!(
+            aexcompat_broker::image_render::encode_interactive_payload(&sendable).is_ok(),
+            "normalized discovery defaults must be renderable"
+        );
+        assert!(
+            aexcompat_broker::image_render::encode_interactive_payload(&[parameter]).is_err(),
+            "an explicit out-of-range edit remains fail-closed"
+        );
+        let mut displayed = normalized.clone();
+        displayed[1].debug_summary = Some(String::new());
+        assert_eq!(
+            parameters_for_native_action(&displayed, &defaults).len(),
+            1,
+            "opening an empty arbitrary editor does not make it sendable"
+        );
+        displayed[1].debug_summary = Some("edited ramp".to_owned());
+        assert_eq!(
+            parameters_for_native_action(&displayed, &defaults).len(),
+            2,
+            "an explicit printable arbitrary edit is retained"
+        );
+    }
+
+    #[test]
     fn parameter_signature_ignores_values_but_pins_structure() {
         let parameter = |slot: u32, kind: &str, value: f64| {
             serde_json::from_value::<aexcompat_broker::image_render::InteractiveParameter>(
@@ -49,6 +770,7 @@ mod tests {
         let key = |selection| LiveSessionKey {
             plugin_sha256: "a".repeat(64),
             dependency_identities: vec![],
+            dependency_search_dirs: vec![],
             parameter_signature: "[]".into(),
             selection,
             width: 16,
@@ -62,6 +784,12 @@ mod tests {
         // resident key so `render_live_request` closes and reopens instead of
         // reporting a new source from a stale session.
         assert!(key(auto) != key(manual));
+        let mut rooted = key(auto);
+        rooted.dependency_search_dirs = vec![PathBuf::from(r"C:\runtime")];
+        assert!(
+            key(auto) != rooted,
+            "a runtime-root change must reopen the resident worker"
+        );
         assert!(selected_interactive_session_selection(smart, false, true).is_err());
 
         let classic = InspectedRenderCapability {
@@ -94,6 +822,119 @@ mod tests {
         ] {
             assert!(inspected_render_capability(&report).is_err(), "{report}");
         }
+    }
+
+    #[test]
+    fn parameter_inspection_state_distinguishes_zero_filtering_and_failure_inputs() {
+        let parameter = |visible: bool| {
+            serde_json::from_value::<aexcompat_broker::image_render::InteractiveParameter>(
+                serde_json::json!({
+                    "slot": 1, "name": "Amount", "kind": "float",
+                    "minimum": 0.0, "maximum": 100.0, "value": 25.0,
+                    "choices": [], "color": [0, 0, 0, 0],
+                    "components": [0.0, 0.0, 0.0], "component_count": 0,
+                    "layer_path": null, "enabled": true, "visible": visible,
+                    "supervised": false,
+                }),
+            )
+            .unwrap()
+        };
+        let report = |raw_count: usize| {
+            serde_json::json!({
+                "worker_diagnostics": {
+                    "parameter_metadata": (0..raw_count)
+                        .map(|index| serde_json::json!({"index": index + 1}))
+                        .collect::<Vec<_>>()
+                }
+            })
+        };
+
+        assert_eq!(
+            parameter_inspection_state(&report(0), &[]).unwrap(),
+            ParameterInspectionState::ZeroParameters
+        );
+        assert_eq!(
+            parameter_inspection_state(&report(1), &[]).unwrap(),
+            ParameterInspectionState::UnsupportedParameters
+        );
+        assert_eq!(
+            parameter_inspection_state(&report(1), &[parameter(false)]).unwrap(),
+            ParameterInspectionState::HiddenParameters
+        );
+        assert_eq!(
+            parameter_inspection_state(&report(1), &[parameter(true)]).unwrap(),
+            ParameterInspectionState::Ready
+        );
+        assert!(parameter_inspection_state(&serde_json::json!({}), &[]).is_err());
+        assert!(parameter_inspection_state(&report(0), &[parameter(true)]).is_err());
+
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::ZeroParameters),
+            Some((
+                "This effect intentionally declared no parameters.",
+                "このエフェクトはパラメーターを定義していません。"
+            ))
+        );
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::UnsupportedParameters),
+            Some((
+                "This effect declared parameters, but none use supported control types.",
+                "パラメーターはありますが、対応しているコントロール形式がありません。"
+            ))
+        );
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::HiddenParameters),
+            Some((
+                "This effect declared controls, but all are hidden by the plug-in.",
+                "コントロールはありますが、プラグインによってすべて非表示です。"
+            ))
+        );
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::Failed),
+            Some((
+                "Effect Controls inspection failed. See the diagnostic report below.",
+                "エフェクトコントロールの検査に失敗しました。下の診断レポートを確認してください。"
+            ))
+        );
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::Ready),
+            None
+        );
+        assert_eq!(
+            parameter_inspection_status(
+                ParameterInspectionState::HiddenParameters,
+                &[parameter(false)],
+                false
+            ),
+            "Effect Controls inspected: all declared controls are hidden. Render path: Classic."
+        );
+        assert_eq!(
+            parameter_inspection_status(
+                ParameterInspectionState::Ready,
+                &[parameter(false), parameter(true)],
+                true
+            ),
+            "Effect Controls ready: 1 visible parameter(s). Render path: SmartFX."
+        );
+    }
+
+    #[test]
+    fn render_action_requires_current_successful_inspection() {
+        assert!(render_action_enabled(false, true, true, true, false, true));
+        assert!(!render_action_enabled(
+            false, true, true, true, false, false
+        ));
+        assert!(!render_action_enabled(
+            false, true, true, false, false, true
+        ));
+        assert!(!render_action_enabled(false, true, true, true, true, true));
+        assert!(!render_action_enabled(true, true, true, true, false, true));
+        assert!(!render_action_enabled(
+            false, false, true, true, false, true
+        ));
+        assert!(!render_action_enabled(
+            false, true, false, true, false, true
+        ));
     }
 
     #[test]
@@ -1017,21 +1858,18 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_depth_is_not_misreported_as_a_selector_or_rect_failure() {
+    fn stale_unsupported_depth_flag_does_not_hide_a_selector_or_rect_failure() {
         let message = concat!(
             r#"failed: diagnostics={"classification":"nonzero_exit","failure_stage":"render"}, report="#,
             r#"{"depth_supported":false,"smart_render_error":-1,"result_rects_valid":false}"#,
         );
         let diagnostics = failure_diagnostics(message).unwrap();
-        assert_eq!(diagnostics.classification, "unsupported_pixel_depth");
-        assert_eq!(
-            diagnostics.failure_stage.as_deref(),
-            Some("pixel_depth_negotiation")
-        );
-        assert_eq!(diagnostics.selector_error, None);
+        assert_eq!(diagnostics.classification, "nonzero_exit");
+        assert_eq!(diagnostics.failure_stage.as_deref(), Some("render"));
+        assert_eq!(diagnostics.selector_error, Some(-1));
         assert_eq!(
             matrix_error_summary(message),
-            "AEX did not advertise support for the requested pixel depth"
+            "SmartFX did not return a valid result rectangle"
         );
     }
 
@@ -1061,13 +1899,16 @@ mod tests {
             "cases": [
                 {"render_path":"classic","pixel_format":"argb8","passed":true,
                  "classification":"ok","output_png":"classic.png",
-                 "output_relation":"pixels_changed","differing_input_pixels":42},
+                 "output_relation":"pixels_changed","differing_input_pixels":42,
+                 "advertised_depth_supported":true,"planned_dispatch_pixel_bytes":4,
+                 "dispatch_pixel_bytes":4,"depth_relation":"native"},
                 {"render_path":"smartfx","pixel_format":"argb32f","passed":false,
                  "classification":"crashed","failure_stage":"smart_render_gpu",
                  "selector_error":512,"error":"GPU selector crashed"},
-                {"render_path":"classic","pixel_format":"argb16","passed":false,
-                 "applicable":false,"classification":"unsupported_pixel_depth",
-                 "failure_stage":"pixel_depth_negotiation"}
+                {"render_path":"classic","pixel_format":"argb16","passed":true,
+                 "applicable":true,"classification":"depth_fallback_rendered",
+                 "advertised_depth_supported":false,"planned_dispatch_pixel_bytes":4,
+                 "dispatch_pixel_bytes":4,"depth_relation":"advertised_fallback"}
             ]
         });
         let cases = compatibility_matrix(&report).unwrap();
@@ -1077,14 +1918,79 @@ mod tests {
         assert_eq!(cases[0].output_png.as_deref(), Some("classic.png"));
         assert_eq!(cases[0].output_relation.as_deref(), Some("pixels_changed"));
         assert_eq!(cases[0].differing_input_pixels, Some(42));
+        assert_eq!(cases[0].depth_relation.as_deref(), Some("native"));
         assert!(!cases[1].passed);
         assert_eq!(cases[1].classification, "crashed");
         assert_eq!(cases[1].failure_stage.as_deref(), Some("smart_render_gpu"));
         assert_eq!(cases[1].selector_error, Some(512));
         assert_eq!(cases[1].error.as_deref(), Some("GPU selector crashed"));
-        assert!(!cases[2].passed);
-        assert!(!cases[2].applicable);
-        assert_eq!(cases[2].classification, "unsupported_pixel_depth");
+        assert!(cases[2].passed);
+        assert!(cases[2].applicable);
+        assert_eq!(cases[2].classification, "depth_fallback_rendered");
+        assert_eq!(cases[2].advertised_depth_supported, Some(false));
+        assert_eq!(cases[2].planned_dispatch_pixel_bytes, Some(4));
+        assert_eq!(cases[2].dispatch_pixel_bytes, Some(4));
+        assert_eq!(
+            cases[2].depth_relation.as_deref(),
+            Some("advertised_fallback")
+        );
+    }
+
+    #[test]
+    fn depth_render_classification_separates_plugin_fallback_from_gpu_capture() {
+        assert_eq!(depth_render_classification(4, 4, 4), ("ok", "native"));
+        assert_eq!(
+            depth_render_classification(8, 4, 4),
+            ("depth_fallback_rendered", "advertised_fallback")
+        );
+        assert_eq!(
+            depth_render_classification(4, 4, 16),
+            ("capture_converted_rendered", "gpu_capture_conversion")
+        );
+        assert_eq!(
+            depth_render_classification(8, 4, 16),
+            ("depth_fallback_rendered", "fallback_and_gpu_capture")
+        );
+    }
+
+    #[test]
+    fn matrix_success_classification_distinguishes_no_image_from_missing_provenance() {
+        let empty =
+            serde_json::json!({"width":0,"height":0,"output_png":null,"depth_provenance":null});
+        assert_eq!(
+            matrix_success_classification(&empty, 4),
+            (
+                "empty_result",
+                "not_dispatched",
+                false,
+                true,
+                Some("empty_result")
+            )
+        );
+        let audio_only = serde_json::json!({"width":2,"height":2,"output_png":"passthrough.png",
+                                           "image_render_supported":false,"depth_provenance":null});
+        assert_eq!(
+            matrix_success_classification(&audio_only, 4),
+            (
+                "unsupported_media_type",
+                "not_dispatched",
+                false,
+                false,
+                Some("media_type_negotiation")
+            )
+        );
+        let malformed = serde_json::json!({"width":2,"height":2,"output_png":"render.png",
+                                          "image_render_supported":true,"depth_provenance":null});
+        assert_eq!(
+            matrix_success_classification(&malformed, 4),
+            (
+                "depth_provenance_missing",
+                "unknown",
+                false,
+                true,
+                Some("report_validation")
+            )
+        );
     }
 
     #[test]
@@ -1128,6 +2034,33 @@ mod tests {
         assert!(app.parameters.is_empty());
         assert!(app.preview.is_none());
 
+        let retained_hash = refreshed.sha256.clone();
+        let parameter = serde_json::from_value::<
+            aexcompat_broker::image_render::InteractiveParameter,
+        >(serde_json::json!({
+            "slot": 1, "name": "Amount", "kind": "float",
+            "minimum": 0.0, "maximum": 100.0, "value": 25.0,
+            "choices": [], "color": [0, 0, 0, 0],
+            "components": [0.0, 0.0, 0.0], "component_count": 0,
+            "layer_path": null, "enabled": true, "visible": true,
+            "supervised": false,
+        }))
+        .unwrap();
+        app.parameters = vec![parameter.clone()];
+        app.parameter_defaults = vec![parameter];
+        app.parameter_inspection_state = ParameterInspectionState::Ready;
+        app.inspect_after_refresh = false;
+        app.refresh_aex();
+        assert_eq!(app.selection.as_ref().unwrap().sha256, retained_hash);
+        assert!(app.session_approved);
+        assert!(app.inspect_after_refresh);
+        assert_eq!(
+            app.parameter_inspection_state,
+            ParameterInspectionState::Loading
+        );
+        assert!(app.parameters.is_empty());
+        assert!(app.parameter_defaults.is_empty());
+
         app.trust_rebuilds = false;
         first_build.extend_from_slice(b"third build");
         fs::write(&path, &first_build).unwrap();
@@ -1158,6 +2091,92 @@ mod tests {
             discover_adjacent_imports(&malformed)
                 .unwrap_err()
                 .contains("Could not inspect PE imports")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_runtime_roots_require_unambiguous_live_dll() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-cli-runtime-candidate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("helper.dll"), b"same DLL bytes").unwrap();
+        fs::write(second.join("helper.dll"), b"same DLL bytes").unwrap();
+
+        let nested_plugin = first.join("Plug-ins").join("effect.aex");
+        fs::create_dir_all(nested_plugin.parent().unwrap()).unwrap();
+        fs::write(&nested_plugin, b"fixture AEX").unwrap();
+        let nested_plugin = canonical_deverbatim(&nested_plugin).unwrap();
+        assert_eq!(
+            registered_cli_runtime_roots_for_unresolved(&nested_plugin, &[]).unwrap(),
+            vec![nested_plugin.parent().unwrap().to_path_buf()]
+        );
+        let mut found = std::collections::BTreeMap::new();
+        found.insert("helper.dll".to_owned(), vec![first.clone(), second.clone()]);
+        assert_eq!(
+            admit_cli_runtime_roots(&nested_plugin, &["helper.dll".to_owned()], &found, true,)
+                .unwrap(),
+            vec![
+                nested_plugin.parent().unwrap().to_path_buf(),
+                canonical_runtime_dependency_root(&first).unwrap(),
+            ]
+        );
+        assert!(
+            admit_cli_runtime_roots(&nested_plugin, &["helper.dll".to_owned()], &found, false,)
+                .unwrap_err()
+                .contains("Ambiguous")
+        );
+        assert_eq!(
+            cli_runtime_candidates_for_plugin(
+                &nested_plugin,
+                vec![first.clone(), second.clone()],
+                true
+            ),
+            vec![first.clone()]
+        );
+        assert_eq!(
+            cli_runtime_candidates_for_plugin(
+                &nested_plugin,
+                vec![first.clone(), second.clone()],
+                false
+            )
+            .len(),
+            2
+        );
+
+        assert_eq!(
+            unique_cli_runtime_candidate("helper.dll", vec![first.clone()]).unwrap(),
+            Some(canonical_runtime_dependency_root(&first).unwrap())
+        );
+        assert_eq!(
+            unique_cli_runtime_candidate("helper.dll", vec![]).unwrap(),
+            None
+        );
+        assert!(
+            unique_cli_runtime_candidate("helper.dll", vec![first.clone(), second.clone()])
+                .unwrap_err()
+                .contains("Ambiguous")
+        );
+        fs::remove_file(first.join("helper.dll")).unwrap();
+        assert!(
+            unique_cli_runtime_candidate("helper.dll", vec![first.clone()])
+                .unwrap_err()
+                .contains("disappeared")
+        );
+        fs::create_dir(first.join("helper.dll")).unwrap();
+        assert!(
+            unique_cli_runtime_candidate("helper.dll", vec![first])
+                .unwrap_err()
+                .contains("disappeared")
         );
         fs::remove_dir_all(root).unwrap();
     }

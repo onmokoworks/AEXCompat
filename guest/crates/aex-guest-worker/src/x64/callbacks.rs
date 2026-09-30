@@ -22,6 +22,9 @@ fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
             .position(|byte| *byte == 0)
             .unwrap_or(name_bytes.len());
         let name = String::from_utf8_lossy(&name_bytes[..name_end]).into_owned();
+        if param_type == 7 {
+            capture_popup_choices(unicorn, &mut bytes)?;
+        }
         Ok(GuestParam {
             index,
             param_type,
@@ -36,6 +39,78 @@ fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         Err(error) => {
             unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_register_ui(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let registration = (|| -> Result<Option<CustomUiRegistration>, String> {
+        let effect_ref = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("register_ui effect ref: {error}"))?;
+        let info = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("register_ui info: {error}"))?;
+        if effect_ref != 1 || info == 0 {
+            return Ok(None);
+        }
+        if !guest_range_has_permission(
+            unicorn,
+            info,
+            abi::PF_CUSTOM_UI_INFO_SIZE as u64,
+            Prot::READ,
+        )? {
+            return Ok(None);
+        }
+        let bytes = unicorn
+            .mem_read_as_vec(info, abi::PF_CUSTOM_UI_INFO_SIZE)
+            .map_err(|error| format!("register_ui PF_CustomUIInfo: {error}"))?;
+        let read_i32 = |offset: usize| {
+            i32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .expect("generated PF_CustomUIInfo field is four bytes"),
+            )
+        };
+        let registration = CustomUiRegistration {
+            events: read_i32(abi::CUSTOM_UI_EVENTS_OFFSET) as u32,
+            comp_width: read_i32(abi::CUSTOM_UI_COMP_WIDTH_OFFSET),
+            comp_height: read_i32(abi::CUSTOM_UI_COMP_HEIGHT_OFFSET),
+            comp_alignment: read_i32(abi::CUSTOM_UI_COMP_ALIGNMENT_OFFSET),
+            layer_width: read_i32(abi::CUSTOM_UI_LAYER_WIDTH_OFFSET),
+            layer_height: read_i32(abi::CUSTOM_UI_LAYER_HEIGHT_OFFSET),
+            layer_alignment: read_i32(abi::CUSTOM_UI_LAYER_ALIGNMENT_OFFSET),
+            preview_width: read_i32(abi::CUSTOM_UI_PREVIEW_WIDTH_OFFSET),
+            preview_height: read_i32(abi::CUSTOM_UI_PREVIEW_HEIGHT_OFFSET),
+            preview_alignment: read_i32(abi::CUSTOM_UI_PREVIEW_ALIGNMENT_OFFSET),
+        };
+        let valid_dimension = |value: i32| (0..=8192).contains(&value);
+        if registration.events & !15 != 0
+            || !valid_dimension(registration.comp_width)
+            || !valid_dimension(registration.comp_height)
+            || !valid_dimension(registration.layer_width)
+            || !valid_dimension(registration.layer_height)
+            || !valid_dimension(registration.preview_width)
+            || !valid_dimension(registration.preview_height)
+        {
+            return Ok(None);
+        }
+        Ok(Some(registration))
+    })();
+    match registration {
+        Ok(Some(registration)) => {
+            unicorn.get_data_mut().custom_ui_registration = Some(registration);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        Ok(None) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
             let _ = unicorn.emu_stop();
         }
     }
@@ -360,6 +435,74 @@ fn install_float_import(
     .map(|_| ())
 }
 
+fn install_log2f_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    uc(
+        "install log2f import",
+        unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+            if let Ok(mut xmm0) = unicorn.reg_read_long(RegisterX86::XMM0) {
+                let value = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
+                let output = value.log2();
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("log2f({value})={output}"));
+                }
+                xmm0[..4].copy_from_slice(&output.to_le_bytes());
+                let _ = unicorn.reg_write_long(RegisterX86::XMM0, &xmm0);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn install_roundf_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    // Keep the original IAT address while moving this hot CRT primitive into
+    // translated guest code. No host callback is needed for each invocation.
+    let displacement = i32::try_from(GUEST_ROUNDF as i64 - address as i64 - 5)
+        .map_err(|_| GuestError::StubCapacity)?;
+    let mut jump = [0u8; 5];
+    jump[0] = 0xe9;
+    jump[1..].copy_from_slice(&displacement.to_le_bytes());
+    uc(
+        "write translated roundf routine",
+        unicorn.mem_write(GUEST_ROUNDF, GUEST_ROUNDF_CODE),
+    )?;
+    uc(
+        "branch to translated roundf",
+        unicorn.mem_write(address, &jump),
+    )?;
+    Ok(())
+}
+
+fn install_floorf_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    // The hot import branches into translated guest code. Its subnormal guard
+    // preserves floorf semantics when the caller enables MXCSR.DAZ.
+    let displacement = i32::try_from(GUEST_FLOORF as i64 - address as i64 - 5)
+        .map_err(|_| GuestError::StubCapacity)?;
+    let mut jump = [0u8; 5];
+    jump[0] = 0xe9;
+    jump[1..].copy_from_slice(&displacement.to_le_bytes());
+    uc(
+        "write translated floorf routine",
+        unicorn.mem_write(GUEST_FLOORF, GUEST_FLOORF_CODE),
+    )?;
+    uc(
+        "branch to translated floorf",
+        unicorn.mem_write(address, &jump),
+    )?;
+    Ok(())
+}
+
 fn deterministic_import_i32(name: &str) -> Option<i32> {
     match name {
         // The emulator is deliberately single-threaded. Returning one keeps
@@ -373,6 +516,14 @@ fn deterministic_import_i32(name: &str) -> Option<i32> {
 fn deterministic_i32_stub(value: i32) -> [u8; 6] {
     let bytes = value.to_le_bytes();
     [0xb8, bytes[0], bytes[1], bytes[2], bytes[3], 0xc3]
+}
+
+fn deterministic_u64_stub(value: u64) -> [u8; 11] {
+    let bytes = value.to_le_bytes();
+    [
+        0x48, 0xb8, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        0xc3,
+    ]
 }
 
 pub(super) fn msvc_udt_by_value_return_import(symbol: &str) -> bool {
@@ -450,6 +601,137 @@ fn install_float_binary_import(
     .map(|_| ())
 }
 
+fn install_atan2f_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    uc(
+        "install atan2f import",
+        unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+            if let (Ok(mut xmm0), Ok(xmm1)) = (
+                unicorn.reg_read_long(RegisterX86::XMM0),
+                unicorn.reg_read_long(RegisterX86::XMM1),
+            ) {
+                let y = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
+                let x = f32::from_le_bytes(xmm1[..4].try_into().unwrap());
+                let output = y.atan2(x);
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("atan2f({y},{x})={output}"));
+                }
+                xmm0[..4].copy_from_slice(&output.to_le_bytes());
+                let _ = unicorn.reg_write_long(RegisterX86::XMM0, &xmm0);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn deterministic_fmodf(left: f32, right: f32) -> f32 {
+    const SIGN: u32 = 0x8000_0000;
+    const ABS: u32 = 0x7fff_ffff;
+    const INF: u32 = 0x7f80_0000;
+    const QUIET_NAN: u32 = 0x0040_0000;
+
+    let left_bits = left.to_bits();
+    let right_bits = right.to_bits();
+    let left_abs = left_bits & ABS;
+    let right_abs = right_bits & ABS;
+
+    // C leaves NaN payload selection unspecified. Keep this backend stable and
+    // host-independent by quieting and returning the first NaN operand.
+    if left_abs > INF {
+        return f32::from_bits(left_bits | QUIET_NAN);
+    }
+    if right_abs > INF {
+        return f32::from_bits(right_bits | QUIET_NAN);
+    }
+    // Domain errors are represented by a fixed quiet NaN. errno and the FP
+    // exception environment are not virtualized by this serial guest backend.
+    if right_abs == 0 || left_abs == INF {
+        return f32::from_bits(0x7fc0_0000);
+    }
+    if left_abs == 0 || right_abs == INF || left_abs < right_abs {
+        return left;
+    }
+    if left_abs == right_abs {
+        return f32::from_bits(left_bits & SIGN);
+    }
+
+    // Compute the exact binary remainder using integer significands. This is
+    // equivalent to truncating left/right toward zero, without depending on
+    // host libm, rounding mode, extended precision, or `%` NaN behavior.
+    let (mut left_significand, left_exponent) = normalized_f32_significand(left_abs);
+    let (right_significand, right_exponent) = normalized_f32_significand(right_abs);
+    for _ in right_exponent..left_exponent {
+        if left_significand >= right_significand {
+            left_significand -= right_significand;
+        }
+        left_significand <<= 1;
+    }
+    if left_significand >= right_significand {
+        left_significand -= right_significand;
+    }
+    if left_significand == 0 {
+        return f32::from_bits(left_bits & SIGN);
+    }
+
+    let mut exponent = right_exponent;
+    while left_significand < (1 << 23) {
+        left_significand <<= 1;
+        exponent -= 1;
+    }
+    let magnitude = if exponent > -127 {
+        ((exponent + 127) as u32) << 23 | (left_significand & 0x007f_ffff)
+    } else {
+        left_significand >> (-126 - exponent) as u32
+    };
+    f32::from_bits((left_bits & SIGN) | magnitude)
+}
+
+fn install_fmodf_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    uc(
+        "install fmodf import",
+        unicorn.add_code_hook(address, address, |unicorn, _, _| {
+            if let (Ok(mut xmm0), Ok(xmm1)) = (
+                unicorn.reg_read_long(RegisterX86::XMM0),
+                unicorn.reg_read_long(RegisterX86::XMM1),
+            ) {
+                let left = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
+                let right = f32::from_le_bytes(xmm1[..4].try_into().unwrap());
+                let output = deterministic_fmodf(left, right);
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("fmodf({left},{right})={output}"));
+                }
+                // Only the low scalar lane carries the return. Preserve the
+                // remaining XMM0 bits deterministically instead of inheriting
+                // Unicorn's host-dependent narrow-register write behavior.
+                xmm0[..4].copy_from_slice(&output.to_le_bytes());
+                let _ = unicorn.reg_write_long(RegisterX86::XMM0, &xmm0);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn normalized_f32_significand(bits: u32) -> (u32, i32) {
+    let encoded_exponent = ((bits >> 23) & 0xff) as i32;
+    if encoded_exponent != 0 {
+        ((bits & 0x007f_ffff) | (1 << 23), encoded_exponent - 127)
+    } else {
+        let shift = bits.leading_zeros() - 8;
+        (bits << shift, -126 - shift as i32)
+    }
+}
+
 fn install_double_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
@@ -470,6 +752,118 @@ fn install_double_import(
                 }
                 xmm0[..8].copy_from_slice(&output.to_le_bytes());
                 let _ = unicorn.reg_write_long(RegisterX86::XMM0, &xmm0);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn emulate_fdclass(unicorn: &mut Unicorn<'_, GuestState>, float: bool) {
+    let result = (|| -> Result<u64, String> {
+        let xmm = unicorn
+            .reg_read_long(RegisterX86::XMM0)
+            .map_err(|e| e.to_string())?;
+        let (sign, exponent, fraction, max_exponent, quiet_bit) = if float {
+            let bits = u32::from_le_bytes(xmm[..4].try_into().unwrap()) as u64;
+            (
+                bits >> 31 != 0,
+                (bits >> 23) & 0xff,
+                bits & ((1 << 23) - 1),
+                0xff,
+                1 << 22,
+            )
+        } else {
+            let bits = u64::from_le_bytes(xmm[..8].try_into().unwrap());
+            (
+                bits >> 63 != 0,
+                (bits >> 52) & 0x7ff,
+                bits & ((1u64 << 52) - 1),
+                0x7ff,
+                1u64 << 51,
+            )
+        };
+        let _ = (sign, quiet_bit);
+        Ok(match (exponent, fraction) {
+            (exponent, fraction) if exponent == max_exponent && fraction != 0 => 2,
+            (exponent, 0) if exponent == max_exponent => 1,
+            (0, 0) => 0,
+            (0, _) => u64::from((-2i16) as u16),
+            _ => u64::from((-1i16) as u16),
+        })
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn windows_lround(value: f64) -> i32 {
+    let rounded = value.round();
+    if !rounded.is_finite() || rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+        // UCRT's 32-bit `long` conversion uses the integer-indefinite value for
+        // a domain/range failure. errno/fenv are not otherwise virtualized by
+        // this serial backend, but the returned word remains ABI-compatible.
+        i32::MIN
+    } else {
+        rounded as i32
+    }
+}
+
+fn install_lround_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    uc("write lround return", unicorn.mem_write(address, &[0xc3]))?;
+    uc(
+        "install lround import",
+        unicorn.add_code_hook(address, address, |unicorn, _, _| {
+            if let Ok(xmm0) = unicorn.reg_read_long(RegisterX86::XMM0) {
+                let value = f64::from_le_bytes(xmm0[..8].try_into().unwrap());
+                let output = windows_lround(value);
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("lround({value})={output}"));
+                }
+                // Win64 `long` is 32-bit. Returning through EAX zeroes the high
+                // half of RAX; callers consume the low word as signed when
+                // required.
+                let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(output as u32));
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn windows_lroundf(value: f32) -> i32 {
+    let rounded = value.round();
+    // `LONG_MAX` is not exactly representable as f32: both it and the first
+    // positive out-of-range value encode as 2^31.  Keep LONG_MIN itself valid
+    // while rejecting that positive boundary and every non-finite input.
+    if !rounded.is_finite() || rounded < -2_147_483_648.0 || rounded >= 2_147_483_648.0 {
+        i32::MIN
+    } else {
+        rounded as i32
+    }
+}
+
+fn install_lroundf_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    uc("write lroundf return", unicorn.mem_write(address, &[0xc3]))?;
+    uc(
+        "install lroundf import",
+        unicorn.add_code_hook(address, address, |unicorn, _, _| {
+            if let Ok(bits) = unicorn.reg_read(RegisterX86::XMM0) {
+                let value = f32::from_bits(bits as u32);
+                let output = windows_lroundf(value);
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("lroundf({value})={output}"));
+                }
+                // Win64 `long` is 32-bit and an EAX return zero-extends RAX.
+                let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(output as u32));
             }
         }),
     )
@@ -517,7 +911,15 @@ fn emulate_crt_malloc(unicorn: &mut Unicorn<'_, GuestState>, calloc: bool) {
             .reg_read(RegisterX86::RCX)
             .map_err(|_| CrtHeapError::SizeOverflow)
     };
-    let pointer = requested_size.and_then(|size| allocate_crt_region(unicorn, size));
+    let pointer = requested_size.and_then(|size| {
+        let pointer = allocate_crt_region(unicorn, size)?;
+        if calloc {
+            unicorn
+                .mem_write(pointer, &vec![0; size.max(1) as usize])
+                .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
+        }
+        Ok(pointer)
+    });
     // malloc/calloc report normal bounded allocation failure as NULL. This is
     // distinct from free ownership violations, which stop at the callback boundary.
     let _ = unicorn.reg_write(RegisterX86::RAX, pointer.unwrap_or(0));
@@ -594,19 +996,34 @@ fn allocate_crt_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     size: u64,
 ) -> Result<u64, CrtHeapError> {
-    let allocation = unicorn.get_data().crt_heap.prepare_allocation(size)?;
-    let pointer = unicorn
-        .get_data()
-        .crt_heap
-        .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
-    unicorn
-        .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
-        .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
-    if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
-        let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
-        return Err(error);
+    let result: Result<u64, CrtHeapError> = (|| {
+        ensure_crt_heap_mapping(unicorn)?;
+        let allocation = unicorn.get_data().crt_heap.prepare_allocation(size)?;
+        let pointer =
+            unicorn
+                .get_data()
+                .crt_heap
+                .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
+        unicorn
+            .get_data_mut()
+            .crt_heap
+            .insert(pointer, allocation)?;
+        Ok(pointer)
+    })();
+    if let Err(error) = result {
+        unicorn.get_data_mut().last_crt_heap_failure = Some((size, error.to_string()));
     }
-    Ok(pointer)
+    result
+}
+
+fn ensure_crt_heap_mapping(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), CrtHeapError> {
+    if !unicorn.get_data().crt_heap_mapped {
+        unicorn
+            .mem_map(CRT_HEAP_BASE, MAX_CRT_HEAP_BYTES, Prot::READ | Prot::WRITE)
+            .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
+        unicorn.get_data_mut().crt_heap_mapped = true;
+    }
+    Ok(())
 }
 
 fn allocate_aligned_crt_region(
@@ -614,6 +1031,7 @@ fn allocate_aligned_crt_region(
     size: u64,
     alignment: u64,
 ) -> Result<u64, CrtHeapError> {
+    ensure_crt_heap_mapping(unicorn)?;
     if alignment == 0 || !alignment.is_power_of_two() {
         return Err(CrtHeapError::InvalidAlignment);
     }
@@ -628,38 +1046,31 @@ fn allocate_aligned_crt_region(
         alignment,
     )?;
     unicorn
-        .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
-        .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
-    if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
-        let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
-        return Err(error);
-    }
+        .get_data_mut()
+        .crt_heap
+        .insert(pointer, allocation)?;
     Ok(pointer)
 }
 
 fn free_crt_region(unicorn: &mut Unicorn<'_, GuestState>, pointer: u64) -> Result<(), String> {
-    let allocation = unicorn
+    unicorn
         .get_data_mut()
         .crt_heap
         .remove(pointer)
         .map_err(|error| error.to_string())?;
-    unicorn
-        .mem_unmap(pointer, allocation.backing_size)
-        .map_err(|error| format!("unmap CRT allocation {pointer:#x}: {error}"))
+    Ok(())
 }
 
 fn free_aligned_crt_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     pointer: u64,
 ) -> Result<(), String> {
-    let allocation = unicorn
+    unicorn
         .get_data_mut()
         .crt_heap
         .remove_aligned(pointer)
         .map_err(|error| error.to_string())?;
-    unicorn
-        .mem_unmap(pointer, allocation.backing_size)
-        .map_err(|error| format!("unmap aligned CRT allocation {pointer:#x}: {error}"))
+    Ok(())
 }
 
 fn emulate_crt_aligned_malloc(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -798,6 +1209,224 @@ fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
+fn emulate_windows_hook_api(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    let result = (|| -> Result<u64, String> {
+        match operation {
+            LegacyWin64Import::SetWindowsHookExA => {
+                let kind = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+                let callback = read_win64_import_argument(unicorn, 1)?;
+                let module = read_win64_import_argument(unicorn, 2)?;
+                let thread = read_win64_import_argument(unicorn, 3)? as u32;
+                if !(-1..=14).contains(&kind)
+                    || callback == 0
+                    || !guest_range_has_permission(unicorn, callback, 1, Prot::EXEC)?
+                {
+                    unicorn.get_data_mut().windows_last_error = 87;
+                    return Ok(0);
+                }
+                if unicorn.get_data().windows_hooks.len() >= MAX_WINDOWS_HOOKS {
+                    unicorn.get_data_mut().windows_last_error = 8;
+                    return Ok(0);
+                }
+                let index = unicorn.get_data().next_windows_hook;
+                let handle = WINDOWS_HOOK_HANDLE_BASE
+                    .checked_add(index.checked_mul(16).ok_or("Windows hook token overflow")?)
+                    .ok_or("Windows hook token overflow")?;
+                unicorn.get_data_mut().next_windows_hook = index + 1;
+                unicorn
+                    .get_data_mut()
+                    .windows_hooks
+                    .insert(handle, (kind, callback, module, thread));
+                Ok(handle)
+            }
+            LegacyWin64Import::UnhookWindowsHookEx => {
+                let handle = read_win64_import_argument(unicorn, 0)?;
+                if unicorn
+                    .get_data_mut()
+                    .windows_hooks
+                    .remove(&handle)
+                    .is_some()
+                {
+                    Ok(1)
+                } else {
+                    unicorn.get_data_mut().windows_last_error = 1404;
+                    Ok(0)
+                }
+            }
+            LegacyWin64Import::CallNextHookEx => {
+                // This isolated guest has no hook chain outside registrations
+                // owned above, and host UI events are never injected.
+                Ok(0)
+            }
+            _ => unreachable!("validated Windows hook operation"),
+        }
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_windows_timer_api(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    let result = (|| -> Result<u64, String> {
+        let window = read_win64_import_argument(unicorn, 0)?;
+        let requested_id = read_win64_import_argument(unicorn, 1)?;
+        if operation == LegacyWin64Import::KillTimer {
+            return if unicorn
+                .get_data_mut()
+                .windows_timers
+                .remove(&(window, requested_id))
+                .is_some()
+            {
+                Ok(1)
+            } else {
+                Ok(0)
+            };
+        }
+        let interval = read_win64_import_argument(unicorn, 2)?;
+        let callback = read_win64_import_argument(unicorn, 3)?;
+        if interval > u32::MAX as u64
+            || (callback != 0 && !guest_range_has_permission(unicorn, callback, 1, Prot::EXEC)?)
+        {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        if unicorn.get_data().windows_timers.len() >= 256 {
+            unicorn.get_data_mut().windows_last_error = 8;
+            return Ok(0);
+        }
+        let id = if requested_id != 0 {
+            requested_id
+        } else {
+            let next = unicorn
+                .get_data()
+                .next_windows_timer
+                .checked_add(1)
+                .ok_or("Windows timer id overflow")?;
+            unicorn.get_data_mut().next_windows_timer = next;
+            next
+        };
+        unicorn
+            .get_data_mut()
+            .windows_timers
+            .insert((window, id), ((interval as u32).max(10), callback));
+        Ok(id)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_message_box(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
+    let result = (|| -> Result<u64, String> {
+        let text_pointer = read_win64_import_argument(unicorn, 1)?;
+        let caption_pointer = read_win64_import_argument(unicorn, 2)?;
+        let style = read_win64_import_argument(unicorn, 3)? as u32;
+        let read = |unicorn: &Unicorn<'_, GuestState>, pointer, label| {
+            if pointer == 0 {
+                return Ok(String::new());
+            }
+            if wide {
+                read_guest_wide_file_string(unicorn, pointer, 4096, label)
+            } else {
+                let bytes = read_crt_stdio_c_string(unicorn, pointer, 4096, label)?;
+                let (text, _, malformed) = encoding_rs::SHIFT_JIS.decode(&bytes);
+                if malformed {
+                    return Err(format!("{label} contains invalid CP932"));
+                }
+                Ok(text.into_owned())
+            }
+        };
+        let text = read(unicorn, text_pointer, "MessageBox text")?;
+        let caption = read(unicorn, caption_pointer, "MessageBox caption")?;
+        if unicorn.get_data().windows_message_boxes.len() >= 32 {
+            return Err("MessageBox diagnostic capacity exceeded".into());
+        }
+        unicorn
+            .get_data_mut()
+            .windows_message_boxes
+            .push((caption, text, style));
+        // Choose the dismissive/default-safe result for each button group.
+        Ok(match style & 0xf {
+            0 => 1,             // IDOK
+            1 | 3 | 5 | 6 => 2, // IDCANCEL
+            2 => 3,             // IDABORT
+            4 => 7,             // IDNO
+            _ => 1,
+        })
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let pointer = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("read CRT realloc pointer: {error}"))?;
+        let size = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("read CRT realloc size: {error}"))?;
+        if pointer == 0 {
+            return Ok(allocate_crt_region(unicorn, size).unwrap_or(0));
+        }
+        if size == 0 {
+            free_crt_region(unicorn, pointer)?;
+            return Ok(0);
+        }
+        let old = unicorn
+            .get_data()
+            .crt_heap
+            .regular_allocation(pointer)
+            .map_err(|error| error.to_string())?;
+        let replacement = match unicorn
+            .get_data()
+            .crt_heap
+            .prepare_regular_reallocation(pointer, size)
+        {
+            Ok(replacement) => replacement,
+            Err(CrtHeapError::ForeignOrFreedPointer | CrtHeapError::AllocatorMismatch) => {
+                return Err("CRT realloc rejected foreign allocation".into());
+            }
+            Err(_) => return Ok(0),
+        };
+        if replacement.backing_size <= old.backing_size {
+            unicorn
+                .get_data_mut()
+                .crt_heap
+                .commit_regular_reallocation(pointer, pointer, replacement)
+                .map_err(|error| error.to_string())?;
+            return Ok(pointer);
+        }
+        let new_pointer =
+            match unicorn
+                .get_data()
+                .crt_heap
+                .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, replacement)
+            {
+                Ok(pointer) => pointer,
+                Err(_) => return Ok(0),
+            };
+        let bytes = unicorn
+            .mem_read_as_vec(pointer, old.requested_size.min(size) as usize)
+            .map_err(|error| format!("CRT realloc read old block: {error}"))?;
+        unicorn
+            .mem_write(new_pointer, &bytes)
+            .map_err(|error| format!("CRT realloc write new block: {error}"))?;
+        unicorn
+            .get_data_mut()
+            .crt_heap
+            .commit_regular_reallocation(pointer, new_pointer, replacement)
+            .map_err(|error| error.to_string())?;
+        Ok(new_pointer)
+    })();
+    match result {
+        Ok(pointer) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn emulate_memset(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn
@@ -883,6 +1512,215 @@ fn emulate_crt_memory_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     match result {
         Ok(destination) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, destination);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let source = read_win64_import_argument(unicorn, 1)?;
+        if destination == 0 {
+            return Err("strcpy destination is null".into());
+        }
+        let live_remaining = unicorn
+            .get_data()
+            .crt_heap
+            .allocation_containing(source)
+            .map(|(base, allocation)| allocation.requested_size - (source - base));
+        let mut value = if let Some(remaining) = live_remaining {
+            let mut bytes = unicorn
+                .mem_read_as_vec(source, remaining as usize)
+                .map_err(|error| format!("strcpy allocation read: {error}"))?;
+            let end = bytes
+                .iter()
+                .position(|byte| *byte == 0)
+                .ok_or("strcpy live allocation has no terminator")?;
+            bytes.truncate(end);
+            bytes
+        } else {
+            read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strcpy source")?
+        };
+        value.push(0);
+        if !guest_range_has_permission(unicorn, destination, value.len() as u64, Prot::WRITE)? {
+            return Err("strcpy destination is not writable".into());
+        }
+        unicorn
+            .mem_write(destination, &value)
+            .map_err(|error| format!("strcpy destination write: {error}"))?;
+        Ok(destination)
+    })();
+    match result {
+        Ok(destination) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, destination);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        // Tracked allocations occupy either the regular CRT heap or this
+        // session's GetEnvironmentStringsW namespace. Most strlen calls target
+        // static image strings, so avoid a BTree predecessor search for those
+        // overwhelmingly common misses.
+        let state = unicorn.get_data();
+        let environment_strings_end = state
+            .environment_strings_base
+            .checked_add(ENVIRONMENT_STRINGS_NAMESPACE_SIZE);
+        let may_be_tracked = (CRT_HEAP_BASE..CRT_HEAP_END).contains(&source)
+            || (state.environment_strings_base != 0
+                && environment_strings_end
+                    .is_some_and(|end| (state.environment_strings_base..end).contains(&source)));
+        let live_allocation = may_be_tracked
+            .then(|| state.crt_heap.allocation_containing(source))
+            .flatten();
+        let error = if let Some((base, allocation)) = live_allocation {
+            let remaining = allocation.requested_size - (source - base);
+            match scan_crt_stdio_c_string(unicorn, source, remaining, "strlen", None) {
+                Ok(length) => return Ok(length),
+                Err(error) if error.contains(" exceeds ") => {
+                    "strlen live allocation has no terminator".to_string()
+                }
+                Err(error) => error,
+            }
+        } else {
+            match scan_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strlen", None) {
+                Ok(length) => return Ok(length),
+                Err(error) => error,
+            }
+        };
+        let caller = unicorn
+            .reg_read(RegisterX86::RSP)
+            .ok()
+            .and_then(|rsp| unicorn.mem_read_as_vec(rsp, 8).ok())
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or_default();
+        let preview = unicorn
+            .mem_read_as_vec(source, 64)
+            .map(|bytes| {
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let allocation = live_allocation
+            .map(|(base, allocation)| format!("{base:#x}+{:#x}", allocation.requested_size))
+            .unwrap_or_default();
+        let stack_code = unicorn
+            .reg_read(RegisterX86::RSP)
+            .ok()
+            .and_then(|rsp| unicorn.mem_read_as_vec(rsp, 512).ok())
+            .map(|bytes| {
+                bytes
+                    .chunks_exact(8)
+                    .enumerate()
+                    .filter_map(|(slot, bytes)| {
+                        let address = u64::from_le_bytes(bytes.try_into().ok()?);
+                        let module = guest_module_from_address(unicorn.get_data(), address)?;
+                        Some(format!(
+                            "+{:#x}:{:#x}+{:#x}",
+                            slot * 8,
+                            module,
+                            address - module
+                        ))
+                    })
+                    .take(16)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .unwrap_or_default();
+        Err(format!(
+            "{error} (source={source:#x}, caller={caller:#x}, allocation={allocation}, preview={preview}, stack_code={stack_code})"
+        ))
+    })();
+    match result {
+        Ok(length) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, length);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_strstr(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let needle_pointer = read_win64_import_argument(unicorn, 1)?;
+        if source == 0 || needle_pointer == 0 {
+            return Err("strstr received a null string pointer".into());
+        }
+        let needle = read_crt_stdio_c_string(
+            unicorn,
+            needle_pointer,
+            MAX_CRT_STRING_BYTES,
+            "strstr needle",
+        )?;
+        if needle.is_empty() {
+            return Ok(source);
+        }
+        // KMP bounds host work linearly even for repetitive adversarial strings.
+        let mut prefix = vec![0usize; needle.len()];
+        let mut matched = 0;
+        for index in 1..needle.len() {
+            while matched > 0 && needle[index] != needle[matched] {
+                matched = prefix[matched - 1];
+            }
+            if needle[index] == needle[matched] {
+                matched += 1;
+            }
+            prefix[index] = matched;
+        }
+        matched = 0;
+        for offset in 0..MAX_CRT_STRING_BYTES {
+            let address = source
+                .checked_add(offset)
+                .ok_or("strstr source range overflow")?;
+            if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                return Err("strstr source is not readable".into());
+            }
+            let mut byte = [0u8];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|error| format!("strstr source read: {error}"))?;
+            if byte[0] == 0 {
+                return Ok(0);
+            }
+            while matched > 0 && byte[0] != needle[matched] {
+                matched = prefix[matched - 1];
+            }
+            if byte[0] == needle[matched] {
+                matched += 1;
+            }
+            if matched == needle.len() {
+                return Ok(address - (needle.len() as u64 - 1));
+            }
+        }
+        Err(format!(
+            "strstr source exceeds {MAX_CRT_STRING_BYTES} bytes"
+        ))
+    })();
+    match result {
+        Ok(address) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, address);
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
@@ -1031,24 +1869,327 @@ fn read_crt_stdio_c_string(
     limit: u64,
     label: &str,
 ) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    scan_crt_stdio_c_string(unicorn, address, limit, label, Some(&mut bytes))?;
+    Ok(bytes)
+}
+
+fn scan_crt_stdio_c_string(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    limit: u64,
+    label: &str,
+    mut output: Option<&mut Vec<u8>>,
+) -> Result<u64, String> {
     if address == 0 {
         return Err(format!("stdio {label} pointer is null"));
     }
-    let mut bytes = Vec::new();
-    for offset in 0..limit {
-        let address = address
+    // Most CRT strings are short parameter names. Reading the rest of their
+    // 4 KiB guest page into a fresh Vec made every strlen copy and allocate
+    // thousands of bytes. A small caller-owned buffer preserves page-bounded,
+    // fail-closed reads while keeping the common path allocation-free.
+    let mut chunk = [0u8; 256];
+    let mut offset = 0u64;
+    while offset < limit {
+        let current = address
             .checked_add(offset)
             .ok_or_else(|| format!("stdio {label} range overflow"))?;
-        let mut byte = [0u8; 1];
-        unicorn
-            .mem_read(address, &mut byte)
-            .map_err(|error| format!("stdio {label} read: {error}"))?;
-        if byte[0] == 0 {
-            return Ok(bytes);
+        let page_remaining = PAGE_SIZE - current % PAGE_SIZE;
+        let chunk_len = page_remaining.min(limit - offset).min(chunk.len() as u64) as usize;
+        let current_chunk = &mut chunk[..chunk_len];
+        aex_unicorn_buffer::read_protected(unicorn, current, current_chunk).map_err(|error| {
+            format!("stdio {label} address {current:#x} is not readable: {error}")
+        })?;
+        if let Some(end) = memchr::memchr(0, current_chunk) {
+            if let Some(bytes) = output.as_deref_mut() {
+                bytes.extend_from_slice(&current_chunk[..end]);
+            }
+            return Ok(offset + end as u64);
         }
-        bytes.push(byte[0]);
+        if let Some(bytes) = output.as_deref_mut() {
+            bytes.extend_from_slice(current_chunk);
+        }
+        offset += chunk_len as u64;
     }
     Err(format!("stdio {label} exceeds {limit} bytes"))
+}
+
+fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<i32, String> {
+        let left = read_win64_import_argument(unicorn, 0)?;
+        let right = read_win64_import_argument(unicorn, 1)?;
+        if left == 0 || right == 0 {
+            return Err("strcmp received a null string pointer".into());
+        }
+        let allocation_remaining = |pointer: u64| {
+            unicorn
+                .get_data()
+                .crt_heap
+                .allocation_containing(pointer)
+                .map(|(base, allocation)| allocation.requested_size - (pointer - base))
+        };
+        let left_remaining = allocation_remaining(left);
+        let right_remaining = allocation_remaining(right);
+        let both_owned = left_remaining.is_some() && right_remaining.is_some();
+        let limit = left_remaining
+            .unwrap_or(MAX_CRT_STRING_BYTES)
+            .min(right_remaining.unwrap_or(MAX_CRT_STRING_BYTES));
+        let mut offset = 0u64;
+        while offset < limit {
+            let mut count = (limit - offset).min(256 * 1024);
+            if !both_owned {
+                count = count
+                    .min(PAGE_SIZE - (left + offset) % PAGE_SIZE)
+                    .min(PAGE_SIZE - (right + offset) % PAGE_SIZE);
+            }
+            let count = count as usize;
+            if !guest_range_has_permission(unicorn, left + offset, count as u64, Prot::READ)? {
+                return Err(format!(
+                    "strcmp left string address {:#x} is not readable",
+                    left + offset
+                ));
+            }
+            if !guest_range_has_permission(unicorn, right + offset, count as u64, Prot::READ)? {
+                return Err(format!(
+                    "strcmp right string address {:#x} is not readable",
+                    right + offset
+                ));
+            }
+            let left_bytes = unicorn
+                .mem_read_as_vec(left + offset, count)
+                .map_err(|error| {
+                    format!(
+                        "strcmp left string address {:#x} is not readable: {error}",
+                        left + offset
+                    )
+                })?;
+            let right_bytes = unicorn
+                .mem_read_as_vec(right + offset, count)
+                .map_err(|error| {
+                    format!(
+                        "strcmp right string address {:#x} is not readable: {error}",
+                        right + offset
+                    )
+                })?;
+            for (&left_byte, &right_byte) in left_bytes.iter().zip(&right_bytes) {
+                let ordering = left_byte.cmp(&right_byte);
+                if !ordering.is_eq() {
+                    return Ok(match ordering {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Equal => 0,
+                        std::cmp::Ordering::Greater => 1,
+                    });
+                }
+                if left_byte == 0 {
+                    return Ok(0);
+                }
+            }
+            offset += count as u64;
+        }
+        Err(format!(
+            "strcmp strings exceed {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+        ))
+    })();
+    match result {
+        Ok(ordering) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(ordering as u32));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_strncmp(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<i32, String> {
+        let left = read_win64_import_argument(unicorn, 0)?;
+        let right = read_win64_import_argument(unicorn, 1)?;
+        let count = read_win64_import_argument(unicorn, 2)?;
+        if count == 0 {
+            return Ok(0);
+        }
+        if left == 0 || right == 0 {
+            return Err("strncmp received a null string pointer".into());
+        }
+        for offset in 0..count.min(MAX_CRT_STRING_BYTES) {
+            let read = |unicorn: &Unicorn<'_, GuestState>, base: u64, side: &str| {
+                let address = base
+                    .checked_add(offset)
+                    .ok_or_else(|| format!("strncmp {side} string range overflow"))?;
+                if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                    return Err(format!(
+                        "strncmp {side} string address {address:#x} is not readable"
+                    ));
+                }
+                let mut byte = [0u8; 1];
+                unicorn
+                    .mem_read(address, &mut byte)
+                    .map_err(|error| format!("strncmp {side} string read failed: {error}"))?;
+                Ok(byte[0])
+            };
+            let left_byte = read(unicorn, left, "left")?;
+            let right_byte = read(unicorn, right, "right")?;
+            let ordering = left_byte.cmp(&right_byte);
+            if !ordering.is_eq() {
+                return Ok(match ordering {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                });
+            }
+            if left_byte == 0 {
+                return Ok(0);
+            }
+        }
+        if count <= MAX_CRT_STRING_BYTES {
+            return Ok(0);
+        }
+        Err(format!(
+            "strncmp strings exceed {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+        ))
+    })();
+    match result {
+        Ok(ordering) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(ordering as u32));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_stricmp(unicorn: &mut Unicorn<'_, GuestState>, bounded: bool) {
+    let result = (|| -> Result<i32, String> {
+        let limit = if bounded {
+            let count = read_win64_import_argument(unicorn, 2)?;
+            let _locale = read_win64_import_argument(unicorn, 3)?;
+            count.min(MAX_CRT_STRING_BYTES)
+        } else {
+            MAX_CRT_STRING_BYTES
+        };
+        if limit == 0 {
+            return Ok(0);
+        }
+        let left = read_win64_import_argument(unicorn, 0)?;
+        let right = read_win64_import_argument(unicorn, 1)?;
+        if left == 0 || right == 0 {
+            return Err("_stricmp received a null string pointer".into());
+        }
+        for offset in 0..limit {
+            let read = |unicorn: &Unicorn<'_, GuestState>, base: u64, side: &str| {
+                let address = base
+                    .checked_add(offset)
+                    .ok_or_else(|| format!("_stricmp {side} string range overflow"))?;
+                if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                    return Err(format!(
+                        "_stricmp {side} string address {address:#x} is not readable"
+                    ));
+                }
+                let mut byte = [0u8; 1];
+                unicorn
+                    .mem_read(address, &mut byte)
+                    .map_err(|error| format!("_stricmp {side} string read failed: {error}"))?;
+                Ok(byte[0])
+            };
+            let fold = |byte: u8| {
+                if byte.is_ascii_uppercase() {
+                    byte + (b'a' - b'A')
+                } else {
+                    byte
+                }
+            };
+            let left_byte = read(unicorn, left, "left")?;
+            let right_byte = read(unicorn, right, "right")?;
+            let ordering = fold(left_byte).cmp(&fold(right_byte));
+            if !ordering.is_eq() {
+                return Ok(match ordering {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                });
+            }
+            if left_byte == 0 {
+                return Ok(0);
+            }
+        }
+        if bounded {
+            Ok(0)
+        } else {
+            Err(format!(
+                "_stricmp strings exceed {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+            ))
+        }
+    })();
+    match result {
+        Ok(ordering) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(ordering as u32));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_wcstombs(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let source = read_win64_import_argument(unicorn, 1)?;
+        let count = read_win64_import_argument(unicorn, 2)?;
+        if source == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(u64::MAX);
+        }
+        let text = read_guest_wide_file_string(unicorn, source, 4096, "wcstombs source")?;
+        if !text.is_ascii() {
+            set_guest_crt_errno(unicorn, 42)?;
+            return Ok(u64::MAX);
+        }
+        let bytes = text.as_bytes();
+        if destination == 0 {
+            return Ok(bytes.len() as u64);
+        }
+        let writable = usize::try_from(count)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len().saturating_add(1));
+        if writable == 0 {
+            return Ok(0);
+        }
+        if !guest_range_has_permission(unicorn, destination, writable as u64, Prot::WRITE)? {
+            return Err("wcstombs destination is not writable".into());
+        }
+        let copied = writable.min(bytes.len());
+        if copied != 0 {
+            unicorn
+                .mem_write(destination, &bytes[..copied])
+                .map_err(|error| format!("wcstombs destination write failed: {error}"))?;
+        }
+        if writable > bytes.len() {
+            unicorn
+                .mem_write(destination + bytes.len() as u64, &[0])
+                .map_err(|error| format!("wcstombs terminator write failed: {error}"))?;
+        }
+        Ok(copied as u64)
+    })();
+    match result {
+        Ok(value) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, value);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
 }
 
 fn emulate_stdio_common_vsnprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -1064,11 +2205,6 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
         let options = read_win64_import_argument(unicorn, 0)?;
         let destination = read_win64_import_argument(unicorn, 1)?;
         let requested_buffer_count = read_win64_import_argument(unicorn, 2)?;
-        if !secure && requested_buffer_count != u64::MAX {
-            return Err(format!(
-                "stdio finite vsprintf buffer count {requested_buffer_count} is unsupported"
-            ));
-        }
         let (buffer_count, max_count, format_address, locale, va_list) = if secure {
             (
                 requested_buffer_count,
@@ -1092,15 +2228,25 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
             )
         };
 
-        let expected_options = if secure { 0x24 } else { 0x25 };
-        if options != expected_options {
+        // UCRT call sites select either legacy termination (0x1) or standard
+        // snprintf behavior (0x2), alongside legacy narrow-format wide
+        // specifiers (0x4) and standard rounding (0x20). The formatter below
+        // implements the common subset identically for these three observed
+        // combinations.
+        if !matches!(options, 0x24 | 0x25 | 0x26) {
             return Err(format!("stdio unsupported formatting options {options:#x}"));
         }
-        if locale != 0 {
+        if !supported_crt_locale(unicorn, locale) {
             return Err("stdio locale-aware formatting is unsupported".to_string());
         }
-        if destination == 0 || buffer_count == 0 {
+        if secure && (destination == 0 || buffer_count == 0) {
             return Err("stdio destination and buffer count must be nonzero".to_string());
+        }
+        if !secure
+            && (requested_buffer_count == u64::MAX || requested_buffer_count != 0)
+            && destination == 0
+        {
+            return Err("stdio destination pointer is null".to_string());
         }
         let maximum_buffer_count = MAX_CRT_STDIO_BUFFER_BYTES + u64::from(!secure);
         if buffer_count > maximum_buffer_count {
@@ -1108,7 +2254,7 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
                 "stdio buffer count {buffer_count} exceeds {maximum_buffer_count}"
             ));
         }
-        if max_count != u64::MAX && max_count >= buffer_count {
+        if secure && max_count != u64::MAX && max_count >= buffer_count {
             return Err(format!(
                 "stdio max count {max_count} must be smaller than buffer count {buffer_count}"
             ));
@@ -1120,80 +2266,60 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
             MAX_CRT_STDIO_FORMAT_BYTES,
             "format",
         )?;
-        let mut output = Vec::new();
-        let mut format_index = 0usize;
-        let mut argument_index = 0usize;
-        while format_index < format.len() {
-            if format[format_index] != b'%' {
-                output.push(format[format_index]);
-                format_index += 1;
-            } else {
-                format_index += 1;
-                let conversion = *format
-                    .get(format_index)
-                    .ok_or_else(|| "stdio format ends with '%'".to_string())?;
-                format_index += 1;
-                if conversion == b'%' {
-                    output.push(b'%');
-                    continue;
-                }
-                if argument_index >= MAX_CRT_STDIO_ARGUMENTS {
-                    return Err(format!(
-                        "stdio conversion count exceeds {MAX_CRT_STDIO_ARGUMENTS}"
-                    ));
-                }
-                let slot_address = va_list
-                    .checked_add((argument_index as u64) * 8)
-                    .ok_or_else(|| "stdio va_list address overflow".to_string())?;
-                let slot = unicorn
-                    .mem_read_as_vec(slot_address, 8)
-                    .map_err(|error| format!("stdio va_list read: {error}"))?;
-                let value = u64::from_le_bytes(
-                    slot.try_into()
-                        .map_err(|_| "stdio va_list slot has wrong size".to_string())?,
-                );
-                argument_index += 1;
-                match conversion {
-                    b's' => output.extend(read_crt_stdio_c_string(
-                        unicorn,
-                        value,
-                        MAX_CRT_STDIO_BUFFER_BYTES,
-                        "string argument",
-                    )?),
-                    b'd' => output.extend((value as u32 as i32).to_string().as_bytes()),
-                    other => {
-                        return Err(format!(
-                            "stdio unsupported conversion '%{}'",
-                            char::from(other)
-                        ));
-                    }
-                }
+        let mut output = format_guest_stdio(unicorn, &format, va_list)?;
+
+        let return_value;
+        if !secure && requested_buffer_count != u64::MAX {
+            if requested_buffer_count == 0 && destination == 0 {
+                return_value = output.len() as u64;
+                output.clear();
+                return Ok((destination, output, return_value));
             }
-            if output.len() as u64 > MAX_CRT_STDIO_BUFFER_BYTES {
+            if !guest_range_has_permission(
+                unicorn,
+                destination,
+                requested_buffer_count,
+                Prot::WRITE,
+            )? {
                 return Err(format!(
-                    "stdio formatted output exceeds {MAX_CRT_STDIO_BUFFER_BYTES} bytes"
+                    "stdio destination {destination:#x} is not writable for {requested_buffer_count} bytes"
                 ));
             }
+            match (output.len() as u64).cmp(&requested_buffer_count) {
+                std::cmp::Ordering::Less => {
+                    return_value = output.len() as u64;
+                    output.push(0);
+                }
+                std::cmp::Ordering::Equal => {
+                    return_value = output.len() as u64;
+                }
+                std::cmp::Ordering::Greater => {
+                    output.truncate(requested_buffer_count as usize);
+                    return_value = u32::MAX as u64;
+                }
+            }
+        } else {
+            let limit = if max_count == u64::MAX {
+                buffer_count - 1
+            } else {
+                max_count
+            };
+            let truncated = output.len() as u64 > limit;
+            output.truncate(limit as usize);
+            output.push(0);
+            return_value = if truncated {
+                u32::MAX as u64
+            } else {
+                (output.len() - 1) as u64
+            };
         }
-
-        let limit = if max_count == u64::MAX {
-            buffer_count - 1
-        } else {
-            max_count
-        };
-        let truncated = output.len() as u64 > limit;
-        output.truncate(limit as usize);
-        output.push(0);
-        let return_value = if truncated {
-            u32::MAX as u64
-        } else {
-            (output.len() - 1) as u64
-        };
         Ok((destination, output, return_value))
     })();
     match result {
         Ok((destination, output, return_value)) => {
-            if let Err(error) = unicorn.mem_write(destination, &output) {
+            if !output.is_empty()
+                && let Err(error) = unicorn.mem_write(destination, &output)
+            {
                 if unicorn.get_data().callback_error.is_none() {
                     unicorn.get_data_mut().callback_error =
                         Some(format!("stdio destination write: {error}"));
@@ -1212,13 +2338,10 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
     }
 }
 
-fn finish_msvcp_mutex_callback(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    result: Result<(), String>,
-) {
+fn finish_msvcp_mutex_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<u32, String>) {
     match result {
-        Ok(()) => {
-            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        Ok(return_value) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, return_value as u64);
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
@@ -1237,9 +2360,11 @@ fn read_msvcp_mutex_object(
     if object == 0 {
         return Err(format!("MSVCP mutex {operation} object is null"));
     }
-    unicorn
-        .mem_read_as_vec(object, 1)
-        .map_err(|error| format!("MSVCP mutex {operation} object is not mapped: {error}"))?;
+    if !guest_range_has_permission(unicorn, object, MSVCP_MUTEX_BYTES as u64, Prot::WRITE)? {
+        return Err(format!(
+            "MSVCP mutex {operation} object {object:#x} is not fully writable"
+        ));
+    }
     Ok(object)
 }
 
@@ -1247,9 +2372,9 @@ fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "init")?;
         let mutex_type = read_win64_import_argument(unicorn, 1)? as u32;
-        if mutex_type != OBSERVED_MSVCP_MUTEX_TYPE {
+        if mutex_type != OBSERVED_MSVCP_MUTEX_TYPE && mutex_type != MSVCP_MUTEX_TRY {
             return Err(format!(
-                "MSVCP mutex type {mutex_type:#x} is unsupported; expected {OBSERVED_MSVCP_MUTEX_TYPE:#x}"
+                "MSVCP mutex type {mutex_type:#x} is unsupported; expected {MSVCP_MUTEX_TRY:#x} or {OBSERVED_MSVCP_MUTEX_TYPE:#x}"
             ));
         }
         let state = unicorn.get_data_mut();
@@ -1257,18 +2382,17 @@ fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
             return Err(format!("MSVCP mutex {object:#x} is already initialized"));
         }
         if state.msvcp_mutexes.len() >= MAX_MSVCP_MUTEXES {
-            return Err(format!(
-                "MSVCP mutex count exceeds {MAX_MSVCP_MUTEXES}"
-            ));
+            return Err(format!("MSVCP mutex count exceeds {MAX_MSVCP_MUTEXES}"));
         }
         state.msvcp_mutexes.insert(
             object,
             MsvcpMutex {
                 mutex_type,
+                owner_thread_id: None,
                 lock_count: 0,
             },
         );
-        Ok(())
+        Ok(0)
     })();
     finish_msvcp_mutex_callback(unicorn, result);
 }
@@ -1276,18 +2400,32 @@ fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
 fn emulate_msvcp_mutex_lock(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "lock")?;
+        let current_thread_id = unicorn.get_data().current_windows_thread_id;
         let mutex = unicorn
             .get_data_mut()
             .msvcp_mutexes
             .get_mut(&object)
             .ok_or_else(|| format!("MSVCP mutex {object:#x} is not initialized"))?;
+        if mutex.lock_count == 0 {
+            mutex.owner_thread_id = Some(current_thread_id);
+            mutex.lock_count = 1;
+            return Ok(0);
+        }
+        if mutex.owner_thread_id != Some(current_thread_id) {
+            return Err(format!(
+                "MSVCP mutex {object:#x} would block guest thread {current_thread_id}; cooperative mutex waiting is unsupported"
+            ));
+        }
+        if mutex.mutex_type & MSVCP_MUTEX_RECURSIVE == 0 {
+            return Ok(MSVCP_THRD_BUSY);
+        }
         if mutex.lock_count >= MAX_MSVCP_MUTEX_RECURSION {
             return Err(format!(
                 "MSVCP mutex {object:#x} recursion exceeds {MAX_MSVCP_MUTEX_RECURSION}"
             ));
         }
         mutex.lock_count += 1;
-        Ok(())
+        Ok(0)
     })();
     finish_msvcp_mutex_callback(unicorn, result);
 }
@@ -1295,6 +2433,7 @@ fn emulate_msvcp_mutex_lock(unicorn: &mut Unicorn<'_, GuestState>) {
 fn emulate_msvcp_mutex_unlock(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "unlock")?;
+        let current_thread_id = unicorn.get_data().current_windows_thread_id;
         let mutex = unicorn
             .get_data_mut()
             .msvcp_mutexes
@@ -1303,8 +2442,16 @@ fn emulate_msvcp_mutex_unlock(unicorn: &mut Unicorn<'_, GuestState>) {
         if mutex.lock_count == 0 {
             return Err(format!("MSVCP mutex {object:#x} unlock is unbalanced"));
         }
+        if mutex.owner_thread_id != Some(current_thread_id) {
+            return Err(format!(
+                "MSVCP mutex {object:#x} is not owned by guest thread {current_thread_id}"
+            ));
+        }
         mutex.lock_count -= 1;
-        Ok(())
+        if mutex.lock_count == 0 {
+            mutex.owner_thread_id = None;
+        }
+        Ok(0)
     })();
     finish_msvcp_mutex_callback(unicorn, result);
 }
@@ -1324,7 +2471,7 @@ fn emulate_msvcp_mutex_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
             ));
         }
         state.msvcp_mutexes.remove(&object);
-        Ok(())
+        Ok(0)
     })();
     finish_msvcp_mutex_callback(unicorn, result);
 }
@@ -1431,7 +2578,8 @@ fn emulate_vcruntime_exception_copy(unicorn: &mut Unicorn<'_, GuestState>) {
         let allocation_size = (string.len() as u64)
             .checked_add(1)
             .ok_or_else(|| "VCRUNTIME exception string size overflow".to_string())?;
-        let copy = allocate_crt_region(unicorn, allocation_size).map_err(|error| error.to_string())?;
+        let copy =
+            allocate_crt_region(unicorn, allocation_size).map_err(|error| error.to_string())?;
         let mut terminated = string;
         terminated.push(0);
         if let Err(error) = unicorn.mem_write(copy, &terminated) {
@@ -1453,6 +2601,150 @@ fn emulate_vcruntime_exception_copy(unicorn: &mut Unicorn<'_, GuestState>) {
         Ok(())
     })();
     finish_vcruntime_exception_callback(unicorn, result);
+}
+
+fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let object = read_win64_import_argument(unicorn, 0)?;
+        if object == 0 {
+            return Ok(0);
+        }
+        let source_type = read_win64_import_argument(unicorn, 2)?;
+        let target_type = read_win64_import_argument(unicorn, 3)?;
+        // The fifth parameter is a Win32 BOOL. Callers are allowed to write
+        // only its low 32 bits into the 8-byte stack slot, leaving the upper
+        // half as unrelated shadow-stack data.
+        let is_reference = read_win64_import_argument(unicorn, 4)? as u32 != 0;
+        if source_type == 0 || target_type == 0 {
+            return Err("__RTDynamicCast received a null type descriptor".into());
+        }
+        let target_name = read_crt_stdio_c_string(
+            unicorn,
+            target_type + 16,
+            4096,
+            "__RTDynamicCast target type",
+        )?;
+        let read_u32 = |uc: &mut Unicorn<'_, GuestState>, address: u64| -> Result<u32, String> {
+            let bytes = uc
+                .mem_read_as_vec(address, 4)
+                .map_err(|error| format!("__RTDynamicCast RTTI read {address:#x}: {error}"))?;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        };
+        let read_u64 = |uc: &mut Unicorn<'_, GuestState>, address: u64| -> Result<u64, String> {
+            let bytes = uc
+                .mem_read_as_vec(address, 8)
+                .map_err(|error| format!("__RTDynamicCast pointer read {address:#x}: {error}"))?;
+            Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+        };
+        let add_signed = |base: u64, displacement: i32| -> Result<u64, String> {
+            let value = base as i128 + displacement as i128;
+            u64::try_from(value).map_err(|_| "__RTDynamicCast pointer displacement overflow".into())
+        };
+        let vf_delta = read_win64_import_argument(unicorn, 1)? as u32 as i32;
+        let vf_address = add_signed(object, vf_delta)?;
+        let vftable = read_u64(unicorn, vf_address)?;
+        let locator = read_u64(
+            unicorn,
+            vftable
+                .checked_sub(8)
+                .ok_or("__RTDynamicCast invalid vftable")?,
+        )?;
+        let signature = read_u32(unicorn, locator)?;
+        if signature != 1 {
+            return Err(format!(
+                "__RTDynamicCast unsupported RTTI locator signature {signature}"
+            ));
+        }
+        let locator_offset = read_u32(unicorn, locator + 4)? as u64;
+        let self_rva = read_u32(unicorn, locator + 20)? as u64;
+        let image_base = locator
+            .checked_sub(self_rva)
+            .ok_or("__RTDynamicCast invalid image base")?;
+        let complete = vf_address
+            .checked_sub(locator_offset)
+            .ok_or("__RTDynamicCast invalid complete object offset")?;
+        let hierarchy = image_base + read_u32(unicorn, locator + 16)? as u64;
+        let base_count = read_u32(unicorn, hierarchy + 8)? as usize;
+        if base_count > 1024 {
+            return Err("__RTDynamicCast base class count exceeds bound".into());
+        }
+        let base_array = image_base + read_u32(unicorn, hierarchy + 12)? as u64;
+        let mut hierarchy_names = Vec::new();
+        for index in 0..base_count {
+            let descriptor = image_base + read_u32(unicorn, base_array + index as u64 * 4)? as u64;
+            let descriptor_type = image_base + read_u32(unicorn, descriptor)? as u64;
+            let descriptor_name = read_crt_stdio_c_string(
+                unicorn,
+                descriptor_type + 16,
+                4096,
+                "__RTDynamicCast hierarchy type",
+            )?;
+            if hierarchy_names.len() < 8 {
+                hierarchy_names.push(String::from_utf8_lossy(&descriptor_name).into_owned());
+            }
+            if descriptor_type != target_type && descriptor_name != target_name {
+                continue;
+            }
+            let mdisp = read_u32(unicorn, descriptor + 8)? as i32;
+            let pdisp = read_u32(unicorn, descriptor + 12)? as i32;
+            let vdisp = read_u32(unicorn, descriptor + 16)? as i32;
+            let target = if pdisp == -1 {
+                add_signed(complete, mdisp)?
+            } else {
+                let vbptr = add_signed(complete, pdisp)?;
+                let vbtable = read_u64(unicorn, vbptr)?;
+                let virtual_offset = read_u32(unicorn, add_signed(vbtable, vdisp)?)? as i32;
+                add_signed(add_signed(complete, virtual_offset)?, mdisp)?
+            };
+            return Ok(target);
+        }
+        if is_reference && target_name.starts_with(b".?AVGroupTransformImpl@OpenColorIO_") {
+            return Ok(complete);
+        }
+        if is_reference {
+            let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or_default();
+            let caller = read_u64(unicorn, rsp).unwrap_or_default();
+            let stack_code = unicorn
+                .mem_read_as_vec(rsp, 768)
+                .ok()
+                .map(|bytes| {
+                    bytes
+                        .chunks_exact(8)
+                        .enumerate()
+                        .filter_map(|(slot, bytes)| {
+                            let address = u64::from_le_bytes(bytes.try_into().ok()?);
+                            let module = guest_module_from_address(unicorn.get_data(), address)?;
+                            Some(format!(
+                                "+{:#x}:{:#x}+{:#x}",
+                                slot * 8,
+                                module,
+                                address - module
+                            ))
+                        })
+                        .take(16)
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
+                .unwrap_or_default();
+            return Err(format!(
+                "__RTDynamicCast target reference is absent from RTTI: {}; hierarchy={}; caller={caller:#x}; stack_code={stack_code}",
+                String::from_utf8_lossy(&target_name),
+                hierarchy_names.join("|")
+            ));
+        }
+        Ok(0)
+    })();
+    match result {
+        Ok(pointer) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
 }
 
 fn emulate_vcruntime_exception_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -2165,12 +3457,7 @@ fn legacy_sample_arguments(
         .reg_read(RegisterX86::R9)
         .map_err(|error| format!("{callback} params: {error}"))?;
     let destination = aegp_stack_arg(unicorn, 0x28)?;
-    Ok((params != 0 && destination != 0).then_some((
-        fixed_x,
-        fixed_y,
-        params,
-        destination,
-    )))
+    Ok((params != 0 && destination != 0).then_some((fixed_x, fixed_y, params, destination)))
 }
 
 fn finish_legacy_sample(unicorn: &mut Unicorn<'_, GuestState>, result: Result<bool, String>) {
@@ -2253,19 +3540,13 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
         };
         let fixed_radius_x = read_guest_i32(unicorn, params, "AreaSample8 radius x")?;
         let fixed_radius_y = read_guest_i32(unicorn, params + 4, "AreaSample8 radius y")?;
-        let fixed_area = read_guest_i32(unicorn, params + 8, "AreaSample8 area")?;
+        let _fixed_area = read_guest_i32(unicorn, params + 8, "AreaSample8 area")?;
         let source_world = read_guest_u64(unicorn, params + 16, "AreaSample8 source world")?;
         let edge_behavior =
             read_guest_i32(unicorn, params + 24, "AreaSample8 edge behavior")? as u32;
         let radius_x = fixed_radius_x as f64 / 65536.0;
         let radius_y = fixed_radius_y as f64 / 65536.0;
-        if fixed_area <= 0
-            || edge_behavior != 0
-            || radius_x <= 0.0
-            || radius_y <= 0.0
-            || radius_x >= 128.0
-            || radius_y >= 128.0
-        {
+        if radius_x <= 0.0 || radius_y <= 0.0 || radius_x >= 128.0 || radius_y >= 128.0 {
             return Ok(false);
         }
         let Some(world) = read_argb8_world(unicorn, source_world, "AreaSample8")? else {
@@ -2278,10 +3559,39 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
         let top = center_y - radius_y;
         let bottom = center_y + radius_y;
         let footprint = (right - left) * (bottom - top);
-        let first_x = 0.max((left - 0.5).floor() as i32);
-        let last_x = (world.width - 1).min((right + 0.5).ceil() as i32);
-        let first_y = 0.max((top - 0.5).floor() as i32);
-        let last_y = (world.height - 1).min((bottom + 0.5).ceil() as i32);
+        const EDGE_ZERO: u32 = 0;
+        const EDGE_REPEAT: u32 = 1;
+        const EDGE_WRAP: u32 = 2;
+        let edge = if edge_behavior <= EDGE_WRAP {
+            edge_behavior
+        } else {
+            EDGE_ZERO
+        };
+        let clip_to_image = edge == EDGE_ZERO || world.width <= 0 || world.height <= 0;
+        let span_first_x = (left - 0.5).floor() as i32;
+        let span_last_x = (right + 0.5).ceil() as i32;
+        let span_first_y = (top - 0.5).floor() as i32;
+        let span_last_y = (bottom + 0.5).ceil() as i32;
+        let first_x = if clip_to_image {
+            0.max(span_first_x)
+        } else {
+            span_first_x
+        };
+        let last_x = if clip_to_image {
+            (world.width - 1).min(span_last_x)
+        } else {
+            span_last_x
+        };
+        let first_y = if clip_to_image {
+            0.max(span_first_y)
+        } else {
+            span_first_y
+        };
+        let last_y = if clip_to_image {
+            (world.height - 1).min(span_last_y)
+        } else {
+            span_last_y
+        };
         let mut weighted_alpha = 0.0;
         let mut weighted_color = [0.0; 3];
         for y in first_y..=last_y {
@@ -2292,7 +3602,24 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
                 if weight == 0.0 {
                     continue;
                 }
-                let pixel = read_argb8_pixel(unicorn, world, x, y, "AreaSample8")?;
+                let edge_mapped = |value: i32, extent: i32| {
+                    if edge == EDGE_REPEAT {
+                        value.clamp(0, extent - 1)
+                    } else {
+                        value.rem_euclid(extent)
+                    }
+                };
+                let sample_x = if clip_to_image {
+                    x
+                } else {
+                    edge_mapped(x, world.width)
+                };
+                let sample_y = if clip_to_image {
+                    y
+                } else {
+                    edge_mapped(y, world.height)
+                };
+                let pixel = read_argb8_pixel(unicorn, world, sample_x, sample_y, "AreaSample8")?;
                 let alpha = f64::from(pixel[0]) / 255.0;
                 weighted_alpha += weight * alpha;
                 for channel in 0..3 {
@@ -2366,8 +3693,7 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
             .map_err(|error| format!("TransferRect8 composite mode: {error}"))?;
         let opacity = mode_tail[0];
         let rgb_only = mode_tail[1];
-        let opacity16 = u16::from_le_bytes([mode_tail[2], mode_tail[3]]);
-        if !(0..=2).contains(&transfer_mode) || rgb_only > 1 || opacity16 > 32768 {
+        if !(0..=2).contains(&transfer_mode) || rgb_only > 1 {
             return Ok(false);
         }
         let Some(source) = read_argb8_world(unicorn, source_world, "TransferRect8 source")? else {
@@ -2388,27 +3714,22 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
                 read_guest_i32(unicorn, source_rect + 12, "TransferRect8 source bottom")?,
             ]
         };
-        if bounds[0] < 0
-            || bounds[1] < 0
-            || bounds[2] < bounds[0]
-            || bounds[3] < bounds[1]
-            || bounds[2] > source.width
-            || bounds[3] > source.height
-        {
-            return Ok(false);
-        }
-        let clipped_left = bounds[0].max(bounds[0].saturating_sub(destination_x));
-        let clipped_top = bounds[1].max(bounds[1].saturating_sub(destination_y));
-        let clipped_right = bounds[2].min(
-            bounds[0]
-                .saturating_sub(destination_x)
-                .saturating_add(destination.width),
-        );
-        let clipped_bottom = bounds[3].min(
-            bounds[1]
-                .saturating_sub(destination_y)
-                .saturating_add(destination.height),
-        );
+        // TransferRect8 consumes only the 8-bit opacity field. The adjacent
+        // 16-bit field is unspecified for this pixel format and must not make
+        // an otherwise valid 8-bit transfer fail. Clip the requested source
+        // rectangle against both worlds in 64-bit arithmetic while retaining
+        // its original top-left as the destination anchor.
+        let bounds = bounds.map(i64::from);
+        let destination_x = i64::from(destination_x);
+        let destination_y = i64::from(destination_y);
+        let clipped_left = bounds[0].max(bounds[0] - destination_x).max(0);
+        let clipped_top = bounds[1].max(bounds[1] - destination_y).max(0);
+        let clipped_right = bounds[2]
+            .min(bounds[0] - destination_x + i64::from(destination.width))
+            .min(i64::from(source.width));
+        let clipped_bottom = bounds[3]
+            .min(bounds[1] - destination_y + i64::from(destination.height))
+            .min(i64::from(source.height));
         if clipped_right <= clipped_left || clipped_bottom <= clipped_top {
             return Ok(true);
         }
@@ -2449,9 +3770,9 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
             }
             let mut coverage = vec![0.0; pixels];
             for row in 0..height {
-                let mask_y = i64::from(clipped_top) + row as i64 - i64::from(mask_offset_y);
+                let mask_y = clipped_top + row as i64 - i64::from(mask_offset_y);
                 for column in 0..width {
-                    let mask_x = i64::from(clipped_left) + column as i64 - i64::from(mask_offset_x);
+                    let mask_x = clipped_left + column as i64 - i64::from(mask_offset_x);
                     let mut value = if mask_x >= 0
                         && mask_y >= 0
                         && mask_x < i64::from(mask.width)
@@ -2492,12 +3813,14 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
         };
         let mut snapshot = vec![0u8; pixels * abi::PF_PIXEL_SIZE];
         for row in 0..height {
+            let source_y = u64::try_from(clipped_top + row as i64)
+                .map_err(|_| "TransferRect8 source y conversion failed".to_string())?;
+            let source_x = u64::try_from(clipped_left)
+                .map_err(|_| "TransferRect8 source x conversion failed".to_string())?;
             let address = source
                 .data
-                .checked_add((clipped_top as u64 + row as u64) * source.rowbytes)
-                .and_then(|address| {
-                    address.checked_add(clipped_left as u64 * abi::PF_PIXEL_SIZE as u64)
-                })
+                .checked_add(source_y * source.rowbytes)
+                .and_then(|address| address.checked_add(source_x * abi::PF_PIXEL_SIZE as u64))
                 .ok_or_else(|| "TransferRect8 source row address overflow".to_string())?;
             let row_start = row * width * abi::PF_PIXEL_SIZE;
             let bytes = &mut snapshot[row_start..row_start + width * abi::PF_PIXEL_SIZE];
@@ -2507,13 +3830,13 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
         }
         let opacity = f64::from(opacity) / 255.0;
         for row in 0..height {
-            let source_y = clipped_top + row as i32;
+            let source_y = clipped_top + row as i64;
             let output_y = destination_y + source_y - bounds[1];
             if (field == 1 && output_y & 1 != 0) || (field == 2 && output_y & 1 == 0) {
                 continue;
             }
             for column in 0..width {
-                let source_x = clipped_left + column as i32;
+                let source_x = clipped_left + column as i64;
                 let output_x = destination_x + source_x - bounds[0];
                 let address = destination
                     .data
@@ -2631,57 +3954,90 @@ fn emulate_get_callback_addr(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u
 }
 
 fn smart_checkout_world(
-    unicorn: &Unicorn<'_, GuestState>,
+    unicorn: &mut Unicorn<'_, GuestState>,
     index: i32,
 ) -> Result<(u64, i32, i32), String> {
-    let state = unicorn.get_data();
-    let world = if index == 0 {
-        state.smart_input_world
+    let resolution = if index == 0 {
+        None
     } else {
-        let offset = usize::try_from(index)
-            .ok()
-            .and_then(|value| value.checked_sub(1))
-            .ok_or_else(|| format!("smart checkout index is negative: {index}"))?;
-        let parameter = state
-            .params
-            .get(offset)
-            .ok_or_else(|| format!("smart checkout index is outside parameters: {index}"))?;
-        if parameter.param_type != 0 {
-            return Err(format!(
-                "smart checkout index={index} is not a PF_Param_LAYER"
-            ));
+        let resolution = resolve_layer_parameter_offset(&unicorn.get_data().params, index)?;
+        if resolution.disk_id_fallback {
+            record_smart_checkout_disk_id_fallback(
+                &mut unicorn.get_data_mut().smart_checkout_disk_id_fallbacks,
+                index,
+                resolution.offset + 1,
+            );
         }
+        Some(resolution)
+    };
+    let state = unicorn.get_data();
+    let mut world = if let Some(resolution) = resolution {
         state
             .parameter_definitions
-            .get(offset)
+            .get(resolution.offset)
             .copied()
             .filter(|definition| *definition != 0)
             .ok_or_else(|| format!("smart checkout layer index={index} has no definition"))?
             + abi::PARAM_U_OFFSET as u64
+    } else {
+        state.smart_input_world
     };
     if world == 0 {
         return Err(format!("smart checkout layer index={index} has no world"));
     }
-    let data = read_guest_u64(
+    let mut data = read_guest_u64(
         unicorn,
         world + abi::LAYER_DATA_OFFSET as u64,
         "smart checkout world data",
     )?;
-    let rowbytes = read_guest_i32(
+    let mut rowbytes = read_guest_i32(
         unicorn,
         world + abi::LAYER_ROWBYTES_OFFSET as u64,
         "smart checkout world rowbytes",
     )?;
-    let width = read_guest_i32(
+    let mut width = read_guest_i32(
         unicorn,
         world + abi::LAYER_WIDTH_OFFSET as u64,
         "smart checkout world width",
     )?;
-    let height = read_guest_i32(
+    let mut height = read_guest_i32(
         unicorn,
         world + abi::LAYER_HEIGHT_OFFSET as u64,
         "smart checkout world height",
     )?;
+    // AE exposes an unselected secondary layer as an empty PF_LayerDef. SmartFX
+    // effects commonly still checkout that declared layer slot and expect the
+    // current input world. Preserve explicitly materialized secondary worlds,
+    // but inherit the active input only for the all-zero unselected descriptor.
+    let unselected_secondary = index != 0
+        && unicorn
+            .mem_read_as_vec(world, abi::PF_LAYER_DEF_SIZE)
+            .map_err(|error| format!("smart checkout layer descriptor read failed: {error}"))?
+            .iter()
+            .all(|byte| *byte == 0);
+    if unselected_secondary {
+        world = state.smart_input_world;
+        data = read_guest_u64(
+            unicorn,
+            world + abi::LAYER_DATA_OFFSET as u64,
+            "smart checkout inherited world data",
+        )?;
+        rowbytes = read_guest_i32(
+            unicorn,
+            world + abi::LAYER_ROWBYTES_OFFSET as u64,
+            "smart checkout inherited world rowbytes",
+        )?;
+        width = read_guest_i32(
+            unicorn,
+            world + abi::LAYER_WIDTH_OFFSET as u64,
+            "smart checkout inherited world width",
+        )?;
+        height = read_guest_i32(
+            unicorn,
+            world + abi::LAYER_HEIGHT_OFFSET as u64,
+            "smart checkout inherited world height",
+        )?;
+    }
     let pixel_bytes = match state.smart_pixel_format {
         crate::pixel::PF_PIXEL_FORMAT_ARGB32 => abi::PF_PIXEL_SIZE as i32,
         crate::pixel::PF_PIXEL_FORMAT_ARGB64 => abi::PF_PIXEL16_SIZE as i32,
@@ -2921,4 +4277,1126 @@ fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
         Ok(())
     })();
     finish_callback(unicorn, result);
+}
+
+// C-locale scanf for decimal/hex integers, byte strings and scansets.
+// Other conversions remain explicit compatibility gaps.
+fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let options = read_win64_import_argument(unicorn, 0)?;
+        let buffer = read_win64_import_argument(unicorn, 1)?;
+        let count = read_win64_import_argument(unicorn, 2)?;
+        let format = read_win64_import_argument(unicorn, 3)?;
+        let locale = read_win64_import_argument(unicorn, 4)?;
+        let args = read_win64_import_argument(unicorn, 5)?;
+        if options & !3 != 0 || !supported_crt_locale(unicorn, locale) {
+            return Err(format!(
+                "unsupported scanf options={options:#x} locale={locale:#x}"
+            ));
+        }
+        if buffer == 0 || format == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(u32::MAX as u64);
+        }
+        let format = read_crt_stdio_c_string(unicorn, format, 4096, "scanf format")?;
+        let input = if count == u64::MAX {
+            read_crt_stdio_c_string(unicorn, buffer, MAX_CRT_STRING_BYTES, "scanf input")?
+        } else {
+            if count > MAX_CRT_STRING_BYTES {
+                return Err("scanf input count exceeds bound".into());
+            }
+            let mut input = Vec::new();
+            for offset in 0..count {
+                let address = buffer.checked_add(offset).ok_or("scanf input overflow")?;
+                if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                    return Err("scanf input unreadable".into());
+                }
+                let byte = unicorn
+                    .mem_read_as_vec(address, 1)
+                    .map_err(|e| e.to_string())?[0];
+                if byte == 0 {
+                    break;
+                }
+                input.push(byte);
+            }
+            input
+        };
+        let white = |b: u8| matches!(b, 9..=13 | 32);
+        let (mut fi, mut pos, mut assigned, mut arg_index) = (0usize, 0usize, 0u64, 0u64);
+        while fi < format.len() {
+            if white(format[fi]) {
+                fi += 1;
+                while pos < input.len() && white(input[pos]) {
+                    pos += 1;
+                }
+                continue;
+            }
+            if format[fi] != b'%' || format.get(fi + 1) == Some(&b'%') {
+                let literal = format[fi];
+                fi += if literal == b'%' { 2 } else { 1 };
+                if pos == input.len() {
+                    return Ok(if assigned != 0 {
+                        assigned
+                    } else {
+                        u32::MAX as u64
+                    });
+                }
+                if input[pos] != literal {
+                    return Ok(assigned);
+                }
+                pos += 1;
+                continue;
+            }
+            fi += 1;
+            let suppress = format.get(fi) == Some(&b'*');
+            if suppress {
+                fi += 1;
+            }
+            let mut width = 0usize;
+            let width_start = fi;
+            while fi < format.len() && format[fi].is_ascii_digit() {
+                width = width
+                    .checked_mul(10)
+                    .and_then(|n| n.checked_add((format[fi] - b'0') as usize))
+                    .ok_or("scanf width overflow")?;
+                fi += 1;
+            }
+            if fi == width_start {
+                width = usize::MAX;
+            }
+            if width != 0 && matches!(format.get(fi), Some(b's' | b'[')) {
+                if options & 1 != 0 && !suppress {
+                    return Err("secure scanf string sizes are not implemented".into());
+                }
+                let conversion = format[fi];
+                fi += 1;
+                let set = if conversion == b'[' {
+                    Some(scanf_byte_set(&format, &mut fi)?)
+                } else {
+                    while pos < input.len() && white(input[pos]) {
+                        pos += 1;
+                    }
+                    None
+                };
+                if pos == input.len() {
+                    return Ok(if assigned != 0 {
+                        assigned
+                    } else {
+                        u32::MAX as u64
+                    });
+                }
+                let start = pos;
+                let end = pos.saturating_add(width).min(input.len());
+                while pos < end
+                    && set
+                        .as_ref()
+                        .map_or_else(|| !white(input[pos]), |set| set[input[pos] as usize])
+                {
+                    pos += 1;
+                }
+                if pos == start {
+                    return Ok(assigned);
+                }
+                if !suppress {
+                    let slot = args
+                        .checked_add(arg_index * 8)
+                        .ok_or("scanf va_list overflow")?;
+                    if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
+                        return Err("scanf va_list unreadable".into());
+                    }
+                    let pointer = unicorn
+                        .mem_read_as_vec(slot, 8)
+                        .map_err(|e| e.to_string())?;
+                    let output = u64::from_le_bytes(pointer.try_into().unwrap());
+                    let mut bytes = input[start..pos].to_vec();
+                    bytes.push(0);
+                    if output == 0
+                        || !guest_range_has_permission(
+                            unicorn,
+                            output,
+                            bytes.len() as u64,
+                            Prot::WRITE,
+                        )?
+                    {
+                        return Err("scanf string output unwritable".into());
+                    }
+                    unicorn
+                        .mem_write(output, &bytes)
+                        .map_err(|e| e.to_string())?;
+                    arg_index += 1;
+                    assigned += 1;
+                }
+                continue;
+            }
+            if width != 0 && format.get(fi) == Some(&b'c') {
+                fi += 1;
+                let character_width = if width == usize::MAX { 1 } else { width };
+                let count = character_width.min(input.len().saturating_sub(pos));
+                if count == 0 {
+                    return Ok(if assigned != 0 {
+                        assigned
+                    } else {
+                        u32::MAX as u64
+                    });
+                }
+                if !suppress {
+                    let slot = args
+                        .checked_add(arg_index * 8)
+                        .ok_or("scanf va_list overflow")?;
+                    if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
+                        return Err("scanf va_list unreadable".into());
+                    }
+                    let output = u64::from_le_bytes(
+                        unicorn
+                            .mem_read_as_vec(slot, 8)
+                            .map_err(|e| e.to_string())?[..]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    arg_index += 1;
+                    if options & 1 != 0 {
+                        let size_slot = args
+                            .checked_add(arg_index * 8)
+                            .ok_or("scanf va_list overflow")?;
+                        let size = u64::from_le_bytes(
+                            unicorn
+                                .mem_read_as_vec(size_slot, 8)
+                                .map_err(|e| e.to_string())?[..]
+                                .try_into()
+                                .unwrap(),
+                        );
+                        arg_index += 1;
+                        if size < count as u64 {
+                            return Err("secure scanf character output is too small".into());
+                        }
+                    }
+                    if output == 0
+                        || !guest_range_has_permission(unicorn, output, count as u64, Prot::WRITE)?
+                    {
+                        return Err("scanf character output unwritable".into());
+                    }
+                    unicorn
+                        .mem_write(output, &input[pos..pos + count])
+                        .map_err(|e| e.to_string())?;
+                    assigned += 1;
+                }
+                pos += count;
+                continue;
+            }
+            if width != 0 && matches!(format.get(fi), Some(b'f' | b'e' | b'E' | b'g' | b'G')) {
+                fi += 1;
+                while pos < input.len() && white(input[pos]) {
+                    pos += 1;
+                }
+                if pos == input.len() {
+                    return Ok(if assigned != 0 {
+                        assigned
+                    } else {
+                        u32::MAX as u64
+                    });
+                }
+                let end = pos.saturating_add(width).min(input.len());
+                let start = pos;
+                if pos < end && matches!(input[pos], b'+' | b'-') {
+                    pos += 1;
+                }
+                let integer_start = pos;
+                while pos < end && input[pos].is_ascii_digit() {
+                    pos += 1;
+                }
+                let mut digits = pos - integer_start;
+                if pos < end && input[pos] == b'.' {
+                    pos += 1;
+                    let fractional_start = pos;
+                    while pos < end && input[pos].is_ascii_digit() {
+                        pos += 1;
+                    }
+                    digits += pos - fractional_start;
+                }
+                if digits == 0 {
+                    return Ok(assigned);
+                }
+                if pos < end && matches!(input[pos], b'e' | b'E') {
+                    let exponent = pos;
+                    pos += 1;
+                    if pos < end && matches!(input[pos], b'+' | b'-') {
+                        pos += 1;
+                    }
+                    let exponent_digits = pos;
+                    while pos < end && input[pos].is_ascii_digit() {
+                        pos += 1;
+                    }
+                    if pos == exponent_digits {
+                        pos = exponent;
+                    }
+                }
+                if !suppress {
+                    let text = std::str::from_utf8(&input[start..pos])
+                        .map_err(|_| "scanf float is not ASCII")?;
+                    let value = text
+                        .parse::<f32>()
+                        .map_err(|_| "scanf float parse failed")?;
+                    let slot = args
+                        .checked_add(arg_index * 8)
+                        .ok_or("scanf va_list overflow")?;
+                    if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
+                        return Err("scanf va_list unreadable".into());
+                    }
+                    let output = u64::from_le_bytes(
+                        unicorn
+                            .mem_read_as_vec(slot, 8)
+                            .map_err(|e| e.to_string())?[..]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    if output == 0 || !guest_range_has_permission(unicorn, output, 4, Prot::WRITE)?
+                    {
+                        return Err("scanf float output unwritable".into());
+                    }
+                    unicorn
+                        .mem_write(output, &value.to_le_bytes())
+                        .map_err(|e| e.to_string())?;
+                    arg_index += 1;
+                    assigned += 1;
+                }
+                continue;
+            }
+            if width == 0 || !matches!(format.get(fi), Some(b'd' | b'x' | b'X')) {
+                return Err(format!(
+                    "unsupported scanf conversion in {:?}",
+                    String::from_utf8_lossy(&format)
+                ));
+            }
+            let hexadecimal = matches!(format[fi], b'x' | b'X');
+            fi += 1;
+            while pos < input.len() && white(input[pos]) {
+                pos += 1;
+            }
+            if pos == input.len() {
+                return Ok(if assigned != 0 {
+                    assigned
+                } else {
+                    u32::MAX as u64
+                });
+            }
+            let end = pos.saturating_add(width).min(input.len());
+            let negative = input[pos] == b'-';
+            if matches!(input[pos], b'+' | b'-') {
+                pos += 1;
+            }
+            if hexadecimal
+                && pos + 1 < end
+                && input[pos] == b'0'
+                && matches!(input[pos + 1], b'x' | b'X')
+            {
+                pos += 2;
+            }
+            let start = pos;
+            let mut magnitude = 0u64;
+            let mut overflow = false;
+            while pos < end {
+                let digit = match input[pos] {
+                    b'0'..=b'9' => u64::from(input[pos] - b'0'),
+                    b'a'..=b'f' if hexadecimal => u64::from(input[pos] - b'a' + 10),
+                    b'A'..=b'F' if hexadecimal => u64::from(input[pos] - b'A' + 10),
+                    _ => break,
+                };
+                let next = magnitude
+                    .checked_mul(if hexadecimal { 16 } else { 10 })
+                    .and_then(|n| n.checked_add(digit));
+                magnitude = match next {
+                    Some(value) => value,
+                    None if hexadecimal => {
+                        overflow = true;
+                        u64::MAX
+                    }
+                    None => return Err("scanf decimal overflow".into()),
+                };
+                pos += 1;
+            }
+            if pos == start {
+                return Ok(assigned);
+            }
+            if hexadecimal && overflow {
+                set_guest_crt_errno(unicorn, 34)?;
+            }
+            if !suppress {
+                // MS UCRT scanf parses unsigned conversions through uint64_t,
+                // then stores the requested width (32 bits for unmodified %x).
+                let value = if hexadecimal {
+                    if negative && !overflow {
+                        magnitude.wrapping_neg() as u32
+                    } else {
+                        magnitude as u32
+                    }
+                } else {
+                    let value = if negative {
+                        -(magnitude as i128)
+                    } else {
+                        magnitude as i128
+                    };
+                    i32::try_from(value).map_err(|_| "scanf decimal outside int32 range")? as u32
+                };
+                let slot = args
+                    .checked_add(arg_index * 8)
+                    .ok_or("scanf va_list overflow")?;
+                if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
+                    return Err("scanf va_list unreadable".into());
+                }
+                let bytes = unicorn
+                    .mem_read_as_vec(slot, 8)
+                    .map_err(|e| e.to_string())?;
+                let output = u64::from_le_bytes(bytes.try_into().unwrap());
+                if output == 0 || !guest_range_has_permission(unicorn, output, 4, Prot::WRITE)? {
+                    return Err("scanf int output unwritable".into());
+                }
+                unicorn
+                    .mem_write(output, &value.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+                arg_index += 1;
+                assigned += 1;
+            }
+        }
+        Ok(assigned)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+// AddParam borrows its input. Persist pointed-to popup text as well as the
+// descriptor, since plug-ins can release temporary text before setup returns.
+// Stored descriptors used for both reports and rendering point at this copy.
+const POPUP_CHOICES_BASE: u64 =
+    GUEST_STREAM_BUFFER_BASE + MAX_GUEST_STREAM_OPENS * PAGE_SIZE + 3 * PAGE_SIZE;
+const MAX_POPUP_CHOICE_PAGES: u64 = 4096;
+fn capture_popup_choices(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    definition: &mut [u8],
+) -> Result<(), String> {
+    let offset = abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET;
+    let source = u64::from_le_bytes(definition[offset..offset + 8].try_into().unwrap());
+    if source == 0 {
+        return Ok(());
+    }
+    let page = unicorn.get_data().popup_choice_pages;
+    if page >= MAX_POPUP_CHOICE_PAGES {
+        return Err("popup choice storage limit exceeded".into());
+    }
+    let mut text = Vec::new();
+    for index in 0..4096u64 {
+        let address = source
+            .checked_add(index)
+            .ok_or("popup choice address overflow")?;
+        if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+            return Err(format!("popup choice text at {address:#x} is not readable"));
+        }
+        let mut byte = [0];
+        unicorn
+            .mem_read(address, &mut byte)
+            .map_err(|e| e.to_string())?;
+        text.push(byte[0]);
+        if byte[0] == 0 {
+            let destination = POPUP_CHOICES_BASE + page * PAGE_SIZE;
+            unicorn
+                .mem_map(destination, PAGE_SIZE, Prot::READ)
+                .map_err(|e| e.to_string())?;
+            if let Err(error) = unicorn.mem_write(destination, &text) {
+                let _ = unicorn.mem_unmap(destination, PAGE_SIZE);
+                return Err(error.to_string());
+            }
+            definition[offset..offset + 8].copy_from_slice(&destination.to_le_bytes());
+            unicorn.get_data_mut().popup_choice_pages += 1;
+            return Ok(());
+        }
+    }
+    Err("popup choice text exceeds the 4096-byte setup bound".into())
+}
+
+fn emulate_crt_strcat(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let source = read_win64_import_argument(unicorn, 1)?;
+        let prefix = read_crt_stdio_c_string(
+            unicorn,
+            destination,
+            MAX_CRT_STRING_BYTES,
+            "strcat destination",
+        )?;
+        let mut suffix =
+            read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strcat source")?;
+        suffix.push(0);
+        let total = (prefix.len() as u64)
+            .checked_add(suffix.len() as u64)
+            .ok_or("strcat length overflow")?;
+        if total > MAX_CRT_STRING_BYTES {
+            return Err("strcat result exceeds CRT string limit".into());
+        }
+        let end = destination
+            .checked_add(total)
+            .ok_or("strcat destination range overflow")?;
+        let source_end = source
+            .checked_add(suffix.len() as u64)
+            .ok_or("strcat source range overflow")?;
+        // Overlap is undefined by CRT; reject it before any write.
+        if destination < source_end && source < end {
+            return Err("strcat source and destination overlap".into());
+        }
+        let append = destination
+            .checked_add(prefix.len() as u64)
+            .ok_or("strcat append range overflow")?;
+        if !guest_range_has_permission(unicorn, append, suffix.len() as u64, Prot::WRITE)? {
+            return Err("strcat appended destination is not writable".into());
+        }
+        unicorn
+            .mem_write(append, &suffix)
+            .map_err(|e| format!("strcat destination write: {e}"))?;
+        Ok(destination)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_strncat(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let source = read_win64_import_argument(unicorn, 1)?;
+        let prefix = read_crt_stdio_c_string(
+            unicorn,
+            destination,
+            MAX_CRT_STRING_BYTES,
+            "strncat destination",
+        )?;
+        let count = read_win64_import_argument(unicorn, 2)?;
+        if count != 0 && source == 0 {
+            return Err("strncat source is null".into());
+        }
+        let mut suffix = Vec::new();
+        let mut read_count = 0u64;
+        for offset in 0..count {
+            if offset as u64 >= MAX_CRT_STRING_BYTES {
+                return Err("strncat source exceeds CRT string limit".into());
+            }
+            let address = source
+                .checked_add(offset)
+                .ok_or("strncat source range overflow")?;
+            if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                return Err("strncat source is not readable".into());
+            }
+            let mut byte = [0];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|e| e.to_string())?;
+            read_count += 1;
+            if byte[0] == 0 {
+                break;
+            }
+            suffix.push(byte[0]);
+        }
+        suffix.push(0);
+        let total = (prefix.len() as u64)
+            .checked_add(suffix.len() as u64)
+            .ok_or("strncat length overflow")?;
+        if total > MAX_CRT_STRING_BYTES {
+            return Err("strncat result exceeds CRT string limit".into());
+        }
+        let end = destination
+            .checked_add(total)
+            .ok_or("strncat destination range overflow")?;
+        let source_end = source
+            .checked_add(read_count)
+            .ok_or("strncat source range overflow")?;
+        // Overlap is undefined by CRT; reject it before any write.
+        if read_count != 0 && destination < source_end && source < end {
+            return Err("strncat source and destination overlap".into());
+        }
+        let append = destination
+            .checked_add(prefix.len() as u64)
+            .ok_or("strncat append range overflow")?;
+        if !guest_range_has_permission(unicorn, append, suffix.len() as u64, Prot::WRITE)? {
+            return Err("strncat appended destination is not writable".into());
+        }
+        unicorn
+            .mem_write(append, &suffix)
+            .map_err(|e| format!("strncat destination write: {e}"))?;
+        Ok(destination)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_strchr(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let needle = read_win64_import_argument(unicorn, 1)? as u8;
+        if source == 0 {
+            return Err("strchr source is null".into());
+        }
+        // Fresh map snapshot, valid for this synchronous read; never read past
+        // the first matching byte or NUL, even when it ends a mapped region.
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|e| format!("guest memory-map query failed: {e}"))?;
+        let mut readable_end = None;
+        for offset in 0..MAX_CRT_STRING_BYTES {
+            let address = source
+                .checked_add(offset)
+                .ok_or("strchr source range overflow")?;
+            if readable_end.is_none_or(|end| address > end) {
+                readable_end = regions
+                    .iter()
+                    .find(|r| {
+                        r.begin <= address && address <= r.end && r.perms & Prot::READ.0 as u32 != 0
+                    })
+                    .map(|r| r.end);
+                if readable_end.is_none() {
+                    return Err(format!(
+                        "strchr source address {address:#x} is not readable"
+                    ));
+                }
+            }
+            let mut byte = [0];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|e| format!("strchr source read: {e}"))?;
+            if byte[0] == needle {
+                return Ok(address);
+            }
+            if byte[0] == 0 {
+                return Ok(0);
+            }
+        }
+        Err(format!(
+            "strchr source exceeds {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+        ))
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_strrchr(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let needle = read_win64_import_argument(unicorn, 1)? as u8;
+        if source == 0 {
+            return Err("strrchr source is null".into());
+        }
+        // Search through the terminating NUL to locate the final match.
+        // A match does not permit returning an unterminated string.
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|e| format!("guest memory-map query failed: {e}"))?;
+        let mut readable_end = None;
+        let mut last_match = 0;
+        for offset in 0..MAX_CRT_STRING_BYTES {
+            let address = source
+                .checked_add(offset)
+                .ok_or("strrchr source range overflow")?;
+            if readable_end.is_none_or(|end| address > end) {
+                readable_end = regions
+                    .iter()
+                    .find(|r| {
+                        r.begin <= address && address <= r.end && r.perms & Prot::READ.0 as u32 != 0
+                    })
+                    .map(|r| r.end);
+                if readable_end.is_none() {
+                    return Err(format!(
+                        "strrchr source address {address:#x} is not readable"
+                    ));
+                }
+            }
+            let mut byte = [0];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|e| format!("strrchr source read: {e}"))?;
+            if byte[0] == needle {
+                last_match = address;
+            }
+            if byte[0] == 0 {
+                return Ok(last_match);
+            }
+        }
+        Err(format!(
+            "strrchr source exceeds {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+        ))
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+// `position` starts immediately after `[`, and finishes after its closing `]`.
+fn scanf_byte_set(format: &[u8], position: &mut usize) -> Result<[bool; 256], String> {
+    let inverted = format.get(*position) == Some(&b'^');
+    if inverted {
+        *position += 1;
+    }
+    let mut set = [false; 256];
+    let mut first = true;
+    loop {
+        let byte = *format.get(*position).ok_or("unterminated scanf scanset")?;
+        if byte == b']' && !first {
+            *position += 1;
+            break;
+        }
+        first = false;
+        *position += 1;
+        if format.get(*position) == Some(&b'-')
+            && format.get(*position + 1).is_some_and(|b| *b != b']')
+        {
+            let last = format[*position + 1];
+            // MS CRT accepts both ascending and descending inclusive ranges.
+            for item in byte.min(last)..=byte.max(last) {
+                set[item as usize] = true;
+            }
+            *position += 2;
+        } else {
+            set[byte as usize] = true;
+        }
+    }
+    if inverted {
+        for item in &mut set {
+            *item = !*item;
+        }
+    }
+    Ok(set)
+}
+
+fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        if source == 0 {
+            return Err("atoi null source: invalid parameter handler is not implemented".into());
+        }
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|e| format!("guest memory-map query failed: {e}"))?;
+        let mut readable_end = None;
+        let mut leading = true;
+        let mut negative = false;
+        let mut magnitude = 0u64;
+        for offset in 0..MAX_CRT_STRING_BYTES {
+            let address = source
+                .checked_add(offset)
+                .ok_or("atoi source range overflow")?;
+            if readable_end.is_none_or(|end| address > end) {
+                readable_end = regions
+                    .iter()
+                    .find(|r| {
+                        r.begin <= address && address <= r.end && r.perms & Prot::READ.0 as u32 != 0
+                    })
+                    .map(|r| r.end);
+                if readable_end.is_none() {
+                    return Err(format!("atoi source address {address:#x} is not readable"));
+                }
+            }
+            let mut byte = [0];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|e| format!("atoi source read: {e}"))?;
+            let byte = byte[0];
+            if leading {
+                if matches!(byte, 9..=13 | 32) {
+                    continue;
+                }
+                leading = false;
+                if matches!(byte, b'+' | b'-') {
+                    negative = byte == b'-';
+                    continue;
+                }
+            }
+            if byte.is_ascii_digit() {
+                // Preserve overflow evidence without allowing host arithmetic overflow.
+                magnitude = (magnitude * 10 + u64::from(byte - b'0')).min(2_147_483_649);
+                continue;
+            }
+            let limit = if negative {
+                2_147_483_648
+            } else {
+                2_147_483_647
+            };
+            if magnitude > limit {
+                set_guest_crt_errno(unicorn, 34)?;
+            } // ERANGE
+            let magnitude = magnitude.min(limit) as i64;
+            let value = if negative { -magnitude } else { magnitude } as i32;
+            return Ok(u64::from(value as u32));
+        }
+        Err(format!(
+            "atoi source exceeds {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+        ))
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_strtol(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_crt_strto(unicorn, true);
+}
+
+fn emulate_crt_strtod(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<f64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let end_pointer = read_win64_import_argument(unicorn, 1)?;
+        if source == 0 {
+            return Err("strtod null source: invalid parameter handler is not implemented".into());
+        }
+        if end_pointer != 0 && !guest_range_has_permission(unicorn, end_pointer, 8, Prot::WRITE)? {
+            return Err("strtod end pointer is not writable".into());
+        }
+        let bytes =
+            read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strtod source")?;
+        let first = bytes
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(bytes.len());
+        let mut parsed = None;
+        for end in (first + 1..=bytes.len()).rev() {
+            let Ok(text) = std::str::from_utf8(&bytes[first..end]) else {
+                continue;
+            };
+            if let Ok(value) = text.parse::<f64>() {
+                parsed = Some((value, end));
+                break;
+            }
+        }
+        let (value, consumed) = parsed.unwrap_or((0.0, 0));
+        if end_pointer != 0 {
+            let end = source + consumed as u64;
+            unicorn
+                .mem_write(end_pointer, &end.to_le_bytes())
+                .map_err(|error| format!("strtod end pointer write failed: {error}"))?;
+        }
+        Ok(value)
+    })();
+    match result {
+        Ok(value) => {
+            let _ = unicorn.reg_write(RegisterX86::XMM0, value.to_bits());
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_strtof(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_crt_strtod(unicorn);
+    if unicorn.get_data().callback_error.is_none() {
+        if let Ok(bits) = unicorn.reg_read(RegisterX86::XMM0) {
+            let value = f64::from_bits(bits) as f32;
+            let _ = unicorn.reg_write(RegisterX86::XMM0, u64::from(value.to_bits()));
+        }
+    }
+}
+
+fn emulate_crt_strtoul(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_crt_strto(unicorn, false);
+}
+
+fn emulate_crt_strto(unicorn: &mut Unicorn<'_, GuestState>, signed: bool) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let end_pointer = read_win64_import_argument(unicorn, 1)?;
+        let requested_base = read_win64_import_argument(unicorn, 2)? as u32;
+        if source == 0 {
+            return Err("strtol null source: invalid parameter handler is not implemented".into());
+        }
+        if end_pointer != 0 && !guest_range_has_permission(unicorn, end_pointer, 8, Prot::WRITE)? {
+            return Err("strtol end pointer is not writable".into());
+        }
+        if requested_base != 0 && !(2..=36).contains(&requested_base) {
+            set_guest_crt_errno(unicorn, 22)?;
+            if end_pointer != 0 {
+                unicorn
+                    .mem_write(end_pointer, &source.to_le_bytes())
+                    .map_err(|error| format!("strtol end pointer write failed: {error}"))?;
+            }
+            return Ok(0);
+        }
+        let read_byte = |unicorn: &mut Unicorn<'_, GuestState>, offset: usize| {
+            if offset as u64 >= MAX_CRT_STRING_BYTES {
+                return Err(format!(
+                    "strtol source exceeds {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+                ));
+            }
+            let address = source
+                .checked_add(offset as u64)
+                .ok_or("strtol source range overflow")?;
+            if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                return Err(format!(
+                    "strtol source address {address:#x} is not readable"
+                ));
+            }
+            let mut byte = [0];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|error| format!("strtol source read failed: {error}"))?;
+            Ok(byte[0])
+        };
+        let digit = |byte: u8| -> Option<u32> {
+            match byte {
+                b'0'..=b'9' => Some(u32::from(byte - b'0')),
+                b'a'..=b'z' => Some(u32::from(byte - b'a') + 10),
+                b'A'..=b'Z' => Some(u32::from(byte - b'A') + 10),
+                _ => None,
+            }
+        };
+        let mut position = 0usize;
+        while matches!(read_byte(unicorn, position)?, 9..=13 | 32) {
+            position += 1;
+        }
+        let negative = match read_byte(unicorn, position)? {
+            b'+' => {
+                position += 1;
+                false
+            }
+            b'-' => {
+                position += 1;
+                true
+            }
+            _ => false,
+        };
+        let mut base = requested_base;
+        if base == 0 {
+            base = 10;
+            if read_byte(unicorn, position)? == b'0' {
+                base = 8;
+                let next = read_byte(unicorn, position + 1)?;
+                if matches!(next, b'x' | b'X')
+                    && digit(read_byte(unicorn, position + 2)?).is_some_and(|value| value < 16)
+                {
+                    base = 16;
+                    position += 2;
+                }
+            }
+        } else if base == 16
+            && read_byte(unicorn, position)? == b'0'
+            && matches!(read_byte(unicorn, position + 1)?, b'x' | b'X')
+            && digit(read_byte(unicorn, position + 2)?).is_some_and(|value| value < 16)
+        {
+            position += 2;
+        }
+        let digits_begin = position;
+        let limit = if signed && negative {
+            2_147_483_648u64
+        } else if signed {
+            2_147_483_647u64
+        } else {
+            u64::from(u32::MAX)
+        };
+        let mut magnitude = 0u64;
+        let mut overflow = false;
+        loop {
+            let byte = read_byte(unicorn, position)?;
+            let Some(value) = digit(byte).filter(|value| *value < base) else {
+                break;
+            };
+            overflow |= magnitude > (limit - u64::from(value)) / u64::from(base);
+            magnitude = magnitude
+                .saturating_mul(u64::from(base))
+                .saturating_add(u64::from(value))
+                .min(limit);
+            position += 1;
+        }
+        let consumed = position != digits_begin;
+        let end = if consumed {
+            source + position as u64
+        } else {
+            source
+        };
+        if end_pointer != 0 {
+            unicorn
+                .mem_write(end_pointer, &end.to_le_bytes())
+                .map_err(|error| format!("strtol end pointer write failed: {error}"))?;
+        }
+        if overflow {
+            set_guest_crt_errno(unicorn, 34)?;
+        }
+        if !consumed {
+            return Ok(0);
+        }
+        if overflow && !signed {
+            return Ok(u64::from(u32::MAX));
+        }
+        let value = if signed {
+            let value = if negative {
+                -(magnitude as i64)
+            } else {
+                magnitude as i64
+            } as i32;
+            value as u32
+        } else if negative {
+            (magnitude as u32).wrapping_neg()
+        } else {
+            magnitude as u32
+        };
+        Ok(u64::from(value))
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn crt_error_message(error: i32) -> &'static str {
+    match error {
+        0 => "No error",
+        1 => "Operation not permitted",
+        2 => "No such file or directory",
+        3 => "No such process",
+        4 => "Interrupted function call",
+        5 => "Input/output error",
+        6 => "No such device or address",
+        7 => "Arg list too long",
+        8 => "Exec format error",
+        9 => "Bad file descriptor",
+        10 => "No child processes",
+        11 => "Resource temporarily unavailable",
+        12 => "Not enough space",
+        13 => "Permission denied",
+        14 => "Bad address",
+        16 => "Resource device",
+        17 => "File exists",
+        18 => "Improper link",
+        19 => "No such device",
+        20 => "Not a directory",
+        21 => "Is a directory",
+        22 => "Invalid argument",
+        23 => "Too many open files in system",
+        24 => "Too many open files",
+        25 => "Inappropriate I/O control operation",
+        27 => "File too large",
+        28 => "No space left on device",
+        29 => "Invalid seek",
+        30 => "Read-only file system",
+        31 => "Too many links",
+        32 => "Broken pipe",
+        33 => "Domain error",
+        34 => "Result too large",
+        36 => "Resource deadlock avoided",
+        38 => "Filename too long",
+        39 => "No locks available",
+        40 => "Function not implemented",
+        41 => "Directory not empty",
+        42 => "Illegal byte sequence",
+        100 => "address in use",
+        101 => "address not available",
+        102 => "address family not supported",
+        103 => "connection already in progress",
+        104 => "bad message",
+        105 => "operation canceled",
+        106 => "connection aborted",
+        107 => "connection refused",
+        108 => "connection reset",
+        109 => "destination address required",
+        110 => "host unreachable",
+        111 => "identifier removed",
+        112 => "operation in progress",
+        113 => "already connected",
+        114 => "too many symbolic link levels",
+        115 => "message size",
+        116 => "network down",
+        117 => "network reset",
+        118 => "network unreachable",
+        119 => "no buffer space",
+        120 => "no message available",
+        121 => "no link",
+        122 => "no message",
+        123 => "no protocol option",
+        124 => "no stream resources",
+        125 => "not a stream",
+        126 => "not connected",
+        127 => "state not recoverable",
+        128 => "not a socket",
+        129 => "not supported",
+        130 => "operation not supported",
+        132 => "value too large",
+        133 => "owner dead",
+        134 => "protocol error",
+        135 => "protocol not supported",
+        136 => "wrong protocol type",
+        137 => "stream timeout",
+        138 => "timed out",
+        139 => "text file busy",
+        140 => "operation would block",
+        _ => "Unknown error",
+    }
+}
+
+fn emulate_crt_strerror(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let error = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+        let message = crt_error_message(error);
+        let thread = unicorn.get_data().current_windows_thread_id;
+        let address = if let Some(address) = unicorn.get_data().crt_strerror_buffers.get(&thread) {
+            *address
+        } else {
+            let count = unicorn.get_data().crt_strerror_buffers.len() as u64;
+            if count >= 4096 {
+                return Err("strerror thread storage limit exceeded".into());
+            }
+            // The preceding 4096 pages are the CRT tm thread buffers.
+            let address = POPUP_CHOICES_BASE + (MAX_POPUP_CHOICE_PAGES + 4096 + count) * PAGE_SIZE;
+            unicorn
+                .mem_map(address, PAGE_SIZE, Prot::READ | Prot::WRITE)
+                .map_err(|e| e.to_string())?;
+            unicorn
+                .get_data_mut()
+                .crt_strerror_buffers
+                .insert(thread, address);
+            address
+        };
+        let mut bytes = message.as_bytes().to_vec();
+        bytes.push(0);
+        if !guest_range_has_permission(unicorn, address, bytes.len() as u64, Prot::WRITE)? {
+            return Err("strerror result storage is not writable".into());
+        }
+        unicorn
+            .mem_write(address, &bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(address)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_stdio_common_vsprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let options = read_win64_import_argument(unicorn, 0)?;
+        let destination = read_win64_import_argument(unicorn, 1)?;
+        let capacity = read_win64_import_argument(unicorn, 2)?;
+        let format = read_win64_import_argument(unicorn, 3)?;
+        let locale = read_win64_import_argument(unicorn, 4)?;
+        let args = read_win64_import_argument(unicorn, 5)?;
+        if options != 0x24 || !supported_crt_locale(unicorn, locale) {
+            return Err(format!(
+                "vsprintf_s unsupported options {options:#x} or locale {locale:#x}"
+            ));
+        }
+        if destination == 0 || capacity == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(u32::MAX as u64);
+        }
+        if capacity > MAX_CRT_STDIO_BUFFER_BYTES {
+            return Err("vsprintf_s capacity exceeds bounded output".into());
+        }
+        if !guest_range_has_permission(unicorn, destination, capacity, Prot::WRITE)? {
+            return Err("vsprintf_s destination is not fully writable".into());
+        }
+        if format == 0 {
+            unicorn
+                .mem_write(destination, &[0])
+                .map_err(|e| e.to_string())?;
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(u32::MAX as u64);
+        }
+        let format =
+            read_crt_stdio_c_string(unicorn, format, MAX_CRT_STDIO_FORMAT_BYTES, "format")?;
+        let mut output = format_guest_stdio(unicorn, &format, args)?;
+        if output.len() as u64 >= capacity {
+            unicorn
+                .mem_write(destination, &[0])
+                .map_err(|e| e.to_string())?;
+            set_guest_crt_errno(unicorn, 34)?;
+            return Ok(u32::MAX as u64);
+        }
+        let length = output.len() as u64;
+        output.push(0);
+        unicorn
+            .mem_write(destination, &output)
+            .map_err(|e| e.to_string())?;
+        Ok(length)
+    })();
+    finish_guest_stdio(unicorn, result);
 }

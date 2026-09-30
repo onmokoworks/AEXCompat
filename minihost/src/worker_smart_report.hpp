@@ -34,6 +34,19 @@ struct SmartCompletionInputs {
   bool parameter_count_contract_valid{};
   bool arbitrary_defaults_disposed{};
   bool depth_supported{};
+  /// Advertised fact and the depth actually dispatched, recorded beside
+  /// `depth_supported` (which says whether the run served the caller's
+  /// depth at all).
+  bool advertised_depth_supported{};
+  int32_t dispatch_pixel_bytes{4};
+  /// Pixel depth of the session's output slot, or 0 outside a session. The
+  /// frame block below describes what the caller receives, and in a session
+  /// that is the slot: the plug-in may have been dispatched at another depth
+  /// and the frame converted into it, so its own world depth would describe a
+  /// buffer the caller never sees - and a row length taken from one with a
+  /// pixel size taken from the other reports written bytes as undefined
+  /// padding.
+  int32_t session_pixel_bytes{};
   bool image_render_supported{};
   bool smart_render_supported{};
   bool nop_render_advertised{};

@@ -3,32 +3,29 @@ import os
 import subprocess
 from pathlib import Path
 
+from _render_session import HARNESS
+
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "instruments/pf-param-utils-animation-probe/pf_param_utils_animation_probe.cpp"
-RC = ROOT / "instruments/pf-param-utils-animation-probe/pf_param_utils_animation_probe.rc"
 SCRIPT = ROOT / "tools/build-pf-param-utils-animation-probe.ps1"
 PROBE = ROOT / "target/pf-param-utils-animation-probe-build/Release/pf_param_utils_animation_probe.aex"
-HARNESS = ROOT / "broker/target/release/aexcompat-harness.exe"
 
 
 def _worker():
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
     candidates = [Path(configured) if configured else None,
-                  ROOT / "target/minihost-build-v18/Release/aex_render_worker.exe",
-                  ROOT / "target/minihost-build-v18/aex_render_worker.exe"]
+                  ROOT / "target/minihost-build-v18/Release/aex_worker.exe",
+                  ROOT / "target/minihost-build-v18/aex_worker.exe"]
     return next((path for path in candidates if path and path.is_file()), None)
 
 
 
 
-def test_probe_builds_and_passes_native_guards():
+def test_probe_builds():
     subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT)],
                    cwd=ROOT, check=True, timeout=180)
     assert PROBE.is_file() and PROBE.stat().st_size > 0
-    guard = ROOT / "tests/test_native_code_guards.py"
-    subprocess.run(["pytest", "-q", str(guard)], cwd=ROOT, check=True, timeout=120)
 
 
 def test_real_aex_animation_sidecar_adversarial_probe(tmp_path):

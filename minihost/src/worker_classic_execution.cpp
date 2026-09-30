@@ -44,11 +44,24 @@ int32_t finish_lifecycle(void* host, LifecycleResult& state,
 }
 
 int32_t dispatch_render(void* host, int32_t error, const RenderHooks& h) {
-  if (!host || !h.prepare_output || !h.dispatch_selector || !h.close_ui) return -5;
-  if (error == 0 && h.draw && !h.draw(host)) error = -5;
+  if (!host || !h.stage_begin || !h.stage_end || !h.draw_enabled ||
+      !h.prepare_output || !h.dispatch_selector || !h.ui_context_active ||
+      !h.close_ui) return -5;
+  if (error == 0 && h.draw && h.draw_enabled(host)) {
+    h.stage_begin(host, "classic_ui_draw");
+    const bool succeeded = h.draw(host);
+    h.stage_end(host, "classic_ui_draw", succeeded ? 0 : -5);
+    if (!succeeded) error = -5;
+  }
   if (error == 0) error = h.prepare_output(host);
   if (error == 0) error = h.dispatch_selector(host);
-  if (!h.close_ui(host) && error == 0) error = -5;
+  if (h.ui_context_active(host)) {
+    h.stage_begin(host, "classic_ui_teardown");
+    const bool close_succeeded = h.close_ui(host);
+    const int32_t close_error = !close_succeeded && error == 0 ? -5 : 0;
+    h.stage_end(host, "classic_ui_teardown", close_error);
+    if (close_error != 0) error = close_error;
+  }
   return error;
 }
 
@@ -57,6 +70,17 @@ int finalize(Context& c, const Hooks& h) {
   if (!h.copy_packed || !h.hash || !h.copy_packed(c.destination, c.rowbytes, c.width,
       c.height, c.pixel_bytes, logical)) return -3;
   if (c.output_hash) *c.output_hash = h.hash(logical.data(), logical.size());
+  // A NOP_RENDER frame is a host-owned passthrough; the plug-in promised no
+  // writes. All other successful Classic frames promise their output extent.
+  auto coverage = c.output_written_by_host ? output_coverage::Result{} :
+      output_coverage::inspect(logical.data(), logical.size(), c.width, c.height,
+                               c.pixel_bytes, c.promised_rect);
+  if (c.error == 0 && !c.output_written_by_host &&
+      (!coverage.geometry_valid || coverage.unwritten_pixels != 0)) {
+    coverage.host_validation_failed = true;
+    c.error = -6;
+  }
+  if (c.output_coverage) *c.output_coverage = coverage;
   if (c.error == 0 && (!h.publish_stage || !h.publish_stage(
       {c.current_time, c.time_scale}, {c.time_step, c.time_scale},
       static_cast<int8_t>(c.quality == 0 ? 0 : 1), c.pixel_format,

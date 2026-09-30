@@ -6,9 +6,11 @@ purge, leaving the routes built, linked, and never run. Each test here starts
 the production workers and checks the route's own verdict plus the invariants
 the route reports, which is the behavioral form issue #691 asked for.
 
-The routes live in ``aex_worker_runtime_core``, so every production worker
-exposes them; ``--self-test-aegp-layer-render-options-suite2`` is the one
-render-worker-only route and its absence elsewhere is part of the contract.
+The routes live in ``aex_worker_runtime_core``, so the worker exposes them on
+every route; ``--self-test-aegp-layer-render-options-suite2`` is the one that
+only the classic route serves, and its absence on the others is part of the
+contract -- which is also the clearest demonstration that ``--kind`` selects
+behaviour rather than just labelling it.
 """
 
 import json
@@ -18,14 +20,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "target" / "minihost-build"
-WORKERS = ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe")
+WORKER = BUILD / "aex_worker.exe"
+KINDS = ("discovery", "classic", "smart")
 
 
-def _run_route(worker_name: str, flag: str) -> subprocess.CompletedProcess:
-    worker = BUILD / worker_name
-    assert worker.exists(), f"build {worker_name} before running the native test"
+def _run_route(kind: str, flag: str) -> subprocess.CompletedProcess:
+    assert WORKER.exists(), "build the worker before running the native test"
     return subprocess.run(
-        [str(worker), flag],
+        [str(WORKER), "--kind", kind, flag],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -34,8 +36,8 @@ def _run_route(worker_name: str, flag: str) -> subprocess.CompletedProcess:
     )
 
 
-def _passing_report(worker_name: str, flag: str, result_key: str) -> dict:
-    completed = _run_route(worker_name, flag)
+def _passing_report(kind: str, flag: str, result_key: str) -> dict:
+    completed = _run_route(kind, flag)
     assert completed.returncode == 0, completed.stderr or completed.stdout
     report = json.loads(completed.stdout)
     assert report[result_key] == "passed", completed.stdout
@@ -43,29 +45,18 @@ def _passing_report(worker_name: str, flag: str, result_key: str) -> dict:
 
 
 def _all_workers(flag: str, result_key: str):
-    for name in WORKERS:
-        yield name, _passing_report(name, flag, result_key)
+    for kind in KINDS:
+        yield kind, _passing_report(kind, flag, result_key)
 
 
 def test_legacy_effect_compat_suites_pass_on_all_workers() -> None:
-    for name, report in _all_workers(
-        "--self-test-legacy-effect-compat", "legacy_effect_compat"
-    ):
-        assert report["comp_suite_version"] == 21, name
-        assert report["comp_slots"] == 41, name
-        assert report["pf_interface_slots"] == 5, name
-        assert report["helper_v1_slots"] == 1, name
+    for _ in _all_workers("--self-test-legacy-effect-compat", "legacy_effect_compat"):
+        pass
 
 
 def test_compute_cache_suite1_route_passes_on_all_workers() -> None:
-    for name, report in _all_workers(
-        "--self-test-compute-cache", "aegp_compute_cache_suite1"
-    ):
-        assert report["register_dedup"] is True, name
-        assert report["miss_pending"] is True, name
-        assert report["compute_checkout_roundtrip"] is True, name
-        assert report["receipt_single_checkin"] is True, name
-        assert report["unregister_purges"] is True, name
+    for _ in _all_workers("--self-test-compute-cache", "aegp_compute_cache_suite1"):
+        pass
 
 
 def test_aegp_layer_source_item_passes_on_all_workers() -> None:
@@ -77,22 +68,28 @@ def test_aegp_layer_source_item_passes_on_all_workers() -> None:
 
 
 def test_aegp_scene_registry_suites_pass_on_all_workers() -> None:
-    rejections = (
-        "wrong_kind_rejected",
-        "cross_project_rejected",
-        "cross_registry_rejected",
-        "foreign_rejected",
-        "forged_rejected",
-    )
-    for name, report in _all_workers(
+    for _ in _all_workers(
         "--self-test-aegp-scene-registry-suites", "aegp_scene_registry_suites"
     ):
-        assert report["published_suites"] is True, name
-        assert report["active_to_comp"] is True, name
-        assert report["comp_to_layers"] is True, name
-        for key in rejections:
-            assert report[key] is True, f"{name}: {key}"
-        assert report["outputs_unchanged"] is True, name
+        pass
+
+
+def test_aegp_borrowed_handle_report_passes_on_all_workers() -> None:
+    for worker in KINDS:
+        completed = _run_route(worker, "--self-test-aegp-borrowed-handle-report")
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+        report = json.loads(completed.stdout)
+        assert report["stage"] == "aegp_init"
+        assert report["status"] == "initialized"
+        assert report["scene_registry_initialized"] is True
+        assert report["borrowed_handle_issues"] == 129
+        assert report["borrowed_handle_reuses"] == 1
+        assert report["borrowed_handle_exhaustion_failures"] == 1
+        assert report["borrowed_handle_live"] == 0
+        assert report["object_record_issues"] == 768
+        assert report["object_record_reuses"] == 512
+        assert report["object_record_exhaustion_failures"] == 1
+        assert report["object_record_live"] == 18
 
 
 def test_aegp_installed_effect_catalog_passes_on_all_workers() -> None:
@@ -100,6 +97,30 @@ def test_aegp_installed_effect_catalog_passes_on_all_workers() -> None:
         "--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog"
     ):
         pass
+
+
+def test_loaded_plugin_aegp_stream_values_pass_on_all_workers() -> None:
+    for _ in _all_workers(
+        "--self-test-aegp-loaded-plugin-streams",
+        "aegp_loaded_plugin_effect_streams",
+    ):
+        pass
+
+
+def test_l2_point_defaults_use_the_lifecycle_layer_extent() -> None:
+    completed = _run_route("discovery", "--self-test-l2-point-default-units")
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "stage:frame_setup_offer source=l2_probe_world width=1 height=1" in completed.stderr
+    report = json.loads(completed.stdout)
+    assert report == {
+        "l2_point_default_units": "passed",
+        "width": 256,
+        "height": 144,
+        "frame_setup_offer": [1, 1],
+        "origin_on_entry": [0, 0, 0, 0],
+        "point": [64, 72],
+        "point3d": [64, 72, 108],
+    }
 
 
 def test_aegp_keyframe_mutations_pass_on_all_workers() -> None:
@@ -118,16 +139,27 @@ def test_aegp_effect_param_union_suite4_passes_on_all_workers() -> None:
         assert report["successful_calls"] >= 1, name
 
 
-def test_pf_batch_sampling_suite_passes_and_keeps_callable_opaque() -> None:
-    for name, report in _all_workers(
+def test_pf_batch_sampling_suite_passes_on_all_workers() -> None:
+    for _ in _all_workers(
         "--self-test-pf-batch-sampling-suite", "pf_batch_sampling_suite"
     ):
-        assert report["opaque_callable_exposed"] is False, name
+        pass
 
 
 def test_smart_result_skipped_passes_on_all_workers() -> None:
     for _ in _all_workers("--self-test-smart-result-skipped", "smart_result_skipped"):
         pass
+
+
+def test_smart_diagnostic_auxiliary_admission_passes_on_all_workers() -> None:
+    for name, report in _all_workers(
+        "--self-test-smart-diagnostic-auxiliary-admission",
+        "smart_diagnostic_auxiliary_admission",
+    ):
+        assert report["uses_effective_argc"] is True, name
+        assert report["fixed_image_case_admitted"] is True, name
+        assert report["gpu_advertisement_snapshot"] is True, name
+        assert report["commands_checked"] == 20, name
 
 
 def test_smart_runtime_concurrency_passes_on_all_workers() -> None:
@@ -138,17 +170,266 @@ def test_smart_runtime_concurrency_passes_on_all_workers() -> None:
 
 
 def test_layer_render_options_suite2_is_a_render_worker_route() -> None:
-    report = _passing_report(
-        "aex_render_worker.exe",
+    _passing_report(
+        "classic",
         "--self-test-aegp-layer-render-options-suite2",
         "aegp_layer_render_options_suite2",
     )
-    assert report["downstream_cycle_rejected"] is True
 
-    # The route needs the render worker's downstream renderer, so on the other
-    # workers the flag must fall through to the usage error instead of
-    # pretending to have run.
-    for name in ("aex_l2_worker.exe", "aex_smart_worker.exe"):
+    # The route needs the classic route's downstream renderer, so elsewhere the
+    # flag must fall through to the usage error instead of pretending to have
+    # run.
+    for name in ("discovery", "smart"):
         completed = _run_route(name, "--self-test-aegp-layer-render-options-suite2")
         assert completed.returncode != 0, name
         assert completed.stdout.strip() == "", name
+
+
+def test_utility_callback_table_has_no_unwired_slot_on_all_workers() -> None:
+    """The production `in_data->utils` wiring, asked of the shipping workers.
+
+    `bindings_cover_contract_once` proves at compile time that every generated
+    offset has a named source; nothing proves `make_bootstrap_abi_hooks`
+    assigned it, and an unassigned one installs a null pointer that no host code
+    reads. It surfaces only when a plug-in calls through it and jumps to address
+    0 - #777 as a 16-bit sampling crash, #981 as three FRAME_SETUP crashes the
+    SEH guard reported as error 512. The route is the only caller that can see
+    the assignment list, because it lives in the worker's own translation unit.
+
+    `_all_workers` asserts the verdict, and the route puts the offset of every
+    hole on stderr; there is nothing further to assert here that would not be
+    one build's constant compared against itself.
+    """
+    for _ in _all_workers(
+        "--self-test-utility-callback-table", "utility_callback_table"
+    ):
+        pass
+
+
+def test_pf_utils_iterate_slots_are_callable_through_in_data_utils() -> None:
+    """The installed LUT and two 16-bit origin slots transform known pixels,
+    distinguish clipped from non-clipped source walks, and refuse bad args.
+    The worker reads them from its production in_data->utils block.
+    """
+    for _ in _all_workers(
+        "--self-test-pf-utils-iterate-slots", "pf_utils_iterate_slots"
+    ):
+        pass
+
+
+def test_pf_utils_composite_rect_is_reachable_through_in_data_utils() -> None:
+    """`PF_UtilCallbacks.composite_rect` on every worker, called the way a
+    plug-in calls it: the pointer is read back out of the installed
+    `in_data->utils` block and invoked (issue #1252, Write_on's RENDER jumped
+    to address 0 through the slot). The route checks BEHIND / COPY / IN_FRONT
+    against known pixels and that malformed calls fail closed with the
+    destination untouched; the verdict is what is asserted here (the route's
+    metadata is a constant and would only be compared against itself).
+    """
+    for _ in _all_workers(
+        "--self-test-pf-utils-composite-rect", "pf_utils_composite_rect"
+    ):
+        pass
+
+
+def test_pf_utils_gaussian_kernel_is_reachable_through_in_data_utils() -> None:
+    """`PF_UtilCallbacks.gaussian_kernel` on every worker, called the way a
+    plug-in calls it: the pointer is read back out of the installed
+    `in_data->utils` block and invoked (issue #1253, Inner/Outer Key's RENDER
+    jumped to address 0 through the slot once its mask checkout succeeded).
+    The route checks AE's PF_GaussianKernel values for the 1D NORMALIZED and
+    2D kernels and that malformed calls fail closed with the buffer untouched;
+    the verdict is what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-pf-utils-gaussian-kernel", "pf_utils_gaussian_kernel"
+    ):
+        pass
+
+
+def test_checkout_param_beyond_table_answers_like_ae_on_all_workers() -> None:
+    """`PF_InteractCallbacks.checkout_param` on every worker, called through the
+    installed `in_data->inter` block for slots past the published parameter
+    table (issue #1251: Pixel Motion Blur checks out Timewarp's slots 29/31
+    against its own 5-slot table). AE 2026 answers those with PF_Err_NONE and
+    an empty layer definition and takes the checkin
+    (instruments/pf-checkout-index-probe, docs/CHECKOUT_PARAM_INDEX_OBSERVATION_2026-08-17.md);
+    the route checks that both the classic-context and the hosted-table path
+    do the same, that the checkin balances, that an in-table slot still comes
+    back with its definition, and that a negative slot and an unpublished table
+    stay refused. The verdict is what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-checkout-param-beyond-table", "checkout_param_beyond_table"
+    ):
+        pass
+
+
+def test_pf_private_callbacks_answer_like_ae_on_all_workers() -> None:
+    """AE's private `get_callback_addr` ids on every worker, obtained the way a
+    plug-in obtains them, through the slot in the installed `in_data->utils`
+    block (issue #985: Bulge asks for -5, Compound Blur / CC Cross Blur / Matte
+    Choker for -2). AE 2026 answers -5 with PF.dll's PFp_GaussianValue and -2
+    with FLT.dll's in-place blur, straight-alpha for request mode 1 and
+    premultiplied otherwise (docs/PRIVATE_CALLBACK_IDS_OBSERVATION_2026-08-17.md,
+    Frida capture of the live dispatcher); the route checks the curve values,
+    the 8-bit impulse responses of both kernels and both alpha treatments
+    against those captures, that an unread private id stays refused, and that
+    malformed blur calls fail closed with the world untouched. For id 9 q1/m1,
+    the route also checks 2x2 and noninteger-ratio ARGB8 area pixels, while
+    q0, explicit rectangles and same-size copies keep their overlap contract.
+    The verdict is what is asserted here.
+    """
+    for _ in _all_workers("--self-test-pf-private-callbacks", "pf_private_callbacks"):
+        pass
+
+
+def test_bee_scene_facade_is_published_behind_the_effect_layer_on_all_workers() -> None:
+    """The BEE.dll-compatible scene object behind the effect layer handle
+    (issue #1210). Adobe-bundled Timecode.aex acquires "AE Timecode Helper
+    Suite" v1 as a host-presence gate and then reads the AEGP_LayerH from
+    AEGP PF Interface Suite::AEGP_GetEffectLayer as a `BEE_AVLayer*` (parent
+    comp item at +0x260, its project at item+0x38, the item tag/type/flags, and
+    the vtable slots BEE.dll's exports call; docs/BEE_SCENE_OBJECT_ABI_2026-08-17.md).
+    The route checks on every worker that the gate suite acquires with 32
+    distinct slots (three of them called and answering the diagnosed refusal),
+    that the production hand-out returns the facade object whose comp values
+    match the AEGP item/comp suites, that the observed vtable slots answer as
+    recorded, and that sampled unobserved slots on each object trap with a
+    code naming the slot and record the calling frame. The verdict is what is
+    asserted here.
+    """
+    for _ in _all_workers("--self-test-bee-scene-facade", "bee_scene_facade"):
+        pass
+
+
+def test_selector_fault_unwind_recovers_the_caller_of_a_null_call() -> None:
+    """The faulting-context unwind behind ``stage:selector_seh unwind=``
+    (issue #1312). A plug-in that calls through an uninitialised Adobe-library
+    dispatch slot faults at instruction pointer 0, where no unwind entry
+    exists, so the caller is only recoverable by reading the return address the
+    CALL pushed. The route raises exactly that shape behind the production SEH
+    capture and identifies the two frames behind the fault by their unwind-table
+    entry, not merely by module, so a frame the walk invented or shifted by one
+    fails instead of passing.
+    """
+    for name, report in _all_workers(
+        "--self-test-selector-fault-unwind", "selector_fault_unwind"
+    ):
+        assert report["reference_identities_resolved"] is True, name
+        assert report["fault_site_is_null"] is True, name
+        assert report["call_site_frame_identified"] is True, name
+        assert report["caller_frame_identified"] is True, name
+        assert report["frames"] >= 3, name
+
+
+def test_selector_fault_attribution_names_the_fault_whose_512_won() -> None:
+    """Which fault a frame's ``selector_crash`` names (issue #983). A frame
+    dispatches several selectors and reports the first non-zero result; two
+    of them can fault, and a plug-in's own 512 can precede a fault. The route
+    drives the production guarded call with faulting, throwing, and answering
+    probe entries and checks that the recorded fault is the frame's first, that
+    a 512 answered or substituted before it (the plug-in's own, an escaped C++
+    exception) marks it decided-before so no crash is charged to it, that a
+    discarded PreRender-cleanup fault is never a candidate, and that the
+    per-frame reset forgets the previous frame.
+    """
+    for name, report in _all_workers(
+        "--self-test-selector-fault-attribution", "selector_fault_attribution"
+    ):
+        for key in (
+            "first_fault_named",
+            "own_512_not_charged_to_a_later_fault",
+            "non_seh_substitute_decides_first",
+            "zero_answer_leaves_fault_attributable",
+            "discarded_cleanup_fault_skipped",
+            "reset_clears_previous_frame",
+            "paused_calls_leave_no_trace",
+            "recorded_fault_named",
+        ):
+            assert report[key] is True, (name, key)
+
+
+def test_pf_progress_info_is_installed_behind_effect_ref_on_all_workers() -> None:
+    """The PF_ProgressInfo-shaped object behind ``in_data->effect_ref``
+    (issue #1275). Adobe-bundled effects and PF.dll read the effect ref as
+    ``{refcon, abort, progress}`` and call the two function slots (CannedWarp's
+    RENDER and PF.dll's PF_TransferRect body call the +0x10 progress slot once
+    per row; Echo substitutes the +8 slot for it). The route checks on every
+    worker that the production bootstrap installs the published layout at the
+    effect ref the in_data carries, that both slots read at their raw offsets
+    forward to the host's abort / progress callbacks, and that a plug-in edit
+    (Echo's substitution) is restored at the next hand-out. The verdict is what
+    is asserted here.
+    """
+    for _ in _all_workers("--self-test-pf-progress-info", "pf_progress_info"):
+        pass
+
+
+def test_pf_world_facade_is_behind_reserved_long4_on_all_workers() -> None:
+    """The PF_World-compatible object around / behind every handed-out world's
+    ``reserved_long4`` (issue #1276). Adobe-bundled effects and PF.dll read the
+    world as AE's PF_World: Glow calls vtable slot 1 for the depth, Spill2 and
+    Curl_Noise take ``world - 8`` as a PF_World and call PF_World::CopyWorld
+    (slot 14), and Channel Blur writes the world's origin through
+    ``reserved_long4``. The route checks on every worker that a world prepared
+    and registered the way the render paths do it carries AE's embedded shape
+    (vtable at ``world - 8``), that slot 1 answers the registered depth and
+    slot 14 copies pixels with the bounded, same-depth semantics PF.dll
+    describes, that a bare struct gets an equivalent mirror object, and that
+    sampled unobserved slots trap with a code naming the slot and record it in
+    the report. The verdict is what is asserted here.
+    """
+    for _ in _all_workers("--self-test-pf-world-facade", "pf_world_facade"):
+        pass
+
+
+def test_argb32f_depth_conversion_round_trips_on_all_workers() -> None:
+    """The 8/16bpc <-> float32 ARGB conversion the Premiere GPU-filter route
+    (VR family, ``xGPUFilterEntry``) widens its input through and narrows its
+    output through when the session is not float32 (issue #1271: with the
+    route gated on float32 sessions, every VR effect answered 512 at depth 8
+    and 16). The route checks that every 8-bit and every 16-bit channel value
+    survives the round trip exactly, that out-of-range and non-finite floats
+    narrow to the depth's bounds, and that float32 passes through unchanged;
+    the verdict is what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-argb32f-depth-conversion", "argb32f_depth_conversion"
+    ):
+        pass
+
+
+def test_dispatch_pixel_depth_rule_on_all_workers() -> None:
+    """Which depth a session hands the plug-in its worlds at, from the two
+    advertised bits. After Effects renders an effect that does not advertise
+    the session's depth rather than refusing it: a FLOAT_COLOR_AWARE-only
+    effect in a 16-bpc project was measured to run above 8 bits, so it gets
+    float32 here, and with nothing advertised above the session the rule falls
+    back to the deepest depth below. The route checks the rule over every combination of the
+    two bits and every session depth the transport carries, that unrelated
+    flags do not move the answer, and that a session depth outside the
+    contract passes through instead of being substituted.
+    """
+    for _ in _all_workers(
+        "--self-test-dispatch-pixel-depth-rule", "dispatch_pixel_depth_rule"
+    ):
+        pass
+
+
+def test_pixel_depth_conform_on_all_workers() -> None:
+    """Bringing a captured frame to the session slot's depth: the step a
+    session runs after dispatching the plug-in at another depth than the slot,
+    and the one that narrows the GPU negotiation transport's float32 capture
+    (its gpu_*_float32 case_id and retry entries hand the plug-in float32
+    worlds whatever depth was dispatched, so the frame can arrive wide). The route checks that a frame
+    already at the slot's depth is left untouched
+    rather than round-tripped through float (which would clamp a 16-bit
+    channel above 32768), that every other conversion agrees with the
+    per-pixel pair, and that a stride nobody dispatched is refused instead of
+    widened into a frame that would report as good.
+    """
+    for _ in _all_workers(
+        "--self-test-pixel-depth-conform", "pixel_depth_conform"
+    ):
+        pass

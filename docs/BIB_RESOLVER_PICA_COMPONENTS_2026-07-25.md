@@ -1,5 +1,14 @@
 # BIB resolver / PICA component init (issue #362, PP・ProfileToProfile) 2026-07-25
 
+> **2026-08-18 追記 (issue #1279)**: この文書の「残課題」2 件
+> (PP の U.dll SPBasicSuite、P2P の ACE CMM) は解決した。前者は U.dll の
+> export `U_SP_Birth`、後者は `COR.dll` の `COR_Conception` で host 内に
+> 閉じる。「実 AE の PICA ブートストラップ / CMM 環境が必要」という結論と、
+> 「ae_sweetpea を `SPInit(nullptr,nullptr,0)` + `SPStartupPlugins` で
+> 直接起動する」「`ensure_pica_components_initialized` は 1 プロセス 1 回」
+> という実装の記述は、いずれも現在のコードでは古い。正は
+> `docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md`。
+
 対象: selector families の残件 **Particle_Playground** (GLOBAL_SETUP error=11) と
 **ProfileToProfile** (GLOBAL_SETUP error=14)。docs/SELECTOR_FAMILIES_2026-07-25.md
 の「BIB resolver 経由の proc 不足が疑われる、未確定」を確定させた slice。

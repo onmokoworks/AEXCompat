@@ -1,4 +1,5 @@
 foreach(target pf_visual_audio_advertised_probe pf_visual_audio_unadvertised_probe
+    pf_visual_audio_audio_only_probe pf_visual_audio_cluster_video_probe
     pf_visual_audio_sidecar_probe pf_visual_audio_layer_sidecar_probe
     pf_visual_audio_boundary_probe
     pf_visual_audio_format_probe pf_visual_audio_multi_handle_probe
@@ -13,6 +14,15 @@ foreach(target pf_visual_audio_advertised_probe pf_visual_audio_unadvertised_pro
   )
   set_target_properties(${target} PROPERTIES PREFIX "" SUFFIX ".aex")
 endforeach()
+target_compile_definitions(pf_visual_audio_audio_only_probe PRIVATE
+  AEXCOMPAT_AUDIO_EFFECT_ONLY=1)
+target_compile_definitions(pf_visual_audio_cluster_video_probe PRIVATE
+  AEXCOMPAT_CLUSTER_VIDEO_PROBE=1)
+# The CI probe script builds the sidecar target as this fixture family's
+# representative artifact. Keep the cluster fixtures in that same built set so
+# the production cluster behavioral test cannot silently skip in CI.
+add_dependencies(pf_visual_audio_sidecar_probe
+  pf_visual_audio_audio_only_probe pf_visual_audio_cluster_video_probe)
 target_compile_definitions(pf_visual_audio_advertised_probe PRIVATE AEXCOMPAT_ADVERTISE_AUDIO=1)
 target_compile_definitions(pf_visual_audio_sidecar_probe PRIVATE
   AEXCOMPAT_ADVERTISE_AUDIO=1 AEXCOMPAT_REQUIRE_AUDIO_SIDECAR=1)

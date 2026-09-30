@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "generated/aex_abi_contract.hpp"
 
@@ -21,7 +22,14 @@ struct State {
 };
 
 struct AbiHooks {
-  std::array<void*, 12> input_callbacks{};
+  // Sized from the contract rather than a literal 12 so the array and the
+  // offsets `install_callback_tables` writes cannot drift apart. It does not
+  // make a short brace list a compile error - aggregate initialization
+  // value-initializes the tail - so the case where the contract grows past the
+  // initializer in `make_bootstrap_abi_hooks` is caught at runtime, by
+  // `unwired_installed_offsets` below.
+  std::array<void*, abi::x86_64_windows::INPUT_CALLBACK_OFFSETS.size()>
+      input_callbacks{};
   std::array<void*, abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS.size()>
       utility_callbacks{};
   const void* color_callbacks{};
@@ -48,6 +56,15 @@ struct Request {
   /// mode that used to set it (the field was named audio_mode for that).
   bool audio_invocation{};
   bool skip_about{};
+  // Static timeline presented from GLOBAL_SETUP onward. Resident sessions
+  // already carry these values in their authenticated launch request; keeping
+  // bootstrap on the historical 0/1/0/1 defaults until the first frame makes
+  // PARAMS_SETUP observe a different composition contract from
+  // SEQUENCE_SETUP and RENDER.
+  int32_t current_time{};
+  int32_t time_step{1};
+  int32_t total_time{};
+  uint32_t time_scale{1};
 };
 
 struct RuntimeHooks {
@@ -71,11 +88,32 @@ struct Result {
   uint32_t advertised_out_flags{};
   uint32_t advertised_out_flags2{};
   bool image_render_supported{};
+  // PF_OutFlag_AUDIO_EFFECT_ONLY (bit 31): the plug-in processes audio and
+  // never renders video. AE leaves such an effect's video untouched, which is
+  // what the render session's passthrough mode reproduces (issue #1048).
+  bool audio_effect_only{};
   bool nop_render_advertised{};
   bool input_write_advertised{};
   bool expand_buffer_advertised{};
   bool shrink_buffer_advertised{};
+  /// The plug-in advertises the session's own pixel depth, as of GLOBAL_SETUP.
+  /// Kept as the raw advertised fact for the diagnostic. It is a snapshot: a
+  /// plug-in that rewrites `out_flags` in a later selector moves what the
+  /// session dispatches at without moving this, so the depth a frame actually
+  /// ran at is recorded per run (`RenderSessionOutcome::dispatch_pixel_bytes`)
+  /// rather than inferred from this pair.
   bool depth_supported{};
+  /// A session can render at the requested depth, dispatching the plug-in at
+  /// another depth it advertises when it has to. False only for a depth the
+  /// transport itself does not carry, which is a caller contract violation
+  /// rather than a plug-in
+  /// property - so in every configuration a caller can currently ask for, it
+  /// is true, and the session exit gates no longer refuse on depth at all.
+  /// The one-shot routes keep gating on `depth_supported`, which for them is
+  /// also always true: what remained of them after #365 runs at 8 bits only.
+  /// Both gates are kept because the depth each side would refuse on is a
+  /// different question, not because either can fire today.
+  bool depth_dispatchable{};
   bool smart_render_supported{};
   bool update_params_ui_advertised{};
   bool query_dynamic_flags_advertised{};
@@ -83,11 +121,80 @@ struct Result {
   std::string about_message;
 };
 
+/// The pixel depth a session dispatches this plug-in at: the session's own
+/// depth when the plug-in advertises it, otherwise the nearest depth it
+/// advertises *above* the session's, and failing that the deepest one below.
+/// A FLOAT_COLOR_AWARE-only plug-in in a 16-bpc session therefore dispatches
+/// at float32 and the frame is narrowed back into the 16-bit slot. 8-bit is
+/// the floor every effect supports, so this always answers one of 4, 8 or 16
+/// bytes per pixel for a session depth in that set.
+///
+/// After Effects does not refuse an effect that lacks
+/// `PF_OutFlag_DEEP_COLOR_AWARE` in a 16-bpc project; it renders it. Measured
+/// on AE 26.3x87 with a SmartFX effect advertising `FLOAT_COLOR_AWARE` and not
+/// `DEEP_COLOR_AWARE`: AE's 16-bpc render holds 2-3x as many distinct values
+/// per channel as its 8-bpc render, so it did not run the effect at 8 bits,
+/// and this host's float32 render of the same effect narrowed to 16 bits sits
+/// within 2-3/65535 of it (depending on how 0..32768 is mapped onto AE's
+/// 16-bit PNG). That is also the only combination in which a deeper
+/// advertisement exists at all. Falling back to the deepest depth below (a
+/// DEEP-only plug-in at 32 bpc, or one advertising neither at 16 bpc) is this
+/// rule's choice and is not measured against AE
+/// (`docs/DEPTH_FALLBACK_OBSERVATION_2026-09-17.md`).
+///
+/// `session_pixel_bytes` outside {4, 8, 16} is returned unchanged: the caller
+/// owns that contract and a silent substitution would hide the violation.
+int32_t dispatch_pixel_bytes(int32_t session_pixel_bytes, uint32_t out_flags,
+                             uint32_t out_flags2);
+
+// Self-test: the rule above over every combination of the two advertised bits
+// and every session depth the transport carries - an advertised depth is never
+// narrowed, an unadvertised one lands on the nearest advertised depth above it
+// or else the deepest below it,
+// 8-bit is the floor, and an out-of-contract session depth passes through.
+bool verify_dispatch_pixel_depth_rule();
+
 // Installs the input/utility/color callback tables into the ABI buffers and
 // links in_data->utils to the utility block. Extracted from run() so behavioral
 // self-tests can exercise the exact wiring a plug-in observes through
 // in_data->utils without dispatching a selector (issue #220).
 void install_callback_tables(State& state, const AbiHooks& abi);
+
+/// One slot `install_callback_tables` left null, named by the block it belongs
+/// to. The offset alone would be ambiguous: ten of the twelve inter offsets are
+/// also valid utility offsets, so 112 is both `inter.reserved_2` and
+/// `utils.new_world` and an operator handed the bare number would audit the
+/// wrong assignment list.
+struct UnwiredSlot {
+  /// Which installed block, in the generated contract's own naming: "in",
+  /// "inter", "utils", or "utils.color_callbacks".
+  const char* block;
+  /// Byte offset within that block.
+  std::size_t offset;
+};
+
+/// Every generated callback offset a plug-in would dereference that
+/// `install_callback_tables` left null, read back out of the installed bytes.
+///
+/// The compile-time half of the invariant is `bindings_cover_contract_once`:
+/// every generated utility offset has exactly one named source. Nothing proves
+/// the caller assigned that source, nothing makes a short `input_callbacks`
+/// brace list a compile error, and nothing catches an install loop that wrote
+/// the wrong stride. Any of those leaves a null pointer no host code ever
+/// reads, so the defect surfaces only when a plug-in calls through it and jumps
+/// to address 0 - #777 as a 16-bit sampling crash, #981 as three FRAME_SETUP
+/// crashes the SEH guard reported as error 512.
+///
+/// Reads the buffers rather than the `AbiHooks` it was built from, so a
+/// regression in the install loop itself is in scope too. Covers everything
+/// `install_callback_tables` writes: the inter and utility tables, the color
+/// block pointer by pointer, and the `utils` / `pica_basicP` / `effect_ref`
+/// links in in_data. It reports the `utils` link as null but does not check
+/// that it points at this `State`'s own block, which is the caller's to decide
+/// - `verify_production_utility_callback_table` does. A `PF_UtilCallbacks`
+/// member the generated contract never names is outside both the install and
+/// this answer (#991).
+std::vector<UnwiredSlot> unwired_installed_offsets(const State& state);
 
 Result run(State& state, EffectEntry entry, const AbiHooks& abi,
            const Request& request, const RuntimeHooks& hooks);

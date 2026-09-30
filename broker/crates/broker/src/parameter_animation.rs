@@ -32,10 +32,21 @@ pub enum AnimationInterpolation {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AnimationValue {
-    Scalar { value: f64 },
-    Color { value: [u8; 4] },
-    Components { value: Vec<f64> },
-    Arbitrary { value: Vec<u8> },
+    Scalar {
+        value: f64,
+    },
+    Color {
+        value: [u8; 4],
+    },
+    /// Component values use the selected parameter's public units. In
+    /// particular, POINT and POINT_3D components are percentages of the input
+    /// layer, matching the corresponding interactive parameter values.
+    Components {
+        value: Vec<f64>,
+    },
+    Arbitrary {
+        value: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -15,13 +15,14 @@ $build = Join-Path $repository "target\pf-wgpu-dx12-probe-build"
 $release = Join-Path $build "Release"
 
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
 
 & cargo build --manifest-path $runtimeManifest --target-dir $runtimeTarget --release --locked
 if ($LASTEXITCODE -ne 0) { throw "wgpu DX12 runtime Release build failed" }
 
-& $CMake -S $source -B $build -G $Generator -A $Architecture
+& $CMake -S $source -B $build -G $Generator @ConfigureArgs
 if ($LASTEXITCODE -ne 0) { throw "PF wgpu DX12 probe configure failed" }
 & $CMake --build $build --config Release --target pf_wgpu_dx12_probe
 if ($LASTEXITCODE -ne 0) { throw "PF wgpu DX12 probe Release build failed" }

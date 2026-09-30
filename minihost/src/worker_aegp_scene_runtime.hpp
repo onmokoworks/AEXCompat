@@ -31,6 +31,13 @@ struct AegpEffectInstance {
   uint32_t flags{1};
   uint32_t generation{};
   bool occupied{};
+  // This instance stands for the plug-in this worker loaded, not for one of
+  // the fixtures `installed_key` names. Slot 0 is seeded with the probe's key
+  // at scene start and `AEGP_GetNewEffectForEffect` hands that same slot back,
+  // so the key alone cannot tell the two apart - and answering a real
+  // plug-in's stream questions out of a five-parameter fixture table is what
+  // kept a 159-parameter effect from reaching its own parameters (issue #909).
+  bool loaded_plugin{};
   void* render_ref{};
   std::array<std::array<double, 4>, kAegpEffectParameterCapacity> parameter_values{{
       {{42.5, 0.0, 0.0, 0.0}}, {{160.0, 90.0, 0.0, 0.0}},
@@ -141,6 +148,7 @@ struct SceneRuntimeState {
       {0x4c415930}, {0x4c415931}, {0x4c415932}}};
   AegpSceneObject dynamic_camera{0x43414d52};
   bool dynamic_camera_live{};
+  bool scene_registry_initialized{};
   scene_model::Identity dynamic_camera_identity{};
   double dynamic_camera_zoom{800.0};
   AegpSceneObject effect{0x45464643};
@@ -210,6 +218,10 @@ struct SceneRuntimeState {
   std::array<std::array<AegpCameraZoomKeyframe, 2>, 3> layer_camera_zoom_keyframes{};
   std::array<int32_t, 3> layer_parent_indices{{-1, -1, -1}};
   int32_t active_camera_layer_index{-1};
+  // Set only by a validated shipping scene snapshot. Self-tests may set the
+  // index directly without claiming an authored camera identity.
+  scene_model::Identity authored_camera_identity{};
+  bool authored_camera_live{};
   AegpSelectionCollection selection{};
 
   SceneRuntimeState() noexcept;

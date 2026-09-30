@@ -12,14 +12,17 @@ namespace aexcompat::host_audio {
 struct Telemetry {
   std::uint32_t checkout_calls{};
   std::uint32_t checkin_calls{};
+  std::uint32_t automatic_checkins{};
   std::uint32_t get_data_calls{};
   std::uint32_t invalid_operations{};
   bool checkout_allowed{};
   bool usage_advertised{};
   bool source_available{};
+  std::uint32_t unadvertised_checkout_calls{};
   std::uint32_t rejected_unadvertised_checkouts{};
   std::uint32_t rejected_format_requests{};
   std::uint32_t handle_exhaustions{};
+  std::int32_t last_checkout_index{-1};
   std::int32_t last_checkout_start_time{};
   std::int32_t last_checkout_duration{};
   std::uint32_t last_checkout_time_scale{};
@@ -37,7 +40,8 @@ struct Telemetry {
 class Runtime {
  public:
   void set_source(const std::vector<float>* source, std::int32_t sample_count);
-  void configure_admission(bool audio_only_mode, bool usage_advertised);
+  void configure_admission(bool audio_only_mode, bool usage_advertised,
+                           const std::vector<std::int32_t>& layer_indices);
   int checkout(void* effect_ref, std::int32_t index, std::int32_t start_time,
                std::int32_t duration, std::uint32_t time_scale, std::uint32_t rate,
                std::int32_t bytes_per_sample, std::int32_t channels,
@@ -46,6 +50,7 @@ class Runtime {
   int get_data(void* effect_ref, void* audio, void** data, std::int32_t* num_samples,
                std::uint32_t* rate, std::int32_t* bytes_per_sample,
                std::int32_t* channels, std::int32_t* format);
+  void automatic_checkin();
   bool lifetimes_balanced() const;
   const Telemetry& telemetry() const noexcept { return telemetry_; }
 
@@ -63,6 +68,7 @@ class Runtime {
   std::array<Handle, 16> handles_{};
   const std::vector<float>* source_{};
   std::int32_t source_sample_count_{};
+  std::vector<std::int32_t> layer_indices_{0};
   Telemetry telemetry_{};
 };
 
@@ -73,4 +79,5 @@ int __cdecl checkout_layer_audio(void*, std::int32_t, std::int32_t, std::int32_t
 int __cdecl checkin_layer_audio(void*, void*);
 int __cdecl get_audio_data(void*, void*, void**, std::int32_t*, std::uint32_t*,
                            std::int32_t*, std::int32_t*, std::int32_t*);
+int cleanup_after_render(void*);
 }  // namespace aexcompat::host_audio

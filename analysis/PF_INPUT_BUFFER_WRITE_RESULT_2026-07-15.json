@@ -27,7 +27,7 @@
     "classification": "crashed",
     "windows_exit_code": 3221225477,
     "windows_exception": "0xC0000005",
-    "failure_stage": "render",
+    "failure_stage": "classic_render",
     "last_completed_stage": "frame_setup",
     "broker_failed_safely": true
   },

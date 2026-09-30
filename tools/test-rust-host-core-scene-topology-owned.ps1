@@ -37,16 +37,33 @@ if (-not (Test-Path -LiteralPath $vsdev -PathType Leaf)) {
     throw "VsDevCmd.bat is unavailable: $vsdev"
 }
 
-$manifest = Join-Path $repoRoot "broker\Cargo.toml"
-& cargo build --manifest-path $manifest `
-    --package aexcompat-host-core-ffi --release --quiet
-if ($LASTEXITCODE -ne 0) {
-    throw "Release Rust host-core FFI build failed"
-}
-$rustDll = Join-Path $repoRoot `
-    "broker\target\release\aexcompat_host_core_ffi.dll"
-if (-not (Test-Path -LiteralPath $rustDll -PathType Leaf)) {
-    throw "Release Rust host-core FFI DLL was not produced: $rustDll"
+# CI passes the producer-built DLL via AEXCOMPAT_HOST_CORE_FFI_DLL so the
+# four gate scripts do not serialize on the same target dir's cargo file
+# lock (#1537). Local runs leave it unset and build as before.
+$rustDll = $env:AEXCOMPAT_HOST_CORE_FFI_DLL
+if ([string]::IsNullOrWhiteSpace($rustDll)) {
+    $manifest = Join-Path $repoRoot "broker\Cargo.toml"
+    & cargo build --manifest-path $manifest `
+        --package aexcompat-host-core-ffi --release --quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release Rust host-core FFI build failed"
+    }
+    $rustDll = Join-Path $repoRoot `
+        "broker\target\release\aexcompat_host_core_ffi.dll"
+    if (-not (Test-Path -LiteralPath $rustDll -PathType Leaf)) {
+        throw "Release Rust host-core FFI DLL was not produced: $rustDll"
+    }
+} else {
+    # The gate exe resolves the path against its own working directory,
+    # which is $buildRoot by the time it runs, so anchor a relative value to
+    # the caller's directory before the existence check agrees with it.
+    $rustDll = $rustDll.Trim()
+    if (-not [System.IO.Path]::IsPathRooted($rustDll)) {
+        $rustDll = Join-Path (Get-Location).Path $rustDll
+    }
+    if (-not (Test-Path -LiteralPath $rustDll -PathType Leaf)) {
+        throw "AEXCOMPAT_HOST_CORE_FFI_DLL does not name a file: $rustDll"
+    }
 }
 
 $abiInclude = Join-Path $repoRoot "broker\crates\broker\include"
@@ -57,12 +74,31 @@ $oracleSource = Join-Path $repoRoot `
     "minihost\src\worker_aegp_scene_model.cpp"
 $executable = Join-Path $buildRoot `
     "rust_host_core_scene_topology_owned_dual_run_selftest.exe"
+# sccache cannot cache a cl invocation that also links (those pass
+# through), so compile each translation unit separately and link after.
+# AEXCOMPAT_COMPILE_CACHE=sccache wraps only the /c compiles (#1533).
+# Keep /Fo outside the colon-quoted form: sccache mis-parses /Fo:"..."
+# as a relative path and fails to zip the outputs.
+$compileDriver = 'cl.exe'
+if ($env:AEXCOMPAT_COMPILE_CACHE -eq 'sccache') {
+    $compileDriver = 'sccache cl.exe'
+}
+$compileFlags = (
+    '/nologo /std:c++17 /O2 /DNDEBUG /EHsc /W4 /WX ' +
+    '/DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX ' +
+    '/I"' + $abiInclude + '" /I"' + $minihostInclude + '"'
+)
+$nativeObject = Join-Path $buildRoot `
+    ([IO.Path]::GetFileNameWithoutExtension($nativeSource) + '.obj')
+$oracleObject = Join-Path $buildRoot `
+    ([IO.Path]::GetFileNameWithoutExtension($oracleSource) + '.obj')
 $compileCommand = (
     'call "' + $vsdev + '" -arch=x64 -host_arch=x64 >nul && ' +
-    'cl.exe /nologo /std:c++17 /O2 /DNDEBUG /EHsc /W4 /WX ' +
-    '/DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX ' +
-    '/I"' + $abiInclude + '" /I"' + $minihostInclude + '" ' +
-    '"' + $nativeSource + '" "' + $oracleSource + '" ' +
+    $compileDriver + ' ' + $compileFlags +
+    ' /c "' + $nativeSource + '" /Fo"' + $nativeObject + '" && ' +
+    $compileDriver + ' ' + $compileFlags +
+    ' /c "' + $oracleSource + '" /Fo"' + $oracleObject + '" && ' +
+    'cl.exe /nologo "' + $nativeObject + '" "' + $oracleObject + '" ' +
     '/Fe:"' + $executable + '"'
 )
 

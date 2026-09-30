@@ -40,9 +40,45 @@ project(AEXCompatMinihost LANGUAGES CXX)
 # A launcher the operator already chose (ccache and friends) wins: replacing it
 # would silently disable their tooling, and only this generator+compiler pair
 # has the localization hazard to begin with.
+#
+# `AEXCOMPAT_COMPILE_CACHE` names a compiler cache (sccache, ccache) to run
+# inside that pin rather than instead of it. CI passes it because the runner
+# starts from a clean machine every run, so all 244 translation units here
+# compile from scratch even on a branch that never touched minihost/src
+# (#1501). Setting CMAKE_CXX_COMPILER_LAUNCHER from the command line would
+# reach the same launcher slot, but it would take the VSLANG pin with it and
+# bring back the #713/#708 locale corruption.
+#
+# The cache goes last so cl still sees the pinned environment: the chain runs
+# `cmake -E env VSLANG=... <cache> cl ...`, and the cache inherits VSLANG from
+# the environment `cmake -E env` just set. On a cache hit the stored stdout is
+# replayed, so ninja still reads the `/showIncludes` notes it builds
+# `deps = msvc` from. That is the property #942 found broken and this tree does
+# not reproduce; `tools/verify-minihost-build-deps.ps1` is what decides, and it
+# runs against this build directory in CI right after the build.
+set(AEXCOMPAT_COMPILE_CACHE "" CACHE STRING
+    "Compiler cache to run each compile through (e.g. sccache). Empty disables it.")
 if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja" AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
   set(CMAKE_CXX_COMPILER_LAUNCHER
       "${CMAKE_COMMAND}" -E env "VSLANG=${AEXCOMPAT_VSLANG}")
+  if(AEXCOMPAT_COMPILE_CACHE)
+    find_program(AEXCOMPAT_COMPILE_CACHE_PROGRAM "${AEXCOMPAT_COMPILE_CACHE}")
+    # Fail rather than build uncached: a caller who asked for a cache and
+    # silently did not get one would read the timings as "caching does not help
+    # here" and draw the wrong conclusion.
+    if(NOT AEXCOMPAT_COMPILE_CACHE_PROGRAM)
+      message(FATAL_ERROR
+              "AEXCOMPAT_COMPILE_CACHE=${AEXCOMPAT_COMPILE_CACHE} was not found on PATH")
+    endif()
+    list(APPEND CMAKE_CXX_COMPILER_LAUNCHER "${AEXCOMPAT_COMPILE_CACHE_PROGRAM}")
+    message(STATUS "minihost compiles run through ${AEXCOMPAT_COMPILE_CACHE_PROGRAM}")
+  endif()
+elseif(AEXCOMPAT_COMPILE_CACHE)
+  # The launcher slot is the only way in, and it exists only for Ninja/Makefile
+  # generators. Saying so beats a silent no-op that looks like a cold cache.
+  message(WARNING
+          "AEXCOMPAT_COMPILE_CACHE=${AEXCOMPAT_COMPILE_CACHE} is ignored: it needs the "
+          "Ninja generator with MSVC and an unset CMAKE_CXX_COMPILER_LAUNCHER")
 endif()
 
 # Read every source as UTF-8 instead of as the operator's code page (issue
@@ -201,7 +237,9 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_suite_call_slot_probe.cpp
     src/worker_suite_registry.cpp
     src/worker_flt_blur_suite.cpp
+    src/worker_pf_private_callbacks.cpp
     src/worker_aefx_ace_suite.cpp
+    src/worker_pf_private_effect_suite.cpp
     src/worker_runtime_admission.cpp
     src/worker_entry_admission.cpp
     src/worker_session.cpp
@@ -212,11 +250,15 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_openmp_policy.cpp
     src/worker_aegp_compute_cache.cpp
     src/worker_aegp_utility_suite.cpp
+    src/worker_aegp_persistent_data_suite.cpp
     src/worker_pf_pixel_data_suite.cpp
     src/worker_pf_world_suite.cpp
     src/worker_pf_pixel_format_registry.cpp
     src/worker_pf_param_suites.cpp
     src/worker_aegp_pf_interface_suite.cpp
+    src/worker_bee_scene_facade.cpp
+    src/worker_pf_progress_info.cpp
+    src/worker_pf_world_facade.cpp
     src/worker_aegp_command_suites.cpp
     src/worker_mask_suite_tables.cpp
     src/worker_l2_render_abi.cpp
@@ -233,6 +275,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_minidump_runtime.cpp
     src/worker_pf_helper_runtime.cpp
     src/worker_mask_runtime_callbacks.cpp
+    src/worker_pf_gaussian_kernel.cpp
     src/worker_pf_path_runtime.cpp
     src/worker_pf_path_selftests.cpp
     src/worker_aegp_render_options.cpp
@@ -249,6 +292,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_aegp_init_orchestration.cpp
     src/worker_aegp_init_report.cpp
     src/worker_ui_event_report.cpp
+    src/worker_system_sound_suppression.cpp
     src/worker_audio_execution.cpp
     src/worker_drawbot_runtime.cpp
     src/worker_param_checkout_runtime.cpp
@@ -266,6 +310,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_aegp_scene.cpp
     src/worker_aegp_scene_runtime.cpp
     src/worker_aegp_scene_selftests.cpp
+    src/worker_active_plugin_context.cpp
     src/worker_aegp_host_selftests.cpp
     src/worker_aegp_compat_selftests.cpp
     src/worker_classic_runtime.cpp
@@ -276,6 +321,10 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_handle_runtime.cpp
     src/worker_host_suite_router.cpp
     src/worker_host_suite_catalog.cpp
+    src/worker_dynamic_suite_registry.cpp
+    src/worker_companion_manifest.cpp
+    src/worker_companion_runtime.cpp
+    src/worker_cor_ace_profile.cpp
     src/worker_pf_suites.cpp
     src/worker_pf_sampling_runtime.cpp
     src/worker_pf_effect_sequence_selftests.cpp
@@ -298,6 +347,8 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
 
 set_source_files_properties(src/worker_aegp_compute_cache.cpp
   PROPERTIES COMPILE_OPTIONS "/EHsc")
+set_source_files_properties(src/l2_main.cpp PROPERTIES OBJECT_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/l2_main_support.inc;${CMAKE_CURRENT_SOURCE_DIR}/src/l2_main_entry.inc")
 set_source_files_properties(
   ../tests/native/worker_aegp_compute_cache_selftest.cpp
   PROPERTIES COMPILE_OPTIONS "/EHsc")
@@ -320,6 +371,7 @@ endif()
 
 add_library(aex_worker_runtime_core OBJECT
   ${AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES}
+  src/worker_target_kind.cpp
   src/worker_build_provenance.cpp)
 target_compile_features(aex_worker_runtime_core PRIVATE cxx_std_17)
 # Where the configured provenance header lands. Object-library sources are all
@@ -328,31 +380,60 @@ target_include_directories(aex_worker_runtime_core PRIVATE "${CMAKE_CURRENT_BINA
 target_compile_definitions(aex_worker_runtime_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX AEXCOMPAT_COMPILE_AEGP_SCENE_CALLBACKS=1)
 target_link_libraries(aex_worker_runtime_core PRIVATE aexcompat_trace_writer)
 
-add_executable(aex_l2_worker src/worker_l2_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
-target_compile_features(aex_l2_worker PRIVATE cxx_std_17)
-target_compile_definitions(aex_l2_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(aex_l2_worker PRIVATE bcrypt aexcompat_trace_writer)
+# One worker executable, one link step (issue #1495). It used to be three --
+# aex_l2_worker, aex_render_worker, aex_smart_worker -- differing only by the
+# Kind their five-line entry passed in. Building one of those targets
+# recompiled the shared object but relinked only that target, so the other two
+# silently stayed on the previous build and a sweep measured old code on the
+# routes it did not name. Selecting the route at runtime removes the way to
+# express a half-built set.
+add_executable(aex_worker src/worker_main_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
+add_library(worker_unhandled_thread_fault_fixture SHARED
+  ../tests/native/worker_unhandled_thread_fault_fixture.cpp)
+target_compile_features(worker_unhandled_thread_fault_fixture PRIVATE cxx_std_17)
+target_compile_definitions(worker_unhandled_thread_fault_fixture PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+add_dependencies(aex_worker worker_unhandled_thread_fault_fixture)
+target_compile_features(aex_worker PRIVATE cxx_std_17)
+target_compile_definitions(aex_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(aex_worker PRIVATE bcrypt aexcompat_trace_writer)
 
 add_executable(worker_report_json_selftest
     ../tests/native/worker_report_json_selftest.cpp
-    src/worker_report.cpp)
+    src/worker_report.cpp
+    src/native_stdout_guard.cpp)
 target_compile_features(worker_report_json_selftest PRIVATE cxx_std_17)
 target_include_directories(worker_report_json_selftest PRIVATE src)
+
+add_executable(l2_mode_execution_selftest
+    ../tests/native/l2_mode_execution_selftest.cpp
+    src/l2_mode_execution.cpp)
+target_compile_features(l2_mode_execution_selftest PRIVATE cxx_std_17)
+target_include_directories(l2_mode_execution_selftest PRIVATE src)
+target_compile_options(l2_mode_execution_selftest PRIVATE /UNDEBUG)
 
 add_executable(worker_temporal_checkout_report_selftest
     ../tests/native/worker_temporal_checkout_report_selftest.cpp)
 target_compile_features(worker_temporal_checkout_report_selftest PRIVATE cxx_std_17)
 target_include_directories(worker_temporal_checkout_report_selftest PRIVATE src)
 
-add_executable(aex_render_worker src/worker_render_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
-target_compile_features(aex_render_worker PRIVATE cxx_std_17)
-target_compile_definitions(aex_render_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(aex_render_worker PRIVATE bcrypt aexcompat_trace_writer)
+add_executable(worker_pf_ansi_diagnostics_selftest
+    ../tests/native/worker_pf_ansi_diagnostics_selftest.cpp
+    src/worker_pf_ansi_runtime.cpp)
+target_compile_features(worker_pf_ansi_diagnostics_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_pf_ansi_diagnostics_selftest PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_pf_ansi_diagnostics_selftest PRIVATE src)
 
-add_executable(aex_smart_worker src/worker_smart_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
-target_compile_features(aex_smart_worker PRIVATE cxx_std_17)
-target_compile_definitions(aex_smart_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(aex_smart_worker PRIVATE bcrypt aexcompat_trace_writer)
+add_executable(worker_classic_suite_report_selftest
+    ../tests/native/worker_classic_suite_report_selftest.cpp
+    $<TARGET_OBJECTS:aex_worker_runtime_core>)
+target_compile_features(worker_classic_suite_report_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_classic_suite_report_selftest PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_classic_suite_report_selftest PRIVATE src)
+target_link_libraries(worker_classic_suite_report_selftest PRIVATE
+    bcrypt aexcompat_trace_writer)
 
 add_executable(worker_suite_registry_selftest
   ../tests/native/worker_suite_registry_selftest.cpp
@@ -385,6 +466,23 @@ target_compile_definitions(worker_aegp_compute_cache_selftest PRIVATE
 target_compile_options(worker_aegp_compute_cache_selftest PRIVATE /UNDEBUG)
 target_include_directories(worker_aegp_compute_cache_selftest PRIVATE src)
 target_link_libraries(worker_aegp_compute_cache_selftest PRIVATE
+    bcrypt aexcompat_trace_writer)
+
+add_library(worker_session_detach_fixture SHARED
+  ../tests/native/worker_session_detach_fixture.cpp)
+target_compile_features(worker_session_detach_fixture PRIVATE cxx_std_17)
+target_compile_definitions(worker_session_detach_fixture PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+add_executable(worker_session_contained_exit_selftest
+  ../tests/native/worker_session_contained_exit_selftest.cpp
+  $<TARGET_OBJECTS:aex_worker_runtime_core>)
+target_compile_features(worker_session_contained_exit_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_session_contained_exit_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_session_contained_exit_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_session_contained_exit_selftest PRIVATE src)
+target_link_libraries(worker_session_contained_exit_selftest PRIVATE
   bcrypt aexcompat_trace_writer)
 
 add_executable(worker_aegp_scene_model_selftest
@@ -416,6 +514,15 @@ target_compile_features(aex_string_table_selftest PRIVATE cxx_std_17)
 target_include_directories(aex_string_table_selftest PRIVATE src)
 target_compile_definitions(aex_string_table_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+add_executable(worker_active_plugin_context_selftest
+  ../tests/native/worker_active_plugin_context_selftest.cpp
+  src/worker_active_plugin_context.cpp
+)
+target_compile_features(worker_active_plugin_context_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_active_plugin_context_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_active_plugin_context_selftest PRIVATE src)
 
 add_executable(rust_host_core_abi_selftest
   ../tests/native/rust_host_core_abi_selftest.cpp
@@ -454,12 +561,42 @@ target_include_directories(worker_param_checkout_time_selftest PRIVATE src)
 add_executable(worker_pf_sampling_wiring_selftest
   ../tests/native/worker_pf_sampling_wiring_selftest.cpp
   src/worker_pf_sampling_runtime.cpp
+  # worker_pf_sampling_runtime calls pf_world_transform::copy_world8, defined in
+  # worker_pf_world_transform_runtime, which in turn needs world_safety's
+  # DispatchWorldFormatScope. Without both TUs the target fails to link (#892).
+  src/worker_pf_world_transform_runtime.cpp
+  src/worker_world_safety.cpp
+  # world_safety's register_world attaches the PF_World facade (#1276).
+  src/worker_pf_world_facade.cpp
   src/worker_effect_bootstrap.cpp
 )
 target_compile_features(worker_pf_sampling_wiring_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_pf_sampling_wiring_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_pf_sampling_wiring_selftest PRIVATE src)
+
+add_executable(worker_cross_thread_dispatch_world_selftest
+  ../tests/native/worker_cross_thread_dispatch_world_selftest.cpp
+  src/worker_world_safety.cpp
+  # world_safety's register_world gives each handed-out world AE's PF_World
+  # shape behind reserved_long4 (#1276).
+  src/worker_pf_world_facade.cpp
+)
+target_compile_features(worker_cross_thread_dispatch_world_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_cross_thread_dispatch_world_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_cross_thread_dispatch_world_selftest PRIVATE src)
+
+add_executable(worker_pf_bad_callback_param_selftest
+  ../tests/native/worker_pf_bad_callback_param_selftest.cpp
+  src/worker_pf_world_transform_runtime.cpp
+  src/worker_world_safety.cpp
+  src/worker_pf_world_facade.cpp
+)
+target_compile_features(worker_pf_bad_callback_param_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_pf_bad_callback_param_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_pf_bad_callback_param_selftest PRIVATE src)
 
 add_executable(worker_classic_execution_selftest
   ../tests/native/worker_classic_execution_selftest.cpp
@@ -469,6 +606,47 @@ target_compile_features(worker_classic_execution_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_classic_execution_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_classic_execution_selftest PRIVATE src)
+
+add_executable(worker_output_coverage_selftest
+  ../tests/native/worker_output_coverage_selftest.cpp
+)
+target_compile_features(worker_output_coverage_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_output_coverage_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_output_coverage_selftest PRIVATE src)
+
+add_executable(host_audio_runtime_selftest
+  ../tests/native/host_audio_runtime_selftest.cpp
+  src/host_audio_runtime.cpp
+  src/render_subsystem.cpp
+  # render_subsystem's prepare_world_layout embeds the PF_World facade (#1276).
+  src/worker_pf_world_facade.cpp
+  src/worker_effect_bootstrap.cpp
+)
+target_compile_features(host_audio_runtime_selftest PRIVATE cxx_std_17)
+target_compile_definitions(host_audio_runtime_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(host_audio_runtime_selftest PRIVATE src)
+
+add_executable(worker_effect_bootstrap_timing_selftest
+  ../tests/native/worker_effect_bootstrap_timing_selftest.cpp
+  src/worker_effect_bootstrap.cpp
+)
+target_compile_features(worker_effect_bootstrap_timing_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_effect_bootstrap_timing_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_effect_bootstrap_timing_selftest PRIVATE src)
+
+add_executable(worker_render_lifecycle_selftest
+  ../tests/native/worker_render_lifecycle_selftest.cpp
+  src/render_lifecycle.cpp
+  src/render_subsystem.cpp
+  src/worker_pf_world_facade.cpp
+)
+target_compile_features(worker_render_lifecycle_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_render_lifecycle_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_render_lifecycle_selftest PRIVATE src)
 
 add_executable(worker_classic_runtime_selftest
   ../tests/native/worker_classic_runtime_selftest.cpp
@@ -501,6 +679,36 @@ target_compile_definitions(worker_openmp_policy_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_openmp_policy_selftest PRIVATE src)
 
+add_executable(worker_legacy_support_init_selftest
+  ../tests/native/worker_legacy_support_init_selftest.cpp
+)
+target_compile_features(worker_legacy_support_init_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_legacy_support_init_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_legacy_support_init_selftest PRIVATE src)
+
+add_executable(worker_dvacore_main_thread_selftest
+  ../tests/native/worker_dvacore_main_thread_selftest.cpp
+)
+target_compile_features(worker_dvacore_main_thread_selftest PRIVATE cxx_std_17)
+target_include_directories(worker_dvacore_main_thread_selftest PRIVATE src)
+
+add_executable(worker_bee_bib_installer_selftest
+  ../tests/native/worker_bee_bib_installer_selftest.cpp
+)
+target_compile_features(worker_bee_bib_installer_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_bee_bib_installer_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_bee_bib_installer_selftest PRIVATE src)
+
+add_executable(worker_sweetpea_bootstrap_selftest
+  ../tests/native/worker_sweetpea_bootstrap_selftest.cpp
+)
+target_compile_features(worker_sweetpea_bootstrap_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_sweetpea_bootstrap_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_sweetpea_bootstrap_selftest PRIVATE src)
+
 add_executable(worker_aegp_init_runtime_selftest
   ../tests/native/worker_aegp_init_runtime_selftest.cpp
   src/worker_aegp_init_runtime.cpp
@@ -509,3 +717,66 @@ target_compile_features(worker_aegp_init_runtime_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_aegp_init_runtime_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_aegp_init_runtime_selftest PRIVATE src)
+
+add_executable(worker_aegp_register_suite_selftest
+  ../tests/native/worker_aegp_register_suite_selftest.cpp
+  src/worker_aegp_command_suites.cpp
+  src/worker_aegp_init_runtime.cpp
+)
+target_compile_features(worker_aegp_register_suite_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_aegp_register_suite_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_aegp_register_suite_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_aegp_register_suite_selftest PRIVATE src)
+
+add_executable(worker_dynamic_suite_registry_selftest
+  ../tests/native/worker_dynamic_suite_registry_selftest.cpp
+  src/worker_aegp_entry_guard.cpp
+  src/worker_aegp_init_runtime.cpp
+  src/worker_companion_runtime.cpp
+  src/worker_dynamic_suite_registry.cpp
+  src/worker_host_suite_catalog.cpp
+  src/worker_host_suite_router.cpp
+  src/worker_pf_ansi_runtime.cpp
+  src/suite_lease_tracker.cpp
+  src/worker_aegp_compute_cache.cpp
+  src/worker_minidump_runtime.cpp
+  src/worker_selector_dispatch.cpp
+  src/worker_suite_call_slot_probe.cpp
+  src/worker_suite_registry.cpp
+)
+add_library(worker_dynamic_suite_companion_fixture SHARED
+  ../tests/native/worker_dynamic_suite_companion_fixture.cpp)
+add_library(worker_dynamic_suite_consumer_fixture SHARED
+  ../tests/native/worker_dynamic_suite_consumer_fixture.cpp)
+target_compile_features(worker_dynamic_suite_companion_fixture PRIVATE cxx_std_17)
+target_compile_features(worker_dynamic_suite_consumer_fixture PRIVATE cxx_std_17)
+target_compile_definitions(worker_dynamic_suite_companion_fixture PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(worker_dynamic_suite_consumer_fixture PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_dynamic_suite_companion_fixture PRIVATE
+  ../tests/native)
+target_include_directories(worker_dynamic_suite_consumer_fixture PRIVATE
+  ../tests/native)
+add_dependencies(worker_dynamic_suite_registry_selftest
+  worker_dynamic_suite_companion_fixture
+  worker_dynamic_suite_consumer_fixture)
+target_compile_features(worker_dynamic_suite_registry_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_dynamic_suite_registry_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_dynamic_suite_registry_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_dynamic_suite_registry_selftest PRIVATE
+  src ../tests/native)
+target_link_libraries(worker_dynamic_suite_registry_selftest PRIVATE
+  bcrypt aexcompat_trace_writer)
+
+add_executable(worker_companion_manifest_selftest
+  ../tests/native/worker_companion_manifest_selftest.cpp
+  src/worker_companion_manifest.cpp
+  src/strict_json.cpp)
+target_compile_features(worker_companion_manifest_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_companion_manifest_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_companion_manifest_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_companion_manifest_selftest PRIVATE src)

@@ -77,8 +77,12 @@ pub struct InPlaceDiscoverySessionOpenRequest<'a> {
     pub dependency_search_dirs: Vec<PathBuf>,
     /// The bounded module-enumeration capacity of the recorded audit.
     pub module_bound: u32,
-    /// Per-inspect watchdog deadline (design §7).
-    pub inspect_deadline: Duration,
+    /// Optional per-inspect watchdog deadline (design §7). `None` preserves
+    /// parameter inspection's no-wall-clock-verdict contract (issue #354).
+    pub inspect_deadline: Option<Duration>,
+    /// Per-launch environment inputs (issue #910), forwarded to the worker
+    /// launch instead of the broker mutating its own environment.
+    pub launch_environment: crate::secure_launch::LaunchEnvironment,
 }
 
 /// The outcome of an `inspect_plugin` exchange (design §4.2).
@@ -98,6 +102,57 @@ pub enum InspectOutcome {
         error_kind: String,
         report: Option<Value>,
     },
+    /// The host completed setup/parameter inspection and authenticated that
+    /// snapshot on the control pipe, but the worker then crashed during
+    /// cleanup. This is not ordinary discovery success: callers may use it
+    /// only to authorize the dedicated one-shot cleanup-contained retry.
+    CleanupCrashCheckpoint {
+        authorization: CleanupCrashAuthorization,
+    },
+}
+
+/// Single-use proof minted only after a manifest-bound checkpoint is followed
+/// by an OS-classified worker crash. Its fields are private so callers cannot
+/// bypass the ordinary lifecycle and manufacture cleanup-contained retries.
+#[derive(Debug)]
+pub struct CleanupCrashAuthorization {
+    plugin_sha256: String,
+    plugin_path: PathBuf,
+    expected_size: u64,
+    dependency_search_dirs: Vec<PathBuf>,
+}
+
+impl CleanupCrashAuthorization {
+    pub(crate) fn into_retry_identity(self) -> (PathBuf, String, u64, Vec<PathBuf>) {
+        (
+            self.plugin_path,
+            self.plugin_sha256,
+            self.expected_size,
+            self.dependency_search_dirs,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
+        Self {
+            plugin_sha256: "0".repeat(64),
+            plugin_path: PathBuf::from("fixture.aex"),
+            expected_size: 1,
+            dependency_search_dirs: vec![PathBuf::from("fixture-root")],
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectCheckpoint {
+    v: u32,
+    #[serde(rename = "type")]
+    kind: String,
+    plugin_index: u32,
+    request_index: u32,
+    plugin_sha256: String,
+    report: Value,
 }
 
 #[derive(Deserialize)]
@@ -121,9 +176,13 @@ pub struct DiscoverySession {
     transport: SessionTransport,
     receiver: mpsc::Receiver<SessionEvent>,
     process_exit_observed: bool,
-    inspect_deadline: Duration,
+    inspect_deadline: Option<Duration>,
     invalidation: Option<SessionInvalidation>,
     plugin_count: u32,
+    plugin_sha256: Vec<String>,
+    plugin_paths: Vec<PathBuf>,
+    plugin_sizes: Vec<u64>,
+    dependency_search_dirs: Vec<PathBuf>,
     next_request_index: u32,
     inspects_ok: u32,
     inspects_errored: u32,
@@ -132,6 +191,48 @@ pub struct DiscoverySession {
     /// read at launch, kept alive for the session. `None` on the sealed
     /// route, whose manifest lives inside the sealed tree.
     _in_place_transport: Option<crate::cluster_manifest::ClusterManifestTransport>,
+}
+
+pub(super) fn inspect_plugin_request_json(
+    plugin_index: u32,
+    request_index: u32,
+    selector: Option<&super::PluginDataEffectSelector>,
+) -> io::Result<String> {
+    let mut message = serde_json::json!({
+        "v": 1,
+        "type": "inspect_plugin",
+        "plugin_index": plugin_index,
+        "request_index": request_index,
+    });
+    if let Some(selector) = selector {
+        selector.encoded()?;
+        message["effect_index"] = serde_json::json!(selector.index);
+        message["effect_match_name_hex"] = serde_json::json!(selector.match_name_hex);
+    }
+    serde_json::to_string(&message)
+        .map_err(|error| invalid(format!("could not encode inspect request: {error}")))
+}
+
+pub(super) fn report_matches_plugin_data_selector(
+    report: &Value,
+    selector: Option<&super::PluginDataEffectSelector>,
+) -> bool {
+    let Some(selector) = selector else {
+        return true;
+    };
+    let Some(plugin_data) = report.get("plugin_data") else {
+        return false;
+    };
+    plugin_data.get("selected_index").and_then(Value::as_u64) == Some(u64::from(selector.index))
+        && plugin_data
+            .get("registrations")
+            .and_then(Value::as_array)
+            .and_then(|registrations| registrations.get(selector.index as usize))
+            .is_some_and(|registration| {
+                registration.get("index").and_then(Value::as_u64) == Some(u64::from(selector.index))
+                    && registration.get("match_name_hex").and_then(Value::as_str)
+                        == Some(selector.match_name_hex.as_str())
+            })
 }
 
 impl DiscoverySession {
@@ -146,7 +247,10 @@ impl DiscoverySession {
     }
 
     fn open_impl(request: InPlaceDiscoverySessionOpenRequest<'_>) -> io::Result<DiscoverySession> {
-        if request.inspect_deadline.is_zero() {
+        if request
+            .inspect_deadline
+            .is_some_and(|deadline| deadline.is_zero())
+        {
             return Err(invalid("discovery session inspect deadline is invalid"));
         }
         let (request_read, request_write) = inheritable_pipe(false)?;
@@ -185,10 +289,32 @@ impl DiscoverySession {
             layers: Vec::new(),
         };
         let dependency_search_dirs = request.dependency_search_dirs;
+        let authorized_dependency_search_dirs = dependency_search_dirs.clone();
+        let plugin_paths = request
+            .plugins
+            .iter()
+            .map(|plugin| plugin.path.clone())
+            .collect();
+        let plugin_sizes = request
+            .plugins
+            .iter()
+            .map(|plugin| plugin.expected_size)
+            .collect();
+        let plugin_sha256 = request
+            .plugins
+            .iter()
+            .map(|plugin| {
+                plugin
+                    .expected_sha256
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect()
+            })
+            .collect();
         let (process, plugin_count, in_place_transport) = {
             let dispatch = crate::secure_image_dispatch::SecureInPlaceClusterDispatch {
                 repository: request.repository,
-                worker_kind: WorkerKind::Render,
+                worker_kind: WorkerKind::Classic,
                 plugins: request.plugins,
                 dependency_search_dirs,
                 positional_plugin: false,
@@ -196,6 +322,7 @@ impl DiscoverySession {
                 module_bound: request.module_bound,
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
+                launch_environment: request.launch_environment,
             };
             let launch = crate::secure_image_dispatch::dispatch_secure_in_place_cluster_session(
                 dispatch,
@@ -222,6 +349,10 @@ impl DiscoverySession {
             inspect_deadline: request.inspect_deadline,
             invalidation: None,
             plugin_count: plugin_count as u32,
+            plugin_sha256,
+            plugin_paths,
+            plugin_sizes,
+            dependency_search_dirs: authorized_dependency_search_dirs,
             next_request_index: 0,
             inspects_ok: 0,
             inspects_errored: 0,
@@ -266,8 +397,7 @@ impl DiscoverySession {
         ))
     }
 
-    fn await_response(&mut self) -> FrameWait {
-        let deadline = Instant::now() + self.inspect_deadline;
+    fn await_response_until(&mut self, deadline: Instant) -> FrameWait {
         loop {
             let mut remaining = deadline.saturating_duration_since(Instant::now());
             if self.process_exit_observed {
@@ -296,6 +426,27 @@ impl DiscoverySession {
         }
     }
 
+    fn await_response_without_deadline(&mut self) -> FrameWait {
+        loop {
+            let event = if self.process_exit_observed {
+                match self.receiver.recv_timeout(PROCESS_EXIT_DRAIN) {
+                    Ok(event) => event,
+                    Err(_) => return FrameWait::WorkerGone,
+                }
+            } else {
+                match self.receiver.recv() {
+                    Ok(event) => event,
+                    Err(_) => return FrameWait::WorkerGone,
+                }
+            };
+            match event {
+                SessionEvent::Message(body) => return FrameWait::Message(body),
+                SessionEvent::ReaderViolation => return FrameWait::FramingViolation,
+                SessionEvent::ProcessExited => self.process_exit_observed = true,
+            }
+        }
+    }
+
     /// Inspects one manifest plugin (design §4.2): sends
     /// `{"v":1,"type":"inspect_plugin","plugin_index":N,"request_index":R}`
     /// and waits for `inspect_done` under the three-way wait. `request_index`
@@ -308,6 +459,15 @@ impl DiscoverySession {
         &mut self,
         plugin_index: u32,
         request_index: u32,
+    ) -> io::Result<InspectOutcome> {
+        self.inspect_plugin_effect(plugin_index, request_index, None)
+    }
+
+    pub fn inspect_plugin_effect(
+        &mut self,
+        plugin_index: u32,
+        request_index: u32,
+        selector: Option<&super::PluginDataEffectSelector>,
     ) -> io::Result<InspectOutcome> {
         if let Some(invalidation) = &self.invalidation {
             return Err(invalid(format!(
@@ -358,9 +518,7 @@ impl DiscoverySession {
                 POST_TERMINATION_COLLECT_TIMEOUT,
             ));
         }
-        let message = format!(
-            "{{\"v\":1,\"type\":\"inspect_plugin\",\"plugin_index\":{plugin_index},\"request_index\":{request_index}}}"
-        );
+        let message = inspect_plugin_request_json(plugin_index, request_index, selector)?;
         if !self.transport.send_message(&message) {
             return Err(self.invalidate(
                 "request_pipe_closed",
@@ -368,32 +526,138 @@ impl DiscoverySession {
                 POST_TERMINATION_COLLECT_TIMEOUT,
             ));
         }
-        let body = match self.await_response() {
-            FrameWait::Message(body) => body,
-            FrameWait::Deadline => {
+        let mut checkpoint: Option<InspectCheckpoint> = None;
+        // An interim checkpoint does not reset the per-inspect watchdog.
+        let response_deadline = self
+            .inspect_deadline
+            .map(|deadline| Instant::now() + deadline);
+        let body = loop {
+            let frame = match response_deadline {
+                Some(deadline) => self.await_response_until(deadline),
+                None => self.await_response_without_deadline(),
+            };
+            let frame = match frame {
+                FrameWait::Message(body) => body,
+                FrameWait::Deadline => {
+                    return Err(self.invalidate(
+                        "inspect_deadline",
+                        format!(
+                            "request {request_index} exceeded the {}ms deadline",
+                            self.inspect_deadline
+                                .expect("deadline frame requires configured deadline")
+                                .as_millis()
+                        ),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                FrameWait::WorkerGone => {
+                    if let Some(checkpoint) = checkpoint.take() {
+                        self.collect_exit(POST_TERMINATION_COLLECT_TIMEOUT);
+                        let crashed = self
+                            .collected
+                            .as_ref()
+                            .and_then(|collected| collected.result.as_ref())
+                            .is_some_and(|result| {
+                                result.classification == crate::ExitClassification::Crashed
+                            });
+                        if crashed {
+                            self.invalidation = Some(SessionInvalidation {
+                                reason: "cleanup_crash_checkpoint",
+                                detail: format!(
+                                    "request {request_index} crashed after its authenticated pre-setdown checkpoint"
+                                ),
+                            });
+                            return Ok(InspectOutcome::CleanupCrashCheckpoint {
+                                authorization: CleanupCrashAuthorization {
+                                    plugin_sha256: checkpoint.plugin_sha256,
+                                    plugin_path: self.plugin_paths[plugin_index as usize].clone(),
+                                    expected_size: self.plugin_sizes[plugin_index as usize],
+                                    dependency_search_dirs: self.dependency_search_dirs.clone(),
+                                },
+                            });
+                        }
+                    }
+                    return Err(self.invalidate(
+                        "worker_exited",
+                        format!("the worker was gone before request {request_index} completed"),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                FrameWait::FramingViolation => {
+                    return Err(self.invalidate(
+                        "response_framing_violation",
+                        format!(
+                            "the worker broke the response framing during request {request_index}"
+                        ),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+            };
+            let value: Value = match serde_json::from_slice(&frame) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(self.invalidate(
+                        "malformed_inspect_response",
+                        format!("request {request_index} response was not JSON: {error}"),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+            };
+            if value.get("type").and_then(Value::as_str) != Some("inspect_checkpoint") {
+                break frame;
+            }
+            if checkpoint.is_some() {
                 return Err(self.invalidate(
-                    "inspect_deadline",
-                    format!(
-                        "request {request_index} exceeded the {}ms deadline",
-                        self.inspect_deadline.as_millis()
-                    ),
+                    "duplicate_inspect_checkpoint",
+                    format!("request {request_index} received more than one checkpoint"),
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
             }
-            FrameWait::WorkerGone => {
+            let parsed: InspectCheckpoint = match serde_json::from_value(value) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    return Err(self.invalidate(
+                        "malformed_inspect_checkpoint",
+                        format!(
+                            "request {request_index} checkpoint did not parse strictly: {error}"
+                        ),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+            };
+            let expected_sha256 = &self.plugin_sha256[plugin_index as usize];
+            if parsed.v != PROTOCOL_VERSION
+                || parsed.kind != "inspect_checkpoint"
+                || parsed.plugin_index != plugin_index
+                || parsed.request_index != request_index
+                || !parsed.plugin_sha256.eq_ignore_ascii_case(expected_sha256)
+                || parsed.report.get("status").and_then(Value::as_str)
+                    != Some("parameters_inspected_pre_setdown")
+                || parsed
+                    .report
+                    .get("global_setup_error")
+                    .and_then(Value::as_i64)
+                    != Some(0)
+                || parsed
+                    .report
+                    .get("params_setup_error")
+                    .and_then(Value::as_i64)
+                    != Some(0)
+                || parsed
+                    .report
+                    .get("global_setdown_error")
+                    .and_then(Value::as_i64)
+                    != Some(-1)
+                || !parsed.report.get("parameters").is_some_and(Value::is_array)
+                || !report_matches_plugin_data_selector(&parsed.report, selector)
+            {
                 return Err(self.invalidate(
-                    "worker_exited",
-                    format!("the worker was gone before request {request_index} completed"),
+                    "inspect_checkpoint_mismatch",
+                    format!("request {request_index} checkpoint identity did not match the in-flight manifest entry"),
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
             }
-            FrameWait::FramingViolation => {
-                return Err(self.invalidate(
-                    "response_framing_violation",
-                    format!("the worker broke the response framing during request {request_index}"),
-                    POST_TERMINATION_COLLECT_TIMEOUT,
-                ));
-            }
+            checkpoint = Some(parsed);
         };
         let done: InspectDone = match serde_json::from_slice(&body) {
             Ok(done) => done,
@@ -426,6 +690,18 @@ impl DiscoverySession {
                     return Err(self.invalidate(
                         "malformed_inspect_done",
                         format!("request {request_index} ok response missed its report"),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                if !report_matches_plugin_data_selector(
+                    done.report.as_ref().expect("checked above"),
+                    selector,
+                ) {
+                    return Err(self.invalidate(
+                        "plugin_data_selector_mismatch",
+                        format!(
+                            "request {request_index} report did not echo its exact PluginData selector"
+                        ),
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
@@ -521,9 +797,22 @@ impl DiscoverySession {
             if self.invalidation.is_none()
                 && !self.transport.send_message("{\"v\":1,\"type\":\"close\"}")
             {
-                self.invalidation = Some(SessionInvalidation {
-                    reason: "close_send_failed",
-                    detail: "the close message could not be delivered".into(),
+                // The liveness check above races the send: a worker that exits
+                // between the two breaks the pipe, and reporting the failed
+                // write would name the symptom instead of the exit that caused
+                // it. Re-check before deciding which of the two this was.
+                self.process_exit_observed =
+                    self.process_exit_observed || super::settled_as_exited(self.process.as_ref());
+                self.invalidation = Some(if self.process_exit_observed {
+                    SessionInvalidation {
+                        reason: "premature_exit",
+                        detail: "the worker exited before the close handshake".into(),
+                    }
+                } else {
+                    SessionInvalidation {
+                        reason: "close_send_failed",
+                        detail: "the close message could not be delivered".into(),
+                    }
                 });
             }
         }

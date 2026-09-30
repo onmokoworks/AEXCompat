@@ -2,7 +2,7 @@
 
 Source-level wiring assertions always run. The runtime test drives
 ``broker.exe render-video-batch`` end to end against the session-capable
-``aex_render_worker.exe`` (PR-B) and the pf_sampling_probe fixture, with
+``aex_worker.exe`` (PR-B) and the pf_sampling_probe fixture, with
 self-computed expectations only, so a fresh build on any machine satisfies
 it.
 """
@@ -13,18 +13,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _render_session import BROKER
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-BROKER_SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "render_session.rs"
-BROKER_MAIN = ROOT / "broker" / "crates" / "broker" / "src" / "main.rs"
-BROKER = ROOT / "broker" / "target" / "release" / "broker.exe"
-WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 AEX = ROOT / "target" / "pf-sampling-probe-build" / "Release" / "pf_sampling_probe.aex"
-# STATUS_DLL_INIT_FAILED: what a process exits with when a restricted token
-# cannot initialize it. The Rust integration tests detect the same condition
-# through their own probe (broker/crates/broker/tests/common, issue #335).
-STATUS_DLL_INIT_FAILED = 0xC0000142
 GENERATOR = ROOT / "tools" / "generate-oracle-rgba-input.py"
 
 
@@ -79,18 +74,9 @@ def test_video_batch_renders_a_sequence_through_one_resident_worker(tmp_path: Pa
     )
     if completed.returncode != 0:
         # The CLI exits 3 with nothing on stderr when the batch ran but did not
-        # pass; the diagnosis is in the report. Surface it either way, and skip
-        # only for the one environment limitation that provably has nothing to
-        # do with this code: a host whose restricted token cannot initialize the
-        # worker at all (STATUS_DLL_INIT_FAILED, issue #335). Any other failure
-        # is reported with the full report so it can be diagnosed.
+        # pass; the diagnosis is in the report, so surface it either way.
         detail = (report_path.read_text(encoding="utf-8")
                   if report_path.is_file() else "<no report written>")
-        allow_skip = os.environ.get("AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP") == "1"
-        if allow_skip and f'"exit_code": {STATUS_DLL_INIT_FAILED}' in detail:
-            pytest.skip(
-                "this environment cannot launch a restricted-token worker "
-                "(STATUS_DLL_INIT_FAILED, issue #335)")
         raise AssertionError(
             "broker exited {}; stderr: {}; report: {}".format(
                 completed.returncode, completed.stderr[-800:], detail[:2000]))

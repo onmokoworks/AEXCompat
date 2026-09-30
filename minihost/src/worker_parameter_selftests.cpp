@@ -1,10 +1,17 @@
 #include "worker_parameter_selftests.hpp"
+#include "worker_parameter_limits.hpp"
+#include "worker_invocation_orchestration.hpp"
+#include "worker_classic_render_entry.hpp"
+#include "worker_smart_setup.hpp"
 #include <windows.h>
 #include <bcrypt.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+namespace aexcompat::l2_detail {
+int32_t __cdecl add_param(void*, int32_t, void*);
+}
 namespace aexcompat::parameter_selftests {
 namespace { Hooks g_hooks; }
 void configure(Hooks hooks) { g_hooks = hooks; }
@@ -160,8 +167,12 @@ bool verify_pf_param_utils_suite3() {
 bool verify_parameter_animation_transport() {
   const auto saved_params = parameter_state().records;
   const auto saved_timelines = parameter_state().timelines;
+  const int32_t saved_layer_width = parameter_state().animation_layer_width;
+  const int32_t saved_layer_height = parameter_state().animation_layer_height;
   parameter_state().records.clear();
   parameter_state().timelines.clear();
+  parameter_state().animation_layer_width = 256;
+  parameter_state().animation_layer_height = 144;
   ParamRecord param{};
   param.index = 1;
   param.disk_id = 9001;
@@ -185,13 +196,56 @@ bool verify_parameter_animation_transport() {
   b.hold = true;
   timeline.keys = {a, b, c};
   parameter_state().timelines.push_back(timeline);
-  std::vector<std::array<std::byte, kParamSize>> definitions(2);
+  ParamRecord point{};
+  point.index = 2;
+  point.disk_id = 9002;
+  point.type = 6;
+  write<int32_t>(point.raw, 0, point.disk_id);
+  write<int32_t>(point.raw, kParamType, point.type);
+  parameter_state().records.push_back(point);
+  ParameterTimeline point_timeline;
+  point_timeline.slot = 2;
+  AnimationKey point_key{};
+  point_key.time = 0;
+  point_key.scale = 24;
+  point_key.kind = AnimationValueKind::Components;
+  point_key.component_count = 2;
+  point_key.components = {50.0, 25.0, 0.0};
+  point_timeline.keys = {point_key};
+  parameter_state().timelines.push_back(point_timeline);
+
+  ParamRecord point3d{};
+  point3d.index = 3;
+  point3d.disk_id = 9003;
+  point3d.type = 18;
+  write<int32_t>(point3d.raw, 0, point3d.disk_id);
+  write<int32_t>(point3d.raw, kParamType, point3d.type);
+  parameter_state().records.push_back(point3d);
+  ParameterTimeline point3d_timeline;
+  point3d_timeline.slot = 3;
+  AnimationKey point3d_key{};
+  point3d_key.time = 0;
+  point3d_key.scale = 24;
+  point3d_key.kind = AnimationValueKind::Components;
+  point3d_key.component_count = 3;
+  point3d_key.components = {25.0, 50.0, 75.0};
+  point3d_timeline.keys = {point3d_key};
+  parameter_state().timelines.push_back(point3d_timeline);
+
+  std::vector<std::array<std::byte, kParamSize>> definitions(4);
   definitions[1] = param.raw;
+  definitions[2] = point.raw;
+  definitions[3] = point3d.raw;
   uint8_t identical = 1, found = 0;
   int32_t count = 0, index = -1, time = 0;
   uint32_t scale = 0;
   bool ok = apply_parameter_animation(definitions, 12, 24) &&
             std::abs(read<double>(definitions[1], 56) - 15.0) < 1e-12 &&
+            read<int32_t>(definitions[2], 56) == 128 * 65536 &&
+            read<int32_t>(definitions[2], 60) == 36 * 65536 &&
+            std::abs(read<double>(definitions[3], 56) - 64.0) < 1e-12 &&
+            std::abs(read<double>(definitions[3], 64) - 72.0) < 1e-12 &&
+            std::abs(read<double>(definitions[3], 72) - 108.0) < 1e-12 &&
             apply_parameter_animation(definitions, 36, 24) &&
             std::abs(read<double>(definitions[1], 56) - 20.0) < 1e-12 &&
             get_param_keyframe_count(g_hooks.effect, 1, &count) == 0 && count == 3 &&
@@ -206,9 +260,104 @@ bool verify_parameter_animation_transport() {
             is_identical_param_checkout(g_hooks.effect, 1, 0, 1, 24, 12, 1, 24,
                                         &identical) == 0 &&
             identical == 0;
+  parameter_state().animation_layer_width = 0;
+  parameter_state().animation_layer_height = 0;
+  ok = ok && aexcompat::l2_detail::verify_classic_animation_extent_wiring_for_test();
+  parameter_state().animation_layer_width = 0;
+  parameter_state().animation_layer_height = 0;
+  ok = ok && worker_runtime::smart_setup::verify_animation_extent_wiring_for_test();
+  Definition point_checkout{}, point3d_checkout{};
+  ok = ok && checkout_param_keyframe(g_hooks.effect, 2, 0, nullptr, nullptr,
+                                     &point_checkout) == 0 &&
+       read<int32_t>(point_checkout, 56) == 128 * 65536 &&
+       read<int32_t>(point_checkout, 60) == 36 * 65536 &&
+       checkin_param_keyframe(g_hooks.effect, &point_checkout) == 0 &&
+       checkout_param_keyframe(g_hooks.effect, 3, 0, nullptr, nullptr,
+                               &point3d_checkout) == 0 &&
+       std::abs(read<double>(point3d_checkout, 56) - 64.0) < 1e-12 &&
+       std::abs(read<double>(point3d_checkout, 64) - 72.0) < 1e-12 &&
+       std::abs(read<double>(point3d_checkout, 72) - 108.0) < 1e-12 &&
+       checkin_param_keyframe(g_hooks.effect, &point3d_checkout) == 0;
+  Definition temporal_point{}, temporal_point3d{};
+  ok = ok && aexcompat::worker_runtime::parameters::copy_definition_at_time(
+                 2, 0, 24, point.raw, temporal_point) &&
+       read<int32_t>(temporal_point, 56) == 128 * 65536 &&
+       read<int32_t>(temporal_point, 60) == 36 * 65536 &&
+       aexcompat::worker_runtime::parameters::copy_definition_at_time(
+           3, 0, 24, point3d.raw, temporal_point3d) &&
+       std::abs(read<double>(temporal_point3d, 56) - 64.0) < 1e-12 &&
+       std::abs(read<double>(temporal_point3d, 64) - 72.0) < 1e-12 &&
+       std::abs(read<double>(temporal_point3d, 72) - 108.0) < 1e-12;
+  parameter_state().animation_layer_width = 0;
+  parameter_state().animation_layer_height = 0;
+  ok = ok && apply_parameter_animation(definitions, 0, 24) &&
+       read<int32_t>(definitions[2], 56) == 50 * 65536 &&
+       read<int32_t>(definitions[2], 60) == 25 * 65536 &&
+       std::abs(read<double>(definitions[3], 56) - 25.0) < 1e-12 &&
+       std::abs(read<double>(definitions[3], 64) - 50.0) < 1e-12 &&
+       std::abs(read<double>(definitions[3], 72) - 75.0) < 1e-12;
   parameter_state().records = saved_params;
   parameter_state().timelines = saved_timelines;
+  parameter_state().animation_layer_width = saved_layer_width;
+  parameter_state().animation_layer_height = saved_layer_height;
   parameter_state().keyframe_checkout_ledger.clear();
+  return ok;
+}
+
+bool verify_parameter_registry_capacity() {
+  auto& records = parameter_state().records;
+  const auto saved_params = records;
+  records.clear();
+  Definition definition{};
+  std::memcpy(definition.data() + kParamName, "capacity", 9);
+  bool ok = true;
+  for (std::size_t index = 1;
+       index <= worker_runtime::parameters::kMaxParameterCount; ++index) {
+    write<int32_t>(definition, 0, static_cast<int32_t>(index));
+    ok = ok && aexcompat::l2_detail::add_param(
+                   nullptr, static_cast<int32_t>(index), definition.data()) == 0;
+  }
+  ok = ok && records.size() ==
+                 worker_runtime::parameters::kMaxParameterCount &&
+       records[1264].index == 1265 &&
+       aexcompat::l2_detail::add_param(nullptr, -1, definition.data()) != 0;
+
+  wchar_t executable[] = L"worker";
+  wchar_t mode[] = L"--user-changed";
+  wchar_t plugin[] = L"plugin.aex";
+  wchar_t dependency_root[] = L"dependencies";
+  wchar_t accepted_slot[] = L"1265";
+  wchar_t rejected_slot[] = L"4097";
+  wchar_t* accepted_argv[]{executable, mode, plugin, dependency_root,
+                           accepted_slot};
+  wchar_t* rejected_argv[]{executable, mode, plugin, dependency_root,
+                           rejected_slot};
+  worker_runtime::invocation::InvocationState accepted{};
+  worker_runtime::invocation::InvocationState rejected{};
+  const worker_runtime::invocation::L2ModeHooks mode_hooks{
+      nullptr, worker_runtime::parameters::kMaxParameterCount};
+  ok = ok && worker_runtime::invocation::parse_l2_modes(
+                 5, accepted_argv, accepted, mode_hooks) == 0 &&
+       accepted.user_changed_param_slot == 1265 &&
+       worker_runtime::invocation::parse_l2_modes(
+           5, rejected_argv, rejected, mode_hooks) == 3;
+
+  // Popup defaults are 1-based (issue #1253): a declared dephault of 0
+  // (Reshape's Elasticity / Interpolation Method) registers as the first
+  // choice, the way AE materializes it; a declared in-range default is kept.
+  records.clear();
+  Definition popup{};
+  std::memcpy(popup.data() + kParamName, "popup", 6);
+  write<int32_t>(popup, kParamType, 7);
+  write<int16_t>(popup, 56 + 4, 3);
+  write<int16_t>(popup, 56 + 6, 0);
+  ok = ok && aexcompat::l2_detail::add_param(nullptr, -1, popup.data()) == 0;
+  write<int16_t>(popup, 56 + 6, 2);
+  ok = ok && aexcompat::l2_detail::add_param(nullptr, -1, popup.data()) == 0;
+  ok = ok && records.size() == 2 && records[0].type == 7 &&
+       records[0].default_value == 1.0 && records[0].valid_max == 3.0 &&
+       records[1].default_value == 2.0;
+  records = saved_params;
   return ok;
 }
 }  // namespace aexcompat::parameter_selftests

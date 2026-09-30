@@ -215,6 +215,20 @@ What is unchanged:
    this policy; they are candidates for staged replacement when their
    modules are next touched.
 
+   Amendment (2026-08-07, owner decision recorded on PR #885): the staged
+   replacement above is superseded. Tests that assert the content of
+   committed repository files (source, docs, workflows, schemas) or the
+   repository structure (presence or absence of committed files) are
+   deleted outright, without waiting for their modules to be touched. This
+   removes the remaining bare source greps and dead imports from the #780
+   inventory, the CI workflow contract test
+   (`tests/test_windows_clean_clone_workflow.py`), and the
+   `tests/source_owners.py` owner-resolution helper whose only consumers
+   were those tests. The single surviving exception is
+   `tests/test_probe_pipl_contract.py` (`.rc`<->`.cpp` semantic
+   consistency). The "no CI" paragraph below predates the Windows
+   clean-clone workflow and no longer holds.
+
 This repository has no CI. All of the checks above, including behavioral
 self-tests and broker integration tests, currently run manually on developer
 machines. The policy removes machine-bound hashes from the regression axis so

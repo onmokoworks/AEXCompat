@@ -24,6 +24,20 @@ static_assert(sizeof(AEGP_LayerRenderOptionsSuite1) == 14 * sizeof(void*));
 static_assert(sizeof(AEGP_LayerRenderOptionsSuite2) == 15 * sizeof(void*));
 static_assert(sizeof(AEGP_RenderOptionsSuite1) == 17 * sizeof(void*));
 static_assert(sizeof(AEGP_RenderOptionsSuite4) == 23 * sizeof(void*));
+static_assert(offsetof(AEGP_CompSuite10, AEGP_GetItemFromComp) ==
+              1 * sizeof(void*));
+static_assert(offsetof(AEGP_LayerSuite8, AEGP_GetLayerCurrentTime) ==
+              14 * sizeof(void*));
+using GetItemFromCompSignature =
+    A_Err(SPAPI*)(AEGP_CompH, AEGP_ItemH*);
+using GetLayerCurrentTimeSignature =
+    A_Err(SPAPI*)(AEGP_LayerH, AEGP_LTimeMode, A_Time*);
+static_assert(std::is_same_v<
+              decltype(AEGP_CompSuite10::AEGP_GetItemFromComp),
+              GetItemFromCompSignature>);
+static_assert(std::is_same_v<
+              decltype(AEGP_LayerSuite8::AEGP_GetLayerCurrentTime),
+              GetLayerCurrentTimeSignature>);
 #define ASSERT_SDK_SLOT(Suite, Member, Slot) \
   static_assert(offsetof(Suite, Member) == (Slot) * sizeof(void*))
 ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_NewFromLayer, 0);
@@ -140,10 +154,38 @@ static_assert(offsetof(PF_UtilCallbacks, host_new_handle) == 160);
 static_assert(offsetof(PF_UtilCallbacks, host_lock_handle) == 168);
 static_assert(offsetof(PF_UtilCallbacks, host_unlock_handle) == 176);
 static_assert(offsetof(PF_UtilCallbacks, host_dispose_handle) == 184);
+static_assert(offsetof(PF_UtilCallbacks, app) == 200);
 static_assert(offsetof(PF_UtilCallbacks, host_get_handle_size) == 440);
+static_assert(offsetof(PF_UtilCallbacks, iterate_origin_non_clip_src) == 448);
+static_assert(offsetof(PF_UtilCallbacks, iterate_generic) == 456);
 static_assert(offsetof(PF_UtilCallbacks, host_resize_handle) == 464);
 static_assert(offsetof(PF_UtilCallbacks, subpixel_sample16) == 472);
 static_assert(offsetof(PF_UtilCallbacks, area_sample16) == 480);
+// The ANSI block's remaining eight entries (issue #981). Eleven of the
+// nineteen were emitted, so the host wired eleven and left the rest null;
+// Basic_3D calls `fmod` and Bulge/Spherize call `floor` from FRAME_SETUP and
+// each jumped to address 0, which the worker's SEH guard then reported as
+// error 512 - the same shape as the 16-bit sampling pair in issue #777.
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, atan) == 208);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, atan2) == 216);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, exp) == 240);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, floor) == 256);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, fmod) == 264);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log) == 280);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log10) == 288);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, tan) == 320);
+// composite_rect, between end_sampling and blend (issue #1252): the contract
+// left it out, so the host wired blend at 0x30 and left 0x28 null; Write_on's
+// RENDER composites the input layer behind its strokes through it and jumped
+// to address 0.
+static_assert(offsetof(PF_UtilCallbacks, composite_rect) == 40);
+// gaussian_kernel, between fill and iterate (issue #1253): the contract left
+// it out, so the host wired iterate at 0x58 and left 0x50 null; Inner/Outer
+// Key's RENDER builds its 1D blur kernel through it and jumped to address 0.
+static_assert(offsetof(PF_UtilCallbacks, gaussian_kernel) == 80);
+static_assert(offsetof(PF_UtilCallbacks, iterate_lut) == 136);
+static_assert(offsetof(PF_UtilCallbacks, iterate_origin16) == 512);
+static_assert(offsetof(PF_UtilCallbacks, iterate_origin_non_clip_src16) == 520);
 
 template <typename T>
 void field(const char* name, std::size_t offset, bool& first) {
@@ -287,6 +329,8 @@ int main() {
   field<decltype(PF_UtilCallbacks::host_unlock_handle)>("utils.host_unlock_handle", offsetof(PF_UtilCallbacks, host_unlock_handle), first);
   field<decltype(PF_UtilCallbacks::host_dispose_handle)>("utils.host_dispose_handle", offsetof(PF_UtilCallbacks, host_dispose_handle), first);
   field<decltype(PF_UtilCallbacks::host_get_handle_size)>("utils.host_get_handle_size", offsetof(PF_UtilCallbacks, host_get_handle_size), first);
+  field<decltype(PF_UtilCallbacks::iterate_origin_non_clip_src)>("utils.iterate_origin_non_clip_src", offsetof(PF_UtilCallbacks, iterate_origin_non_clip_src), first);
+  field<decltype(PF_UtilCallbacks::iterate_generic)>("utils.iterate_generic", offsetof(PF_UtilCallbacks, iterate_generic), first);
   field<decltype(PF_UtilCallbacks::host_resize_handle)>("utils.host_resize_handle", offsetof(PF_UtilCallbacks, host_resize_handle), first);
   field<decltype(PF_ANSICallbacks::sin)>("utils.ansi_sin",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, sin), first);
@@ -310,7 +354,34 @@ int main() {
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, asin), first);
   field<decltype(PF_ANSICallbacks::acos)>("utils.ansi_acos",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, acos), first);
+  field<decltype(PF_ANSICallbacks::atan)>("utils.ansi_atan",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, atan), first);
+  field<decltype(PF_ANSICallbacks::atan2)>("utils.ansi_atan2",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, atan2), first);
+  field<decltype(PF_ANSICallbacks::exp)>("utils.ansi_exp",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, exp), first);
+  field<decltype(PF_ANSICallbacks::floor)>("utils.ansi_floor",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, floor), first);
+  field<decltype(PF_ANSICallbacks::fmod)>("utils.ansi_fmod",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, fmod), first);
+  field<decltype(PF_ANSICallbacks::log)>("utils.ansi_log",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log), first);
+  field<decltype(PF_ANSICallbacks::log10)>("utils.ansi_log10",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log10), first);
+  field<decltype(PF_ANSICallbacks::tan)>("utils.ansi_tan",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, tan), first);
   field<decltype(PF_UtilCallbacks::colorCB)>("utils.color_callbacks", offsetof(PF_UtilCallbacks, colorCB), first);
+  // composite_rect sits between end_sampling and blend. It was left out of the
+  // emitted contract, so the host never wired it and Write_on's RENDER (paint
+  // style "On Original Image") jumped to address 0 (issue #1252).
+  field<decltype(PF_UtilCallbacks::composite_rect)>("utils.composite_rect", offsetof(PF_UtilCallbacks, composite_rect), first);
+  // gaussian_kernel sits between fill and iterate. It was left out of the
+  // emitted contract, so the host never wired it and Inner/Outer Key's RENDER
+  // (once its mask checkout succeeded) jumped to address 0 (issue #1253).
+  field<decltype(PF_UtilCallbacks::gaussian_kernel)>("utils.gaussian_kernel", offsetof(PF_UtilCallbacks, gaussian_kernel), first);
+  field<decltype(PF_UtilCallbacks::iterate_lut)>("utils.iterate_lut", offsetof(PF_UtilCallbacks, iterate_lut), first);
+  field<decltype(PF_UtilCallbacks::iterate_origin16)>("utils.iterate_origin16", offsetof(PF_UtilCallbacks, iterate_origin16), first);
+  field<decltype(PF_UtilCallbacks::iterate_origin_non_clip_src16)>("utils.iterate_origin_non_clip_src16", offsetof(PF_UtilCallbacks, iterate_origin_non_clip_src16), first);
   field<decltype(PF_UtilCallbacks::blend)>("utils.blend", offsetof(PF_UtilCallbacks, blend), first);
   field<decltype(PF_UtilCallbacks::convolve)>("utils.convolve", offsetof(PF_UtilCallbacks, convolve), first);
   field<decltype(PF_UtilCallbacks::copy)>("utils.copy", offsetof(PF_UtilCallbacks, copy), first);
@@ -321,6 +392,7 @@ int main() {
   field<decltype(PF_UtilCallbacks::iterate16)>("utils.iterate16", offsetof(PF_UtilCallbacks, iterate16), first);
   field<decltype(PF_UtilCallbacks::iterate_origin)>("utils.iterate_origin", offsetof(PF_UtilCallbacks, iterate_origin), first);
   field<decltype(PF_UtilCallbacks::get_callback_addr)>("utils.get_callback_addr", offsetof(PF_UtilCallbacks, get_callback_addr), first);
+  field<decltype(PF_UtilCallbacks::app)>("utils.app", offsetof(PF_UtilCallbacks, app), first);
   field<decltype(PF_UtilCallbacks::new_world)>("utils.new_world", offsetof(PF_UtilCallbacks, new_world), first);
   field<decltype(PF_UtilCallbacks::dispose_world)>("utils.dispose_world", offsetof(PF_UtilCallbacks, dispose_world), first);
   field<decltype(PF_UtilCallbacks::transfer_rect)>("utils.transfer_rect", offsetof(PF_UtilCallbacks, transfer_rect), first);

@@ -1,7 +1,59 @@
 use crate::ExitClassification;
+use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Environment inputs one launch carries explicitly, instead of the broker
+/// mutating its own process environment (issue #910).
+///
+/// `std::env::set_var` is process-global. Before this existed, the only way a
+/// caller could influence a worker's environment — or point the broker's
+/// opt-in minidump capture at a directory — was to set a variable on the
+/// broker process, which every concurrent launch then saw. Both fields default
+/// to "whatever the broker process already has", so production callers that
+/// build a request without them are unchanged.
+#[derive(Clone, Debug, Default)]
+pub struct LaunchEnvironment {
+    child_overrides: Vec<(OsString, OsString)>,
+    minidump_directory: Option<PathBuf>,
+}
+
+impl LaunchEnvironment {
+    /// Sets one environment variable in the child, for this launch only.
+    ///
+    /// The override is applied after the inherited copy of the broker's
+    /// environment and after the broker injects its handle variables, so it
+    /// wins over an inherited value of the same name but can never forge a
+    /// handle variable: the keys the broker owns
+    /// (`AEXCOMPAT_MINIDUMP_HANDLE`, `AEXCOMPAT_MINIDUMP_ACK_HANDLE`,
+    /// `AEX_INSTRUMENT_TRACE_HANDLE`, the `SESSION_*_HANDLE_VARIABLE` names,
+    /// and the broker-side `*_DIR` knobs they come from) are ignored here, as
+    /// are malformed keys. See `windows_process::child_environment`.
+    pub fn with_child_var(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.child_overrides.push((key.into(), value.into()));
+        self
+    }
+
+    /// Directs this launch's opt-in crash minidump capture at `directory`
+    /// instead of reading `AEXCOMPAT_MINIDUMP_DIR` (issue #18). This is a
+    /// broker-side setting: the worker never receives the path, only the
+    /// inherited dump pipe the broker creates under it. The same
+    /// repository-relative policy applies (`minidump_policy`), so the
+    /// directory must still resolve under `<repository>/target`.
+    pub fn with_minidump_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.minidump_directory = Some(directory.into());
+        self
+    }
+
+    pub(crate) fn child_overrides(&self) -> &[(OsString, OsString)] {
+        &self.child_overrides
+    }
+
+    pub(crate) fn minidump_directory(&self) -> Option<&Path> {
+        self.minidump_directory.as_deref()
+    }
+}
 
 #[derive(Debug)]
 pub struct SecureLaunchResult {
@@ -51,6 +103,13 @@ pub struct SecureLaunchRequest<'a> {
     /// worker never receives this path or a dump-file handle.
     pub repository: &'a Path,
     pub require_module_audit: bool,
+    /// Per-launch environment inputs (issue #910). `Default` inherits the
+    /// broker's own environment and reads the minidump directory from
+    /// `AEXCOMPAT_MINIDUMP_DIR`, which is what every production caller wants.
+    pub launch_environment: LaunchEnvironment,
+    /// Explicit dependency-owned data files that a runtime resolves relative
+    /// to the authenticated worker executable.
+    pub staged_worker_assets: &'a [(PathBuf, PathBuf)],
 }
 
 /// In-place variant of `secure_launch` (issue #751): the plug-in loads from
@@ -71,6 +130,8 @@ pub fn secure_launch_in_place(
         &args,
         request.require_module_audit,
         request.repository,
+        &request.launch_environment,
+        request.staged_worker_assets,
         timeout,
         process_memory_limit,
     )
@@ -95,6 +156,8 @@ pub(crate) fn secure_launch_without_plugin(
         &args,
         request.require_module_audit,
         request.repository,
+        &request.launch_environment,
+        request.staged_worker_assets,
         timeout,
         process_memory_limit,
     )
@@ -128,6 +191,7 @@ fn build_in_place_launch_args(
 }
 
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 fn secure_launch_impl(
     worker_program: &Path,
     worker_expected_sha256: [u8; 32],
@@ -135,14 +199,20 @@ fn secure_launch_impl(
     args: &[String],
     require_module_audit: bool,
     repository: &Path,
+    launch_environment: &LaunchEnvironment,
+    staged_worker_assets: &[(PathBuf, PathBuf)],
     timeout: Option<Duration>,
     process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
-    let worker_stage =
-        TrustedWorkerStage::create(worker_program, worker_expected_sha256, worker_expected_size)
-            .map_err(|error| stage_error("trusted worker staging", error))?;
+    let worker_stage = TrustedWorkerStage::create_with_assets(
+        worker_program,
+        worker_expected_sha256,
+        worker_expected_size,
+        staged_worker_assets,
+    )
+    .map_err(|error| stage_error("trusted worker staging", error))?;
     // Never expose the repository root as a worker CWD. The native sidecar
     // loader pins relative access to <cwd>/image-transport, which is the same
     // broker-owned <repository>/target/image-transport boundary as before.
@@ -156,6 +226,7 @@ fn secure_launch_impl(
             timeout,
             &worker_cwd,
             repository,
+            launch_environment,
             limit,
         )
     } else {
@@ -166,6 +237,7 @@ fn secure_launch_impl(
             &worker_cwd,
             // Repository root for the launch-boundary minidump handle (issue #18).
             repository,
+            launch_environment,
         )
     }
     .map_err(|error| stage_error("staged process launch", error))?;
@@ -237,6 +309,15 @@ impl SecureSessionProcess {
             .duplicated_process_handle()
     }
 
+    /// Best-effort current/peak committed bytes; telemetry, not a launch gate.
+    pub fn memory_commit_snapshot(&self) -> Option<(u64, u64)> {
+        self.launched.as_ref()?.memory_commit_snapshot()
+    }
+
+    pub fn job_peak_commit_bytes(&self) -> Option<u64> {
+        self.launched.as_ref()?.job_peak_commit_bytes()
+    }
+
     /// See `LaunchedIsolatedProcess::has_exited`.
     pub fn has_exited(&self) -> bool {
         self.launched
@@ -296,6 +377,7 @@ pub(crate) fn secure_launch_session_in_place(
     request: SecureLaunchRequest<'_>,
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+    memory_budget: crate::windows_process::SessionMemoryBudget,
 ) -> io::Result<SecureSessionProcess> {
     let args = match plugin_path {
         Some(plugin_path) => build_in_place_launch_args(plugin_path, &request)?,
@@ -308,7 +390,7 @@ pub(crate) fn secure_launch_session_in_place(
             args
         }
     };
-    secure_launch_session_impl(args, request, session, desktop_policy)
+    secure_launch_session_impl(args, request, session, desktop_policy, memory_budget)
 }
 
 #[cfg(windows)]
@@ -317,13 +399,15 @@ fn secure_launch_session_impl(
     request: SecureLaunchRequest<'_>,
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+    memory_budget: crate::windows_process::SessionMemoryBudget,
 ) -> io::Result<SecureSessionProcess> {
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
-    let worker_stage = TrustedWorkerStage::create(
+    let worker_stage = TrustedWorkerStage::create_with_assets(
         request.worker_program,
         request.worker_expected_sha256,
         request.worker_expected_size,
+        request.staged_worker_assets,
     )
     .map_err(|error| stage_error("trusted worker staging", error))?;
     // Session workers share the same non-root CWD and transport boundary as
@@ -333,13 +417,15 @@ fn secure_launch_session_impl(
         .map_err(|error| stage_error("session worker cwd creation", error))?;
     let launched = match desktop_policy {
         crate::windows_process::WorkerDesktopPolicy::Dedicated => {
-            crate::windows_process::launch_isolated_session_staged(
+            crate::windows_process::launch_isolated_session_staged_with_budget(
                 worker_stage.worker_path(),
                 &args,
                 &worker_cwd,
                 session,
                 // Repository root for the launch-boundary minidump handle (issue #18/#224).
                 request.repository,
+                &request.launch_environment,
+                memory_budget,
             )
         }
         crate::windows_process::WorkerDesktopPolicy::Current => {
@@ -349,6 +435,8 @@ fn secure_launch_session_impl(
                 &worker_cwd,
                 session,
                 request.repository,
+                &request.launch_environment,
+                memory_budget,
             )
         }
     }
@@ -367,6 +455,7 @@ fn stage_error(stage: &'static str, error: io::Error) -> io::Error {
 }
 
 #[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
 fn secure_launch_impl(
     _worker_program: &Path,
     _worker_expected_sha256: [u8; 32],
@@ -374,6 +463,8 @@ fn secure_launch_impl(
     _args: &[String],
     _require_module_audit: bool,
     _repository: &Path,
+    _launch_environment: &LaunchEnvironment,
+    _staged_worker_assets: &[(PathBuf, PathBuf)],
     _timeout: Option<Duration>,
     _process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
@@ -397,6 +488,8 @@ mod tests {
             args_after_plugin: after,
             repository: Path::new("."),
             require_module_audit: false,
+            launch_environment: LaunchEnvironment::default(),
+            staged_worker_assets: &[],
         }
     }
 

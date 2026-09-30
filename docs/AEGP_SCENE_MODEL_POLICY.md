@@ -73,8 +73,8 @@ generation all remain unchanged.
 
 ## Required local evidence
 
-`--self-test-aegp-scene-model` must pass on `aex_l2_worker`,
-`aex_render_worker`, and `aex_smart_worker`. Its strict JSON report is validated
+`--self-test-aegp-scene-model` must pass on all three of `aex_worker.exe`'s
+routes (`--kind discovery`, `--kind classic`, `--kind smart`). Its strict JSON report is validated
 by `schemas/aegp-scene-model-selftest.schema.json`, rejects duplicate keys,
 requires non-zero identity/dependency/order/trace hashes, and requires zero live
 or reserved receipts. The test invokes a published unsupported Effect Suite

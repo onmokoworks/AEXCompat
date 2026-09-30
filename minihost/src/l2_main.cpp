@@ -44,6 +44,7 @@
 #include <variant>
 #include <vector>
 
+#include "extended_inter_memory.hpp"
 #include "native_stdout_guard.hpp"
 #include "gpu_cuda_backend.hpp"
 #include "gpu_device_info_registry.hpp"
@@ -52,15 +53,21 @@
 #include "gpu_memory_world_transport.hpp"
 #include "host_audio_runtime.hpp"
 #include "l2_cli_dispatch.h"
+#include "worker_bee_scene_facade.hpp"
+#include "worker_pf_progress_info.hpp"
+#include "worker_pf_world_facade.hpp"
 #include "worker_extended_diag.hpp"
 #include "worker_callback_diagnostics.hpp"
 #include "aex_string_table.hpp"
+#include "worker_active_plugin_context.hpp"
 #include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
 #include "worker_parameter_runtime.hpp"
+#include "worker_parameter_limits.hpp"
 #include "worker_parameter_selftests.hpp"
 #include "worker_parameter_selftest_routing.hpp"
 #include "worker_pf_color_selftests.hpp"
+#include "worker_pf_gaussian_kernel.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
@@ -73,8 +80,13 @@
 #include "worker_selector_dispatch.hpp"
 #include "worker_runtime_admission.hpp"
 #include "worker_openmp_policy.hpp"
+#include "worker_bee_bib_installer.hpp"
+#include "worker_legacy_support_init.hpp"
+#include "worker_dvacore_main_thread.hpp"
 #include "worker_entry_admission.hpp"
 #include "worker_session.hpp"
+#include "worker_companion_manifest.hpp"
+#include "worker_companion_runtime.hpp"
 #include "worker_selftest_dispatch.hpp"
 #include "worker_fixed_selftest_routing.hpp"
 #include "worker_custom_selftest_routing.hpp"
@@ -159,9 +171,10 @@
 #include "worker_render_report.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_target.hpp"
+#include "worker_system_sound_suppression.hpp"
 
 
-// Split as textual implementation fragments to preserve this ABI-sensitive worker as
-// one translation unit while keeping each handwritten file reviewable.
+// Split as textual implementation fragments to preserve this ABI-sensitive
+// worker as one translation unit while keeping each handwritten file reviewable.
 #include "l2_main_support.inc"
 #include "l2_main_entry.inc"

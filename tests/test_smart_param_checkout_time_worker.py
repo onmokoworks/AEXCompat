@@ -29,7 +29,7 @@ from test_render_session_worker import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "target" / "minihost-build" / "aex_smart_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 PROBE = (
     ROOT / "target" / "pf-smart-param-time-probe-build" / "Release"
     / "pf_smart_param_time_probe.aex"
@@ -45,7 +45,7 @@ TOTAL_TIME = 300
 
 def _require_artifacts():
     if not WORKER.is_file():
-        pytest.skip("aex_smart_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if not PROBE.is_file():
         pytest.skip("pf_smart_param_time_probe.aex is not built; "
                     "run tools/build-pf-smart-param-time-probe.ps1")
@@ -54,7 +54,7 @@ def _require_artifacts():
 def _spawn(transport):
     aex_sha = hashlib.sha256(PROBE.read_bytes()).hexdigest()
     process = subprocess.Popen(
-        [str(WORKER), "--smart-session-v1", str(PROBE), aex_sha, "v2|",
+        [str(WORKER), "--kind", "smart", "--smart-session-v1", str(PROBE), aex_sha, "v2|",
          str(WIDTH), str(HEIGHT), "1", str(TOTAL_TIME), str(TIME_SCALE)],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

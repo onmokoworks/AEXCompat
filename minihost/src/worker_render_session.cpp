@@ -1,18 +1,26 @@
 #include "worker_render_session.hpp"
 
+#include "worker_bee_scene_facade.hpp"
+#include "worker_effect_bootstrap.hpp"
+
 #include <windows.h>
 
 #include "render_pixel_transport.hpp"
 #include "render_subsystem.h"
 #include "strict_json.hpp"
+#include "worker_classic_render_entry.hpp"
 #include "worker_invocation_orchestration.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_request_parser.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_smart_dispatch.hpp"
 #include "worker_smart_execution.hpp"
+#include "worker_smart_setup.hpp"
 #include "worker_ui_event_execution.hpp"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -22,6 +30,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -126,10 +135,18 @@ bool session_environment_requested() {
 }
 
 SessionChannels::~SessionChannels() {
+  close();
+}
+
+void SessionChannels::close() {
   if (view_) UnmapViewOfFile(view_);
+  view_ = nullptr;
   if (section_) CloseHandle(section_);
+  section_ = nullptr;
   if (request_pipe_) CloseHandle(request_pipe_);
+  request_pipe_ = nullptr;
   if (response_pipe_) CloseHandle(response_pipe_);
+  response_pipe_ = nullptr;
 }
 
 bool SessionChannels::open_from_environment(const SessionGeometry& geometry) {
@@ -321,19 +338,6 @@ constexpr int32_t kSequenceSetdown = 8;
 
 int32_t invoke_sequence_selector(EffectEntry entry, int32_t selector, void* input,
                                  void* output, uint32_t* exception_code = nullptr);
-int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
-                    std::array<std::byte, kOutSize>& output,
-                    const std::string& case_id, int32_t& width, int32_t& height,
-                    int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
-                    bool& guards_intact, const RequestedAssignments* requested = nullptr,
-                    const std::vector<unsigned char>* external_rgba = nullptr,
-                    int32_t external_width = 0, int32_t external_height = 0,
-                    const std::vector<ExternalLayerInput>* external_layers = nullptr,
-                    int32_t external_current_time = 0, int32_t external_time_step = 1,
-                    int32_t external_total_time = 1, uint32_t external_time_scale = 1,
-                    int32_t external_pixel_bytes = 4, bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr);
 worker_runtime::smart_execution::Result smart_render_once(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const std::string& case_id,
@@ -344,7 +348,8 @@ worker_runtime::smart_execution::Result smart_render_once(
     int32_t external_current_time = 0, int32_t external_time_step = 1,
     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
     int32_t external_pixel_bytes = 4,
-    worker_runtime::smart_execution::SessionFrame* session = nullptr);
+    worker_runtime::smart_execution::SessionFrame* session = nullptr,
+    uint32_t advertised_out_flags2 = 0);
 std::string sha256_bytes(const unsigned char* data, std::size_t size);
 void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
                                    int32_t height, int32_t pixel_bytes);
@@ -438,6 +443,7 @@ void apply_session_ui_action(const SessionUiAction* action) {
   const auto registration = telemetry.registration;
   const auto invalid_registrations = telemetry.invalid_custom_ui_registrations;
   telemetry = ui::CustomUiTelemetry{};
+  ui::reset_info_text_telemetry();
   telemetry.register_ui_calls = register_ui_calls;
   telemetry.registration = registration;
   telemetry.invalid_custom_ui_registrations = invalid_registrations;
@@ -458,13 +464,31 @@ void apply_session_ui_action(const SessionUiAction* action) {
 // fail-closed decisions stay identical across both session flavors.
 struct SessionFrameOutput {
   int32_t frame_error{0};
+  bool gpu_float32_transport{false};
+  // True only when a Smart selector returned success but the host's guarded
+  // output remained invalid/untouched. This is distinct from a plug-in
+  // returning the same numeric -6 itself.
+  bool smart_output_untouched{false};
   int32_t width{0};
   int32_t height{0};
   int32_t rowbytes{0};
+  // Where the frame sits relative to the layer's own origin. A SmartFX
+  // effect that grows its output - a glow reaching past the layer - answers
+  // with a result_rect whose top-left is negative, and the pixels start
+  // there rather than at the layer's (0,0). A caller that has to place the
+  // frame back into a fixed-size image needs this to know which part of it
+  // covers the layer (issue #914). A Classic effect that expands its buffer
+  // states the same geometry the other way round - PF_OutData::origin is where
+  // the input's (0,0) landed inside the grown output, so positive - and the
+  // classic callback negates it into this field rather than reporting it raw
+  // (issue #984). Zero when nothing resized, which is where the output starts.
+  int32_t origin_x{0};
+  int32_t origin_y{0};
   std::string input_hash;
   std::string output_hash;
   bool guard_violation{false};
   bool output_validation_failed{false};
+  worker_runtime::output_coverage::Result output_coverage{};
   // A SmartFX frame whose PreRender returned a legally empty result_rect (#278):
   // the render selector was skipped and there are no output pixels. This is a
   // valid contract the one-shot path reports as a zero-dimension output, so the
@@ -479,7 +503,7 @@ struct SessionFrameOutput {
 // persistent_sequence precedent; pixels move through the inherited anonymous
 // section (copy-through slots, the plug-in never sees the mapping) and control
 // messages over the inherited pipe pair with strict exact-key validation.
-// render_frame(current_time, frame_rgba, captured, frame_layers,
+// render_frame(current_entry, current_time, frame_rgba, captured, frame_layers,
 // frame_override, frame_ui) runs one frame under the hoisted sequence and
 // returns the SessionFrameOutput above with the packed ARGB output in
 // `captured`. frame_override is a v:2 per-frame parameter set (protocol
@@ -489,14 +513,17 @@ struct SessionFrameOutput {
 // RenderSessionOutcome is defined in worker_invocation_orchestration.hpp so
 // the final dispatch owner can call the wrappers below across TUs.
 template <typename FrameFn>
-RenderSessionOutcome run_session_frame_loop(
-    EffectEntry entry, std::array<std::byte, kInSize>& input,
+void run_session_frame_loop(
+    RenderSessionOutcome& outcome, EffectEntry entry,
+    std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output,
     int32_t max_width, int32_t max_height, int32_t output_capacity_width,
     int32_t output_capacity_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
+    uint32_t advertised_out_flags, uint32_t advertised_out_flags2,
     const std::vector<ExternalLayerInput>* external_layers, FrameFn&& render_frame,
-    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr) {
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr,
+    bool audio_passthrough = false) {
   using aexcompat::strict_json::JsonValue;
   using aexcompat::strict_json::StrictJsonParser;
   using aexcompat::strict_json::json_exact_keys;
@@ -515,8 +542,26 @@ RenderSessionOutcome run_session_frame_loop(
   // response must read as continuation-impossible, not frame-local (the
   // plug-in's own setup error is preserved in the final report).
   constexpr int32_t kSessionSequenceSetupFailed = -47;
+  // A ui_action frame sent to an AUDIO_EFFECT_ONLY passthrough session
+  // (issue #1048): the event sequence has no render to ride on, and
+  // swallowing it silently would hide the gap. Frame-local; the session
+  // continues.
+  constexpr int32_t kSessionUiActionUnsupported = -48;
 
-  RenderSessionOutcome outcome;
+  // The depth this session dispatches at, from the advertisement the bootstrap
+  // snapshotted right after the plug-in's GLOBAL_SETUP - never read back out of
+  // the live `out_data`. That buffer is written by PARAMS_SETUP and by every
+  // frame selector after it, and nothing restores it between frames (#843), so
+  // reading it there lets a plug-in that assigns rather than ORs its flags move
+  // the depth under the session with no diagnostic. What a selector may change
+  // about the effect is not what the host hands it its worlds in. Re-read only
+  // where the plug-in identity itself changes: a cluster swap.
+  int32_t dispatch_bytes = worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
+      pixel_bytes, advertised_out_flags, advertised_out_flags2);
+  uint32_t current_advertised_out_flags = advertised_out_flags;
+  uint32_t current_advertised_out_flags2 = advertised_out_flags2;
+  outcome.dispatch_pixel_bytes = dispatch_bytes;
+
   const int32_t layer_slot_count =
       external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
   // Non-const: an in-session grow (protocol §3, issue #262) raises the output
@@ -533,7 +578,7 @@ RenderSessionOutcome run_session_frame_loop(
   if (!channels.open_from_environment(geometry) ||
       !channels.static_header_matches(geometry)) {
     outcome.protocol_violation = true;
-    return outcome;
+    return;
   }
   // Refills every dynamic layer's private vector from its retained handle
   // (issue #674). Returns false on a short read or an unreadable handle, which
@@ -579,7 +624,7 @@ RenderSessionOutcome run_session_frame_loop(
           !GetHandleInformation(handle, &flags) ||
           GetFileType(handle) != FILE_TYPE_DISK) {
         outcome.protocol_violation = true;
-        return outcome;
+        return;
       }
       layer.rgba.resize(bytes);
       std::size_t collected = 0;
@@ -607,7 +652,7 @@ RenderSessionOutcome run_session_frame_loop(
       }
       if (!read_ok || collected != bytes) {
         outcome.protocol_violation = true;
-        return outcome;
+        return;
       }
     }
   }
@@ -645,6 +690,7 @@ RenderSessionOutcome run_session_frame_loop(
   // continuation-impossible response while the session stays alive for the
   // broker's continue/stop decision).
   int32_t current_plugin_index = swap_hook ? 0 : -1;
+  bool current_audio_passthrough = audio_passthrough;
   bool swapped_plugin_setup_failed = false;
 
   const std::size_t input_offset = wrs::input_slot_offset();
@@ -770,7 +816,10 @@ RenderSessionOutcome run_session_frame_loop(
       // 2.-6. GLOBAL_SETDOWN, quiescence, plug-in-only unload, authenticated
       // load of plugins[N], GLOBAL_SETUP/PARAMS_SETUP, and the payload swap
       // all belong to the dispatch owner, which holds the WorkerSession, the
-      // bootstrap wiring, and the launch payload parser.
+      // bootstrap wiring, and the launch payload parser. The BEE facade's
+      // attribution window (issue #1264) is opened inside that hook, between
+      // the outgoing plug-in's unload and the incoming plug-in's bootstrap,
+      // so each side's facade calls count against the plug-in that made them.
       wrs::SwapPluginResult swap =
           swap_hook->invoke(swap_hook->context, plugin_index);
       if (swap.hard_failure || !swap.entry) {
@@ -779,8 +828,21 @@ RenderSessionOutcome run_session_frame_loop(
       }
       entry = swap.entry;
       current_plugin_index = plugin_index;
+      current_audio_passthrough = swap.audio_effect_only;
       swapped_plugin_setup_failed =
           swap.global_setup_error != 0 || swap.params_setup_error != 0;
+      // The incoming plug-in advertises its own depths; its bootstrap
+      // snapshotted them for exactly this, so no live buffer is consulted.
+      // A member whose setup failed advertises nothing worth recording: every
+      // later frame answers -47 and no dispatch happens, so the session keeps
+      // the depth it had rather than publishing one that never ran.
+      if (!swapped_plugin_setup_failed) {
+        current_advertised_out_flags = swap.advertised_out_flags;
+        current_advertised_out_flags2 = swap.advertised_out_flags2;
+        dispatch_bytes = worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
+            pixel_bytes, swap.advertised_out_flags, swap.advertised_out_flags2);
+        outcome.dispatch_pixel_bytes = dispatch_bytes;
+      }
       // Re-apply the session-static in_data fields the re-bootstrap cleared.
       write_session_static_fields();
       std::string reply;
@@ -839,6 +901,10 @@ RenderSessionOutcome run_session_frame_loop(
     // Each frame starts with no message: what the plug-in said about a previous
     // frame is not this frame's diagnosis (issue #707).
     aexcompat::worker_runtime::reset_selector_return_message();
+    // And with no fault: a startup, custom-UI, or previous-frame fault is not
+    // this frame's either (issue #983).
+    aexcompat::worker_runtime::reset_selector_fault_attribution();
+    aexcompat::worker_runtime::reset_render_selector_timing();
     const auto& time_object = std::get<JsonValue::Object>(time_value->value);
     int32_t current_time{};
     int32_t current_scale{};
@@ -892,17 +958,87 @@ RenderSessionOutcome run_session_frame_loop(
       frame_ui = &frame_ui_action;
     }
     const uint32_t expected_generation = static_cast<uint32_t>(frame_index) + 1;
+    std::chrono::steady_clock::time_point setup_started{};
+    uint64_t worker_setup_ns = 0;
+    uint64_t worker_render_ns = 0;
+    std::chrono::steady_clock::time_point render_completed{};
+    const auto append_performance = [&](std::string& reply) {
+      uint64_t selector_ns = 0;
+      reply += ",\"performance\":{\"worker_setup_ns\":";
+      if (setup_started != std::chrono::steady_clock::time_point{} &&
+          render_completed != std::chrono::steady_clock::time_point{})
+        reply += std::to_string(worker_setup_ns);
+      else
+        reply += "null";
+      reply += ",\"worker_render_ns\":";
+      if (render_completed != std::chrono::steady_clock::time_point{})
+        reply += std::to_string(worker_render_ns);
+      else
+        reply += "null";
+      reply += ",\"render_selector_ns\":";
+      if (aexcompat::worker_runtime::render_selector_timing_ns(selector_ns))
+        reply += std::to_string(selector_ns);
+      else
+        reply += "null";
+      reply += ",\"worker_finalize_ns\":";
+      if (render_completed != std::chrono::steady_clock::time_point{})
+        reply += std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - render_completed).count());
+      else
+        reply += "null";
+      reply += "}";
+    };
     // Error responses carry no output or generation: a frame rejected before
     // or during rendering never updates the output slot, so there is no slot
     // metadata to report (protocol §4.3).
-    const auto respond_error = [&](int32_t frame_error) {
+    const auto respond_error = [&](int32_t frame_error,
+                                   bool smart_output_untouched = false) {
       std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
           std::to_string(frame_index) + ",\"status\":\"error\",\"render_error\":" +
           std::to_string(frame_error);
+      if (smart_output_untouched)
+        reply += ",\"smart_output_untouched\":true";
       const auto& telemetry =
           aexcompat::worker_runtime::selector_dispatch_telemetry();
       const auto& missing = telemetry.missing_dependency;
       if (!missing.empty()) reply += ",\"missing_dependency\":\"" + missing + "\"";
+      // A selector SEH used to be flattened into kAuditFailure == 512, which
+      // collides with PF_Err_INTERNAL_STRUCT_DAMAGED. Carry a frame-local,
+      // structured discriminator instead, meaning exactly "this 512 is the
+      // host's substitute for this fault" (issue #983).
+      //
+      // Which fault: the one whose substituted 512 is `frame_error`, and that
+      // is established, not guessed. Both flavors report the first non-zero
+      // result, in dispatch order, among the selectors whose result they fold
+      // in - classic `end_frame` takes FRAME_SETDOWN's error only when the
+      // primary error is 0, and the smart precedence below (GPU setup,
+      // PreRender, render with FRAME_SETDOWN folded in, GPU setdown) is the
+      // same rule - so the first fault of the frame produced the frame's 512
+      // unless some folded-in result was already non-zero before it, and
+      // `frame_fault` records both (the first fault since the frame-start
+      // reset above, and whether a non-zero result preceded it). The two
+      // dispatches the rule does not cover run with the attribution paused:
+      // the arbitrary-data probes, which tolerate an answer or a fault, and
+      // GPU_DEVICE_SETDOWN, ranked behind the FRAME_SETDOWN dispatched after
+      // it, which the smart frame records itself when its arm is reported
+      // (`SelectorFaultAttribution` in worker_selector_dispatch.hpp). A frame
+      // whose 512 came before its first fault (the plug-in's own 512 from
+      // RENDER, then a FRAME_SETDOWN fault; a C++ exception substitute, then
+      // a fault) carries no `selector_crash`: the fault it had is on the
+      // always-on `stage:selector_seh` stderr line (issue #1212), and the
+      // 512 stays a 512 that no fault explains. So does a fault the reported
+      // error did not come from at all (a GPU setdown or custom-UI event
+      // fault behind an untouched-output -6, say): the error check keeps the
+      // field off any number it does not explain.
+      constexpr int32_t kSelectorFaultSubstitute = 512;  // kAuditFailure
+      const auto& fault = telemetry.frame_fault;
+      if (frame_error == kSelectorFaultSubstitute && fault.captured &&
+          !fault.error_before_fault && fault.fault_code != 0 &&
+          !fault.selector.empty()) {
+        reply += ",\"selector_crash\":{\"selector\":\"" +
+            escape(fault.selector) + "\",\"exception_code\":" +
+            std::to_string(fault.fault_code) + "}";
+      }
       // What the plug-in itself said about the failure. The SDK writes
       // "Couldn't load suite." here when a suite is missing, and plug-ins write
       // their own reason, so this is often the whole diagnosis (issue #707).
@@ -918,7 +1054,9 @@ RenderSessionOutcome run_session_frame_loop(
       return channels.write_message(reply);
     };
     const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,
-                                int32_t frame_rowbytes, std::size_t packed_bytes) {
+                                int32_t frame_rowbytes, std::size_t packed_bytes,
+                                int32_t frame_origin_x, int32_t frame_origin_y,
+                                int32_t captured_pixel_bytes) {
       std::string reply;
       reply.reserve(256);
       reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
@@ -937,8 +1075,27 @@ RenderSessionOutcome run_session_frame_loop(
       // used to carry (issue #690).
       reply += "\",\"packed_bytes\":";
       reply += std::to_string(packed_bytes);
+      reply += ",\"origin_x\":";
+      reply += std::to_string(frame_origin_x);
+      reply += ",\"origin_y\":";
+      reply += std::to_string(frame_origin_y);
+      // An audio-only passthrough copies host pixels; it did not dispatch the
+      // plug-in at any depth and must not claim depth provenance.
+      if (captured_pixel_bytes != 0) {
+        reply += ",\"advertised_out_flags\":";
+        reply += std::to_string(current_advertised_out_flags);
+        reply += ",\"advertised_out_flags2\":";
+        reply += std::to_string(current_advertised_out_flags2);
+        reply += ",\"advertised_depth_supported\":";
+        reply += dispatch_bytes == pixel_bytes ? "true" : "false";
+        reply += ",\"planned_dispatch_pixel_bytes\":";
+        reply += std::to_string(dispatch_bytes);
+        reply += ",\"dispatch_pixel_bytes\":";
+        reply += std::to_string(captured_pixel_bytes);
+      }
       reply += ",\"guards_intact\":true},\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
+      append_performance(reply);
       reply += "}";
       return channels.write_message(reply);
     };
@@ -957,6 +1114,7 @@ RenderSessionOutcome run_session_frame_loop(
       reply += "\",\"packed_bytes\":0,\"guards_intact\":true,\"empty_result\":true},";
       reply += "\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
+      append_performance(reply);
       reply += "}";
       return channels.write_message(reply);
     };
@@ -998,6 +1156,7 @@ RenderSessionOutcome run_session_frame_loop(
       outcome.invariant_failure = true;
       break;
     }
+    setup_started = std::chrono::steady_clock::now();
     std::memcpy(frame_rgba.data(), channels.view() + input_offset, frame_rgba.size());
     // A swapped-in plug-in whose GLOBAL/PARAMS setup failed can never render;
     // answer every frame with the reserved continuation-impossible code and
@@ -1030,6 +1189,59 @@ RenderSessionOutcome run_session_frame_loop(
       activate_external_aux();
       write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
     }
+    // AUDIO_EFFECT_ONLY passthrough (issue #1048): an audio-only effect has no
+    // video selector to dispatch, and AE leaves its video untouched, so the
+    // frame is the input. The input slot is RGBA8 transport at every session
+    // depth, so a deep session expands each channel with the same scaling
+    // `build_argb_input` uses for the render input; the output slot is native
+    // RGBA at the session depth either way. The sequence lifecycle above
+    // still runs - AE opens a sequence for every applied effect, and a setup
+    // failure stays the genuine diagnostic it is for any other plug-in. No
+    // FRAME pair, no layers, no capture buffer.
+    if (current_audio_passthrough) {
+      // A custom-UI event is an explicit broker-requested action, not a
+      // render input; a passthrough that swallowed it would be a silent
+      // compatibility gap. Explicit frame-local refusal instead.
+      if (frame_ui) {
+        if (!respond_error(kSessionUiActionUnsupported)) {
+          outcome.protocol_violation = true;
+          break;
+        }
+        continue;
+      }
+      unsigned char* slot = channels.view() + output_offset;
+      const std::size_t channel_count =
+          static_cast<std::size_t>(max_width) * max_height * 4;
+      if (pixel_bytes == 4) {
+        std::memcpy(slot, frame_rgba.data(), frame_rgba.size());
+      } else if (pixel_bytes == 8) {
+        auto* deep = reinterpret_cast<uint16_t*>(slot);
+        for (std::size_t index = 0; index < channel_count; ++index)
+          deep[index] = static_cast<uint16_t>(
+              (static_cast<uint32_t>(frame_rgba[index]) * 32768u + 127u) / 255u);
+      } else {
+        auto* deep = reinterpret_cast<float*>(slot);
+        for (std::size_t index = 0; index < channel_count; ++index)
+          deep[index] = frame_rgba[index] / 255.0f;
+      }
+      record_output_checksum_detail(slot, max_width, max_height, pixel_bytes);
+      channels.write_header_u32(wrs::kHeaderFrameWidthOffset,
+                                static_cast<uint32_t>(max_width));
+      channels.write_header_u32(wrs::kHeaderFrameHeightOffset,
+                                static_cast<uint32_t>(max_height));
+      channels.write_header_u32(wrs::kHeaderOutputGenerationOffset,
+                                expected_generation);
+      outcome.width = max_width;
+      outcome.height = max_height;
+      outcome.rowbytes = max_width * pixel_bytes;
+      if (!respond_ok(max_width, max_height, max_width * pixel_bytes,
+                      static_cast<std::size_t>(max_width) * max_height * pixel_bytes,
+                      0, 0, 0)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
     captured.clear();
     // Re-read every dynamic layer for this frame (issue #674). The broker
     // rewrites the file before it sends the frame message and waits for the
@@ -1040,18 +1252,34 @@ RenderSessionOutcome run_session_frame_loop(
       outcome.protocol_violation = true;
       break;
     }
+    const auto render_started = std::chrono::steady_clock::now();
+    worker_setup_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            render_started - setup_started).count());
     const SessionFrameOutput frame =
-        render_frame(current_time, frame_rgba, captured, frame_layers, frame_override,
-                     frame_ui);
+        render_frame(entry, current_time, frame_rgba, captured, frame_layers,
+                     frame_override, frame_ui, dispatch_bytes);
+    render_completed = std::chrono::steady_clock::now();
+    worker_render_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            render_completed - render_started).count());
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.
     aexcompat::pf_ae_channel::reclaim_layer_channels();
     outcome.width = frame.width;
     outcome.height = frame.height;
-    outcome.rowbytes = frame.rowbytes;
+    // The slot's geometry, not the plug-in's. A frame that does not reach the
+    // slot has no stride of its own to report, and the depth the plug-in
+    // rendered at is not necessarily `dispatch_bytes` either - the GPU
+    // negotiation transport (#1072) renders float32 whatever the session
+    // dispatched - so deriving one from the other would be a guess. The
+    // successful transfer below replaces this with the stride actually packed,
+    // which keeps a plug-in's own padding when nothing was converted.
+    outcome.rowbytes = frame.width * pixel_bytes;
     outcome.input_hash = frame.input_hash;
     outcome.output_hash = frame.output_hash;
+    outcome.output_coverage = frame.output_coverage;
     // Corruption evidence outranks the render error: a plug-in that wrote
     // outside its guarded private buffer invalidates the session even when it
     // also reported a nonzero error. Host-protection invariant, fail closed.
@@ -1073,7 +1301,7 @@ RenderSessionOutcome run_session_frame_loop(
     if (frame.frame_error != 0) {
       // Frame-local compatibility diagnostic; the sequence state is still
       // owned by the host, so the session may continue.
-      if (!respond_error(frame.frame_error)) {
+      if (!respond_error(frame.frame_error, frame.smart_output_untouched)) {
         outcome.protocol_violation = true;
         break;
       }
@@ -1116,11 +1344,46 @@ RenderSessionOutcome run_session_frame_loop(
     }
     const std::size_t expected_pixels =
         static_cast<std::size_t>(frame.width) * frame.height;
+    // A session whose depth the plug-in does not advertise dispatches it at
+    // another depth it does (`effect_bootstrap::dispatch_pixel_bytes`), so the
+    // frame comes back narrower or wider than the slot and is converted here -
+    // what AE does around the same call rather than refusing the effect. The source
+    // depth is read off the captured buffer rather than recomputed so a route
+    // that captures at a depth of its own (the GPU negotiation transport,
+    // whose case_id and retry entries hand out float32 worlds whatever was
+    // dispatched) conforms through the same step.
+    const int32_t captured_pixel_bytes =
+        aexcompat::render_pixel_transport::conform_pixel_depth(
+            captured, expected_pixels, pixel_bytes, dispatch_bytes,
+            frame.gpu_float32_transport);
+    // 0 means the frame did not arrive at a depth anything dispatched it at.
+    // The size check below cannot stand in for this: a refused stride that
+    // happens to equal the session depth passes it, and the un-narrowed buffer
+    // would be packed into the slot and reported as a good frame.
+    if (captured_pixel_bytes == 0) {
+      respond_error(kSessionOutputCaptureError);
+      outcome.invariant_failure = true;
+      break;
+    }
+    // `captured` is the packed session-slot image even when no depth conversion
+    // was needed. The plug-in's world can have padding, but the broker's frame
+    // protocol always describes the transferred image, not that private world.
+    const int32_t reported_rowbytes = frame.width * pixel_bytes;
     if (captured.size() != expected_pixels * pixel_bytes) {
       respond_error(kSessionOutputCaptureError);
       outcome.invariant_failure = true;
       break;
     }
+    // The final report reads this; leaving it at the dispatch depth's stride
+    // would have the report and the per-frame message describe the same frame
+    // differently.
+    outcome.rowbytes = reported_rowbytes;
+    // What the plug-in actually rendered at, read off the frame it produced
+    // rather than from the session's decision: the GPU negotiation transport
+    // (#1072) can hand it float32 worlds whatever was dispatched, and this
+    // field is provenance - it says what
+    // ran, not what was planned.
+    outcome.dispatch_pixel_bytes = captured_pixel_bytes;
     // Shrink, or an expand that still fits the launch output slot, is written
     // below at its actual dimensions. An expand that overruns the slot needs a
     // larger slot: the render already ran exactly once into the private buffer
@@ -1160,7 +1423,8 @@ RenderSessionOutcome run_session_frame_loop(
     // layout disagreement the hash existed to catch, at no per-frame cost
     // (issue #690). The final report's output_hash keeps the one-shot
     // internal-ARGB definition (protocol §4.3).
-    if (!respond_ok(frame.width, frame.height, frame.rowbytes, captured.size())) {
+    if (!respond_ok(frame.width, frame.height, reported_rowbytes, captured.size(),
+                    frame.origin_x, frame.origin_y, captured_pixel_bytes)) {
       outcome.protocol_violation = true;
       break;
     }
@@ -1187,7 +1451,8 @@ RenderSessionOutcome run_session_frame_loop(
               !outcome.protocol_violation && !outcome.invariant_failure
           ? 0
           : -1;
-  return outcome;
+  channels.close();
+  return;
 }
 
 // Classic resident session: render_once(manage_sequence=false) per frame
@@ -1197,38 +1462,53 @@ RenderSessionOutcome run_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
+    uint32_t advertised_out_flags, uint32_t advertised_out_flags2,
     const std::vector<ExternalLayerInput>* external_layers,
-    const aexcompat::worker_render_session::SwapPluginHook* swap_hook) {
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook,
+    bool audio_passthrough) {
   // The output slot starts at the render dimensions; an expand grows it in place
   // mid-session (#262), so the initial output capacity equals max_width/height.
-  return run_session_frame_loop(
-      entry, input, output, max_width, max_height, max_width,
+  RenderSessionOutcome outcome;
+  run_session_frame_loop(
+      outcome, entry, input, output, max_width, max_height, max_width,
       max_height, time_step, total_time,
-      time_scale, pixel_bytes, external_layers,
-      [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
+      time_scale, pixel_bytes, advertised_out_flags, advertised_out_flags2,
+      external_layers,
+      [&](EffectEntry current_entry, int32_t current_time,
+          const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>* frame_layers,
           const RequestedAssignments* frame_override,
-          const SessionUiAction* frame_ui) {
+          const SessionUiAction* frame_ui, int32_t dispatch_bytes) {
         apply_session_ui_action(frame_ui);
         SessionFrameOutput frame;
         // Initialized true so it means "finalize observed corruption" when
         // false: render_once's early host-side failures return before touching
         // it, while every path that allocates the guarded buffer overwrites it.
         bool frame_guards = true;
-        bool output_validation_failed = false;
+        aexcompat::render::ClassicFrameOutput classic_output;
         frame.frame_error = render_once(
-            entry, input, output, "request", frame.width, frame.height,
+            current_entry, input, output, "request", frame.width, frame.height,
             frame.rowbytes, frame.input_hash, frame.output_hash, frame_guards,
             frame_override ? frame_override : requested, &frame_rgba,
             max_width, max_height, frame_layers,
-            current_time, time_step, total_time, time_scale, pixel_bytes, false,
-            &captured, &output_validation_failed);
+            current_time, time_step, total_time, time_scale, dispatch_bytes, false,
+            &captured, &classic_output);
         frame.guard_violation = !frame_guards;
-        frame.output_validation_failed = output_validation_failed;
+        frame.output_validation_failed = classic_output.validation_failed;
+        frame.output_coverage = classic_output.output_coverage;
+        // Sign conversion, not a copy: `ClassicFrameOutput::input_origin_*` is
+        // PF_OutData::origin, and this field is the layer-relative origin the
+        // smart path feeds from `result_rect[0]`. The rule itself lives in
+        // render_subsystem so the self-test can pin it (issue #984).
+        frame.origin_x =
+            aexcompat::render::layer_origin_from_input_origin(classic_output.input_origin_x);
+        frame.origin_y =
+            aexcompat::render::layer_origin_from_input_origin(classic_output.input_origin_y);
         return frame;
       },
-      swap_hook);
+      swap_hook, audio_passthrough);
+  return outcome;
 }
 
 // SmartFX resident session frame loop (protocol v1.1): each frame runs
@@ -1245,40 +1525,193 @@ SmartRenderSessionOutcome run_smart_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
-    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers) {
+    int32_t pixel_bytes, uint32_t advertised_out_flags,
+    uint32_t advertised_out_flags2,
+    const std::vector<ExternalLayerInput>* external_layers) {
   SmartRenderSessionOutcome outcome;
-  outcome.session = run_session_frame_loop(
-      entry, input, output, max_width, max_height,
+  // Resident sessions receive each input before its selector runs. Retain a
+  // bounded set of *actual* prior inputs for SmartFX temporal slot-0 checkouts;
+  // an evicted or not-yet-received time remains unavailable, never an alias of
+  // the current frame. The cap is shared by all frames in this session.
+  constexpr std::size_t kMaxTemporalHistoryBytes = 256u * 1024u * 1024u;
+  // The setup path materializes each retained RGBA8 frame in the dispatch
+  // depth too. Bound those additional worlds, not just the stored RGBA8.
+  constexpr std::size_t kMaxTemporalConvertedBytes = 512u * 1024u * 1024u;
+  constexpr std::size_t kMaxTemporalHistoryFrames = 64;
+  std::vector<ExternalLayerInput> temporal_layers;
+  std::size_t temporal_bytes = 0;
+  const auto trim_temporal_history = [&]() {
+    // A GPU-required retry may promote an ARGB8 dispatch to a float32 world
+    // inside smart_render_once. Budget the largest supported host pixel even
+    // before the retry decides which plan to run.
+    constexpr std::size_t kMaxHostPixelBytes = 16;
+    while (!temporal_layers.empty() &&
+           (temporal_layers.size() > kMaxTemporalHistoryFrames ||
+            temporal_bytes > kMaxTemporalHistoryBytes ||
+            temporal_bytes / 4 * kMaxHostPixelBytes >
+                kMaxTemporalConvertedBytes)) {
+      temporal_bytes -= temporal_layers.front().rgba.size();
+      temporal_layers.erase(temporal_layers.begin());
+    }
+  };
+  run_session_frame_loop(
+      outcome.session, entry, input, output, max_width, max_height,
       // Smart sessions (v1.1) render at fixed dimensions; no output expansion.
       max_width, max_height, time_step, total_time,
-      time_scale, pixel_bytes, external_layers,
-      [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
+      time_scale, pixel_bytes, advertised_out_flags, advertised_out_flags2,
+      external_layers,
+      [&](EffectEntry current_entry, int32_t current_time,
+          const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>* frame_layers,
           const RequestedAssignments* frame_override,
-          const SessionUiAction* frame_ui) {
+          const SessionUiAction* frame_ui, int32_t dispatch_bytes) {
         apply_session_ui_action(frame_ui);
+        // Drop a stale world for a repeated timestamp before constructing the
+        // hosted-world set. The new input is still recorded after this frame.
+        const auto repeated = std::find_if(temporal_layers.begin(),
+            temporal_layers.end(), [current_time, time_scale](const auto& layer) {
+              return layer.time == current_time && layer.time_scale == time_scale;
+            });
+        if (repeated != temporal_layers.end()) {
+          temporal_bytes -= repeated->rgba.size();
+          temporal_layers.erase(repeated);
+        }
+        // The selected dispatch can be promoted again by a GPU retry. Trim
+        // before setup materializes every retained frame at that depth.
+        trim_temporal_history();
+        const std::size_t history_count = temporal_layers.size();
+        if (frame_layers)
+          temporal_layers.insert(temporal_layers.end(), frame_layers->begin(),
+                                 frame_layers->end());
+        const auto* available_layers = temporal_layers.empty()
+            ? nullptr : &temporal_layers;
         SessionFrameOutput frame;
         worker_runtime::smart_execution::SessionFrame session_frame{&captured};
-        const worker_runtime::smart_execution::Result frame_result = smart_render_once(
-            entry, input, output, case_id, frame_override ? frame_override : requested,
-            &frame_rgba,
-            max_width, max_height, frame_layers, current_time, time_step, total_time,
-            time_scale, pixel_bytes, &session_frame);
+        // A retry below renders into its own SessionFrame; `verdict` always
+        // names the frame that produced `frame_result`, so the guard verdict
+        // read at the end is the one from the pass whose pixels are reported.
+        worker_runtime::smart_execution::SessionFrame retry_frame{&captured};
+        const worker_runtime::smart_execution::SessionFrame* verdict = &session_frame;
+        const auto render_attempt = [&](worker_runtime::smart_execution::SessionFrame* attempt_frame) {
+          // A retry's result replaces the first attempt's outright, so the
+          // fault attribution restarts with it: the first attempt's 14 or
+          // 512/516 (the codes the retries below key on) must not mark a
+          // fault in the retry as decided-before (issue #983).
+          worker_runtime::reset_selector_fault_attribution();
+          return worker_runtime::smart_setup::run_pr_gpu_pf_first_session_attempt(
+              [&] {
+                return smart_render_once(
+                    current_entry, input, output, case_id,
+                    frame_override ? frame_override : requested, &frame_rgba,
+                    max_width, max_height, available_layers, current_time, time_step,
+                    total_time, time_scale, dispatch_bytes, attempt_frame,
+                    advertised_out_flags2);
+              });
+        };
+        worker_runtime::smart_execution::Result frame_result =
+            render_attempt(&session_frame);
+        // GPU-required fallback (#1072): an effect advertising GPU F32 render
+        // (out_flags2 bit25) that answers PF_Err 14 at the start of CPU
+        // SMART_RENDER only implements the GPU path (the color family). out_flags2
+        // does not separate those from CPU-capable effects, so the runtime 14 is
+        // the only signal. The 14 arrives before the plug-in touches suites,
+        // worlds, or checkouts, so re-run the frame once through the GPU transport.
+        if (frame_result.render_error == 14 &&
+            (advertised_out_flags2 & (1u << 25)) != 0 &&
+            !worker_runtime::smart_setup::force_gpu_retry_requested()) {
+          const worker_runtime::smart_setup::ForceGpuRetryScope force_gpu;
+          captured.clear();
+          retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
+          verdict = &retry_frame;
+          frame_result = render_attempt(&retry_frame);
+        }
+        // Premiere GPU-filter fallback (#1271): an effect exporting
+        // xGPUFilterEntry whose SMART_RENDER selector refused the frame only
+        // implements the GPU path (the VR family draws a "requires GPU
+        // acceleration" notice and gives up). The export alone does not
+        // separate those from exporters whose PF CPU path works, so the
+        // selector's own refusal is the signal (the selector, not a
+        // FRAME_SETUP / SETDOWN error folded into render_error), and only the
+        // plug-in's own: the host substitutes 512 - never 516 - whenever it
+        // stands in for the plug-in's return (a caught fault, an escaped C++
+        // exception, a failed module audit), and a plug-in that just faulted
+        // is not re-entered on a GPU route. That guard therefore covers the
+        // 512 half only; what bounds the 516 half is the `xGPUFilterEntry`
+        // export test below, and the `stage:pr_gpu_route_begin reason=cpu_*`
+        // line the route now carries, which keeps a papered-over host refusal
+        // visible in the record. A dispatch that
+        // already offered the route is not retried: the route declined once
+        // and would again. Re-run the frame once with the route enabled; if it
+        // declines, the PF path answers the same again.
+        //
+        // Both 512 and 516 count (issue #1283). The VR family's CPU path
+        // answered 512 only because it gave up before reaching a host
+        // callback; once `dvacore::config::Localizer` is installed the same
+        // effects get one step further, ask the host to transform a world
+        // with a matrix they had no field of view to build (the
+        // `AE VR Effects Video Attributes Suite` they want is not
+        // implemented), and pass the host's PF_Err_BAD_CALLBACK_PARAM out as
+        // their own. Which of the two codes a GPU-only effect reaches the end
+        // of its CPU path with is incidental; that it could not serve the
+        // frame is the property this retry is for.
+        if (frame_result.selector_dispatched &&
+            (frame_result.selector_error == 512 ||
+             frame_result.selector_error == 516) &&
+            !frame_result.selector_failure_substituted &&
+            !frame_result.pr_gpu_route_attempted &&
+            worker_runtime::smart_dispatch::pr_gpu_filter_route_available() &&
+            !worker_runtime::smart_setup::force_pr_gpu_retry_requested()) {
+          const worker_runtime::smart_setup::ForcePrGpuRetryScope force_pr_gpu(
+              frame_result.selector_error);
+          captured.clear();
+          retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
+          verdict = &retry_frame;
+          frame_result = render_attempt(&retry_frame);
+        }
         outcome.last = frame_result;
+        frame.gpu_float32_transport = frame_result.gpu_render_dispatched;
         frame.width = frame_result.output_width;
         frame.height = frame_result.output_height;
+        // The GPU transport captures float32 ARGB whatever the session asked
+        // for, and an 8-bit comp in AE receives it narrowed (#1072). The frame
+        // loop's `conform_pixel_depth` is that narrowing now, for every session
+        // depth rather than only for 8-bit, and it corrects the reported
+        // rowbytes with it. This used to be a second clamp-and-round written
+        // out here; one rule means the float32 a 16-bpc session narrows and the
+        // float32 an 8-bpc session narrows cannot round or handle NaN
+        // differently.
         frame.rowbytes = frame_result.output_rowbytes;
+        // result_rect's top-left is where these pixels sit relative to the
+        // layer origin; a grown output starts at a negative coordinate. Only
+        // once the rects passed validation: `result_rect` is copied out of the
+        // PreRender output before it is checked, so on a rejected geometry it
+        // still holds whatever the plug-in wrote, and a caller placing a frame
+        // by it would be placing it by an unvalidated number.
+        if (frame_result.rects_valid) {
+          // The plug-in's own `result_rect` places a frame it rendered. It
+          // cannot place the empty-result passthrough: that rect is empty and
+          // its top-left need not be (0,0) (an effect may answer, say,
+          // {5,5,5,5}), while the copied frame sits at the request rect
+          // (issue #1285).
+          frame.origin_x = frame_result.empty_result_passthrough
+              ? frame_result.output_origin_x : frame_result.result_rect[0];
+          frame.origin_y = frame_result.empty_result_passthrough
+              ? frame_result.output_origin_y : frame_result.result_rect[1];
+        }
         frame.input_hash = frame_result.input_hash;
         frame.output_hash = frame_result.output_hash;
         // A legally empty PreRender result_rect (#278): no pixels were rendered,
         // so this is a valid empty frame, not a zero-dimension invariant failure.
-        frame.empty_result = frame_result.empty_result_rect;
+        // ... unless the host emitted the input in its place, which is a real
+        // frame with real pixels (issue #1285).
+        frame.empty_result = frame_result.empty_result_rect &&
+            !frame_result.empty_result_passthrough;
         // Sentinel evidence only exists once the guarded output buffer was
         // built; refusals before that point are frame-local diagnostics, not
         // corruption.
         frame.guard_violation =
-            session_frame.output_buffer_allocated && !session_frame.guards_intact;
+            verdict->output_buffer_allocated && !verdict->guards_intact;
         // The per-frame diagnostic keeps the one-shot error priority: GPU
         // device setup, then PreRender, then the render/finalize error, then
         // GPU device setdown. ROI/rect diagnostics stay in the final report;
@@ -1289,6 +1722,45 @@ SmartRenderSessionOutcome run_smart_render_session(
                 ? frame_result.pre_error
                 : frame_result.render_error != 0 ? frame_result.render_error
                                                  : frame_result.gpu_setdown_error;
+        // GPU device setdown is dispatched before FRAME_SETDOWN (folded into
+        // render_error above) but ranked behind it, so it runs with the fault
+        // attribution paused and is named here instead, only when its arm is
+        // the one reported: the three earlier arms are 0, so no folded-in
+        // result preceded it and its 512 is the frame's (issue #983).
+        if (frame.frame_error == frame_result.gpu_setdown_error &&
+            frame_result.gpu_setup_error == 0 && frame_result.pre_error == 0 &&
+            frame_result.render_error == 0 &&
+            frame_result.gpu_setdown_exception_code != 0) {
+          worker_runtime::record_selector_fault_attribution(
+              "GPU_DEVICE_SETDOWN", frame_result.gpu_setdown_exception_code);
+        }
+        frame.smart_output_untouched = frame_result.selector_error == 0 &&
+            frame_result.pre_error == 0 && frame_result.render_error == -6 &&
+            frame_result.output_untouched && !frame_result.empty_result_rect;
+        temporal_layers.resize(history_count);
+        if (frame_rgba.size() <= kMaxTemporalHistoryBytes) {
+          // A later dispatch may reuse a time with new input pixels. Keep only
+          // its newest world so a rational-time lookup cannot return stale data.
+          const auto previous = std::find_if(temporal_layers.begin(),
+              temporal_layers.end(), [current_time, time_scale](const auto& layer) {
+                return layer.time == current_time && layer.time_scale == time_scale;
+              });
+          if (previous != temporal_layers.end()) {
+            temporal_bytes -= previous->rgba.size();
+            temporal_layers.erase(previous);
+          }
+          ExternalLayerInput prior{};
+          prior.slot = 0;
+          prior.time = current_time;
+          prior.time_scale = time_scale;
+          prior.timed = true;
+          prior.width = max_width;
+          prior.height = max_height;
+          prior.rgba = frame_rgba;
+          temporal_bytes += prior.rgba.size();
+          temporal_layers.push_back(std::move(prior));
+          trim_temporal_history();
+        }
         return frame;
       },
       // Smart sessions are out of cluster-swap scope (design §1): no hook.

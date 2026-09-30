@@ -6,34 +6,44 @@ from pathlib import Path
 
 import pytest
 
+from _msvc_compile import compile_driver
+
 ROOT = Path(__file__).resolve().parents[1]
-SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
-SCENE_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp"
-SCENE_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
-SCENE_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_selftests.cpp"
-PF_SUITE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
-SELFTEST_DISPATCH_SOURCE = ROOT / "minihost" / "src" / "worker_selftest_dispatch.cpp"
-ENTRY_WIRING_SOURCE = ROOT / "minihost" / "src" / "worker_entry_wiring.cpp"
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
+
 
 def _sdk_headers() -> Path:
     if HEADERS is None or not HEADERS.is_dir():
         pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
     return HEADERS
 
+
 def test_sdk_frozen_projector_levels_abi_compiles() -> None:
     headers = _sdk_headers()
 
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    vswhere = (
+        Path(program_files_x86)
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
     if not vswhere.is_file():
         pytest.skip("Visual Studio discovery tool is not installed")
 
     installations = subprocess.run(
-        [str(vswhere), "-latest", "-products", "*", "-requires",
-         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+        [
+            str(vswhere),
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ],
         capture_output=True,
         text=True,
         check=True,
@@ -42,7 +52,7 @@ def test_sdk_frozen_projector_levels_abi_compiles() -> None:
         pytest.skip("Visual Studio C++ tools are not installed")
     vcvars = Path(installations) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
 
-    source = r'''
+    source = r"""
 #include <cstddef>
 #include <type_traits>
 #include "AEConfig.h"
@@ -103,7 +113,7 @@ static_assert(std::is_same_v<decltype(AEGP_StreamSuite2::AEGP_GetNewStreamValue)
 static_assert(std::is_same_v<decltype(AEGP_StreamSuite2::AEGP_DisposeStreamValue), DisposeStreamValue>);
 static_assert(std::is_same_v<decltype(AEGP_StreamSuite2::AEGP_SetStreamValue), SetStreamValue>);
 int main() { return 0; }
-'''
+"""
     with tempfile.TemporaryDirectory() as directory:
         cpp = Path(directory) / "aegp_projector_levels_abi.cpp"
         obj = Path(directory) / "aegp_projector_levels_abi.obj"
@@ -111,21 +121,17 @@ int main() { return 0; }
         cpp.write_text(source, encoding="ascii")
         batch.write_text(
             f'@call "{vcvars}" >nul\n'
-            f'@cl /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{headers}" '
+            f'@{compile_driver()} /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{headers}" '
             f'/I"{headers / "SP"}" /Fo"{obj}" "{cpp}"\n',
             encoding="ascii",
         )
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
+
 def test_native_projector_levels_self_test_passes_all_present_workers() -> None:
-    workers = [
-        BUILD / name
-        for name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe")
-    ]
-    if not any(worker.is_file() for worker in workers):
-        pytest.skip("Release minihost workers are not present; run the native build first")
-    missing = [worker.name for worker in workers if not worker.is_file()]
-    assert not missing, f"native build is incomplete; missing: {', '.join(missing)}"
+    worker = BUILD / "aex_worker.exe"
+    if not worker.is_file():
+        pytest.skip("the minihost worker is not present; run the native build first")
 
     expected = {
         "projector_levels": "passed",
@@ -138,9 +144,9 @@ def test_native_projector_levels_self_test_passes_all_present_workers() -> None:
         "reverse_dispose": True,
         "fail_closed": True,
     }
-    for worker in workers:
+    for kind in ("discovery", "classic", "smart"):
         completed = subprocess.run(
-            [str(worker), "--self-test-aegp-projector-levels"],
+            [str(worker), "--kind", kind, "--self-test-aegp-projector-levels"],
             cwd=ROOT,
             capture_output=True,
             text=True,

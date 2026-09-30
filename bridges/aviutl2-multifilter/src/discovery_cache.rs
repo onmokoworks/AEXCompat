@@ -31,6 +31,11 @@ struct Config {
     /// `.aex`-extension-insensitive).
     #[serde(default)]
     ignore: Vec<String>,
+    /// Menu-category display language (issue #876): "en" shows the canonical
+    /// English AE category names; anything else (or absent) shows Adobe's
+    /// Japanese names for the standard categories. Applies to filters not yet
+    /// labelled in aviutl2.ini, like every other label initial value.
+    category_language: Option<String>,
 }
 
 /// The TOML config path: `AEXCOMPAT_MULTIFILTER_CONFIG` if set, else the Windows
@@ -260,41 +265,62 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // be read this launch does not rename a filter that did register. This
     // narrows the hazard rather than closing it: a peer the cache has never seen
     // (a first launch that misses a folder) still cannot be counted.
-    let filter_names = unique_filter_names(
-        &plugins,
-        &cached_naming_peers(&cache, &dirs, scan_complete, !dirs_complete, &config.ignore),
-    );
-    report_qualified_names(&plugins, &filter_names);
-    let mut pending: Vec<PathBuf> = Vec::new();
-    let mut registered: usize = 0;
-    let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
-    let mut rekey: Vec<(String, String)> = Vec::new();
-    // Whether any cached key under the scan roots is a spelling this scan did not
-    // walk. If none is, no other spelling exists and the alias lookup — which
-    // touches the filesystem, on the thread AviUtl2 is loading from — is skipped.
+    // Resolve alternate path spellings before assigning names. Registration
+    // already admits the same file through a junction/alias; naming must use
+    // that exact cache entry too, or the first launch under a new spelling can
+    // rename a saved-project filter before `apply_rekey` copies the entry.
     let walked: std::collections::HashSet<String> = scan
         .seen
         .iter()
         .map(|plugin| plugin.to_string_lossy().into_owned())
         .collect();
     let alias_possible = alias_possible(&cache, &walked, &dirs);
-
-    for (plugin, filter_name) in plugins.iter().zip(&filter_names) {
+    let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
+    let mut rekey: Vec<(String, String)> = Vec::new();
+    let resolved_entries = plugins
+        .iter()
+        .map(|plugin| {
+            let key = plugin.to_string_lossy().into_owned();
+            let (cached, alias) = resolve_cached(
+                &cache,
+                &key,
+                plugin,
+                file_meta(plugin),
+                build,
+                &dirs,
+                alias_possible,
+                &mut aliases,
+            );
+            if let Some(alias) = alias {
+                rekey.push((alias, key));
+            }
+            cached.cloned()
+        })
+        .collect::<Vec<_>>();
+    let remembered_names = resolved_entries
+        .iter()
+        .map(|entry| {
+            entry
+                .as_ref()
+                .and_then(|entry| entry.registered_name.clone())
+        })
+        .collect::<Vec<_>>();
+    let filter_names = stable_filter_names(
+        &plugins,
+        &cached_naming_peers(&cache, &dirs, scan_complete, !dirs_complete, &config.ignore),
+        &remembered_names,
+    );
+    let secondary_names = plan_secondary_filter_names(&plugins, &filter_names, &resolved_entries);
+    let japanese_categories = config.category_language.as_deref() != Some("en");
+    report_qualified_names(&plugins, &filter_names);
+    let mut pending: Vec<PathBuf> = Vec::new();
+    let mut registered: usize = 0;
+    for ((plugin, filter_name), resolved) in
+        plugins.iter().zip(&filter_names).zip(&resolved_entries)
+    {
         let key = plugin.to_string_lossy().into_owned();
         let meta = file_meta(plugin);
-        let (cached, alias) = resolve_cached(
-            &cache,
-            &key,
-            plugin,
-            meta,
-            build,
-            &dirs,
-            alias_possible,
-            &mut aliases,
-        );
-        if let Some(alias) = alias {
-            rekey.push((alias, key));
-        }
+        let cached = resolved.as_ref();
         let mut decision = classify(cached, meta, build);
         // A closure that would now resolve differently (issue #304) joins the same
         // queue rather than unregistering the filter: the dependency DLLs decide
@@ -310,15 +336,49 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         // already-queued one pays nothing.
         if !decision.discover
             && let Some(entry) = cached
-            && needs_closure_recheck(entry, build, &search_roots_for(plugin, &dependency.dirs))
+            && needs_closure_recheck(
+                entry,
+                build,
+                &search_roots_for(plugin, &dependency.dirs, dependency.default_runtime),
+            )
         {
             decision.discover = true;
         }
         if decision.register
             && let Some(entry) = cached
         {
-            register_discovered(host, &repository, plugin, &dependency, entry, filter_name);
-            registered += 1;
+            let companions = match companion_providers_for(plugin, &cache) {
+                Ok(companions) => companions,
+                Err(classification) => {
+                    log_warn(&format!("companion association rejected: {classification}"));
+                    if classification == "companion_demand_probe_unresolved" {
+                        // This branch continues past the common enqueue below,
+                        // so queue the unresolved effect exactly once here.
+                        pending.push(plugin.clone());
+                    }
+                    continue;
+                }
+            };
+            let effect_names = secondary_names
+                .iter()
+                .filter_map(|((effect_key, index), name)| {
+                    (effect_key == &key).then_some((*index, name.clone()))
+                })
+                .collect::<HashMap<_, _>>();
+            for view in virtual_effect_registrations(entry, filter_name, &effect_names) {
+                register_discovered(
+                    host,
+                    &repository,
+                    plugin,
+                    &dependency,
+                    &view.entry,
+                    companions.clone(),
+                    &view.name,
+                    view.selector,
+                    japanese_categories,
+                );
+                registered += 1;
+            }
         }
         if decision.discover {
             pending.push(plugin.clone());
@@ -328,18 +388,28 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // Counted over `plugins` — the set actually iterated above — not over
     // `scan.seen`: an untrustworthy scan adds cached entries that were not walked
     // this launch (#321), which would otherwise read as "registered 500 of 12".
-    report_registration(plugins.len(), registered, pending.len(), limits);
+    let known_effects = resolved_entries
+        .iter()
+        .map(|entry| {
+            entry
+                .as_ref()
+                .map_or(1, |entry| 1 + entry.additional_effects.len())
+        })
+        .sum();
+    report_registration(known_effects, registered, pending.len(), limits);
 
     let rekeyed = !rekey.is_empty();
     apply_rekey(&mut cache, rekey);
+    let names_remembered = remember_filter_names(&mut cache, &plugins, &filter_names);
+    let secondary_names_remembered = remember_secondary_filter_names(&mut cache, &secondary_names);
 
     if pending.is_empty() {
         // Nothing to discover, so the background pass (the only other writer)
         // will not run. Persist the re-key here or it is recomputed every launch.
-        if rekeyed && !save_cache(&cache) {
+        if (rekeyed || names_remembered || secondary_names_remembered) && !save_cache(&cache) {
             log_warn(
                 "the discovery cache could not be written; the plug-in paths it \
-                 re-keyed this launch are resolved again on the next one",
+                 re-keyed or named this launch are resolved again on the next one",
             );
         }
         return;
@@ -355,6 +425,94 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         build,
         scan_complete,
     );
+}
+
+/// Associates only discovery-proven AEGP suite providers in the effect's
+/// exact install directory. This is an explicit cache relation: arbitrary
+/// neighboring AEX files never enter a PF worker, and a provider with no
+/// observed suite identities is not a companion.
+fn companion_providers_for(
+    effect: &Path,
+    cache: &HashMap<String, CacheEntry>,
+) -> Result<Vec<ApprovedCompanion>, &'static str> {
+    let Some(parent) = effect.parent() else {
+        return Ok(Vec::new());
+    };
+    let Some(effect_entry) = cache.get(&effect.to_string_lossy().into_owned()) else {
+        return Ok(Vec::new());
+    };
+    let has_sibling_provider = cache.iter().any(|(path, entry)| {
+        entry.ok
+            && entry.plugin_kind == DiscoveredPluginKind::Aegp
+            && !entry.provided_suites.is_empty()
+            && Path::new(path).parent() == Some(parent)
+    });
+    if has_sibling_provider && !effect_entry.companion_demand_probe_complete {
+        return Err("companion_demand_probe_unresolved");
+    }
+    let mut providers = Vec::new();
+    let mut claimed = std::collections::BTreeSet::new();
+    for (path, entry) in cache {
+        if !entry.ok
+            || entry.plugin_kind != DiscoveredPluginKind::Aegp
+            || entry.provided_suites.is_empty()
+        {
+            continue;
+        }
+        let path = PathBuf::from(path);
+        if path.parent() != Some(parent) {
+            continue;
+        }
+        let Some(expected_sha256) = decode_sha256_hex(&entry.sha) else {
+            continue;
+        };
+        let Ok(expected_size) = std::fs::metadata(&path).map(|value| value.len()) else {
+            continue;
+        };
+        let suites: Option<Vec<CompanionSuiteIdentity>> = entry
+            .provided_suites
+            .iter()
+            .map(|suite| {
+                Some(CompanionSuiteIdentity {
+                    name: suite.name.clone(),
+                    api_version: u32::try_from(suite.api_version).ok().filter(|v| *v != 0)?,
+                    internal_version: u32::try_from(suite.internal_version).ok()?,
+                })
+            })
+            .collect();
+        let Some(suites) = suites else {
+            continue;
+        };
+        let demanded: Vec<_> = suites
+            .iter()
+            .filter(|suite| {
+                effect_entry.demanded_suites.iter().any(|demand| {
+                    demand.name == suite.name
+                        && u32::try_from(demand.api_version).ok() == Some(suite.api_version)
+                })
+            })
+            .cloned()
+            .collect();
+        if demanded.is_empty() {
+            continue;
+        }
+        if demanded.iter().any(|suite| !claimed.insert(suite.clone())) {
+            // Two sibling providers claiming the same demanded identity are
+            // ambiguous. Loading either (or both) would make provider order an
+            // ABI decision, so fail closed instead of poisoning this PF.
+            return Err("ambiguous_companion_suite_provider");
+        }
+        providers.push(ApprovedCompanion {
+            artifact: ApprovedImageArtifact {
+                path,
+                expected_sha256,
+                expected_size,
+            },
+            suites: demanded,
+        });
+    }
+    providers.sort_by(|left, right| left.artifact.path.cmp(&right.artifact.path));
+    Ok(providers)
 }
 
 /// Drops cache entries for AEX that are no longer present.
@@ -544,7 +702,7 @@ fn cached_fallback_plugins(
     cache
         .iter()
         .filter_map(|(key, entry)| {
-            if !entry.ok || seen_keys.contains(key) {
+            if !is_registerable_effect(entry) || seen_keys.contains(key) {
                 return None;
             }
             let path = PathBuf::from(key);
@@ -665,8 +823,11 @@ fn resolve_cached<'a>(
     // registers, but on a payload that may describe older bytes, so its sessions
     // fail to open and its frames pass through unrendered. Another spelling can
     // hold a sound entry for the same file.
-    let direct_is_sound =
-        direct_registers && direct_matches && direct.is_some_and(|entry| !entry.stale);
+    let direct_is_sound = direct_matches
+        && direct.is_some_and(|entry| {
+            (direct_registers && !entry.stale)
+                || (entry.ok && entry.plugin_kind == DiscoveredPluginKind::Aegp)
+        });
     if !alias_possible || direct_is_sound {
         return (direct, None);
     }
@@ -710,7 +871,7 @@ fn resolve_cached<'a>(
 fn alias_rank(entry: Option<&CacheEntry>, build: BuildFingerprint) -> (bool, bool, bool) {
     match entry {
         Some(entry) => (
-            entry.ok,
+            is_registerable_effect(entry),
             !entry.stale,
             build.is_known() && entry.build == build,
         ),
@@ -786,7 +947,7 @@ fn classify(
         // `BuildFingerprint::is_known`, or one failed stat costs two full passes)
         // and this host has not already spent its [`RETRY_BUDGET`] on it.
         Some((mtime, len)) if entry.mtime == mtime && entry.len == len => LoadDecision {
-            register: entry.ok,
+            register: is_registerable_effect(entry),
             discover: entry.stale
                 || (build.is_known()
                     && entry.build != build
@@ -798,12 +959,12 @@ fn classify(
         // then fails closed on the SHA instead of AviUtl2 dropping the object
         // before the replacement result is available (issue #309).
         Some(_) => LoadDecision {
-            register: entry.ok,
+            register: is_registerable_effect(entry),
             discover: true,
         },
         // Unknown: keep what we have and re-check in the background.
         None => LoadDecision {
-            register: entry.ok,
+            register: is_registerable_effect(entry),
             discover: true,
         },
     }
@@ -903,7 +1064,7 @@ fn run_discovery_pass(
     // Each entry carries the build that produced it, so an interrupted pass
     // leaves the not-yet-redone entries on the old build and they are queued
     // again next launch (issue #307).
-    let (mut effects, mut rejected) = (0usize, 0usize);
+    let (mut effects, mut aegps, mut rejected) = (0usize, 0usize, 0usize);
     let mut interrupted = false;
     let mut persisted = true;
     for chunk in pending.chunks(DISCOVERY_SAVE_CHUNK) {
@@ -914,10 +1075,10 @@ fn run_discovery_pass(
         let results = discover_all(repository, chunk, dependency, build);
         let discovered = results.len();
         for (plugin, entry) in results {
-            if entry.ok {
-                effects += 1;
-            } else {
-                rejected += 1;
+            match discovery_result_kind(&entry) {
+                DiscoveryResultKind::Effect => effects += 1,
+                DiscoveryResultKind::Aegp => aegps += 1,
+                DiscoveryResultKind::Rejected => rejected += 1,
             }
             let key = plugin.to_string_lossy().into_owned();
             // `None` means there was nothing trustworthy to write; the existing
@@ -938,7 +1099,29 @@ fn run_discovery_pass(
             break;
         }
     }
-    report_discovery(effects, rejected, interrupted, persisted, kind);
+    // Resident probes are never part of the synchronous first-launch path.
+    // Unresolved effects are queued above and completed only by this background
+    // pass, becoming registerable on the next launch.
+    if kind == DiscoveryPassKind::Background && complete_companion_demand_probes(repository, cache)
+    {
+        persisted = save_cache(cache);
+    }
+    report_discovery(effects, aegps, rejected, interrupted, persisted, kind);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiscoveryResultKind {
+    Effect,
+    Aegp,
+    Rejected,
+}
+
+fn discovery_result_kind(entry: &CacheEntry) -> DiscoveryResultKind {
+    match (entry.ok, entry.plugin_kind) {
+        (true, DiscoveredPluginKind::Effect) => DiscoveryResultKind::Effect,
+        (true, DiscoveredPluginKind::Aegp) => DiscoveryResultKind::Aegp,
+        (false, _) => DiscoveryResultKind::Rejected,
+    }
 }
 
 /// Where a discovery pass runs, which is also when its results become visible:
@@ -1026,6 +1209,8 @@ fn default_dirs() -> (Vec<PathBuf>, bool) {
 /// After Effects runtime folder — plus the operator's optional ceilings. An AEX's
 /// own folder is not listed; it is always searched first, per plug-in.
 fn resolve_dependency_config(config: &Config) -> DependencyConfig {
+    let default_runtime =
+        std::env::var_os(ENV_DEPENDENCY_DIRS).is_none() && config.dependency_dirs.is_empty();
     let dirs = if let Some(dirs) = std::env::var_os(ENV_DEPENDENCY_DIRS) {
         dirs.to_string_lossy()
             .split(';')
@@ -1040,6 +1225,7 @@ fn resolve_dependency_config(config: &Config) -> DependencyConfig {
     };
     DependencyConfig {
         dirs,
+        default_runtime,
         module_limit: config.dependency_module_limit,
         byte_limit: config.dependency_byte_limit,
     }
@@ -1051,6 +1237,7 @@ fn resolve_dependency_config(config: &Config) -> DependencyConfig {
 #[derive(Clone, Default)]
 struct DependencyConfig {
     dirs: Vec<PathBuf>,
+    default_runtime: bool,
     module_limit: Option<usize>,
     byte_limit: Option<u64>,
 }
@@ -1060,12 +1247,7 @@ struct DependencyConfig {
 /// (`dvacore.dll` and friends) live, one level above the `Plug-ins\` tree that
 /// is scanned for effects.
 fn default_dependency_dirs() -> Vec<PathBuf> {
-    latest_after_effects_plugins()
-        .0
-        .and_then(|plugins| plugins.parent().map(Path::to_path_buf))
-        .filter(|support_files| support_files.is_dir())
-        .into_iter()
-        .collect()
+    latest_after_effects_support_files().into_iter().collect()
 }
 
 /// The search roots for one AEX: its own folder first (an AEX that ships its
@@ -1080,7 +1262,11 @@ fn default_dependency_dirs() -> Vec<PathBuf> {
 /// would only turn a stale config line into "nothing discovers at all". Too
 /// *many* folders is not softened — the resolver rejects that, so a config over
 /// the root limit fails loudly instead of silently ignoring the tail.
-fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> {
+fn search_roots_for(
+    plugin: &Path,
+    dependency_dirs: &[PathBuf],
+    default_runtime: bool,
+) -> Vec<PathBuf> {
     let canonical_dir = |dir: &Path| {
         std::fs::canonicalize(dir)
             .ok()
@@ -1091,7 +1277,18 @@ fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> 
         .and_then(canonical_dir)
         .into_iter()
         .collect();
-    for dir in dependency_dirs {
+    let matching_runtime = default_runtime
+        .then(|| ae_support_files_for_plugin(plugin))
+        .flatten();
+    let runtime_dirs: &[PathBuf] = if matching_runtime.is_some() {
+        &[]
+    } else {
+        dependency_dirs
+    };
+    for dir in matching_runtime
+        .into_iter()
+        .chain(runtime_dirs.iter().map(PathBuf::as_path))
+    {
         if let Some(dir) = canonical_dir(dir)
             && !roots.iter().any(|root| root == &dir)
         {
@@ -1099,6 +1296,44 @@ fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> 
         }
     }
     roots
+}
+
+fn cached_matching_registered_runtime_roots(
+    plugin: &Path,
+    sha: &str,
+    basenames: &[String],
+) -> aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup {
+    static ASSOCIATED: OnceLock<Mutex<HashMap<(String, String, String), Vec<PathBuf>>>> =
+        OnceLock::new();
+    let plugin_key = (
+        plugin.to_string_lossy().to_ascii_lowercase(),
+        sha.to_owned(),
+        aexcompat_broker::installed_runtime_roots::registered_runtime_snapshot_id(),
+    );
+    let cache = ASSOCIATED.get_or_init(|| Mutex::new(HashMap::new()));
+    let associated = if let Some(found) = cache
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&plugin_key)
+        .cloned()
+    {
+        found
+    } else {
+        // Association can visit thousands of directories. Never hold the
+        // process cache lock while doing filesystem or registry I/O.
+        let found =
+            aexcompat_broker::installed_runtime_roots::associated_registered_install_roots(plugin);
+        cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(plugin_key)
+            .or_insert_with(|| found.clone())
+            .clone()
+    };
+    aexcompat_broker::installed_runtime_roots::matching_registered_runtime_roots_by_basename(
+        basenames,
+        &associated,
+    )
 }
 
 /// Whether a name is a Windows API set, which the loader resolves on its own.
@@ -1142,104 +1377,6 @@ fn cached_missing(unresolved: &[String]) -> Vec<String> {
         .filter(|name| !is_api_set(name))
         .cloned()
         .collect()
-}
-
-/// `%ProgramFiles%\Adobe`, the root of Adobe app installs.
-fn adobe_root() -> Option<PathBuf> {
-    let program_files = std::env::var_os("ProgramFiles")?;
-    Some(PathBuf::from(program_files).join("Adobe"))
-}
-
-/// The newest `Adobe After Effects <year>\Support Files\Plug-ins`, or `None`.
-fn latest_after_effects_plugins() -> (Option<PathBuf>, bool) {
-    let Some(adobe) = adobe_root() else {
-        return (None, false);
-    };
-    newest_versioned(
-        &adobe,
-        "Adobe After Effects ",
-        &["Support Files", "Plug-ins"],
-    )
-}
-
-/// The newest `Adobe\Common\Plug-ins\<version>\MediaCore`, or `None`.
-fn mediacore_dir() -> (Option<PathBuf>, bool) {
-    let Some(adobe) = adobe_root() else {
-        return (None, false);
-    };
-    let root = adobe.join("Common").join("Plug-ins");
-    newest_versioned(&root, "", &["MediaCore"])
-}
-
-/// The `leaf` folder under the newest versioned subfolder of `root` whose name
-/// starts with `prefix` (e.g. `Adobe After Effects 2025/Support Files/Plug-ins`).
-///
-/// The second value is false when the pick cannot be trusted to be the newest:
-/// the folder could not be enumerated, an entry could not be read, or a version
-/// *newer than the pick* was present without its `leaf`. That last case is what
-/// an install being updated looks like, and silently falling back to an older
-/// version while reporting a complete scan would make the newer version's
-/// plug-ins look deleted — which prunes their cache entries and unregisters them
-/// on the next launch, deleting objects from saved projects (issue #307). A
-/// leafless *older* version is just an uninstall leftover and means nothing.
-fn newest_versioned(root: &Path, prefix: &str, leaf: &[&str]) -> (Option<PathBuf>, bool) {
-    let Ok(read) = std::fs::read_dir(root) else {
-        return (None, false);
-    };
-    let mut best: Option<(Vec<u64>, PathBuf)> = None;
-    let mut leafless: Vec<Vec<u64>> = Vec::new();
-    let mut complete = true;
-    for entry in read {
-        let Ok(entry) = entry else {
-            complete = false;
-            continue;
-        };
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let Some(version) = name.strip_prefix(prefix) else {
-            continue;
-        };
-        // A numbered name is what an install in progress looks like. Unnumbered
-        // ones (`... (Beta)`) are still picked when nothing numbered exists, but a
-        // missing leaf under them is not evidence of an incomplete install.
-        let numbered = version
-            .split(['.', ' '])
-            .any(|part| part.parse::<u64>().is_ok());
-        let key = version_key(version);
-        let mut candidate = entry.path();
-        // Tested through the path, not `DirEntry::file_type`, which reports a
-        // directory junction as a symlink rather than a directory — Adobe installs
-        // are routinely junctioned to another drive.
-        if !candidate.is_dir() {
-            // A plain file is clutter. A reparse point that will not resolve is an
-            // install we simply could not see this launch, which must not read as
-            // "its plug-ins are gone".
-            let unresolved = candidate
-                .symlink_metadata()
-                .is_ok_and(|meta| meta.file_type().is_symlink());
-            if numbered && unresolved {
-                leafless.push(key);
-            }
-            continue;
-        }
-        candidate.extend(leaf);
-        if !candidate.is_dir() {
-            if numbered {
-                leafless.push(key);
-            }
-            continue;
-        }
-        if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
-            best = Some((key, candidate));
-        }
-    }
-    // A leafless version above the pick means the newest install is not fully
-    // visible this launch, so its absence is not evidence its plug-ins are gone.
-    let best_key = best.as_ref().map(|(key, _)| key);
-    complete &= !leafless
-        .iter()
-        .any(|key| best_key.is_none_or(|best_key| key > best_key));
-    (best.map(|(_, path)| path), complete)
 }
 
 /// Why a launch's picture of what is on disk is not authoritative. Each cause
@@ -1322,6 +1459,110 @@ struct Scan {
     /// carries `unresolved_root`: that is about which folders were handed to the
     /// scan, which only the caller knows. Fold it in before judging authority.
     limits: ScanLimits,
+}
+
+/// What the registration's folder resolution and scan saw, for a sweep that has
+/// to enumerate the same AEX the AviUtl2 registration would (issue #957).
+#[doc(hidden)]
+pub struct DiagnosticScan {
+    /// The folders scanned, after the env override / config / defaults order.
+    pub dirs: Vec<PathBuf>,
+    /// The AEX to sweep: every `*.aex` found, minus the configured `ignore`.
+    pub plugins: Vec<PathBuf>,
+    /// How many `*.aex` the walk saw in total, ignored ones included.
+    pub seen: usize,
+    /// The dependency search folders the discovery pass will admit.
+    pub dependency_dirs: Vec<PathBuf>,
+    /// Whether dependency_dirs came from the newest-AE fallback rather than
+    /// an explicit override. A versioned AE AEX uses its own runtime in this case.
+    pub default_runtime: bool,
+    /// Why this walk was not exhaustive, if it was not. A sweep that reports a
+    /// plug-in count has to carry this: an unreadable folder or a tree past
+    /// [`MAX_SCAN_DEPTH`] silently shrinks the denominator (issue #660).
+    pub incomplete_reason: Option<String>,
+}
+
+/// Resolves scan folders, ignore list and dependency folders exactly as
+/// `RegisterPlugin` does, then walks them (issue #957). `dirs`, when given,
+/// replaces the resolved folders and nothing else — a sweep aimed at one
+/// folder still honours the configured `ignore` and dependency folders, since
+/// those are what the registration it is measuring would apply.
+#[doc(hidden)]
+pub fn scan_for_diagnostics(dirs: Option<Vec<PathBuf>>) -> DiagnosticScan {
+    let config = load_config();
+    let dependency = resolve_dependency_config(&config);
+    let (resolved, complete) = match dirs {
+        Some(dirs) => (dirs, true),
+        None => resolve_scan_dirs(&config),
+    };
+    let scan = collect_aex(&resolved, &config.ignore);
+    let mut limits = scan.limits;
+    limits.unresolved_root |= !complete;
+    DiagnosticScan {
+        dirs: resolved,
+        plugins: scan.plugins,
+        seen: scan.seen.len(),
+        dependency_dirs: dependency.dirs,
+        default_runtime: dependency.default_runtime,
+        incomplete_reason: limits.describe(),
+    }
+}
+
+/// How a sweep names one plug-in in its report (issue #957).
+#[doc(hidden)]
+pub struct PluginName {
+    /// The file name alone.
+    pub basename: String,
+    /// The path relative to the scan folder it was found under, joined with
+    /// `/`, so the same tree names the same plug-in the same way on any
+    /// machine and no absolute path is recorded.
+    ///
+    /// It is not unique on its own: two scan folders can each hold an
+    /// `Effects/Foo.aex`. [`PluginName::root`] says which one, kept beside it
+    /// rather than folded into it so a reader joining a path against a scan
+    /// folder still gets a path (`tools/aex_sweep_checkpoint.py` does exactly
+    /// that, and a prefixed spelling stops resolving).
+    pub relative: String,
+    /// Which scan folder `relative` is under, by index into the resolved list.
+    /// `None` when the plug-in was under none of them.
+    pub root: Option<usize>,
+}
+
+/// Names a plug-in relative to the scan folder it came from, which tells two
+/// same-named AEX in different folders apart without recording an absolute
+/// path. A plug-in under none of the folders keeps its file name alone.
+///
+/// The separator is `/` rather than the platform's: the report is meant to be
+/// shareable, and a reader joining on this must not have to know which host
+/// wrote it.
+#[doc(hidden)]
+pub fn plugin_name(plugin: &Path, roots: &[PathBuf]) -> PluginName {
+    let basename = plugin
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "?".to_owned());
+    let under = roots
+        .iter()
+        .enumerate()
+        .find_map(|(index, root)| Some((index, plugin.strip_prefix(root).ok()?)));
+    let relative = under
+        .map(|(_, relative)| {
+            relative
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .filter(|relative| !relative.is_empty())
+        .unwrap_or_else(|| basename.clone());
+    PluginName {
+        basename,
+        relative,
+        root: under.map(|(index, _)| index),
+    }
 }
 
 /// Recursively scans `dirs`. An incomplete scan (a folder that could not be read,
@@ -1462,12 +1703,19 @@ struct RenderedFrame {
     pixels: Vec<u8>,
     width: u32,
     height: u32,
+    /// The frame's top-left relative to the layer origin. A SmartFX effect that
+    /// grows its output past the layer answers with a negative one (#914).
+    origin_x: i32,
+    origin_y: i32,
 }
 
 /// The outcome of one frame, distinguishing a still-usable session from a lost
 /// one so the caller reopens only when necessary.
 enum FrameReply {
     Rendered(RenderedFrame),
+    /// Pixels from a fresh Classic retry whose worker has already closed and
+    /// passed the canonical close validator.
+    RenderedClassicFallback(RenderedFrame),
     /// A frame-local diagnostic; the session stays usable, leave pixels. The
     /// second field is what the plug-in wrote into `PF_OutData::return_msg`
     /// while failing, when it wrote anything (issue #707) - often the whole
@@ -1621,9 +1869,9 @@ fn record_session_close(config: &MfSessionConfig, close: &serde_json::Value) {
                 .map(str::to_owned)
         });
     let worker = config.repository.join(if config.smart {
-        "target/minihost-build/aex_smart_worker.exe"
+        "target/minihost-build/aex_worker.exe"
     } else {
-        "target/minihost-build/aex_render_worker.exe"
+        "target/minihost-build/aex_worker.exe"
     });
     let worker_sha256 = std::fs::read(&worker)
         .ok()
@@ -1670,6 +1918,10 @@ struct FilterCtx {
     dependency: DependencyConfig,
     sha: String,
     smart: bool,
+    plugin_data_selector: Option<PluginDataEffectSelector>,
+    /// Discovery-confirmed AEGPs installed beside this effect. Only providers
+    /// that successfully registered concrete suite identities are admitted.
+    companions: Vec<ApprovedCompanion>,
     /// This AEX's dependency-closure identity from discovery (issue #405).
     /// When other registered AEXes share it, renders route through the pooled
     /// cluster session instead of a per-effect worker.
@@ -1685,19 +1937,59 @@ struct FilterCtx {
     /// Live sessions keyed by AviUtl2 `effect_id`, so two objects of the same
     /// AEX filter each get their own session/worker (no cross-object thrash).
     sessions: Mutex<HashMap<i64, MfSession>>,
+    /// Per-object/config downgrade after one authenticated untouched-Smart
+    /// attempt. A geometry/timing change naturally invalidates the entry.
+    classic_fallbacks: Mutex<HashMap<i64, GeomIdentity>>,
+}
+
+#[derive(Clone, Debug)]
+struct RetainedFrameRequest {
+    current_time: i32,
+    rgba: Vec<u8>,
+    parameters: Option<Vec<InteractiveParameter>>,
+    layer: Option<(u32, Vec<u8>)>,
+}
+
+fn retain_frame_request(request: &RenderReq) -> RetainedFrameRequest {
+    RetainedFrameRequest {
+        current_time: request.current_time,
+        rgba: request.rgba.clone(),
+        parameters: request.parameters.clone(),
+        layer: request.layer.clone(),
+    }
 }
 
 /// The cached discovery result for one AEX. Keyed in the cache file by the AEX
-/// path; `(mtime, len)` invalidates the entry when the file changes. `ok` records
-/// a non-discoverable `.aex` (e.g. a format/codec plug-in, not an effect) so it
-/// is skipped without being re-probed every launch.
+/// path; `(mtime, len)` invalidates the entry when the file changes. `ok` means
+/// the AEX was identified and initialized through its matching ABI. `plugin_kind`
+/// separately decides whether that readable AEX is an AviUtl2 effect filter.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct CacheEntry {
     mtime: (u64, u32),
     len: u64,
     ok: bool,
+    /// The successfully identified plug-in ABI. AEGPs are readable by the
+    /// shipping discovery pass but are not AviUtl2 video filters, so they must
+    /// not be registered or handed to a PF render session.
+    #[serde(default)]
+    plugin_kind: DiscoveredPluginKind,
+    /// Exact process-local suites registered while a shipping AEGP discovery
+    /// worker initialized this plug-in. Empty for effects and older cache
+    /// entries. These identities, not filename/folder guesses, are the
+    /// authority for companion association.
+    #[serde(default)]
+    provided_suites: Vec<ProvidedSuite>,
+    #[serde(default)]
+    demanded_suites: Vec<ProvidedSuite>,
+    #[serde(default)]
+    companion_demand_probe_complete: bool,
     sha: String,
     smart: bool,
+    /// Exact PF_OutFlags2 observed during discovery. Zero means an older cache
+    /// entry that predates this field; its existing `smart` decision is kept
+    /// until background re-verification fills the flags in.
+    #[serde(default)]
+    out_flags2: u32,
     #[serde(default)]
     params: Vec<InteractiveParameter>,
     /// The host build that produced this entry. Held per entry, not per file, so
@@ -1735,6 +2027,10 @@ struct CacheEntry {
     /// it to a negative cache entry (#328).
     #[serde(default)]
     failure_classification: Option<String>,
+    /// Path-free, broker-normalized diagnostics from the most recent failed
+    /// discovery attempt. Older cache entries deserialize with `None`.
+    #[serde(default)]
+    failure_diagnostics: Option<serde_json::Value>,
     /// This spelling is retained only as a fallback after an alias re-key. It
     /// must not keep the alias lookup hot while its walked spelling is present.
     #[serde(default)]
@@ -1748,11 +2044,203 @@ struct CacheEntry {
     /// cluster and always takes the per-plugin path).
     #[serde(default)]
     closure_identity: Option<String>,
+    /// The effect's own AE menu category, from its PiPL 'catg' property
+    /// (issue #871); the registered filter's initial menu label nests under
+    /// "AEXCompat" by it. Added additively: an entry written before this
+    /// field reads as `None` (bare "AEXCompat") until the host-fingerprint
+    /// change that ships the field re-verifies it in the background.
+    #[serde(default)]
+    category: Option<String>,
+    /// The AviUtl2 registration name first assigned to this plug-in. Saved
+    /// projects resolve filters by this string, so recomputing it after a
+    /// same-stem plug-in is installed or removed would discard their objects
+    /// (issue #662).
+    #[serde(default)]
+    registered_name: Option<String>,
+    /// Exact first PluginData registration selected by the legacy/default
+    /// route. `None` for PiPL effects and older cache entries.
+    #[serde(default)]
+    plugin_data_effect: Option<PluginDataIdentity>,
+    /// Additional effects registered by the same PluginData bundle (#1260).
+    /// Kept inside the path entry so alias/re-key and first-effect saved-project
+    /// identity remain backward compatible.
+    #[serde(default)]
+    additional_effects: Vec<CachedPluginDataEffect>,
     /// Structured record of a cluster-session fallback (issue #405, design
     /// §6): present when this entry was produced after a cluster discovery
     /// session failed — never silently rounded into a plain success.
     #[serde(default)]
     cluster_fallback: Option<ClusterFallback>,
+}
+
+fn plan_secondary_filter_names(
+    plugins: &[PathBuf],
+    primary_names: &[String],
+    resolved_entries: &[Option<CacheEntry>],
+) -> HashMap<(String, u32), String> {
+    let mut used: HashSet<String> = primary_names
+        .iter()
+        .map(|name| name.to_lowercase())
+        .collect();
+    let mut planned = HashMap::new();
+    for ((plugin, primary_name), resolved) in
+        plugins.iter().zip(primary_names).zip(resolved_entries)
+    {
+        let Some(entry) = resolved.as_ref() else {
+            continue;
+        };
+        let key = plugin.to_string_lossy().into_owned();
+        for effect in &entry.additional_effects {
+            let remembered = effect
+                .registered_name
+                .as_deref()
+                .filter(|name| valid_registered_name(name))
+                .filter(|name| used.insert(name.to_lowercase()))
+                .map(str::to_owned);
+            let name = remembered.unwrap_or_else(|| {
+                let display = effect
+                    .identity
+                    .display_name()
+                    .unwrap_or_else(|| format!("effect {}", effect.identity.index + 1));
+                let base = bounded_filter_name(&format!("{primary_name} — {display}"));
+                let mut candidate = base.clone();
+                let mut disambiguator = 2u32;
+                while !used.insert(candidate.to_lowercase()) {
+                    candidate = bounded_filter_name(&format!("{base} [{disambiguator}]"));
+                    disambiguator = disambiguator.saturating_add(1);
+                }
+                candidate
+            });
+            planned.insert((key.clone(), effect.identity.index), name);
+        }
+    }
+    planned
+}
+
+#[derive(Clone)]
+struct VirtualEffectRegistration {
+    entry: CacheEntry,
+    name: String,
+    selector: Option<PluginDataEffectSelector>,
+}
+
+fn virtual_effect_registrations(
+    entry: &CacheEntry,
+    primary_name: &str,
+    secondary_names: &HashMap<u32, String>,
+) -> Vec<VirtualEffectRegistration> {
+    let mut registrations = vec![VirtualEffectRegistration {
+        entry: entry.clone(),
+        name: primary_name.to_owned(),
+        selector: None,
+    }];
+    for effect in &entry.additional_effects {
+        let Some(name) = secondary_names.get(&effect.identity.index) else {
+            continue;
+        };
+        let mut effect_entry = entry.clone();
+        effect_entry.smart = effect.smart;
+        effect_entry.out_flags2 = effect.out_flags2;
+        effect_entry.params = effect.params.clone();
+        effect_entry.category = effect.identity.category();
+        effect_entry.registered_name = Some(name.clone());
+        effect_entry.plugin_data_effect = Some(effect.identity.clone());
+        effect_entry.additional_effects.clear();
+        effect_entry.closure_identity = None;
+        registrations.push(VirtualEffectRegistration {
+            entry: effect_entry,
+            name: name.clone(),
+            selector: Some(effect.identity.selector()),
+        });
+    }
+    registrations
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+struct PluginDataIdentity {
+    index: u32,
+    name_hex: String,
+    match_name_hex: String,
+    category_hex: String,
+    entrypoint: String,
+}
+
+impl PluginDataIdentity {
+    fn selector(&self) -> PluginDataEffectSelector {
+        PluginDataEffectSelector {
+            index: self.index,
+            match_name_hex: self.match_name_hex.clone(),
+        }
+    }
+
+    fn display_name(&self) -> Option<String> {
+        decode_plugin_data_label(&self.name_hex)
+    }
+
+    fn category(&self) -> Option<String> {
+        decode_plugin_data_label(&self.category_hex)
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct CachedPluginDataEffect {
+    identity: PluginDataIdentity,
+    smart: bool,
+    out_flags2: u32,
+    #[serde(default)]
+    params: Vec<InteractiveParameter>,
+    #[serde(default)]
+    registered_name: Option<String>,
+}
+
+fn decode_plugin_data_bytes(hex: &str) -> Option<Vec<u8>> {
+    if hex.is_empty() || hex.len() > 512 || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    if bytes.iter().any(|byte| *byte < 0x20 || *byte == 0x7f) {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn decode_plugin_data_text(hex: &str) -> Option<String> {
+    let bytes = decode_plugin_data_bytes(hex)?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn decode_plugin_data_label(hex: &str) -> Option<String> {
+    let raw = decode_plugin_data_text(hex)?;
+    if raw.starts_with("$$$/")
+        && let Some((_, fallback)) = raw.rsplit_once('=')
+        && !fallback.is_empty()
+    {
+        return Some(fallback.to_owned());
+    }
+    Some(raw)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProvidedSuite {
+    pub name: String,
+    pub api_version: i32,
+    pub internal_version: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveredPluginKind {
+    #[default]
+    Effect,
+    Aegp,
+}
+
+fn is_registerable_effect(entry: &CacheEntry) -> bool {
+    entry.ok && entry.plugin_kind == DiscoveredPluginKind::Effect
 }
 
 /// How one cache entry relates to a failed cluster discovery session
@@ -2256,6 +2744,7 @@ fn registration_summary(
 /// Sends a discovery pass's outcome to the host log.
 fn report_discovery(
     effects: usize,
+    aegps: usize,
     rejected: usize,
     interrupted: bool,
     persisted: bool,
@@ -2266,6 +2755,11 @@ fn report_discovery(
         log_warn(&summary);
     } else {
         log_info(&summary);
+    }
+    if aegps > 0 {
+        log_info(&format!(
+            "{aegps} AEGP plug-in(s) initialized and cached without AviUtl2 filter registration"
+        ));
     }
     // For the background pass, what the *next* launch reads back is the whole
     // point; for the first-launch pass this launch already registered the
@@ -2381,7 +2875,7 @@ impl WorkerRootSource {
 
 /// The L2 (discovery) worker, relative to the root handed to the broker. Kept in
 /// step with the broker's own `WorkerKind::repository_relative_program`.
-const L2_WORKER_RELATIVE_PATH: &str = "target/minihost-build/aex_l2_worker.exe";
+const L2_WORKER_RELATIVE_PATH: &str = "target/minihost-build/aex_worker.exe";
 
 /// The path of this running DLL, resolved from an address inside it. Used to
 /// fingerprint the in-process broker (its bytes ship in this module, not the
@@ -2451,17 +2945,31 @@ fn save_cache(entries: &HashMap<String, CacheEntry>) -> bool {
     let Some(path) = cache_path() else {
         return false;
     };
+    save_cache_at(&path, entries)
+}
+
+/// The file half of [`save_cache`], separated so the merge direction is
+/// pinned by a test against a real file: issue #840 was this call site
+/// passing the on-disk snapshot as the authoritative side, which no unit
+/// test of [`merge_cache_entries`] alone could see.
+fn save_cache_at(path: &Path, entries: &HashMap<String, CacheEntry>) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     // The lock is held across the disk read and the atomic replacement.  A
     // lock around only the final rename would still allow two launches to read
     // the same old cache and lose one another's newly discovered entries.
-    let Some(_lock) = acquire_cache_lock(&path) else {
+    let Some(_lock) = acquire_cache_lock(path) else {
         return false;
     };
-    let mut merged_entries = load_cache_at(&path);
-    merge_cache_entries(&mut merged_entries, entries);
+    // This launch's snapshot is the authoritative first argument (issue
+    // #840): an update to an existing key — a re-verified build, new
+    // parameters for replaced bytes, a negative for bytes that no longer
+    // discover — must reach the file. The on-disk side contributes disjoint
+    // keys from a concurrent launch, plus its same-meta known-good over a
+    // local transient negative.
+    let mut merged_entries = entries.clone();
+    merge_cache_entries(&mut merged_entries, &load_cache_at(path));
     let file = CacheFile {
         version: CACHE_VERSION,
         // An entry that cannot be serialized is dropped rather than failing the
@@ -2536,12 +3044,15 @@ fn keep_best(
     // the previous bytes. Take the meta just read (so the entry keeps matching the
     // file and stays registered) but mark it for one more pass.
     let stale = discovered.mtime != mtime || discovered.len != len;
-    let discovered = CacheEntry {
+    let mut discovered = CacheEntry {
         mtime,
         len,
         stale,
         ..discovered
     };
+    if let Some(old) = cached {
+        preserve_secondary_registered_names(&mut discovered, old);
+    }
     match cached {
         Some(old)
             if old.ok
@@ -2589,7 +3100,30 @@ fn keep_best(
                 // self-healing: today one later success is enough. Converging
                 // safely needs the failure's classification, which is #328.
                 stale: old.stale,
+                // The menu category was parsed from the bytes before the
+                // inspect ran (issue #871), so even this failed attempt
+                // carries it; adopting it here is what lets an entry written
+                // before the field exist learn its category without a
+                // successful re-discovery.
+                category: discovered.category.clone().or_else(|| old.category.clone()),
                 ..old.clone()
+            })
+        }
+        Some(old) if !old.ok && !discovered.ok && old.mtime == mtime && old.len == len => {
+            // A read failure returns the bare negative entry before dependency
+            // roots can be recorded. Its empty closure deliberately schedules
+            // another pass, but replacing an older negative with `attempts: 0`
+            // here made that pass recur on every launch forever (issue #658).
+            // Count the same bytes under the same host build just like a failed
+            // re-verification of a working entry. Keep the newest failure data;
+            // only the retry ledger belongs to the sequence of attempts.
+            Some(CacheEntry {
+                attempts: if old.checked == discovered.build {
+                    old.attempts.saturating_add(1)
+                } else {
+                    1
+                },
+                ..discovered
             })
         }
         _ => Some(discovered),
@@ -2603,8 +3137,13 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         mtime,
         len,
         ok: false,
+        plugin_kind: DiscoveredPluginKind::Effect,
+        provided_suites: Vec::new(),
+        demanded_suites: Vec::new(),
+        companion_demand_probe_complete: false,
         sha: String::new(),
         smart: false,
+        out_flags2: 0,
         params: Vec::new(),
         build,
         stale: false,
@@ -2612,10 +3151,68 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         attempts: 0,
         closure: CachedClosure::default(),
         failure_classification: None,
+        failure_diagnostics: None,
         alias_fallback: false,
         alias_target: None,
         closure_identity: None,
         cluster_fallback: None,
+        category: None,
+        registered_name: None,
+        plugin_data_effect: None,
+        additional_effects: Vec::new(),
+    }
+}
+
+fn preserve_secondary_registered_names(discovered: &mut CacheEntry, old: &CacheEntry) {
+    let mut old_names = HashMap::<(String, String), String>::new();
+    if let (Some(identity), Some(name)) = (
+        old.plugin_data_effect.as_ref(),
+        old.registered_name
+            .as_ref()
+            .filter(|name| valid_registered_name(name)),
+    ) {
+        old_names.insert(
+            (identity.match_name_hex.clone(), identity.entrypoint.clone()),
+            name.clone(),
+        );
+    }
+    for effect in &old.additional_effects {
+        if let Some(name) = effect
+            .registered_name
+            .as_ref()
+            .filter(|name| valid_registered_name(name))
+        {
+            old_names.insert(
+                (
+                    effect.identity.match_name_hex.clone(),
+                    effect.identity.entrypoint.clone(),
+                ),
+                name.clone(),
+            );
+        }
+    }
+    if discovered.registered_name.is_none() {
+        discovered.registered_name = discovered
+            .plugin_data_effect
+            .as_ref()
+            .and_then(|identity| {
+                old_names.get(&(identity.match_name_hex.clone(), identity.entrypoint.clone()))
+            })
+            .cloned()
+            // Older entries have no PluginData identity. Preserve the legacy
+            // path-level name until one successful refresh can bind it.
+            .or_else(|| old.registered_name.clone());
+    }
+    for effect in &mut discovered.additional_effects {
+        if effect.registered_name.is_some() {
+            continue;
+        }
+        effect.registered_name = old_names
+            .get(&(
+                effect.identity.match_name_hex.clone(),
+                effect.identity.entrypoint.clone(),
+            ))
+            .cloned();
     }
 }
 
@@ -2654,7 +3251,87 @@ fn merge_cache_entries(
     local: &mut HashMap<String, CacheEntry>,
     on_disk: &HashMap<String, CacheEntry>,
 ) {
+    let mut disk_name_owners = HashMap::<String, HashSet<String>>::new();
+    for (key, entry) in on_disk {
+        // apply_rekey deliberately retains an alias fallback and its walked
+        // copy. They are one plug-in and therefore one owner of the name.
+        let path_owner = entry
+            .alias_fallback
+            .then(|| entry.alias_target.as_deref())
+            .flatten()
+            .filter(|target| on_disk.contains_key(*target))
+            .unwrap_or(key)
+            .to_lowercase();
+        if let Some(name) = entry
+            .registered_name
+            .as_deref()
+            .filter(|name| valid_registered_name(name))
+        {
+            disk_name_owners
+                .entry(name.to_lowercase())
+                .or_default()
+                .insert(format!("{path_owner}\0primary"));
+        }
+        for effect in &entry.additional_effects {
+            if let Some(name) = effect
+                .registered_name
+                .as_deref()
+                .filter(|name| valid_registered_name(name))
+            {
+                disk_name_owners
+                    .entry(name.to_lowercase())
+                    .or_default()
+                    .insert(format!(
+                        "{path_owner}\0{}\0{}",
+                        effect.identity.match_name_hex, effect.identity.entrypoint
+                    ));
+            }
+        }
+    }
     for (key, disk_entry) in on_disk {
+        if let Some(local_entry) = local.get_mut(key) {
+            let stable_name = |name: Option<&String>| {
+                name.filter(|name| {
+                    valid_registered_name(name)
+                        && disk_name_owners
+                            .get(&name.to_lowercase())
+                            .is_some_and(|owners| owners.len() == 1)
+                })
+                .cloned()
+            };
+            let disk_name_for_identity = |identity: &PluginDataIdentity| {
+                if disk_entry
+                    .plugin_data_effect
+                    .as_ref()
+                    .is_some_and(|candidate| {
+                        candidate.match_name_hex == identity.match_name_hex
+                            && candidate.entrypoint == identity.entrypoint
+                    })
+                {
+                    return stable_name(disk_entry.registered_name.as_ref());
+                }
+                disk_entry.additional_effects.iter().find_map(|effect| {
+                    (effect.identity.match_name_hex == identity.match_name_hex
+                        && effect.identity.entrypoint == identity.entrypoint)
+                        .then(|| stable_name(effect.registered_name.as_ref()))
+                        .flatten()
+                })
+            };
+            let stable_disk_name = stable_name(disk_entry.registered_name.as_ref());
+            if let Some(identity) = &local_entry.plugin_data_effect {
+                if let Some(name) = disk_name_for_identity(identity) {
+                    local_entry.registered_name = Some(name);
+                }
+            } else if let Some(name) = stable_disk_name {
+                // Pre-#1260 entries have only the path-level identity.
+                local_entry.registered_name = Some(name);
+            }
+            for local_effect in &mut local_entry.additional_effects {
+                if let Some(name) = disk_name_for_identity(&local_effect.identity) {
+                    local_effect.registered_name = Some(name);
+                }
+            }
+        }
         match local.get(key) {
             None => {
                 local.insert(key.clone(), disk_entry.clone());
@@ -2675,11 +3352,24 @@ fn merge_cache_entries(
 /// Extract the broker's already-normalized worker classification from the
 /// diagnostic JSON embedded in an inspection error. Missing or malformed
 /// diagnostics stay unknown and therefore retain the old safe behavior.
-fn inspection_failure_classification(error: &std::io::Error) -> Option<String> {
+fn inspection_failure_diagnostics(error: &std::io::Error) -> Option<serde_json::Value> {
     let message = error.to_string();
-    let payload = message.split_once("diagnostics=")?.1;
-    serde_json::from_str::<serde_json::Value>(payload)
-        .ok()?
+    let payload = [
+        "AEX parameter inspection worker failed safely: ",
+        "AEGP initialization failed safely: ",
+        "AEGP initialization contract failed safely: ",
+        "diagnostics=",
+    ]
+    .into_iter()
+    .find_map(|marker| message.split_once(marker).map(|(_, payload)| payload))?;
+    serde_json::Deserializer::from_str(payload)
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()
+}
+
+fn inspection_failure_classification(error: &std::io::Error) -> Option<String> {
+    inspection_failure_diagnostics(error)?
         .get("classification")?
         .as_str()
         .map(str::to_owned)

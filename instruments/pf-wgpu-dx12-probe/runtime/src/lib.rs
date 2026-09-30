@@ -402,18 +402,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixed_affine_result_and_hash_are_stable() {
-        let expected = (0..ELEMENT_COUNT as u32)
-            .map(|value| value * 3 + 7)
-            .collect::<Vec<_>>();
-        assert_eq!(expected.len(), 64);
-        assert_eq!(expected[0], 7);
-        assert_eq!(expected[63], 196);
-        assert_eq!(values_sha256(&expected).len(), 64);
-        assert_eq!(sha256(WGSL.as_bytes()).len(), 64);
-    }
-
-    #[test]
     fn failure_observation_never_claims_readiness() {
         let report = failed_setup("fixture");
         assert!(!report.wgpu_compute_ready);

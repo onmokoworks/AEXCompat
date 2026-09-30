@@ -24,7 +24,7 @@ isolation boundary:
 
 ```powershell
 broker.exe l1 maskoffset target/l1-results/maskoffset-second-fixture-20260713-001.json
-broker.exe l2 maskoffset target/l2-results/maskoffset-second-fixture-20260713-001.json
+broker.exe discovery maskoffset target/l2-results/maskoffset-second-fixture-20260713-001.json
 ```
 
 L1 loaded and unloaded the fixed module without dispatching selectors. L2

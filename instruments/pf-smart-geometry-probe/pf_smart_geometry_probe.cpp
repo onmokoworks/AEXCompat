@@ -2,9 +2,82 @@
 #include "entry.h"
 #include "AE_Effect.h"
 
+// Prophylactic, not load-bearing: nothing here trips the function-like max/min
+// macros today (this file uses neither) and nothing here uses anything
+// WIN32_LEAN_AND_MEAN excludes. They keep the next use from failing to compile
+// with an error that points at a standard header rather than at this include.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
+#include <array>
 #include <cstdint>
+#include <cstring>
 
 namespace {
+
+// Depth-advertisement variants, selected by a marker in this module's own file
+// name so the same fixture, the same entry point and the same render answer
+// every case - only the advertisement differs, which is the variable under
+// test. Every other probe in the tree advertises DEEP and FLOAT
+// unconditionally, so without these a session's dispatch depth always equals
+// its own and the host's narrowing path never runs under test.
+//
+//   ...-shallow.aex   advertise neither depth at GLOBAL_SETUP.
+//   ...-floatonly.aex advertise FLOAT and not DEEP at GLOBAL_SETUP, the
+//                     combination a 16-bpc session dispatches at float32.
+//   ...-rewrite.aex   advertise both at GLOBAL_SETUP and then ASSIGN them away
+//                     in PARAMS_SETUP, the way a plug-in that assigns rather
+//                     than ORs does. A host that decides its dispatch depth
+//                     from the live out_data instead of from the GLOBAL_SETUP
+//                     snapshot follows the rewrite and renders shallower.
+//
+// The file name and not an environment variable: a test copies the probe to a
+// marked name and points the worker at the copy, so the variant travels with
+// the plug-in the run actually loaded. An environment variable is ambient -
+// every other test that spawns this probe inherits it, and after this change a
+// session report describes the slot rather than the plug-in's world, so those
+// tests stay green while silently measuring a narrowed run.
+const char* ModuleFileName() {
+  // One function-local static with an initializer, so the compiler emits the
+  // thread-safe guard: a `static bool resolved` tested and set by hand is a
+  // data race even when the racing writes are identical.
+  //
+  // Not MAX_PATH: GetModuleFileNameA truncates silently, and the marker is the
+  // last thing before the extension - a deep enough checkout would make it
+  // invisible and the variant would quietly become the plain probe.
+  static const std::array<char, 4096> path = [] {
+    std::array<char, 4096> resolved{};
+    HMODULE self = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&ModuleFileName), &self)) {
+      GetModuleFileNameA(self, resolved.data(),
+                         static_cast<DWORD>(resolved.size()));
+    }
+    return resolved;
+  }();
+  return path.data();
+}
+
+// The file name alone, not the full path: a checkout or worktree directory
+// whose name carries a marker would otherwise turn the plain probe into a
+// variant, and a narrowed run reports the slot and stays green.
+bool ModuleNameHas(const char* marker) {
+  const char* path = ModuleFileName();
+  const char* name = path;
+  for (const char* cursor = path; *cursor != '\0'; ++cursor)
+    if (*cursor == '\\' || *cursor == '/') name = cursor + 1;
+  return std::strstr(name, marker) != nullptr;
+}
+
+bool AdvertisesDeepColor() {
+  return !ModuleNameHas("-shallow") && !ModuleNameHas("-floatonly");
+}
+
+bool AdvertisesFloatColor() { return !ModuleNameHas("-shallow"); }
+
+bool RewritesFlagsInParamsSetup() { return ModuleNameHas("-rewrite"); }
 
 bool RectEmpty(const PF_LRect& rect) {
   return rect.left >= rect.right || rect.top >= rect.bottom;
@@ -24,17 +97,18 @@ PF_Err CheckoutInput(PF_InData* in_data, PF_PreRenderExtra* extra,
 }
 
 // Probe modes are selected through the generic render time the host already
-// supplies (current_time modulo 4), so no host-side probe-specific branch is
+// supplies (current_time modulo 5), so no host-side probe-specific branch is
 // needed to reach any scenario.
 enum class Mode : A_long {
   VerifyIntersection = 0,
   ExtraPixels = 1,
   FlaglessOverrun = 2,
   EmptyResult = 3,
+  LargeEnvelope = 4,
 };
 
 Mode ProbeMode(const PF_InData* in_data) {
-  return static_cast<Mode>(((in_data->current_time % 4) + 4) % 4);
+  return static_cast<Mode>(((in_data->current_time % 5) + 5) % 5);
 }
 
 PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
@@ -45,6 +119,24 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
   if (width < 8 || height < 4) return PF_Err_BAD_CALLBACK_PARAM;
   const PF_LRect full{0, 0, width, height};
   PF_CheckoutResult checkout{};
+  if (ModuleNameHas("-difftile")) {
+    // The diagnostic host request, not a probe-specific host switch, chooses
+    // the returned tile. Its output world must be placed at this rect's origin.
+    const PF_LRect requested = extra->input->output_request.rect;
+    const PF_Err err = CheckoutInput(in_data, extra, requested, &checkout);
+    if (err) return err;
+    extra->output->result_rect = requested;
+    extra->output->max_result_rect = full;
+    return PF_Err_NONE;
+  }
+  if (ModuleNameHas("-crop")) {
+    const PF_LRect cropped{2, 1, width - 2, height - 1};
+    const PF_Err err = CheckoutInput(in_data, extra, cropped, &checkout);
+    if (err) return err;
+    extra->output->result_rect = cropped;
+    extra->output->max_result_rect = full;
+    return PF_Err_NONE;
+  }
   switch (ProbeMode(in_data)) {
     case Mode::VerifyIntersection: {
       // A full-frame request answers full availability.
@@ -91,6 +183,13 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
       extra->output->max_result_rect = full;
       return PF_Err_NONE;
     }
+    case Mode::LargeEnvelope: {
+      const PF_Err err = CheckoutInput(in_data, extra, full, &checkout);
+      if (err) return err;
+      extra->output->result_rect = full;
+      extra->output->max_result_rect = PF_LRect{-5000, -5000, 5000, 5000};
+      return PF_Err_NONE;
+    }
     case Mode::ExtraPixels:
     case Mode::FlaglessOverrun: {
       const PF_Err err = CheckoutInput(in_data, extra, full, &checkout);
@@ -107,21 +206,63 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
 }
 
 template <typename Pixel, typename Channel>
-void FillWorld(PF_EffectWorld* world, Channel opaque) {
-  for (A_long y = 0; y < world->height; ++y) {
+void FillWorld(PF_EffectWorld* world, Channel opaque,
+               const PF_LRect* promised = nullptr) {
+  const A_long write_width = ModuleNameHas("-partial")
+      ? world->width / 2 : world->width;
+  const bool differential_tile = ModuleNameHas("-difftile");
+  const bool origin_bug = ModuleNameHas("-originbug");
+  const bool stride_bug = ModuleNameHas("-stridebug");
+  const A_long top = promised ? promised->top : 0;
+  const A_long bottom = promised ? promised->bottom : world->height;
+  const A_long left = promised ? promised->left : 0;
+  const A_long right = promised ? promised->right : write_width;
+  for (A_long y = top; y < bottom; ++y) {
     auto* row = reinterpret_cast<Pixel*>(
-        reinterpret_cast<A_u_char*>(world->data) + y * world->rowbytes);
-    for (A_long x = 0; x < world->width; ++x) {
+        reinterpret_cast<A_u_char*>(world->data) +
+        y * (stride_bug ? world->width * static_cast<A_long>(sizeof(Pixel))
+                        : world->rowbytes));
+    for (A_long x = left; x < right; ++x) {
       auto* channels = reinterpret_cast<Channel*>(&row[x]);
-      channels[0] = opaque;
-      channels[1] = opaque;
-      channels[2] = Channel(0);
-      channels[3] = opaque;
+      Channel color = opaque;
+      if (ModuleNameHas("-solidcc")) {
+        if constexpr (sizeof(Channel) == 1) color = Channel(0xCC);
+        else if constexpr (sizeof(Channel) == 2) color = Channel(0xCCCC);
+        else color = Channel(0.8f);
+      }
+      channels[0] = color;
+      channels[1] = color;
+      channels[2] = ModuleNameHas("-solidcc") ? color : Channel(0);
+      channels[3] = color;
+      if (differential_tile) {
+        const A_long layer_x = x + (origin_bug ? 0 : world->origin_x);
+        const A_long layer_y = y + (origin_bug ? 0 : world->origin_y);
+        const A_long code = (layer_x * 17 + layer_y * 29) % 251;
+        if constexpr (sizeof(Channel) == sizeof(float))
+          channels[1] = Channel(static_cast<float>(code) / 250.0f);
+        else
+          channels[1] = Channel(code);
+      }
     }
   }
 }
 
+PF_Err ClassicRender(PF_LayerDef* output) {
+  if (ModuleNameHas("-classic-nopresize"))
+    return PF_Err_INTERNAL_STRUCT_DAMAGED;
+  if (ModuleNameHas("-selectorerror")) return PF_Err_BAD_CALLBACK_PARAM;
+  if (!output || !output->data) return PF_Err_BAD_CALLBACK_PARAM;
+  if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_PixelFloat)))
+    FillWorld<PF_PixelFloat, PF_FpShort>(output, 1.0f);
+  else if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_Pixel16)))
+    FillWorld<PF_Pixel16, A_u_short>(output, PF_MAX_CHAN16);
+  else
+    FillWorld<PF_Pixel8, A_u_char>(output, PF_MAX_CHAN8);
+  return PF_Err_NONE;
+}
+
 PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
+  if (ModuleNameHas("-selectorerror")) return PF_Err_BAD_CALLBACK_PARAM;
   if (!in_data || !extra || !extra->cb) return PF_Err_BAD_CALLBACK_PARAM;
   // The empty-result pre-render promised nothing, so the host must never
   // invoke the render selector for it.
@@ -132,12 +273,28 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
   if (!err) err = extra->cb->checkout_output(in_data->effect_ref, &output);
   if (err) return err;
   if (!input || !input->data || !output || !output->data) return PF_Err_BAD_CALLBACK_PARAM;
+  const bool hint_only = ModuleNameHas("-difftile-hintonly") &&
+      in_data->extent_hint.left >= 0 && in_data->extent_hint.top >= 0 &&
+      in_data->extent_hint.right <= output->width &&
+      in_data->extent_hint.bottom <= output->height &&
+      !RectEmpty(in_data->extent_hint);
+  const PF_LRect* promised = hint_only ? &in_data->extent_hint : nullptr;
   if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_PixelFloat)))
-    FillWorld<PF_PixelFloat, PF_FpShort>(output, 1.0f);
+    FillWorld<PF_PixelFloat, PF_FpShort>(output, 1.0f, promised);
   else if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_Pixel16)))
-    FillWorld<PF_Pixel16, A_u_short>(output, PF_MAX_CHAN16);
+    FillWorld<PF_Pixel16, A_u_short>(output, PF_MAX_CHAN16, promised);
   else
-    FillWorld<PF_Pixel8, A_u_char>(output, PF_MAX_CHAN8);
+    FillWorld<PF_Pixel8, A_u_char>(output, PF_MAX_CHAN8, promised);
+  if (ModuleNameHas("-difftile-extentbug") &&
+      in_data->extent_hint.left >= 0 && in_data->extent_hint.top >= 0 &&
+      in_data->extent_hint.left < output->width &&
+      in_data->extent_hint.top < output->height &&
+      (in_data->extent_hint.left != 0 || in_data->extent_hint.top != 0)) {
+    const auto offset = static_cast<std::size_t>(in_data->extent_hint.top) *
+                        output->rowbytes +
+                        static_cast<std::size_t>(in_data->extent_hint.left) * 4;
+    reinterpret_cast<A_u_char*>(output->data)[offset + 1] ^= 1;
+  }
   return extra->cb->checkin_layer_pixels(in_data->effect_ref, 0);
 }
 
@@ -145,21 +302,40 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
 
 extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
                                         PF_OutData* out_data, PF_ParamDef*[],
-                                        PF_LayerDef*, void* extra) {
+                                        PF_LayerDef* output_world, void* extra) {
   switch (cmd) {
     case PF_Cmd_GLOBAL_SETUP:
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
-      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE;
-      out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |
-                             PF_OutFlag2_FLOAT_COLOR_AWARE;
+      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT |
+          (AdvertisesDeepColor() ? PF_OutFlag_DEEP_COLOR_AWARE : 0) |
+          (ModuleNameHas("-nop") ? PF_OutFlag_NOP_RENDER : 0) |
+          (ModuleNameHas("-classic-nopresize") ? PF_OutFlag_I_EXPAND_BUFFER : 0);
+      out_data->out_flags2 = (ModuleNameHas("-classic") ? 0 :
+          PF_OutFlag2_SUPPORTS_SMART_RENDER) |
+          (AdvertisesFloatColor() ? PF_OutFlag2_FLOAT_COLOR_AWARE : 0);
       return PF_Err_NONE;
     case PF_Cmd_PARAMS_SETUP:
       out_data->num_params = 1;
+      if (RewritesFlagsInParamsSetup()) {
+        out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT;
+        out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER;
+      }
+      return PF_Err_NONE;
+    case PF_Cmd_FRAME_SETUP:
+      if (ModuleNameHas("-classic-nopresize")) {
+        // Exercise the host-owned image placement path without dispatching RENDER.
+        out_data->width += 4;
+        out_data->height += 4;
+        out_data->origin.h = 3;
+        out_data->origin.v = 3;
+      }
       return PF_Err_NONE;
     case PF_Cmd_SMART_PRE_RENDER:
       return SmartPreRender(in_data, static_cast<PF_PreRenderExtra*>(extra));
     case PF_Cmd_SMART_RENDER:
       return SmartRender(in_data, static_cast<PF_SmartRenderExtra*>(extra));
+    case PF_Cmd_RENDER:
+      return ClassicRender(output_world);
     default:
       return PF_Err_NONE;
   }

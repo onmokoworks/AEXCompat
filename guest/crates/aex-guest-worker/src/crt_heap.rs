@@ -1,11 +1,15 @@
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fmt;
 
 pub(crate) const CRT_HEAP_ALIGNMENT: u64 = 16;
 pub(crate) const CRT_HEAP_PAGE_SIZE: u64 = 4096;
-pub(crate) const MAX_CRT_ALLOCATION_BYTES: u64 = 64 * 1024 * 1024;
-pub(crate) const MAX_CRT_HEAP_BYTES: u64 = 128 * 1024 * 1024;
-pub(crate) const MAX_CRT_ALLOCATIONS: usize = 4096;
+pub(crate) const MAX_CRT_ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_CRT_HEAP_BYTES: u64 = 512 * 1024 * 1024;
+// Sapphire setup holds more than 4096 small C++ objects concurrently. Keep
+// a finite metadata/page-overhead bound while retaining the byte-size limits.
+pub(crate) const MAX_CRT_ALLOCATIONS: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CrtAllocation {
@@ -18,6 +22,8 @@ pub(crate) struct CrtAllocation {
 enum CrtAllocationKind {
     Regular,
     Aligned,
+    ProcessHeap,
+    EnvironmentStrings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +62,195 @@ impl fmt::Display for CrtHeapError {
 #[derive(Default)]
 pub(crate) struct CrtHeap {
     allocations: BTreeMap<u64, CrtAllocation>,
+    occupied: AdaptiveRuns,
+    allocation_hints: RefCell<BTreeMap<(u64, u64), AllocationHint>>,
     live_bytes: u64,
+}
+
+struct AllocationHint {
+    next: u64,
+    // The last tree search proved [next, free_end) unoccupied. Inserts into
+    // this interval invalidate it; freeing below next rewinds the cursor.
+    free_end: u64,
+}
+
+// Do not maintain an auxiliary tree until a real search performs a long allocation scan.
+// This is a workload threshold, not an effect-specific or allocation-size rule.
+const OCCUPIED_INDEX_SCAN_THRESHOLD: usize = 128;
+const OCCUPIED_INDEX_ACTIVATION_SEARCHES: u8 = 8;
+
+#[derive(Default)]
+struct AdaptiveRuns {
+    index: OnceCell<OccupiedRuns>,
+    long_searches: Cell<u8>,
+}
+
+impl AdaptiveRuns {
+    #[cold]
+    #[inline(never)]
+    fn activate(&self, allocations: &BTreeMap<u64, CrtAllocation>) {
+        if self.index.get().is_some() {
+            return;
+        }
+        let long_searches = self.long_searches.get().saturating_add(1);
+        self.long_searches.set(long_searches);
+        if long_searches < OCCUPIED_INDEX_ACTIVATION_SEARCHES {
+            return;
+        }
+        self.index.get_or_init(|| {
+            let mut index = OccupiedRuns::default();
+            for (&pointer, allocation) in allocations {
+                index.insert(pointer, allocation.backing_size);
+                if index.disabled {
+                    break;
+                }
+            }
+            index
+        });
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, pointer: u64, size: u64) {
+        if let Some(index) = self.index.get_mut() {
+            index.insert(pointer, size);
+        }
+    }
+
+    #[inline(always)]
+    fn remove(&mut self, pointer: u64, size: u64) {
+        if let Some(index) = self.index.get_mut() {
+            index.remove(pointer, size);
+        }
+    }
+
+    #[inline(always)]
+    fn find(&self, candidate: u64, end: u64, size: u64, alignment: u64) -> Option<(u64, u64)> {
+        self.index.get()?.find(candidate, end, size, alignment)
+    }
+
+    #[cfg(test)]
+    fn disable(&mut self) {
+        self.index.get_or_init(OccupiedRuns::default);
+        self.index.get_mut().unwrap().disable();
+    }
+
+    #[cfg(test)]
+    fn activate_now(&self, allocations: &BTreeMap<u64, CrtAllocation>) {
+        for _ in 0..OCCUPIED_INDEX_ACTIVATION_SEARCHES {
+            self.activate(allocations);
+        }
+    }
+}
+
+/// Optional search acceleration only; allocation ownership stays in allocations.
+/// Overlapping direct insertions use the legacy search for the rest of this heap.
+#[derive(Default)]
+struct OccupiedRuns {
+    runs: BTreeMap<u64, u64>,
+    disabled: bool,
+}
+
+impl OccupiedRuns {
+    fn disable(&mut self) {
+        self.disabled = true;
+        self.runs.clear();
+    }
+
+    #[inline(never)]
+    fn insert(&mut self, pointer: u64, size: u64) {
+        if self.disabled {
+            return;
+        }
+        let Some(end) = pointer.checked_add(size).filter(|end| *end > pointer) else {
+            self.disable();
+            return;
+        };
+        let right = self.runs.range(pointer..).next().map(|(&s, &e)| (s, e));
+        if right.is_some_and(|(s, _)| s < end) {
+            self.disable();
+            return;
+        }
+        let finish = right.filter(|(s, _)| *s == end).map_or(end, |(_, e)| e);
+        let mut extended = false;
+        if let Some((_, left_end)) = self.runs.range_mut(..=pointer).next_back() {
+            if *left_end > pointer {
+                self.disable();
+                return;
+            }
+            // Extending an existing run does not change its key. Keep its tree
+            // entry, and update through the lookup rather than searching again.
+            if *left_end == pointer {
+                *left_end = finish;
+                extended = true;
+            }
+        }
+        if let Some((s, _)) = right
+            && s == end
+        {
+            self.runs.remove(&s);
+        }
+        if !extended {
+            self.runs.insert(pointer, finish);
+        }
+    }
+
+    #[inline(never)]
+    fn remove(&mut self, pointer: u64, size: u64) {
+        if self.disabled {
+            return;
+        }
+        let Some(end) = pointer.checked_add(size) else {
+            self.disable();
+            return;
+        };
+        let Some((&start, run_end)) = self.runs.range_mut(..=pointer).next_back() else {
+            self.disable();
+            return;
+        };
+        let finish = *run_end;
+        if end > finish || end <= pointer {
+            self.disable();
+            return;
+        }
+        if start < pointer {
+            // Tail removal and interior splitting retain the left run's key.
+            *run_end = pointer;
+        } else {
+            self.runs.remove(&start);
+        }
+        if end < finish {
+            self.runs.insert(end, finish);
+        }
+    }
+
+    #[inline(never)]
+    fn find(
+        &self,
+        mut candidate: u64,
+        range_end: u64,
+        size: u64,
+        alignment: u64,
+    ) -> Option<(u64, u64)> {
+        if self.disabled {
+            return None;
+        }
+        let scan_start = candidate;
+        if let Some((_, &end)) = self.runs.range(..=candidate).next_back()
+            && end > candidate
+        {
+            candidate = align_up(end, alignment).ok()?;
+        }
+        if candidate >= range_end {
+            return None;
+        }
+        for (&start, &end) in self.runs.range(scan_start..range_end) {
+            if candidate.checked_add(size)? <= start {
+                return Some((candidate, start));
+            }
+            candidate = candidate.max(align_up(end, alignment).ok()?);
+        }
+        (candidate.checked_add(size)? <= range_end).then_some((candidate, range_end))
+    }
 }
 
 impl CrtHeap {
@@ -80,6 +274,20 @@ impl CrtHeap {
         self.prepare_allocation_kind(requested_size, CrtAllocationKind::Aligned)
     }
 
+    pub(crate) fn prepare_process_heap_allocation(
+        &self,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.prepare_allocation_kind(requested_size, CrtAllocationKind::ProcessHeap)
+    }
+
+    pub(crate) fn prepare_environment_strings_allocation(
+        &self,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.prepare_allocation_kind(requested_size, CrtAllocationKind::EnvironmentStrings)
+    }
+
     fn prepare_allocation_kind(
         &self,
         requested_size: u64,
@@ -95,7 +303,12 @@ impl CrtHeap {
         if self.live_bytes > MAX_CRT_HEAP_BYTES - requested_size {
             return Err(CrtHeapError::AggregateBudgetExceeded);
         }
-        let backing_size = align_up(requested_size, CRT_HEAP_PAGE_SIZE)?;
+        let backing_alignment = if kind == CrtAllocationKind::EnvironmentStrings {
+            CRT_HEAP_PAGE_SIZE
+        } else {
+            CRT_HEAP_ALIGNMENT
+        };
+        let backing_size = align_up(requested_size, backing_alignment)?;
         Ok(CrtAllocation {
             requested_size,
             backing_size,
@@ -109,7 +322,12 @@ impl CrtHeap {
         range_end: u64,
         allocation: CrtAllocation,
     ) -> Result<u64, CrtHeapError> {
-        self.first_fit_aligned(range_start, range_end, allocation, CRT_HEAP_PAGE_SIZE)
+        let alignment = if allocation.kind == CrtAllocationKind::EnvironmentStrings {
+            CRT_HEAP_PAGE_SIZE
+        } else {
+            CRT_HEAP_ALIGNMENT
+        };
+        self.first_fit_aligned(range_start, range_end, allocation, alignment)
     }
 
     pub(crate) fn first_fit_aligned(
@@ -122,27 +340,86 @@ impl CrtHeap {
         if alignment == 0 || !alignment.is_power_of_two() {
             return Err(CrtHeapError::InvalidAlignment);
         }
-        let mapping_alignment = alignment.max(CRT_HEAP_PAGE_SIZE);
-        let mut candidate = align_up(range_start, mapping_alignment)?;
-        for (&pointer, existing) in self.allocations.range(range_start..range_end) {
+        let mapping_alignment = alignment.max(CRT_HEAP_ALIGNMENT);
+        let mut hints = self.allocation_hints.borrow_mut();
+        let hint = hints
+            .entry((range_start, range_end))
+            .or_insert(AllocationHint {
+                next: range_start,
+                free_end: range_start,
+            });
+        let hint_in_range = (range_start..range_end).contains(&hint.next);
+        let mut candidate = align_up(
+            if hint_in_range {
+                hint.next
+            } else {
+                range_start
+            },
+            mapping_alignment,
+        )?;
+        if hint_in_range && let Some(end) = candidate.checked_add(allocation.backing_size) {
+            if end <= hint.free_end {
+                hint.next = end;
+                return Ok(candidate);
+            }
+        }
+        if let Some((selected, free_end)) = self.occupied.find(
+            candidate,
+            range_end,
+            allocation.backing_size,
+            mapping_alignment,
+        ) {
+            hint.next = selected + allocation.backing_size;
+            hint.free_end = free_end;
+            return Ok(selected);
+        }
+        // Preserve legacy error ordering on exhaustion/overflow and handle
+        // heaps whose direct overlapping insertions disabled the optional index.
+        // Alignment after an overlapping predecessor can jump past the start
+        // of another live block. Keep scanning from the original candidate.
+        let scan_start = candidate;
+        if let Some((&pointer, existing)) = self.allocations.range(..=candidate).next_back() {
+            let existing_end = pointer
+                .checked_add(existing.backing_size)
+                .ok_or(CrtHeapError::AddressSpaceExhausted)?;
+            if existing_end > candidate {
+                candidate = align_up(existing_end, mapping_alignment)?;
+            }
+        }
+        if candidate >= range_end {
+            return Err(CrtHeapError::AddressSpaceExhausted);
+        }
+        for (visited, (&pointer, existing)) in
+            self.allocations.range(scan_start..range_end).enumerate()
+        {
+            if visited + 1 == OCCUPIED_INDEX_SCAN_THRESHOLD {
+                // Finish this first expensive query with the original scan, so
+                // activation itself cannot change its result or error ordering.
+                self.occupied.activate(&self.allocations);
+            }
             let candidate_end = candidate
                 .checked_add(allocation.backing_size)
                 .ok_or(CrtHeapError::AddressSpaceExhausted)?;
             if candidate_end <= pointer {
+                hint.next = candidate_end;
+                hint.free_end = pointer;
                 return Ok(candidate);
             }
-            candidate = align_up(
+            candidate = candidate.max(align_up(
                 pointer
                     .checked_add(existing.backing_size)
                     .ok_or(CrtHeapError::AddressSpaceExhausted)?,
                 mapping_alignment,
-            )?;
+            )?);
         }
-        candidate
+        let selected = candidate
             .checked_add(allocation.backing_size)
             .filter(|end| *end <= range_end)
             .map(|_| candidate)
-            .ok_or(CrtHeapError::AddressSpaceExhausted)
+            .ok_or(CrtHeapError::AddressSpaceExhausted)?;
+        hint.next = selected + allocation.backing_size;
+        hint.free_end = range_end;
+        Ok(selected)
     }
 
     pub(crate) fn insert(
@@ -153,11 +430,15 @@ impl CrtHeap {
         if pointer == 0 || pointer % CRT_HEAP_ALIGNMENT != 0 {
             return Err(CrtHeapError::InvalidPointer);
         }
-        if self.allocations.contains_key(&pointer) {
-            return Err(CrtHeapError::DuplicatePointer);
+        match self.allocations.entry(pointer) {
+            Entry::Vacant(entry) => {
+                entry.insert(allocation);
+            }
+            Entry::Occupied(_) => return Err(CrtHeapError::DuplicatePointer),
         }
-        self.allocations.insert(pointer, allocation);
+        self.occupied.insert(pointer, allocation.backing_size);
         self.live_bytes += allocation.requested_size;
+        self.occupy_allocation_hints(pointer, allocation.backing_size);
         Ok(())
     }
 
@@ -165,8 +446,168 @@ impl CrtHeap {
         self.remove_kind(pointer, CrtAllocationKind::Regular)
     }
 
+    pub(crate) fn process_heap_allocation(
+        &self,
+        pointer: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let allocation = *self
+            .allocations
+            .get(&pointer)
+            .ok_or(CrtHeapError::ForeignOrFreedPointer)?;
+        if allocation.kind != CrtAllocationKind::ProcessHeap {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        Ok(allocation)
+    }
+
+    pub(crate) fn prepare_process_heap_reallocation(
+        &self,
+        pointer: u64,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.process_heap_allocation(pointer)?;
+        let requested_size = requested_size.max(1);
+        if requested_size > MAX_CRT_ALLOCATION_BYTES {
+            return Err(CrtHeapError::AllocationTooLarge);
+        }
+        let retained_bytes = self.live_bytes - old.requested_size;
+        if retained_bytes > MAX_CRT_HEAP_BYTES - requested_size {
+            return Err(CrtHeapError::AggregateBudgetExceeded);
+        }
+        let backing_size = align_up(requested_size, CRT_HEAP_ALIGNMENT)?;
+        Ok(CrtAllocation {
+            requested_size,
+            backing_size,
+            kind: CrtAllocationKind::ProcessHeap,
+        })
+    }
+
+    pub(crate) fn regular_allocation(&self, pointer: u64) -> Result<CrtAllocation, CrtHeapError> {
+        let allocation = *self
+            .allocations
+            .get(&pointer)
+            .ok_or(CrtHeapError::ForeignOrFreedPointer)?;
+        if allocation.kind != CrtAllocationKind::Regular {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        Ok(allocation)
+    }
+
+    pub(crate) fn allocation_containing(&self, pointer: u64) -> Option<(u64, CrtAllocation)> {
+        let (&base, &allocation) = self.allocations.range(..=pointer).next_back()?;
+        (pointer < base.saturating_add(allocation.requested_size)).then_some((base, allocation))
+    }
+
+    pub(crate) fn prepare_regular_reallocation(
+        &self,
+        pointer: u64,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.regular_allocation(pointer)?;
+        let requested_size = requested_size.max(1);
+        if requested_size > MAX_CRT_ALLOCATION_BYTES {
+            return Err(CrtHeapError::AllocationTooLarge);
+        }
+        let retained_bytes = self.live_bytes - old.requested_size;
+        if retained_bytes > MAX_CRT_HEAP_BYTES - requested_size {
+            return Err(CrtHeapError::AggregateBudgetExceeded);
+        }
+        Ok(CrtAllocation {
+            requested_size,
+            backing_size: align_up(requested_size, CRT_HEAP_PAGE_SIZE)?,
+            kind: CrtAllocationKind::Regular,
+        })
+    }
+
+    pub(crate) fn commit_regular_reallocation(
+        &mut self,
+        old_pointer: u64,
+        new_pointer: u64,
+        mut allocation: CrtAllocation,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.regular_allocation(old_pointer)?;
+        if allocation.kind != CrtAllocationKind::Regular {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        if new_pointer == 0 || new_pointer % CRT_HEAP_ALIGNMENT != 0 {
+            return Err(CrtHeapError::InvalidPointer);
+        }
+        if new_pointer != old_pointer && self.allocations.contains_key(&new_pointer) {
+            return Err(CrtHeapError::DuplicatePointer);
+        }
+        if new_pointer == old_pointer {
+            allocation.backing_size = old.backing_size;
+        }
+        self.allocations.remove(&old_pointer);
+        self.allocations.insert(new_pointer, allocation);
+        self.occupied.remove(old_pointer, old.backing_size);
+        self.occupied.insert(new_pointer, allocation.backing_size);
+        self.live_bytes = self.live_bytes - old.requested_size + allocation.requested_size;
+        self.occupy_allocation_hints(new_pointer, allocation.backing_size);
+        if new_pointer != old_pointer {
+            self.rewind_allocation_hints(old_pointer);
+        }
+        Ok(old)
+    }
+
+    pub(crate) fn prepare_process_heap_in_place_reallocation(
+        &self,
+        pointer: u64,
+        requested_size: u64,
+    ) -> Result<Option<CrtAllocation>, CrtHeapError> {
+        let old = self.process_heap_allocation(pointer)?;
+        let mut replacement = self.prepare_process_heap_reallocation(pointer, requested_size)?;
+        if replacement.backing_size > old.backing_size {
+            return Ok(None);
+        }
+        replacement.backing_size = old.backing_size;
+        Ok(Some(replacement))
+    }
+
+    pub(crate) fn commit_process_heap_reallocation(
+        &mut self,
+        old_pointer: u64,
+        new_pointer: u64,
+        allocation: CrtAllocation,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.process_heap_allocation(old_pointer)?;
+        if allocation.kind != CrtAllocationKind::ProcessHeap {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        if new_pointer == 0 || new_pointer % CRT_HEAP_ALIGNMENT != 0 {
+            return Err(CrtHeapError::InvalidPointer);
+        }
+        if new_pointer != old_pointer && self.allocations.contains_key(&new_pointer) {
+            return Err(CrtHeapError::DuplicatePointer);
+        }
+        self.allocations.remove(&old_pointer);
+        self.allocations.insert(new_pointer, allocation);
+        self.occupied.remove(old_pointer, old.backing_size);
+        self.occupied.insert(new_pointer, allocation.backing_size);
+        self.live_bytes = self.live_bytes - old.requested_size + allocation.requested_size;
+        self.occupy_allocation_hints(new_pointer, allocation.backing_size);
+        if new_pointer != old_pointer {
+            self.rewind_allocation_hints(old_pointer);
+        }
+        Ok(old)
+    }
+
     pub(crate) fn remove_aligned(&mut self, pointer: u64) -> Result<CrtAllocation, CrtHeapError> {
         self.remove_kind(pointer, CrtAllocationKind::Aligned)
+    }
+
+    pub(crate) fn remove_process_heap(
+        &mut self,
+        pointer: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.remove_kind(pointer, CrtAllocationKind::ProcessHeap)
+    }
+
+    pub(crate) fn remove_environment_strings(
+        &mut self,
+        pointer: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.remove_kind(pointer, CrtAllocationKind::EnvironmentStrings)
     }
 
     fn remove_kind(
@@ -174,25 +615,47 @@ impl CrtHeap {
         pointer: u64,
         expected: CrtAllocationKind,
     ) -> Result<CrtAllocation, CrtHeapError> {
-        let allocation = *self
-            .allocations
-            .get(&pointer)
-            .ok_or(CrtHeapError::ForeignOrFreedPointer)?;
+        let entry = match self.allocations.entry(pointer) {
+            Entry::Occupied(entry) => entry,
+            Entry::Vacant(_) => return Err(CrtHeapError::ForeignOrFreedPointer),
+        };
+        let allocation = *entry.get();
         if allocation.kind != expected {
             return Err(CrtHeapError::AllocatorMismatch);
         }
-        self.allocations.remove(&pointer);
+        entry.remove();
+        self.occupied.remove(pointer, allocation.backing_size);
         self.live_bytes -= allocation.requested_size;
+        self.rewind_allocation_hints(pointer);
         Ok(allocation)
     }
 
-    pub(crate) fn allocations(&self) -> impl Iterator<Item = (u64, CrtAllocation)> + '_ {
+    fn occupy_allocation_hints(&mut self, pointer: u64, backing_size: u64) {
+        let occupied_end = pointer.saturating_add(backing_size);
+        // Direct/native insertions and overlapping search ranges need not
+        // correspond to the cursor that selected this allocation.
+        for hint in self.allocation_hints.get_mut().values_mut() {
+            if pointer < hint.free_end && occupied_end > hint.next {
+                hint.free_end = pointer.max(hint.next);
+            }
+        }
+    }
+
+    fn rewind_allocation_hints(&mut self, pointer: u64) {
+        for (&(start, end), hint) in self.allocation_hints.get_mut().iter_mut() {
+            if (start..end).contains(&pointer) && pointer < hint.next {
+                hint.next = pointer;
+                hint.free_end = pointer;
+            }
+        }
+    }
+
+    pub(crate) fn allocations(&self) -> impl DoubleEndedIterator<Item = (u64, CrtAllocation)> + '_ {
         self.allocations
             .iter()
             .map(|(&pointer, &allocation)| (pointer, allocation))
     }
 
-    #[cfg(test)]
     pub(crate) fn live_bytes(&self) -> u64 {
         self.live_bytes
     }
@@ -210,11 +673,489 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zero_size_is_unique_minimum_allocation_and_page_backed() {
+    fn ownership_entry_failures_preserve_allocation_accounting_and_cursor() {
+        for active in [false, true] {
+            let mut heap = CrtHeap::default();
+            if active {
+                heap.occupied.activate_now(&heap.allocations);
+            }
+            let small = heap.prepare_allocation(16).unwrap();
+            let replacement = heap.prepare_allocation(4096).unwrap();
+            heap.insert(0x1000, small).unwrap();
+            assert_eq!(heap.first_fit(0x1000, 0x10000, small), Ok(0x1010));
+            assert_eq!(
+                heap.insert(0x1000, replacement),
+                Err(CrtHeapError::DuplicatePointer)
+            );
+            assert_eq!(
+                heap.remove_process_heap(0x1000),
+                Err(CrtHeapError::AllocatorMismatch)
+            );
+            assert_eq!(
+                heap.allocations().collect::<Vec<_>>(),
+                vec![(0x1000, small)]
+            );
+            assert_eq!(heap.live_bytes(), 16);
+            assert_eq!(heap.first_fit(0x1000, 0x10000, small), Ok(0x1020));
+            assert_eq!(heap.remove(0x1000), Ok(small));
+            assert_eq!(
+                heap.remove(0x1000),
+                Err(CrtHeapError::ForeignOrFreedPointer)
+            );
+            assert_eq!(heap.live_bytes(), 0);
+            assert_eq!(heap.first_fit(0x1000, 0x10000, small), Ok(0x1000));
+        }
+    }
+
+    #[test]
+    fn adaptive_runs_activate_only_after_a_long_search_and_track_later_churn() {
+        for count in [64_u64, 128, 129, 1024] {
+            let mut indexed = CrtHeap::default();
+            let mut legacy = CrtHeap::default();
+            legacy.occupied.disable();
+            let small = indexed.prepare_allocation(16).unwrap();
+            let large = indexed.prepare_allocation(64).unwrap();
+            for heap in [&mut indexed, &mut legacy] {
+                for i in 0..count {
+                    heap.insert(0x1000 + i * 16, small).unwrap();
+                }
+                heap.remove(0x1000).unwrap();
+            }
+            assert!(indexed.occupied.index.get().is_none());
+            for iteration in 0..32 {
+                assert_eq!(
+                    indexed.first_fit(0x1000, 0x100000, large),
+                    legacy.first_fit(0x1000, 0x100000, large)
+                );
+                assert_eq!(
+                    indexed.occupied.index.get().is_some(),
+                    count > 128 && iteration + 1 >= usize::from(OCCUPIED_INDEX_ACTIVATION_SEARCHES)
+                );
+                for heap in [&mut indexed, &mut legacy] {
+                    heap.insert(0x1000, small).unwrap();
+                    heap.remove(0x1000).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_activation_preserves_preexisting_overlap_and_failed_search_cursor() {
+        for overlap in [false, true] {
+            let mut indexed = CrtHeap::default();
+            let mut legacy = CrtHeap::default();
+            legacy.occupied.disable();
+            let block = indexed.prepare_allocation(32).unwrap();
+            for heap in [&mut indexed, &mut legacy] {
+                for i in 0..256 {
+                    heap.insert(0x1000 + i * 32, block).unwrap();
+                }
+                if overlap {
+                    heap.insert(0x1010, block).unwrap();
+                }
+            }
+            // Repeated exhaustion activates the index but must not advance the hint.
+            for _ in 0..OCCUPIED_INDEX_ACTIVATION_SEARCHES {
+                assert_eq!(
+                    indexed.first_fit(0x1000, 0x3000, block),
+                    legacy.first_fit(0x1000, 0x3000, block)
+                );
+            }
+            assert_eq!(indexed.occupied.index.get().unwrap().disabled, overlap);
+            for heap in [&mut indexed, &mut legacy] {
+                heap.remove(0x2000).unwrap();
+            }
+            assert_eq!(indexed.first_fit(0x1000, 0x3000, block), Ok(0x2000));
+            assert_eq!(legacy.first_fit(0x1000, 0x3000, block), Ok(0x2000));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual dense-search scaling measurement; not actual-render acceptance"]
+    fn measure_dense_run_search_with_low_address_churn() {
+        for count in [256_u64, 4096, 16384] {
+            for legacy in [true, false, false, true] {
+                let mut heap = CrtHeap::default();
+                if legacy {
+                    heap.occupied.disable();
+                }
+                let small = heap.prepare_allocation(16).unwrap();
+                let large = heap.prepare_allocation(64).unwrap();
+                for i in 0..count {
+                    heap.insert(0x1000 + i * 16, small).unwrap();
+                }
+                heap.remove(0x1000).unwrap();
+                let started = std::time::Instant::now();
+                for _ in 0..2000 {
+                    let pointer = heap.first_fit(0x1000, 0x100000, large).unwrap();
+                    assert_eq!(std::hint::black_box(pointer), 0x1000 + count * 16);
+                    heap.insert(0x1000, small).unwrap();
+                    heap.remove(0x1000).unwrap();
+                }
+                println!(
+                    "dense_count={count} legacy={legacy} iterations=2000 elapsed_us={}",
+                    started.elapsed().as_micros()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dense_run_search_matches_legacy_under_deterministic_churn() {
+        let mut indexed = CrtHeap::default();
+        let mut legacy = CrtHeap::default();
+        legacy.occupied.disable();
+        let small = indexed.prepare_allocation(16).unwrap();
+        let mut pointers = Vec::new();
+        for i in 0..1024 {
+            let pointer = 0x1000 + i * 16;
+            indexed.insert(pointer, small).unwrap();
+            legacy.insert(pointer, small).unwrap();
+            pointers.push(pointer);
+        }
+        indexed.occupied.activate_now(&indexed.allocations);
+        assert_eq!(indexed.occupied.index.get().unwrap().runs.len(), 1);
+        let mut random = 42_u64;
+        for step in 0..4000 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let slot = (random >> 32) as usize % pointers.len();
+            let old = pointers[slot];
+            assert_eq!(indexed.remove(old), legacy.remove(old));
+            let allocation = indexed
+                .prepare_allocation(16 << ((random >> 12) % 4))
+                .unwrap();
+            let start = if step % 3 == 0 { 0x2000 } else { 0x1000 };
+            let alignment = 16 << ((random >> 20) % 5);
+            let selected = indexed.first_fit_aligned(start, 0x40000, allocation, alignment);
+            assert_eq!(
+                selected,
+                legacy.first_fit_aligned(start, 0x40000, allocation, alignment)
+            );
+            let pointer = selected.unwrap();
+            assert_eq!(
+                indexed.insert(pointer, allocation),
+                legacy.insert(pointer, allocation)
+            );
+            pointers[slot] = pointer;
+            assert_eq!(indexed.live_bytes(), legacy.live_bytes());
+            assert!(!indexed.occupied.index.get().unwrap().disabled);
+            assert_eq!(
+                indexed.allocations().collect::<Vec<_>>(),
+                legacy.allocations().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn dense_runs_preserve_realloc_and_overlap_fallback() {
+        for overlap in [false, true] {
+            let mut indexed = CrtHeap::default();
+            indexed.occupied.activate_now(&indexed.allocations);
+            let mut legacy = CrtHeap::default();
+            legacy.occupied.disable();
+            for heap in [&mut indexed, &mut legacy] {
+                let regular = heap.prepare_allocation(32).unwrap();
+                heap.insert(0x1000, regular).unwrap();
+                heap.insert(0x1020, regular).unwrap();
+                let process = heap.prepare_process_heap_allocation(32).unwrap();
+                heap.insert(0x1040, process).unwrap();
+                if overlap {
+                    heap.insert(0x1010, regular).unwrap();
+                }
+                let moved = heap.prepare_regular_reallocation(0x1000, 128).unwrap();
+                heap.commit_regular_reallocation(0x1000, 0x4000, moved)
+                    .unwrap();
+                let grown = heap.prepare_process_heap_reallocation(0x1040, 64).unwrap();
+                heap.commit_process_heap_reallocation(0x1040, 0x1040, grown)
+                    .unwrap();
+                heap.remove(0x1020).unwrap();
+                heap.remove_process_heap(0x1040).unwrap();
+                assert_eq!(
+                    heap.remove_process_heap(0x4000),
+                    Err(CrtHeapError::AllocatorMismatch)
+                );
+            }
+            assert_eq!(indexed.occupied.index.get().unwrap().disabled, overlap);
+            for alignment in [16, 32, 256, 4096, 1_u64 << 63] {
+                let allocation = indexed.prepare_allocation(64).unwrap();
+                assert_eq!(
+                    indexed.first_fit_aligned(0x1000, 0x10000, allocation, alignment),
+                    legacy.first_fit_aligned(0x1000, 0x10000, allocation, alignment)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dense_runs_preserve_overflow_and_exhaustion_errors() {
+        let mut indexed = CrtHeap::default();
+        indexed.occupied.activate_now(&indexed.allocations);
+        let mut legacy = CrtHeap::default();
+        legacy.occupied.disable();
+        let allocation = indexed.prepare_allocation(16).unwrap();
+        for pointer in [u64::MAX - 47, u64::MAX - 31] {
+            indexed.insert(pointer, allocation).unwrap();
+            legacy.insert(pointer, allocation).unwrap();
+        }
+        for alignment in [16, 32, 64, 1_u64 << 63] {
+            for end in [u64::MAX - 32, u64::MAX - 16, u64::MAX] {
+                assert_eq!(
+                    indexed.first_fit_aligned(u64::MAX - 63, end, allocation, alignment),
+                    legacy.first_fit_aligned(u64::MAX - 63, end, allocation, alignment)
+                );
+            }
+        }
+        indexed.insert(u64::MAX - 15, allocation).unwrap();
+        legacy.insert(u64::MAX - 15, allocation).unwrap();
+        assert!(indexed.occupied.index.get().unwrap().disabled);
+        assert_eq!(
+            indexed.first_fit(u64::MAX - 63, u64::MAX, allocation),
+            legacy.first_fit(u64::MAX - 63, u64::MAX, allocation)
+        );
+    }
+
+    #[test]
+    fn cached_gap_respects_direct_insertions_and_overlapping_ranges() {
+        let mut heap = CrtHeap::default();
+        let small = heap.prepare_allocation(16).unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x2000, small), Ok(0x1000));
+        heap.insert(0x1000, small).unwrap();
+        // Both ranges have a cached free tail. An insertion through either
+        // namespace must shorten the other's cached tail too.
+        assert_eq!(heap.first_fit(0x1000, 0x3000, small), Ok(0x1010));
+        heap.insert(0x1010, small).unwrap();
+        let wide = heap.prepare_allocation(0x80).unwrap();
+        heap.insert(0x1040, wide).unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x2000, wide), Ok(0x10c0));
+        heap.insert(0x10c0, wide).unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x3000, wide), Ok(0x1140));
+        // The occupied interval can begin below the current cursor.
+        let crossing = heap.prepare_allocation(0x100).unwrap();
+        heap.insert(0x1120, crossing).unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x3000, small), Ok(0x1220));
+    }
+
+    #[test]
+    fn cached_gap_rewinds_on_free_and_moved_realloc() {
+        let mut heap = CrtHeap::default();
+        let small = heap.prepare_allocation(16).unwrap();
+        for pointer in [0x1000, 0x1010, 0x1020] {
+            assert_eq!(heap.first_fit(0x1000, 0x2000, small), Ok(pointer));
+            heap.insert(pointer, small).unwrap();
+        }
+        heap.remove(0x1000).unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x2000, small), Ok(0x1000));
+        heap.insert(0x1000, small).unwrap();
+        let wide = heap.prepare_allocation(32).unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x2000, wide), Ok(0x1030));
+        heap.commit_regular_reallocation(0x1000, 0x1100, wide)
+            .unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x2000, small), Ok(0x1000));
+        assert_eq!(
+            heap.first_fit_aligned(0x1000, 0x2000, wide, 0x100),
+            Ok(0x1200)
+        );
+
+        let process = heap.prepare_process_heap_allocation(16).unwrap();
+        heap.insert(0x1300, process).unwrap();
+        // Moving process-heap ownership invalidates the cached destination.
+        heap.commit_process_heap_reallocation(0x1300, 0x1230, process)
+            .unwrap();
+        let larger = heap.prepare_allocation(48).unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x2000, larger), Ok(0x1240));
+        // An in-place replacement must also invalidate an expanded extent.
+        let larger_process = heap
+            .prepare_process_heap_reallocation(0x1230, 0x100)
+            .unwrap();
+        heap.commit_process_heap_reallocation(0x1230, 0x1230, larger_process)
+            .unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x2000, small), Ok(0x1330));
+    }
+
+    #[test]
+    fn cached_gap_handles_alignment_exhaustion_and_uncommitted_searches() {
+        let heap = CrtHeap::default();
+        let small = heap.prepare_allocation(16).unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x1020, small), Ok(0x1000));
+        // Selection still advances the cursor before an allocation commits.
+        assert_eq!(heap.first_fit(0x1000, 0x1020, small), Ok(0x1010));
+        assert_eq!(heap.first_fit(0x1000, 0x1020, small), Ok(0x1000));
+        assert_eq!(
+            heap.first_fit_aligned(0x1000, 0x1020, small, 0x2000),
+            Err(CrtHeapError::AddressSpaceExhausted)
+        );
+        assert_eq!(
+            heap.first_fit(0x1000, 0x1000, small),
+            Err(CrtHeapError::AddressSpaceExhausted)
+        );
+        assert_eq!(
+            heap.first_fit(u64::MAX - 7, u64::MAX, small),
+            Err(CrtHeapError::SizeOverflow)
+        );
+    }
+
+    #[test]
+    fn cached_destination_is_invalidated_by_realloc_from_another_range() {
+        for process_heap in [false, true] {
+            let mut heap = CrtHeap::default();
+            let small = if process_heap {
+                heap.prepare_process_heap_allocation(16).unwrap()
+            } else {
+                heap.prepare_allocation(16).unwrap()
+            };
+            heap.insert(0x1000, small).unwrap();
+            assert_eq!(heap.first_fit(0x4000, 0x8000, small), Ok(0x4000));
+            heap.insert(0x4000, small).unwrap();
+            let large = if process_heap {
+                heap.prepare_process_heap_reallocation(0x1000, 0x1000)
+                    .unwrap()
+            } else {
+                heap.prepare_regular_reallocation(0x1000, 0x1000).unwrap()
+            };
+            if process_heap {
+                heap.commit_process_heap_reallocation(0x1000, 0x5000, large)
+                    .unwrap();
+            } else {
+                heap.commit_regular_reallocation(0x1000, 0x5000, large)
+                    .unwrap();
+            }
+            assert_eq!(heap.first_fit(0x4000, 0x8000, large), Ok(0x6000));
+            assert_eq!(heap.first_fit(0x1000, 0x2000, small), Ok(0x1000));
+        }
+    }
+
+    #[test]
+    fn aligned_search_does_not_skip_a_block_crossed_by_alignment() {
+        let mut heap = CrtHeap::default();
+        let small = heap.prepare_allocation(16).unwrap();
+        let wide = heap.prepare_allocation(0x100).unwrap();
+        heap.insert(0x1000, small).unwrap();
+        heap.insert(0x1080, wide).unwrap();
+        assert_eq!(
+            heap.first_fit_aligned(0x1000, 0x2000, small, 0x100),
+            Ok(0x1200)
+        );
+        heap.insert(0x1200, small).unwrap();
+        assert_eq!(heap.first_fit(0x1000, 0x2000, small), Ok(0x1210));
+    }
+
+    #[test]
+    fn failed_search_preserves_cursor_for_later_free() {
+        let mut heap = CrtHeap::default();
+        let small = heap.prepare_allocation(16).unwrap();
+        for pointer in [0x1000, 0x1020] {
+            assert_eq!(
+                heap.first_fit_aligned(0x1000, 0x1040, small, 32),
+                Ok(pointer)
+            );
+            heap.insert(pointer, small).unwrap();
+        }
+        assert_eq!(heap.first_fit(0x1000, 0x1040, small), Ok(0x1030));
+        heap.insert(0x1030, small).unwrap();
+        let large = heap.prepare_allocation(64).unwrap();
+        assert_eq!(
+            heap.first_fit(0x1000, 0x1040, large),
+            Err(CrtHeapError::AddressSpaceExhausted)
+        );
+        heap.remove(0x1030).unwrap();
+        // Failure must not reset the saved cursor and select the earlier
+        // alignment gap at 0x1010 when free rewinds the exhausted cursor.
+        assert_eq!(heap.first_fit(0x1000, 0x1040, small), Ok(0x1030));
+    }
+
+    #[test]
+    fn cached_search_matches_uncached_tree_search_under_churn() {
+        // Independent cursor + full-tree oracle exercises the fast path with
+        // different sizes, alignments, namespaces, frees, and uncommitted searches.
+        let mut heap = CrtHeap::default();
+        let mut cursors = BTreeMap::<(u64, u64), u64>::new();
+        let mut seed = 123456789u64;
+        for step in 0..10_000 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            if step % 3 == 0 && !heap.allocations.is_empty() {
+                let index = seed as usize % heap.allocations.len();
+                let pointer = *heap.allocations.keys().nth(index).unwrap();
+                heap.remove(pointer).unwrap();
+                for (&(start, end), cursor) in &mut cursors {
+                    if (start..end).contains(&pointer) && pointer < *cursor {
+                        *cursor = pointer;
+                    }
+                }
+            }
+            let start = 0x10000 + (seed % 3) * 0x1000;
+            let end = 0x10_0000;
+            let size = 1 + (seed >> 32) % 2048;
+            let alignment = 16 << ((seed >> 16) % 6);
+            let allocation = heap.prepare_allocation(size).unwrap();
+            let oracle_before = cursors.get(&(start, end)).copied();
+            let mut candidate = align_up(
+                *cursors
+                    .get(&(start, end))
+                    .filter(|&&cursor| (start..end).contains(&cursor))
+                    .unwrap_or(&start),
+                alignment,
+            )
+            .unwrap();
+            for (&pointer, existing) in &heap.allocations {
+                if pointer + existing.backing_size <= candidate {
+                    continue;
+                }
+                if candidate + allocation.backing_size <= pointer {
+                    break;
+                }
+                candidate = align_up(pointer + existing.backing_size, alignment).unwrap();
+            }
+            let expected = if candidate + allocation.backing_size <= end {
+                cursors.insert((start, end), candidate + allocation.backing_size);
+                Ok(candidate)
+            } else {
+                Err(CrtHeapError::AddressSpaceExhausted)
+            };
+            let hint_before = heap
+                .allocation_hints
+                .borrow()
+                .get(&(start, end))
+                .map(|hint| (hint.next, hint.free_end));
+            assert_eq!(
+                heap.first_fit_aligned(start, end, allocation, alignment),
+                expected,
+                "step {step}, range {start:#x}..{end:#x}, size {size}, alignment {alignment}, hint {hint_before:?}, oracle {oracle_before:?}"
+            );
+            if let Ok(pointer) = expected {
+                if step % 7 != 0 {
+                    heap.insert(pointer, allocation).unwrap();
+                }
+            }
+            for hint in heap.allocation_hints.borrow().values() {
+                if hint.next < hint.free_end {
+                    let overlap = heap
+                        .allocations
+                        .range(..hint.free_end)
+                        .find(|(pointer, value)| **pointer + value.backing_size > hint.next);
+                    assert!(
+                        overlap.is_none(),
+                        "step {step}: cached {}..{} overlaps {overlap:?}",
+                        hint.next,
+                        hint.free_end
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            heap.live_bytes(),
+            heap.allocations
+                .values()
+                .map(|a| a.requested_size)
+                .sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn zero_size_is_unique_minimum_allocation_and_aligned() {
         let heap = CrtHeap::default();
         let allocation = heap.prepare_allocation(0).unwrap();
         assert_eq!(allocation.requested_size, 1);
-        assert_eq!(allocation.backing_size, CRT_HEAP_PAGE_SIZE);
+        assert_eq!(allocation.backing_size, CRT_HEAP_ALIGNMENT);
     }
 
     #[test]
@@ -232,7 +1173,7 @@ mod tests {
             heap.prepare_allocation(MAX_CRT_ALLOCATION_BYTES + 1),
             Err(CrtHeapError::AllocationTooLarge)
         );
-        for index in 0..2 {
+        for index in 0..(MAX_CRT_HEAP_BYTES / MAX_CRT_ALLOCATION_BYTES) {
             let allocation = heap.prepare_allocation(MAX_CRT_ALLOCATION_BYTES).unwrap();
             heap.insert(0x1000 + index * 0x1000, allocation).unwrap();
         }
@@ -255,10 +1196,18 @@ mod tests {
             heap.prepare_allocation(1),
             Err(CrtHeapError::AllocationCountExceeded)
         );
+        // Releasing one live object restores exactly one allocation slot.
+        heap.remove(0x1000).unwrap();
+        let replacement = heap.prepare_allocation(32).unwrap();
+        heap.insert(0x1000, replacement).unwrap();
+        assert_eq!(
+            heap.prepare_allocation(1),
+            Err(CrtHeapError::AllocationCountExceeded)
+        );
     }
 
     #[test]
-    fn first_fit_reuses_freed_page_and_preserves_alignment() {
+    fn first_fit_reuses_freed_slot_and_preserves_alignment() {
         let mut heap = CrtHeap::default();
         let allocation = heap.prepare_allocation(17).unwrap();
         let first = heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap();
@@ -266,7 +1215,7 @@ mod tests {
         heap.insert(first, allocation).unwrap();
         let second = heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap();
         heap.insert(second, allocation).unwrap();
-        assert_eq!(second, first + CRT_HEAP_PAGE_SIZE);
+        assert_eq!(second, first + allocation.backing_size);
         heap.remove(first).unwrap();
         assert_eq!(
             heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap(),
@@ -320,6 +1269,62 @@ mod tests {
         assert_eq!(
             heap.remove(0x1000),
             Err(CrtHeapError::ForeignOrFreedPointer)
+        );
+    }
+
+    #[test]
+    fn containing_lookup_finds_interior_bytes_without_crossing_requested_end() {
+        let mut heap = CrtHeap::default();
+        let first = heap.prepare_allocation(17).unwrap();
+        let second = heap.prepare_allocation(9).unwrap();
+        heap.insert(0x1000, first).unwrap();
+        heap.insert(0x2000, second).unwrap();
+        assert_eq!(heap.allocation_containing(0x1000), Some((0x1000, first)));
+        assert_eq!(heap.allocation_containing(0x1010), Some((0x1000, first)));
+        assert_eq!(heap.allocation_containing(0x1011), None);
+        assert_eq!(heap.allocation_containing(0x1fff), None);
+        assert_eq!(heap.allocation_containing(0x2008), Some((0x2000, second)));
+        assert_eq!(heap.allocation_containing(0x2009), None);
+    }
+
+    #[test]
+    fn reallocation_replaces_ownership_and_accounts_only_the_size_delta() {
+        let mut heap = CrtHeap::default();
+        let old = heap
+            .prepare_process_heap_allocation(MAX_CRT_ALLOCATION_BYTES)
+            .unwrap();
+        heap.insert(0x1000, old).unwrap();
+        let peer = heap.prepare_allocation(MAX_CRT_ALLOCATION_BYTES).unwrap();
+        heap.insert(0x2000, peer).unwrap();
+
+        let replacement = heap.prepare_process_heap_reallocation(0x1000, 16).unwrap();
+        assert_eq!(
+            heap.commit_process_heap_reallocation(0x1000, 0x3000, replacement),
+            Ok(old)
+        );
+        assert_eq!(
+            heap.process_heap_allocation(0x1000),
+            Err(CrtHeapError::ForeignOrFreedPointer)
+        );
+        assert_eq!(heap.process_heap_allocation(0x3000), Ok(replacement));
+        assert_eq!(heap.live_bytes(), MAX_CRT_ALLOCATION_BYTES + 16);
+    }
+
+    #[test]
+    fn in_place_reallocation_preserves_the_existing_mapping_extent() {
+        let mut heap = CrtHeap::default();
+        let old = heap.prepare_process_heap_allocation(4096).unwrap();
+        heap.insert(0x1000, old).unwrap();
+
+        let smaller = heap
+            .prepare_process_heap_in_place_reallocation(0x1000, 8)
+            .unwrap()
+            .unwrap();
+        assert_eq!(smaller.requested_size, 8);
+        assert_eq!(smaller.backing_size, old.backing_size);
+        assert_eq!(
+            heap.prepare_process_heap_in_place_reallocation(0x1000, old.backing_size + 1),
+            Ok(None)
         );
     }
 }

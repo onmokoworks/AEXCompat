@@ -18,10 +18,13 @@ def test_sdk_abi_probe_compiles_and_confirms_frozen_single_slot_suite():
     assert report["types"]["PF_ConstHandle"] == 8
 
 def test_native_selftest_covers_pre_setup_foreign_null_and_stale_handles():
-    worker = ROOT / "target" / "minihost-build" / "Release" / "aex_l2_worker.exe"
+    worker = ROOT / "target" / "minihost-build" / "aex_worker.exe"
     if not worker.exists():
-        worker = ROOT / "target" / "minihost-timed-layers" / "Release" / "aex_l2_worker.exe"
-    result = subprocess.run([str(worker), "--self-test-pf-effect-sequence-data-suite"],
+        worker = ROOT / "target" / "minihost-build" / "Release" / "aex_worker.exe"
+    if not worker.exists():
+        worker = ROOT / "target" / "minihost-timed-layers" / "Release" / "aex_worker.exe"
+    result = subprocess.run([str(worker), "--kind", "discovery",
+                             "--self-test-pf-effect-sequence-data-suite"],
                             cwd=ROOT, check=True, capture_output=True, text=True, timeout=30)
     payload = json.loads(result.stdout.strip())
     assert payload["pf_effect_sequence_data_suite1"] == "passed"

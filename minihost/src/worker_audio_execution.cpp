@@ -383,11 +383,13 @@ void emit_audio_session_report(int32_t global_error, int32_t params_error,
             << ",\"audio_checkout_calls\":" << audio_telemetry().checkout_calls
             << ",\"audio_usage_advertised\":" << (audio_telemetry().usage_advertised ? "true" : "false")
             << ",\"audio_checkout_allowed\":" << (audio_telemetry().checkout_allowed ? "true" : "false")
+            << ",\"unadvertised_audio_checkout_calls\":" << audio_telemetry().unadvertised_checkout_calls
             << ",\"rejected_unadvertised_audio_checkouts\":" << audio_telemetry().rejected_unadvertised_checkouts
             << ",\"rejected_audio_format_requests\":" << audio_telemetry().rejected_format_requests
             << ",\"audio_handle_exhaustions\":" << audio_telemetry().handle_exhaustions
             << ",\"peak_live_audio_handles\":" << audio_telemetry().peak_live_handles
             << ",\"audio_checkin_calls\":" << audio_telemetry().checkin_calls
+            << ",\"automatic_audio_checkins\":" << audio_telemetry().automatic_checkins
             << ",\"audio_get_data_calls\":" << audio_telemetry().get_data_calls
             << ",\"last_audio_checkout_start_time\":" << audio_telemetry().last_checkout_start_time
             << ",\"last_audio_checkout_duration\":" << audio_telemetry().last_checkout_duration

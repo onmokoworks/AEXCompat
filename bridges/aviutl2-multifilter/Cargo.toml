@@ -2,7 +2,7 @@
 name = "aexcompat-aviutl2-multifilter"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "MPL-2.0"
 publish = false
 description = "AviUtl2 generic (.aux2) plugin registering each AEX in a folder as its own keyframeable filter (issue #295)"
 
@@ -33,6 +33,9 @@ windows = { version = "0.62", features = [
 ] }
 toml_edit = "0.25.13"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+aexcompat-broker = { path = "../../broker/crates/broker", features = ["test-pe-fixtures"] }
 
 # Diagnostic examples use only the crate's own dependencies plus the broker's
 # public in-place API.

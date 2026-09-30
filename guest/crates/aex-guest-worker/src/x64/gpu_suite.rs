@@ -656,11 +656,9 @@ fn emulate_gpu_create_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u3
             let offset = abi::LAYER_EXTENT_HINT_OFFSET + index * 4;
             definition[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
-        definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET
-            ..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4]
+        definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4]
             .copy_from_slice(&aspect_numerator.to_le_bytes());
-        definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4
-            ..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 8]
+        definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 8]
             .copy_from_slice(&aspect_denominator.to_le_bytes());
         if let Err(error) = unicorn.mem_write(descriptor, &definition) {
             let _ = unicorn.mem_unmap(descriptor, PAGE_SIZE);
@@ -1037,21 +1035,19 @@ impl GuestEngine<'_> {
                 ));
             }
         }
-        let counts = match self
-            .unicorn
-            .get_data_mut()
-            .gpu_runtime
-            .end()
-        {
+        let counts = match self.unicorn.get_data_mut().gpu_runtime.end() {
             Ok(counts) => counts,
             Err(error) => {
-                return Err(GuestError::Callback(first_error.map_or(error.clone(), |first| {
-                    let backend = match backend_kind {
-                        GpuRuntimeBackendKind::AppleOpenCl => "OpenCL",
-                        GpuRuntimeBackendKind::WgpuMetal => backend_kind.name(),
-                    };
-                    format!("{first}; {backend} runtime end: {error}")
-                })));
+                return Err(GuestError::Callback(first_error.map_or(
+                    error.clone(),
+                    |first| {
+                        let backend = match backend_kind {
+                            GpuRuntimeBackendKind::AppleOpenCl => "OpenCL",
+                            GpuRuntimeBackendKind::WgpuMetal => backend_kind.name(),
+                        };
+                        format!("{first}; {backend} runtime end: {error}")
+                    },
+                )));
             }
         };
         finish_gpu_runtime_shutdown(backend_kind, counts, first_error)

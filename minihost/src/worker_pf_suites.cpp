@@ -1,6 +1,7 @@
 #include "worker_pf_suites_internal.hpp"
 #include "worker_callback_diagnostics.hpp"
 #include "worker_extended_diag.hpp"
+#include "worker_pf_private_callbacks.hpp"
 #include "worker_pf_sampling_runtime.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
@@ -106,6 +107,17 @@ bool normalize_legacy_rect(const LegacyRect* requested, int32_t width, int32_t h
   result = requested ? *requested : LegacyRect{0, 0, width, height};
   return result.left >= 0 && result.top >= 0 && result.right >= result.left &&
       result.bottom >= result.top && result.right <= width && result.bottom <= height;
+}
+
+bool clip_legacy_rect(const LegacyRect* requested, int32_t width, int32_t height,
+                      LegacyRect& result) {
+  if (width <= 0 || height <= 0) return false;
+  const LegacyRect candidate = requested ? *requested : LegacyRect{0, 0, width, height};
+  result.left = std::clamp(candidate.left, 0, width);
+  result.top = std::clamp(candidate.top, 0, height);
+  result.right = std::clamp(candidate.right, result.left, width);
+  result.bottom = std::clamp(candidate.bottom, result.top, height);
+  return true;
 }
 
 template <typename T, std::size_t N>
@@ -381,7 +393,10 @@ void configure_pf_host_context(const PfHostContext& context) {
   g_pf_host = context;
   configure_pf_sampling_runtime({context.hooks.resolve_world,
       context.hooks.acquire_suite, context.hooks.release_suite,
-      context.effect_ref, context.batch_sampling_suite});
+      context.effect_ref, context.batch_sampling_suite,
+      &aexcompat::pf_private::gaussian_value,
+      &aexcompat::pf_private::blur_straight,
+      &aexcompat::pf_private::blur_premultiplied});
   g_pf_host_configured = context.hooks.resolve_world && context.hooks.pixel_format &&
       context.hooks.set_pixel_format && context.hooks.acquire_suite &&
       context.hooks.release_suite && context.hooks.resolve_dispatch_world_format &&
@@ -405,25 +420,79 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   const bool has_source = source_world != nullptr;
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:iterate_args base=" << progress_base
+              << " final=" << progress_final << " bytes=" << pixel_bytes
+              << " src=" << (has_source ? 1 : 0) << "\n" << std::flush;
+  // On a resolve_world failure the close report only records "missing_world",
+  // which does not say which side failed or why bounded_typed_world rejected it
+  // (issue #1035). Dump the rejected world's raw fields under extended diag so a
+  // trace can tell a depth/rowbytes mismatch from an unregistered world without
+  // disassembly. Env-gated, integer-only, path-free.
+  const auto diag_unresolved = [pixel_bytes](const char* side, void* world) {
+    if (!aexcompat::l2_detail::extended_diag_enabled()) return;
+    int32_t flags{}, rowbytes{}, width{}, height{};
+    void* pixels{};
+    if (world) {
+      auto* bytes = static_cast<const std::byte*>(world);
+      std::memcpy(&flags, bytes + 16, sizeof(flags));
+      std::memcpy(&pixels, bytes + 24, sizeof(pixels));
+      std::memcpy(&rowbytes, bytes + 32, sizeof(rowbytes));
+      std::memcpy(&width, bytes + 36, sizeof(width));
+      std::memcpy(&height, bytes + 40, sizeof(height));
+    }
+    std::cerr << "extended_diag:iterate_world_unresolved side=" << side
+              << " world=" << (world ? 1 : 0) << " pixels=" << (pixels ? 1 : 0)
+              << " w=" << width << " h=" << height << " rowbytes=" << rowbytes
+              << " flags=" << flags << " pixel_bytes=" << pixel_bytes << "\n"
+              << std::flush;
+  };
   if (!pixel_function)
     return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
                            Reason::InvalidArguments);
   if (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
-                                   source_width, source_height))
+                                   source_width, source_height)) {
+    diag_unresolved("src", source_world);
     return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
                            Reason::MissingWorld);
+  }
   if (!resolve_world(destination_world, pixel_bytes, destination,
-                     destination_rowbytes, destination_width, destination_height))
+                     destination_rowbytes, destination_width, destination_height)) {
+    diag_unresolved("dst", destination_world);
     return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
                            Reason::MissingWorld);
-  LegacyRect bounds{};
+  }
   const int32_t bound_width = has_source
       ? std::min(source_width, destination_width) : destination_width;
   const int32_t bound_height = has_source
       ? std::min(source_height, destination_height) : destination_height;
-  if (!normalize_legacy_rect(area, bound_width, bound_height, bounds))
-    return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
-                           Reason::InvalidArea);
+  // An area outside the walkable box is clipped to it, not refused (issue
+  // #1034): PowerPin hands the full output extent with a smaller intermediate
+  // world, Slant an extent one column past its source, and both die on a
+  // refusal that AE evidently does not make. Clipping the source walk is also
+  // what the utility table's own vocabulary implies the default is - the SDK
+  // names a separate `iterate_origin_non_clip_src` slot for not doing it. An
+  // empty or inverted intersection writes nothing and succeeds, the same
+  // answer PF_COPY gives a wholly-outside rectangle (issue #962); the row
+  // loop can still tick progress/abort callbacks for a rect empty in x only,
+  // which is what the pre-clip code did for an accepted empty rect too. The
+  // walk stays inside both worlds, so the clip loses no bounds protection.
+  const LegacyRect requested = area ? *area : LegacyRect{0, 0, bound_width, bound_height};
+  LegacyRect bounds{};
+  bounds.left = std::max(requested.left, 0);
+  bounds.top = std::max(requested.top, 0);
+  bounds.right = std::min(requested.right, bound_width);
+  bounds.bottom = std::min(requested.bottom, bound_height);
+  if (bounds.right < bounds.left) bounds.right = bounds.left;
+  if (bounds.bottom < bounds.top) bounds.bottom = bounds.top;
+  if (aexcompat::l2_detail::extended_diag_enabled() &&
+      (bounds.left != requested.left || bounds.top != requested.top ||
+       bounds.right != requested.right || bounds.bottom != requested.bottom))
+    std::cerr << "extended_diag:iterate area clipped l=" << requested.left
+              << " t=" << requested.top << " r=" << requested.right
+              << " b=" << requested.bottom << " bound=" << bound_width << "x"
+              << bound_height << " bytes=" << pixel_bytes
+              << " src=" << (has_source ? 1 : 0) << "\n" << std::flush;
   IterateAbortCallback abort_callback{};
   IterateProgressCallback progress_callback{};
   void* effect_ref{};
@@ -463,7 +532,14 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
     const int32_t callback_total = reverse_progress
         ? static_cast<int32_t>(progress_span)
         : progress_final;
-    if (progress_callback) {
+    // progress_base == progress_final == 0 is the SDK's "no progress
+    // contribution" idiom (Bevel_Edges and Drop_Shadow iterate that way), and
+    // the callback here is the host's own report_progress read back out of
+    // in_data. Synthesizing a (0, 0) report would trip that callback's own
+    // total<=0 validation and fail the whole iterate with 4 (issue #1054), so
+    // only report when there is a progress range to report. A plug-in calling
+    // the callback directly still gets the full fail-closed validation.
+    if (progress_callback && callback_total > 0) {
       const int32_t error = progress_callback(effect_ref, current, callback_total);
       if (error != 0)
         return finish_callback(Callback::Iterate, error, Reason::ProgressCallback);
@@ -500,9 +576,9 @@ int32_t __cdecl iterate_world_float(void* in_data, int32_t progress_base, int32_
       refcon, pixel_function, destination_world);
 }
 
-int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const LegacyRect* area,
-                             const void* origin, void* refcon, IteratePixelRaw pixel_function,
-                             void* destination_world) {
+int32_t iterate_origin_typed(int32_t pixel_bytes, bool clip_source, void* source_world,
+                             const LegacyRect* area, const void* origin, void* refcon,
+                             IteratePixelRaw pixel_function, void* destination_world) {
   unsigned char *source{}, *destination{};
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
@@ -525,7 +601,11 @@ int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const Lega
     return finish_callback(Callback::IterateOrigin, kPfErrBadCallbackParam,
                            Reason::MissingWorld);
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(area, destination_width, destination_height, bounds))
+  const int32_t bound_width = clip_source && has_source
+      ? std::min(source_width, destination_width) : destination_width;
+  const int32_t bound_height = clip_source && has_source
+      ? std::min(source_height, destination_height) : destination_height;
+  if (!clip_legacy_rect(area, bound_width, bound_height, bounds))
     return finish_callback(Callback::IterateOrigin, kPfErrBadCallbackParam,
                            Reason::InvalidArea);
   int16_t origin_x{}, origin_y{};
@@ -551,19 +631,19 @@ int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const Lega
 int32_t __cdecl iterate_origin8(void*, int32_t, int32_t, void* source_world,
                                 const LegacyRect* area, const void* origin, void* refcon,
                                 IteratePixelRaw pixel_function, void* destination_world) {
-  return iterate_origin_typed(4, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(4, true, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 int32_t __cdecl iterate_origin16(void*, int32_t, int32_t, void* source_world,
                                  const LegacyRect* area, const void* origin, void* refcon,
                                  IteratePixelRaw pixel_function, void* destination_world) {
-  return iterate_origin_typed(8, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(8, true, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 int32_t __cdecl iterate_origin_float(void*, int32_t, int32_t, void* source_world,
                                      const LegacyRect* area, const void* origin, void* refcon,
                                      IteratePixelRaw pixel_function, void* destination_world) {
-  return iterate_origin_typed(16, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(16, true, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 
@@ -578,8 +658,8 @@ int32_t __cdecl iterate_lut8(void*, int32_t, int32_t, void* source_world,
       !bounded_argb8_world(destination_world, destination, destination_rowbytes,
                            destination_width, destination_height)) return kPfErrBadCallbackParam;
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(area, std::min(source_width, destination_width),
-                             std::min(source_height, destination_height), bounds))
+  if (!clip_legacy_rect(area, std::min(source_width, destination_width),
+                        std::min(source_height, destination_height), bounds))
     return kPfErrBadCallbackParam;
   unsigned char* tables[4]{alpha_lut, red_lut, green_lut, blue_lut};
   for (int32_t y = bounds.top; y < bounds.bottom; ++y) {
@@ -601,7 +681,7 @@ int32_t __cdecl iterate_origin_non_clip8(void* in_data, int32_t progress_base,
                                           const LegacyRect* area, const void* origin,
                                           void* refcon, IteratePixelRaw pixel_function,
                                           void* destination_world) {
-  return iterate_origin_typed(4, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(4, false, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 
@@ -610,7 +690,7 @@ int32_t __cdecl iterate_origin_non_clip16(void* in_data, int32_t progress_base,
                                            const LegacyRect* area, const void* origin,
                                            void* refcon, IteratePixelRaw pixel_function,
                                            void* destination_world) {
-  return iterate_origin_typed(8, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(8, false, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 
@@ -619,7 +699,7 @@ int32_t __cdecl iterate_origin_non_clip_float(void* in_data, int32_t progress_ba
                                                const LegacyRect* area, const void* origin,
                                                void* refcon, IteratePixelRaw pixel_function,
                                                void* destination_world) {
-  return iterate_origin_typed(16, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(16, false, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 
@@ -629,13 +709,18 @@ int32_t __cdecl iterate_generic(int32_t iterations, void* refcon,
   constexpr int32_t kMaxIterations = 16'777'216;
   if (!callback || (iterations != kOncePerProcessor &&
                     (iterations <= 0 || iterations > kMaxIterations)))
-    return kPfErrBadCallbackParam;
+    return finish_callback(aexcompat::callback_diagnostics::Callback::IterateGeneric,
+                           kPfErrBadCallbackParam,
+                           aexcompat::callback_diagnostics::Reason::InvalidArguments);
   const int32_t actual_iterations = iterations == kOncePerProcessor ? 1 : iterations;
   for (int32_t index = 0; index < actual_iterations; ++index) {
     const int32_t error = callback(refcon, 0, index, actual_iterations);
-    if (error != 0) return error;
+    if (error != 0)
+      return finish_callback(aexcompat::callback_diagnostics::Callback::IterateGeneric,
+                             error,
+                             aexcompat::callback_diagnostics::Reason::CallbackError);
   }
-  return 0;
+  return finish_callback(aexcompat::callback_diagnostics::Callback::IterateGeneric, 0);
 }
 
 struct IterateInteractionTestState {
@@ -699,6 +784,51 @@ bool verify_iterate_suites() {
       destination != std::array<unsigned char, 8>{{10, 235, 30, 40, 50, 195, 70, 80}})
     return false;
 
+  // The ordinary LUT walk clips a caller-supplied area to the common source /
+  // destination box. Empty intersections succeed without touching output.
+  destination.fill(0);
+  const LegacyRect oversized_lut{-3, -2, 9, 7};
+  if (iterate_lut8(nullptr, 0, 1, &source_world, &oversized_lut, nullptr, invert.data(),
+                   nullptr, nullptr, &destination_world) != 0 ||
+      destination != std::array<unsigned char, 8>{{10, 235, 30, 40, 50, 195, 70, 80}})
+    return false;
+  destination.fill(0x5a);
+  const LegacyRect outside_lut{5, 5, 9, 9};
+  const LegacyRect inverted_lut{2, 1, 0, 0};
+  if (iterate_lut8(nullptr, 0, 1, &source_world, &outside_lut, nullptr, invert.data(),
+                   nullptr, nullptr, &destination_world) != 0 ||
+      iterate_lut8(nullptr, 0, 1, &source_world, &inverted_lut, nullptr, invert.data(),
+                   nullptr, nullptr, &destination_world) != 0 ||
+      destination != std::array<unsigned char, 8>{{0x5a, 0x5a, 0x5a, 0x5a,
+                                                    0x5a, 0x5a, 0x5a, 0x5a}})
+    return false;
+
+  // An area past the walkable box is clipped, not refused (issue #1034):
+  // the walk covers exactly the intersection, and a wholly-outside or
+  // inverted rect walks nothing and succeeds, like PF_COPY (issue #962).
+  // Shapes from the corpus: Slant's rect one column past the source,
+  // PowerPin's full output extent against a smaller world.
+  {
+    IterateInteractionTestState clip{};
+    const LegacyRect oversized{-3, -2, 9, 7};
+    if (iterate_world_typed(nullptr, 0, 1, 4, &source_world, &oversized, &clip,
+                            &iterate_test_pixel, &destination_world) != 0 ||
+        clip.pixel_calls != 2) return false;
+    clip = {};
+    const LegacyRect shifted{1, 0, 3, 1};
+    if (iterate_world_typed(nullptr, 0, 1, 4, &source_world, &shifted, &clip,
+                            &iterate_test_pixel, &destination_world) != 0 ||
+        clip.pixel_calls != 1) return false;
+    clip = {};
+    const LegacyRect outside{5, 5, 9, 9};
+    const LegacyRect inverted{2, 1, 0, 0};
+    if (iterate_world_typed(nullptr, 0, 1, 4, &source_world, &outside, &clip,
+                            &iterate_test_pixel, &destination_world) != 0 ||
+        iterate_world_typed(nullptr, 0, 1, 4, &source_world, &inverted, &clip,
+                            &iterate_test_pixel, &destination_world) != 0 ||
+        clip.pixel_calls != 0) return false;
+  }
+
   struct GenericState { int32_t calls{}, expected{}; } state{};
   const auto generic_callback = [](void* opaque, int32_t thread_index, int32_t index,
                                    int32_t iterations) -> int32_t {
@@ -732,6 +862,39 @@ bool verify_iterate_suites() {
     return 0;
   };
   const std::array<int16_t, 2> origin{{0, 0}};
+  struct OriginState { int32_t calls{}, first_x{}, last_x{}, y{}; } origin_state{};
+  const auto origin_callback = [](void* opaque, int32_t x, int32_t y, void* input,
+                                  void* output) -> int32_t {
+    auto& value = *static_cast<OriginState*>(opaque);
+    if (value.calls == 0) {
+      value.first_x = x;
+      value.y = y;
+    }
+    value.last_x = x;
+    ++value.calls;
+    std::memcpy(output, input, 4);
+    return 0;
+  };
+  const std::array<int16_t, 2> shifted_origin{{7, -3}};
+  const LegacyRect oversized_origin{-3, -2, 9, 7};
+  if (iterate_origin8(nullptr, 0, 1, &source_world, &oversized_origin,
+                      shifted_origin.data(), &origin_state, origin_callback,
+                      &destination_world) != 0 ||
+      origin_state.calls != 2 || origin_state.first_x != 7 ||
+      origin_state.last_x != 8 || origin_state.y != -3) return false;
+  origin_state = {};
+  const LegacyRect outside_origin{5, 5, 9, 9};
+  const LegacyRect inverted_origin{2, 1, 0, 0};
+  if (iterate_origin8(nullptr, 0, 1, &source_world, &outside_origin,
+                      shifted_origin.data(), &origin_state, origin_callback,
+                      &destination_world) != 0 ||
+      iterate_origin8(nullptr, 0, 1, &source_world, &inverted_origin,
+                      shifted_origin.data(), &origin_state, origin_callback,
+                      &destination_world) != 0 ||
+      origin_state.calls != 0) return false;
+
+  // The separate non-clip-source slot still walks the whole destination and
+  // supplies a zero pixel beyond the source extent.
   if (iterate_origin_non_clip8(nullptr, 0, 1, &source_world, nullptr, origin.data(),
                                &pixel_state, pixel_callback, &destination_world) != 0 ||
       pixel_state.calls != 3 || !pixel_state.saw_zero) return false;
@@ -783,6 +946,39 @@ bool verify_iterate_suites() {
             &interaction, &iterate_test_pixel, &typed_destination_world) != 73 ||
         interaction.pixel_calls != 2 || interaction.abort_calls != 1 ||
         interaction.progress != std::vector<int32_t>({11})) return false;
+
+    // progress_base == progress_final == 0 is the "no progress contribution"
+    // idiom (Bevel_Edges, Drop_Shadow iterate that way): the host must not
+    // synthesize a (0, 0) report that its own progress callback rejects as
+    // total<=0, and the abort cadence stays unchanged (issue #1054).
+    interaction = {};
+    if (iterate_world_typed(input.data(), 0, 0, pixel_bytes, &typed_source_world, &four_rows,
+            &interaction, &iterate_test_pixel, &typed_destination_world) != 0 ||
+        interaction.pixel_calls != 4 || interaction.abort_calls != 3 ||
+        !interaction.progress.empty()) return false;
+  }
+
+  // A float world that leaves the DEEP bit clear must still resolve for a float
+  // iterate (issue #1035): AE builds the video-frame float worlds through its
+  // own PPix suite, and those come back with world_flags 0x02000000 (bit 0
+  // clear), the exact shape Cartoon's iterateFloat handed the host. The 8-vs-16
+  // distinction still rides the DEEP bit, but float acceptance must not, or a
+  // valid AE float world fails the callback with missing_world.
+  for (const int32_t float_flags : {0, 0x02000000}) {
+    std::array<unsigned char, 64> ae_source{}, ae_destination{};
+    LocalEffectWorld ae_source_world{}, ae_destination_world{};
+    ae_source_world.data = ae_source.data();
+    ae_source_world.rowbytes = 16;
+    ae_source_world.width = 1;
+    ae_source_world.height = 4;
+    ae_source_world.world_flags = float_flags;
+    ae_destination_world = ae_source_world;
+    ae_destination_world.data = ae_destination.data();
+    IterateInteractionTestState interaction{};
+    g_iterate_interaction_test = &interaction;
+    if (iterate_world_typed(input.data(), 10, 14, 16, &ae_source_world, &four_rows,
+            &interaction, &iterate_test_pixel, &ae_destination_world) != 0 ||
+        interaction.pixel_calls != 4) return false;
   }
 
   // A null source world selects the documented destination-only walk (issue

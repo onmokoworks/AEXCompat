@@ -1,4 +1,5 @@
 #include "worker_parameter_execution.hpp"
+#include "worker_parameter_limits.hpp"
 
 #include "worker_extended_diag.hpp"
 
@@ -21,6 +22,20 @@ Hooks& hooks() { return g_hooks; }
 parameters::State& runtime() { return parameters::state(); }
 template <typename T, std::size_t N> T read(const std::array<std::byte, N>& b, std::size_t o) { T v{}; std::memcpy(&v, b.data()+o, sizeof(v)); return v; }
 template <typename T, std::size_t N> void write(std::array<std::byte, N>& b, std::size_t o, const T& v) { std::memcpy(b.data()+o, &v, sizeof(v)); }
+
+bool dispose_arbitrary_handle(EffectEntry entry, BufferIn& input, BufferOut& output,
+                              int16_t id, void* refcon, void* value) {
+  if (!value) return true;
+  std::array<std::byte, 48> extra{};
+  write<int32_t>(extra, 0, 1);
+  write<int16_t>(extra, 4, id);
+  write<void*>(extra, 8, refcon);
+  write<void*>(extra, 16, value);
+  uint32_t exception_code = 0;
+  return hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(),
+      nullptr, nullptr, extra.data(), &exception_code) == 0 && exception_code == 0;
+}
+
 }  // namespace
 
 bool configure_hooks(const Hooks& value) noexcept { if (!value.invoke_entry || !value.handle_is_live || !value.active_mask_count || !value.active_mask_id) return false; g_hooks=value; return true; }
@@ -35,6 +50,13 @@ bool initialize_arbitrary_values(EffectEntry entry,
     const int16_t id = read<int16_t>(definitions[i + 1], u);
     void* source = read<void*>(definitions[i + 1], u + 8);
     void* refcon = read<void*>(definitions[i + 1], u + 24);
+    // PF_ADD_ARBITRARY2 initializes the current value to null independently
+    // from its optional default handle.  A null default therefore represents
+    // an uninitialized value; there is no source object for COPY to duplicate.
+    if (!source) {
+      write<void*>(definitions[i + 1], u + 16, nullptr);
+      continue;
+    }
     void* destination = nullptr;
     std::array<std::byte, 48> extra{};
     write<int32_t>(extra, 0, 2);
@@ -42,9 +64,8 @@ bool initialize_arbitrary_values(EffectEntry entry,
     write<void*>(extra, 8, refcon);
     write<void*>(extra, 16, source);
     write<void*>(extra, 24, &destination);
-    const int32_t error = source
-        ? entry(kArbitraryCallback, input.data(), output.data(), nullptr, nullptr, extra.data())
-        : 4;
+    const int32_t error = entry(kArbitraryCallback, input.data(), output.data(),
+                                nullptr, nullptr, extra.data());
     if (error != 0 || !destination || destination == source) {
       ++runtime().arbitrary.print_failures;
       return false;
@@ -127,15 +148,11 @@ bool dispose_arbitrary_values(EffectEntry entry,
     const std::size_t u = 56;
     void* value = read<void*>(definitions[i + 1], u + 16);
     if (!value) continue;
-    std::array<std::byte, 48> extra{};
-    write<int32_t>(extra, 0, 1);
-    write<int16_t>(extra, 4, read<int16_t>(definitions[i + 1], u));
-    write<void*>(extra, 8, read<void*>(definitions[i + 1], u + 24));
-    write<void*>(extra, 16, value);
-    const int32_t error = entry(kArbitraryCallback, input.data(), output.data(),
-                                nullptr, nullptr, extra.data());
+    const bool disposed = dispose_arbitrary_handle(entry, input, output,
+        read<int16_t>(definitions[i + 1], u),
+        read<void*>(definitions[i + 1], u + 24), value);
     write<void*>(definitions[i + 1], u + 16, nullptr);
-    if (error == 0) ++runtime().arbitrary.dispose_calls;
+    if (disposed) ++runtime().arbitrary.dispose_calls;
     else { ++runtime().arbitrary.invalid_operations; valid = false; }
   }
   return valid;
@@ -150,15 +167,10 @@ bool dispose_arbitrary_defaults(EffectEntry entry,
     const std::size_t u = 56;
     void* value = read<void*>(param.raw, u + 8);
     if (!value) continue;
-    std::array<std::byte, 48> extra{};
-    write<int32_t>(extra, 0, 1);
-    write<int16_t>(extra, 4, read<int16_t>(param.raw, u));
-    write<void*>(extra, 8, read<void*>(param.raw, u + 24));
-    write<void*>(extra, 16, value);
-    const int32_t error = entry(kArbitraryCallback, input.data(), output.data(),
-                                nullptr, nullptr, extra.data());
+    const bool disposed = dispose_arbitrary_handle(entry, input, output,
+        read<int16_t>(param.raw, u), read<void*>(param.raw, u + 24), value);
     write<void*>(param.raw, u + 8, nullptr);
-    if (error == 0) ++runtime().arbitrary.dispose_calls;
+    if (disposed) ++runtime().arbitrary.dispose_calls;
     else { ++runtime().arbitrary.invalid_operations; valid = false; }
   }
   return valid;
@@ -184,12 +196,7 @@ bool apply_arbitrary_parameter_animation(EffectEntry entry,
     void* refcon = read<void*>(definition, u + 24);
     const auto dispose = [&](void* value) {
       if (!hooks().handle_is_live(value)) return false;
-      std::array<std::byte, 48> extra{};
-      write<int32_t>(extra, 0, 1); write<int16_t>(extra, 4, id);
-      write<void*>(extra, 8, refcon); write<void*>(extra, 16, value);
-      uint32_t exception_code = 0;
-      const bool ok = hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(),
-          nullptr, nullptr, extra.data(), &exception_code) == 0 && exception_code == 0;
+      const bool ok = dispose_arbitrary_handle(entry, input, output, id, refcon, value);
       if (ok) ++runtime().arbitrary.dispose_calls; else ++runtime().arbitrary.invalid_operations;
       return ok;
     };
@@ -442,19 +449,14 @@ bool interpolate_arbitrary_values(EffectEntry entry,
     const int16_t id = read<int16_t>(definition, u);
     void* refcon = read<void*>(definition, u + 24);
     void* source = read<void*>(definition, u + 16);
+    if (!source) continue;
     if (!hooks().handle_is_live(source)) {
       ++runtime().arbitrary.interpolation_failures;
       return false;
     }
     const auto dispose = [&](void* value) {
       if (!hooks().handle_is_live(value)) return false;
-      std::array<std::byte, 48> extra{};
-      write<int32_t>(extra, 0, 1);
-      write<int16_t>(extra, 4, id);
-      write<void*>(extra, 8, refcon);
-      write<void*>(extra, 16, value);
-      const bool ok = entry(kArbitraryCallback, input.data(), output.data(), nullptr,
-                            nullptr, extra.data()) == 0;
+      const bool ok = dispose_arbitrary_handle(entry, input, output, id, refcon, value);
       if (ok) ++runtime().arbitrary.dispose_calls;
       return ok;
     };
@@ -524,6 +526,7 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
     const int16_t id = read<int16_t>(definition, u);
     void* refcon = read<void*>(definition, u + 24);
     void* source = read<void*>(definition, u + 16);
+    if (!source) continue;
     uint32_t exception_code = 0;
     uint32_t flat_size = 0;
     std::array<std::byte, 48> size_extra{};
@@ -605,13 +608,7 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
       ++runtime().arbitrary.roundtrip_failures;
       continue;
     }
-    std::array<std::byte, 48> dispose_extra{};
-    write<int32_t>(dispose_extra, 0, 1);
-    write<int16_t>(dispose_extra, 4, id);
-    write<void*>(dispose_extra, 8, refcon);
-    write<void*>(dispose_extra, 16, source);
-    if (entry(kArbitraryCallback, input.data(), output.data(), nullptr, nullptr,
-              dispose_extra.data()) != 0) {
+    if (!dispose_arbitrary_handle(entry, input, output, id, refcon, source)) {
       ++runtime().arbitrary.invalid_operations;
       return false;
     }
@@ -653,76 +650,173 @@ bool validate_requested_assignments(const parameters::RequestedAssignments& requ
 }
 
 void initialize_parameter_definitions(
-    std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions) {
-  for (std::size_t i = 0; i < runtime().records.size(); ++i) {
-    definitions[i + 1] = runtime().records[i].raw;
-    if (runtime().records[i].type == 0)
+    std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions,
+    int32_t layer_width, int32_t layer_height) {
+  // A POINT/POINT_3D default is a percentage of the layer size (SDK
+  // PF_PointDef `x_dephault` /* percentage */); the value the plug-in reads
+  // (`x_value`) is in pixels. Convert here so an effect that derives geometry
+  // from a corner default - Corner Pin's 100% corner, Bezier Warp's control
+  // points - sees the layer's actual extent rather than the raw percentage
+  // read as pixels (issue #326 chain: Corner Pin returned a 100x100 FRAME_SETUP
+  // extent for a 256x144 layer). Zero dims keep the raw percentage for the
+  // point-less audio/UI paths.
+  const auto point_pixels = [&](double percent, int32_t extent) {
+    return layer_width > 0 && layer_height > 0
+        ? percent / 100.0 * extent : percent;
+  };
+  const auto to_fixed = [](double value) {
+    return static_cast<int32_t>(
+        std::round(std::clamp(value, -32768.0, 32767.0) * 65536.0));
+  };
+  auto staged_records = runtime().records;
+  for (std::size_t i = 0; i < staged_records.size(); ++i) {
+    auto& record = staged_records[i];
+    definitions[i + 1] = record.raw;
+    if (record.type == 0)
       std::memset(definitions[i + 1].data() + 56, 0, 40);
-    else if (runtime().records[i].type == 1 || runtime().records[i].type == 7)
-      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(runtime().records[i].default_value));
-    else if (runtime().records[i].type == 4)
-      write<int32_t>(definitions[i + 1], 56, runtime().records[i].default_value != 0 ? 1 : 0);
-    else if (runtime().records[i].type == 2)
-      write<int32_t>(definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(runtime().records[i].default_value * 65536.0)));
-    else if (runtime().records[i].type == 10)
-      write<double>(definitions[i + 1], 56, runtime().records[i].default_value);
-    else if (runtime().records[i].type == 3)
-      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(std::round(runtime().records[i].default_components[0] * 65536.0)));
-    else if (runtime().records[i].type == 6) {
-      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(std::round(runtime().records[i].default_components[0] * 65536.0)));
-      write<int32_t>(definitions[i + 1], 60, static_cast<int32_t>(std::round(runtime().records[i].default_components[1] * 65536.0)));
-    } else if (runtime().records[i].type == 18)
-      for (int component = 0; component < 3; ++component)
-        write<double>(definitions[i + 1], 56 + component * 8, runtime().records[i].default_components[component]);
-    else if (runtime().records[i].type == 12) {
-      const int32_t index = static_cast<int32_t>(runtime().records[i].default_value);
+    else if (record.type == 1 || record.type == 7) {
+      const auto encoded = static_cast<int32_t>(record.default_value);
+      write<int32_t>(definitions[i + 1], 56, encoded);
+      record.has_current = true;
+      record.current_value = encoded;
+    }
+    else if (record.type == 4) {
+      write<int32_t>(definitions[i + 1], 56, record.default_value != 0 ? 1 : 0);
+      record.has_current = true;
+      record.current_value = record.default_value != 0 ? 1.0 : 0.0;
+    }
+    else if (record.type == 2) {
+      const auto encoded = to_fixed(record.default_value);
+      write<int32_t>(definitions[i + 1], 56, encoded);
+      record.has_current = true;
+      record.current_value = encoded / 65536.0;
+    }
+    else if (record.type == 10) {
+      write<double>(definitions[i + 1], 56, record.default_value);
+      record.has_current = true;
+      record.current_value = record.default_value;
+    }
+    else if (record.type == 5) {
+      std::memcpy(record.current_color.data(), record.raw.data() + 56,
+                  record.current_color.size());
+      for (std::size_t channel = 0; channel < 4; ++channel)
+        record.current_float_color[channel] =
+            record.current_color[channel] / 255.0f;
+    }
+    else if (record.type == 3) {
+      const auto encoded = to_fixed(record.default_components[0]);
+      write<int32_t>(definitions[i + 1], 56, encoded);
+      record.current_components[0] = encoded / 65536.0;
+    }
+    else if (record.type == 6) {
+      // Fixed (16.16) pixels: clamp to the same +/-32768 pixel range the point
+      // override path parses (worker_l2_payload_parsers) so a pathological
+      // percentage scaled by the extent cannot overflow the int32 value.
+      const auto encoded_x = to_fixed(
+          point_pixels(record.default_components[0], layer_width));
+      const auto encoded_y = to_fixed(
+          point_pixels(record.default_components[1], layer_height));
+      write<int32_t>(definitions[i + 1], 56, encoded_x);
+      write<int32_t>(definitions[i + 1], 60, encoded_y);
+      record.current_components[0] = encoded_x / 65536.0;
+      record.current_components[1] = encoded_y / 65536.0;
+    } else if (record.type == 18) {
+      // x is % of width, y and z are both % of _height_ (SDK PF_Point3DDef).
+      const std::array<int32_t, 3> extents{layer_width, layer_height, layer_height};
+      for (int component = 0; component < 3; ++component) {
+        record.current_components[component] = point_pixels(record.default_components[component], extents[component]);
+        write<double>(definitions[i + 1], 56 + component * 8, record.current_components[component]);
+      }
+    }
+    else if (record.type == 12) {
+      const int32_t index = static_cast<int32_t>(record.default_value);
       int32_t mask_id = 0;
       if (index > 0) hooks().active_mask_id(static_cast<std::size_t>(index - 1), &mask_id);
       write<int32_t>(definitions[i + 1], 56, mask_id);
     }
   }
+  runtime().records = std::move(staged_records);
 }
 
 bool apply_requested_assignments(
     std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions,
-    const parameters::RequestedAssignments& requested) {
+    const parameters::RequestedAssignments& requested,
+    int32_t layer_width, int32_t layer_height) {
   if (!validate_requested_assignments(requested)) return false;
+  auto staged_definitions = definitions;
+  auto staged_records = runtime().records;
+  // Point assignments carry the same percentage-of-layer unit as their
+  // defaults (the multifilter sources them from discovery, which reads the
+  // SDK `x_dephault` percentage); convert to the pixel `x_value` the plug-in
+  // reads, matching initialize_parameter_definitions. Zero dims keep the raw
+  // value for the point-less audio/UI/L2 paths (issue #1061 chain).
+  const auto point_pixels = [&](double percent, int32_t extent) {
+    return layer_width > 0 && layer_height > 0 ? percent / 100.0 * extent : percent;
+  };
+  const auto to_fixed = [](double pixels) {
+    return static_cast<int32_t>(std::round(std::clamp(pixels, -32768.0, 32767.0) * 65536.0));
+  };
   for (const auto& assignment : requested) {
     const auto slot = static_cast<std::size_t>(assignment.index);
-    const auto type = runtime().records[slot - 1].type;
+    const auto type = staged_records[slot - 1].type;
+    auto& record = staged_records[slot - 1];
     if (type == 11 && assignment.kind == parameters::RequestedKind::ArbitraryText) continue;
-    if (type == 1 || type == 4 || type == 7)
-      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(assignment.value));
+    if (type == 1 || type == 4 || type == 7) {
+      const auto encoded = static_cast<int32_t>(assignment.value);
+      write<int32_t>(staged_definitions[slot], 56, encoded);
+      record.has_current = true;
+      record.current_value = encoded;
+    }
     else if (type == 12) {
       const int32_t index = static_cast<int32_t>(assignment.value);
       int32_t mask_id = 0;
       if (index > 0 && !hooks().active_mask_id(static_cast<std::size_t>(index - 1), &mask_id)) return false;
-      write<int32_t>(definitions[slot], 56, mask_id);
+      write<int32_t>(staged_definitions[slot], 56, mask_id);
     }
     else if (type == 2) {
       const double fixed = assignment.value * 65536.0;
       if (!std::isfinite(fixed) || fixed < INT32_MIN || fixed > INT32_MAX) return false;
-      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(fixed)));
-    } else if (type == 10)
-      write<double>(definitions[slot], 56, assignment.value);
-    else if (type == 5) {
-      std::memcpy(definitions[slot].data() + 56, assignment.color.data(), assignment.color.size());
-      runtime().records[slot - 1].current_color = assignment.color;
-      for (std::size_t channel = 0; channel < 4; ++channel)
-        runtime().records[slot - 1].current_float_color[channel] = assignment.color[channel] / 255.0f;
+      const auto encoded = static_cast<int32_t>(std::round(fixed));
+      write<int32_t>(staged_definitions[slot], 56, encoded);
+      record.has_current = true;
+      record.current_value = encoded / 65536.0;
+    } else if (type == 10) {
+      write<double>(staged_definitions[slot], 56, assignment.value);
+      record.has_current = true;
+      record.current_value = assignment.value;
     }
-    else if (type == 3)
-      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(assignment.components[0] * 65536.0)));
+    else if (type == 5) {
+      std::memcpy(staged_definitions[slot].data() + 56, assignment.color.data(), assignment.color.size());
+      record.current_color = assignment.color;
+      for (std::size_t channel = 0; channel < 4; ++channel)
+        record.current_float_color[channel] = assignment.color[channel] / 255.0f;
+    }
+    else if (type == 3) {
+      const auto encoded = to_fixed(assignment.components[0]);
+      write<int32_t>(staged_definitions[slot], 56, encoded);
+      record.current_components[0] = encoded / 65536.0;
+    }
     else if (type == 6) {
-      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(assignment.components[0] * 65536.0)));
-      write<int32_t>(definitions[slot], 60, static_cast<int32_t>(std::round(assignment.components[1] * 65536.0)));
-    } else if (type == 18)
-      for (int component = 0; component < 3; ++component)
-        write<double>(definitions[slot], 56 + component * 8, assignment.components[component]);
+      const auto encoded_x = to_fixed(
+          point_pixels(assignment.components[0], layer_width));
+      const auto encoded_y = to_fixed(
+          point_pixels(assignment.components[1], layer_height));
+      write<int32_t>(staged_definitions[slot], 56, encoded_x);
+      write<int32_t>(staged_definitions[slot], 60, encoded_y);
+      record.current_components[0] = encoded_x / 65536.0;
+      record.current_components[1] = encoded_y / 65536.0;
+    } else if (type == 18) {
+      const std::array<int32_t, 3> extents{layer_width, layer_height, layer_height};
+      for (int component = 0; component < 3; ++component) {
+        record.current_components[component] = point_pixels(assignment.components[component], extents[component]);
+        write<double>(staged_definitions[slot], 56 + component * 8, record.current_components[component]);
+      }
+    }
     else
       return false;
   }
+  definitions = std::move(staged_definitions);
+  runtime().records = std::move(staged_records);
   return true;
 }
 
@@ -787,7 +881,8 @@ std::string requested_parameters_json(const parameters::RequestedAssignments& re
 namespace aexcompat::l2_detail {
 extern "C" int32_t __cdecl set_options_button_name(void*, const char*);
 namespace {
-constexpr std::size_t kMaxParams = 1024;
+constexpr std::size_t kMaxParams =
+    aexcompat::worker_runtime::parameters::kMaxParameterCount;
 constexpr std::size_t kParamSize =
     aexcompat::worker_runtime::parameters::kDefinitionSize;
 constexpr std::size_t kParamType = 12;
@@ -813,10 +908,19 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
   std::memcpy(bytes.data(), definition, bytes.size());
   const char* name = reinterpret_cast<const char*>(bytes.data() + kParamName);
   const auto length = strnlen_s(name, kParamNameSize);
-  if (extended_diag_enabled())
+  if (extended_diag_enabled()) {
     std::cerr << "extended_diag:add_param index=" << index
               << " type=" << read<int32_t>(bytes, kParamType) << " name=\""
-              << std::string(name, length) << "\"\n" << std::flush;
+              << std::string(name, length) << "\"";
+    // A layer parameter carries its `PF_LayerDefault` in the `dephault` field
+    // that ends the `PF_LayerDef` sitting in the union (SDK AE_Effect.h:
+    // MYSELF = -1, NONE = 0). Which of the two a plug-in declared decides
+    // whether an unconnected slot is transparent or is the effect's own input,
+    // and the trace had no way to show it (issue #1285).
+    if (read<int32_t>(bytes, kParamType) == 0)
+      std::cerr << " layer_dephault=" << read<int32_t>(bytes, 56 + 116);
+    std::cerr << "\n" << std::flush;
+  }
   const int32_t host_index = index < 0 ? static_cast<int32_t>(g_params.size() + 1) : index;
   if (host_index <= 0 || host_index > static_cast<int32_t>(kMaxParams) ||
       std::any_of(g_params.begin(), g_params.end(),
@@ -847,7 +951,19 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
     record.valid_max = read<int16_t>(bytes, u + 4);
     record.slider_min = record.valid_min;
     record.slider_max = record.valid_max;
-    record.default_value = read<int16_t>(bytes, u + 6);
+    // A PF popup value is 1-based (SDK PF_PopupDef). Reshape declares its
+    // Elasticity (9 choices) and Interpolation Method (3 choices) popups with
+    // dephault = value = 0; AE 2026 reads both back as 1 through ExtendScript
+    // with no user edit and renders the effect (issue #1253,
+    // docs/MASKLESS_PATH_EFFECTS_OBSERVATION_2026-08-17.md; that RENDER
+    // receives 1 is inferred from that render passing through). Handing the
+    // plug-in the raw 0 made its RENDER map "Interpolation Method - 1" to a
+    // mode its grid generator rejects, and FLO_DoDistortion answered
+    // PF_Err_OUT_OF_MEMORY. Lift a non-positive declared default to the first
+    // choice; a default above num_choices is not an observed case and is left
+    // as declared.
+    const int16_t declared_default = read<int16_t>(bytes, u + 6);
+    record.default_value = declared_default < 1 ? 1 : declared_default;
     const char* choices = read<const char*>(bytes, u + 8);
     if (choices) record.choices.assign(choices, strnlen_s(choices, 4096));
   } else if (record.type == 4) {

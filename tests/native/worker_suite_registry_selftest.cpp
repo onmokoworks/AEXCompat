@@ -779,6 +779,28 @@ int main() {
       selector_telemetry.invocations[1].has_register_snapshot &&
       selector_telemetry.invocations[1].registers.size() == 5 &&
       selector_telemetry.invocations[1].stack_values.size() == 6 &&
+      // The faulting-context unwind (issue #1312) on the other shape the
+      // capture sees: a fault at a valid instruction pointer, rather than the
+      // call-through-null that --self-test-selector-fault-unwind injects. The
+      // walk must name the fault site itself as frame 0 and still reach the
+      // caller. Frame 0 is never the return-address read: that read only ever
+      // produces the frame behind the fault site.
+      selector_telemetry.invocations[1].unwind_frame_count >= 2 &&
+      !selector_telemetry.invocations[1].unwind_frames[0].from_return_slot &&
+      selector_telemetry.invocations[1].unwind_frames[0].site.classification ==
+          "plugin" &&
+      selector_telemetry.invocations[1].unwind_frames[0].site
+          .has_relative_offset &&
+      selector_telemetry.invocations[1].unwind_frames[0].site.relative_offset ==
+          selector_telemetry.invocations[1].plugin_rva &&
+      selector_telemetry.invocations[1].unwind_frames[1].site.classification ==
+          "plugin" &&
+      selector_telemetry.invocations[1].unwind_frames[1].site
+          .has_relative_offset &&
+      selector_telemetry.invocations[1].unwind_stop ==
+          SelectorUnwindStop::end_of_chain &&
+      selector_telemetry.invocations[0].unwind_stop ==
+          SelectorUnwindStop::not_attempted &&
       selector_telemetry.invocations[2].access_type == "read" &&
       selector_telemetry.invocations[2].fault_address.classification ==
           "low" &&
@@ -812,6 +834,17 @@ int main() {
           std::string::npos &&
       selector_report.find("\"stack_pointer_values\":[") !=
           std::string::npos &&
+      selector_report.find("\"unwind_frames\":[{\"from_return_slot\":false,"
+                           "\"site\":{\"classification\":") !=
+          std::string::npos &&
+      selector_report.find("\"unwind_frames\":null") != std::string::npos &&
+      // The stop reason has to travel with the list it qualifies, or a capped
+      // or lost chain reads like a complete one. end_of_chain is the only
+      // value that licenses reading the outermost frame as the top of stack,
+      // and it is what a fault on this worker's own thread produces.
+      selector_report.find("\"unwind_stop\":\"end_of_chain\"") !=
+          std::string::npos &&
+      selector_report.find("\"unwind_stop\":null") != std::string::npos &&
       registry.acquire("Known Suite", 1, &suite, &resolve_known,
                                  nullptr, nullptr) == 0 &&
       suite == reinterpret_cast<const void*>(0x1234) &&
@@ -833,6 +866,14 @@ int main() {
         suite == nullptr && g_resolver_calls == calls_before;
   }
 
+  SuiteRegistry dotted_missing_registry;
+  suite = nullptr;
+  passed = passed &&
+      dotted_missing_registry.acquire("Opaque Helper Suite 2026.1", 1, &suite,
+                                      &resolve_known, nullptr, nullptr) == 1 &&
+      dotted_missing_registry.missing_suites_report_json().find(
+          "Opaque Helper Suite 2026.1") != std::string::npos;
+
   for (int index = 0; index < 17; ++index) {
     const std::string name = "Missing Suite " + std::to_string(index);
     suite = reinterpret_cast<const void*>(0x5678);
@@ -846,6 +887,61 @@ int main() {
       count_occurrences(missing_report, "\"name\":") == 16 &&
       missing_report.find("\"missing_suites_truncated\":true") !=
           std::string::npos;
+
+  {
+    SuiteRegistry failed_pair_registry;
+    suite = reinterpret_cast<const void*>(0x5678);
+    passed = passed &&
+        failed_pair_registry.acquire("Unavailable Suite", 7, &suite,
+                                     &resolve_known, nullptr, nullptr) == 1 &&
+        suite == nullptr &&
+        failed_pair_registry.release("Unavailable Suite", 7, nullptr) == 1 &&
+        failed_pair_registry.rejected_release_count() == 0 &&
+        failed_pair_registry.release("Unavailable Suite", 7, nullptr) == 1 &&
+        failed_pair_registry.rejected_release_count() == 1;
+  }
+
+  {
+    SuiteRegistry close_duplicate_registry;
+    suite = nullptr;
+    bool close_duplicate_passed =
+        close_duplicate_registry.acquire("Known Suite", 1, &suite,
+                                         &resolve_known, nullptr, nullptr) == 0 &&
+        close_duplicate_registry.release("Known Suite", 1, nullptr) == 0;
+
+    const char* previous = set_suite_timeline_selector("GLOBAL_SETDOWN");
+    const auto close_first =
+        close_duplicate_registry.release("Known Suite", 1, nullptr);
+    const auto close_first_faults =
+        close_duplicate_registry.rejected_release_count();
+    const auto close_second =
+        close_duplicate_registry.release("Known Suite", 1, nullptr);
+    const auto close_second_faults =
+        close_duplicate_registry.rejected_release_count();
+    close_duplicate_passed = close_duplicate_passed &&
+        close_first == 1 && close_first_faults == 0 &&
+        close_second == 1 && close_second_faults == 1;
+    set_suite_timeline_selector(previous);
+
+    SuiteRegistry non_close_duplicate_registry;
+    suite = nullptr;
+    bool non_close_duplicate_passed =
+        non_close_duplicate_registry.acquire("Known Suite", 1, &suite,
+                                             &resolve_known, nullptr, nullptr) == 0 &&
+        non_close_duplicate_registry.release("Known Suite", 1, nullptr) == 0 &&
+        non_close_duplicate_registry.release("Known Suite", 1, nullptr) == 1 &&
+        non_close_duplicate_registry.rejected_release_count() == 1;
+
+    SuiteRegistry never_acquired_close_registry;
+    previous = set_suite_timeline_selector("GLOBAL_SETDOWN");
+    const bool never_acquired_close_passed =
+        never_acquired_close_registry.release("Known Suite", 1, nullptr) ==
+            1 &&
+        never_acquired_close_registry.rejected_release_count() == 1;
+    set_suite_timeline_selector(previous);
+    passed = passed && close_duplicate_passed && non_close_duplicate_passed &&
+        never_acquired_close_passed;
+  }
 
   {
     const auto baseline = registry.snapshot();

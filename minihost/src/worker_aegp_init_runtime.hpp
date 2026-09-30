@@ -11,10 +11,23 @@ using DeathHook = int32_t(__cdecl*)(void*, void*);
 using CommandHook = int32_t(__cdecl*)(void*, void*, int32_t, uint32_t,
                                       uint8_t, uint8_t*);
 
-struct UpdateMenuRegistration { UpdateMenuHook hook{}; void* refcon{}; };
-struct IdleRegistration { IdleHook hook{}; void* refcon{}; };
-struct DeathRegistration { DeathHook hook{}; void* refcon{}; };
+struct UpdateMenuRegistration {
+  int32_t plugin_id{};
+  UpdateMenuHook hook{};
+  void* refcon{};
+};
+struct IdleRegistration {
+  int32_t plugin_id{};
+  IdleHook hook{};
+  void* refcon{};
+};
+struct DeathRegistration {
+  int32_t plugin_id{};
+  DeathHook hook{};
+  void* refcon{};
+};
 struct CommandRegistration {
+  int32_t plugin_id{};
   uint32_t priority{};
   int32_t command{};
   CommandHook hook{};
@@ -79,6 +92,8 @@ EventResult dispatch_idle(void* global_refcon);
 EventResult dispatch_command(void* global_refcon, int32_t command,
                              uint32_t hook_priority, uint8_t already_handled);
 EventResult dispatch_death(void* global_refcon);
+EventResult dispatch_death_for_plugin(int32_t plugin_id, void* global_refcon);
+void forget_plugin_registrations(int32_t plugin_id) noexcept;
 BasicDispatchResult dispatch_basic_events(void* global_refcon,
     bool update_menu, bool idle, bool command, int32_t command_id);
 

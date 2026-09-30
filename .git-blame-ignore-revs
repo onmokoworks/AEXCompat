@@ -7,3 +7,6 @@
 
 # Pin the toolchain and reformat to its style edition (issue #656).
 779b1046806d04a134f5c1cd3708d8e713776b46
+
+# Catch up the 7 files cargo fmt could not reach through include! (issue #1460).
+9f64534fe34f4c46b9daba33eecd93006571e503

@@ -152,7 +152,7 @@ arm64 Unicornが担保しているためである。
 
 - Rosettaのないarm64 environmentで動作する。
 - pinnedかつ再現可能なsourceからbuildできる。
-- GPL-2.0-only workerとの同梱がlicense上成立する。
+- MPL-2.0 sourceとGPLv2 Unicornを結合したworkerの配布条件がlicense上成立する。
 - private Apple APIを使わない。
 - signed、Hardened Runtime、notarized bundleで動作する。
 - JITを使う場合は`MAP_JIT`、write-protect、必要entitlementを配布artifactで検証する。
@@ -198,8 +198,10 @@ Win64 callback、実AEX、fallbackを再検証する。`disable-library-validati
 根拠なく追加しない。durable側のarm64 UnicornもTCG JITを使用するため、`MAP_JIT`、
 `com.apple.security.cs.allow-jit`、thread-local write protectionを含む実配布条件を別途検証する。
 
-worker crateは`GPL-2.0-only`であり、配布時には対応するsource提供とlicense textを含む
-GPL-2.0の義務をpackage設計へ組み込む。
+この文書作成時点ではworker crateを`GPL-2.0-only`と宣言していた。現在のAEXCompat-authored
+sourceはMPL-2.0だが、Unicornをlinkしたcombined executableの配布では、MPL-2.0 section 3.3に
+従って関連Covered SoftwareをGPL-2.0でも追加提供し、適用されるGPLv2の義務（対応source、
+build情報、license noticeを含む）をpackage設計へ組み込む。
 
 ## Reproduction record
 

@@ -1,7 +1,7 @@
 //! Render-session protocol test fixture (issue #98 PR-C).
 //!
 //! Speaks the worker side of docs/RENDER_SESSION_PROTOCOL_2026-07-19.md over
-//! the inherited transport exactly like `aex_render_worker --render-session-v1`
+//! the inherited transport exactly like `aex_worker --kind classic --render-session-v1`
 //! so broker `RenderSession` integration tests can exercise per-frame
 //! validation, the watchdog, and crash invalidation against a real isolated
 //! process without a native minihost build. The "render" is a byte inversion
@@ -9,6 +9,10 @@
 //!
 //! - `hang_frame`: never answers the first `render_frame` (watchdog target).
 //! - `crash_frame`: dies with an access-violation exit code mid-frame.
+//! - `heap_corruption_after_frame_0`: returns one valid Smart frame, then dies
+//!   with Windows heap-corruption status before reading the close request.
+//! - `heap_corruption_on_close_after_frame_0`: returns one valid Smart frame,
+//!   accepts the close request, then dies with Windows heap-corruption status.
 //! - `exit_leaving_descendant`: spawns a sleeping child that inherits the
 //!   session handles, then exits; pipe EOF never fires, only the process
 //!   watcher can see the death (protocol §7 three-way wait).
@@ -17,8 +21,16 @@
 //! - `bad_extent`: reports a packed byte count that disagrees with the
 //!   dimensions it reports alongside it.
 //! - `error_frame_0`: answers frame 0 with a frame-local error response.
-//! - `modal_frame`: reports its desktop, opens a MessageBox, and waits for the
-//!   broker watchdog (issue #351).
+//! - `selector_crash_frame_0`: answers frame 0 with a structured guarded-SEH
+//!   diagnostic whose numeric render error collides with PF error 512.
+//! - `selector_crash_wrong_error_frame_0`, `selector_crash_bad_selector_frame_0`,
+//!   `selector_crash_zero_code_frame_0`: the same diagnostic attached to a
+//!   render error the guard never substitutes, naming a selector outside the
+//!   worker's vocabulary, or carrying no exception code. Each must invalidate
+//!   the session.
+//! - `modal_frame`: opens a MessageBox on its first frame and waits for the
+//!   broker watchdog (issue #351). The desktop report itself is written at
+//!   launch, independent of this behavior.
 //!
 //! Cluster session support (issue #405,
 //! docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md): when the launch argv carries
@@ -40,6 +52,10 @@
 //! - `crash_on_inspect`: dies on the first `inspect_plugin`.
 //! - `inspect_error_plugin_1`: answers `inspect_plugin` for plugin 1 with a
 //!   structured parameter-local error.
+//! - `inspect_entrypoint_aegp_plugin_1`: answers plugin 1 with the real
+//!   entrypoint-error shape and a partial AEGP classification report.
+//! - `plugin_data_secondary`: requires the exact secondary PluginData launch
+//!   selector and renders a selector-specific pixel transform/report.
 
 #[cfg(windows)]
 mod worker {
@@ -115,9 +131,10 @@ mod worker {
         let Some(path) = std::env::var_os("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT") else {
             return;
         };
-        let Some(name) = current_desktop_name() else {
-            return;
-        };
+        // Report the lookup failure too: a caller that sees no file at all
+        // cannot tell "never reached this point" from "ran with no readable
+        // desktop", and those want different fixes.
+        let name = current_desktop_name().unwrap_or_else(|| "<desktop-name-unavailable>".into());
         let _ = std::fs::write(path, name);
     }
 
@@ -374,7 +391,14 @@ mod worker {
         })
     }
 
-    fn final_report(frames: u32, smart: bool, launch_payload: &str, module_audit: Value) -> String {
+    fn final_report(
+        frames: u32,
+        smart: bool,
+        launch_payload: &str,
+        module_audit: Value,
+        behavior: &str,
+        plugin_data_selector: Option<(u32, &str)>,
+    ) -> String {
         // The session-mechanics keys follow the worker flavor: the classic
         // report reuses its persistent-sequence fields while the smart report
         // carries dedicated session_* fields (protocol v1.1).
@@ -423,11 +447,51 @@ mod worker {
             .as_object_mut()
             .unwrap()
             .extend(mechanics.as_object().unwrap().clone());
+        if smart && behavior == "smart_output_untouched" {
+            report.as_object_mut().unwrap().extend(
+                serde_json::json!({
+                    "pre_render_error": 0,
+                    "smart_render_selector_error": 0,
+                    "smart_render_error": -6,
+                    "output_pixels_valid": false,
+                    "empty_result_rect": false,
+                    "result_rects_valid": true
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+        }
+        if let Some((index, match_name_hex)) = plugin_data_selector {
+            report["plugin_data"] = json!({
+                "selected_index": index,
+                "registrations": [
+                    {"index": 0, "name_hex": "4669727374", "match_name_hex": "6669727374", "category_hex": "54657374", "entrypoint": "EffectFirst"},
+                    {"index": 1, "name_hex": "5365636f6e64", "match_name_hex": match_name_hex, "category_hex": "54657374", "entrypoint": "EffectSecond"}
+                ]
+            });
+        }
         report.to_string()
     }
 
+    /// Drops the `--kind <route>` pair the broker puts in front of every worker
+    /// launch (#1495). This fixture emulates the real worker's transport, and
+    /// the real worker consumes that pair in `wmain` before its positional
+    /// contract starts, so the emulation has to do the same or every command
+    /// arrives one slot late and is rejected. The route itself does not change
+    /// what this fixture does; the session commands already say which one they
+    /// are.
+    fn strip_leading_kind(args: Vec<String>) -> Vec<String> {
+        if args.len() >= 3 && args[1] == "--kind" {
+            let mut stripped = vec![args[0].clone()];
+            stripped.extend_from_slice(&args[3..]);
+            return stripped;
+        }
+        args
+    }
+
     pub fn run() -> i32 {
-        let args: Vec<String> = std::env::args().collect();
+        let args = strip_leading_kind(std::env::args().collect());
         if args.len() == 2 && args[1] == "--sleep-child" {
             std::thread::sleep(std::time::Duration::from_secs(120));
             return 0;
@@ -458,6 +522,7 @@ mod worker {
         // so a broker writing the sidecar somewhere the real worker would
         // reject fails these tests too.
         let mut cluster_manifest: Option<ClusterManifest> = None;
+        let mut plugin_data_selector: Option<(u32, String)> = None;
         let mut effective = args.len();
         while effective >= 12 && args[effective - 2].starts_with("--") {
             let value = &args[effective - 1];
@@ -553,6 +618,13 @@ mod worker {
                         return 3;
                     }
                 }
+                "--plugin-data-selector-v1" => {
+                    let fields = value.split('|').collect::<Vec<_>>();
+                    if fields.as_slice() != ["v1", "1", "7365636f6e64"] {
+                        return 3;
+                    }
+                    plugin_data_selector = Some((1, "7365636f6e64".to_owned()));
+                }
                 _ => {}
             }
             effective -= 2;
@@ -614,6 +686,17 @@ mod worker {
             return 2;
         };
         let behavior = std::env::var("AEXCOMPAT_TEST_SESSION_BEHAVIOR").unwrap_or_default();
+        if behavior == "require_static_layer_slot3" && expected_layer_count != 1 {
+            return 3;
+        }
+        if behavior == "plugin_data_secondary" && plugin_data_selector.is_none() {
+            return 3;
+        }
+        // The desktop is assigned at launch, so report it here rather than
+        // from the frame handler: a caller whose frame deadline expires before
+        // this process reaches the handler still gets to observe which desktop
+        // it ran on.
+        report_desktop_for_test();
         let (Some(request), Some(response), Some(section)) = (
             env_handle("AEXCOMPAT_RENDER_SESSION_REQUEST_HANDLE"),
             env_handle("AEXCOMPAT_RENDER_SESSION_RESPONSE_HANDLE"),
@@ -691,6 +774,14 @@ mod worker {
                 if !read_exact(handle, &mut buffer) || buffer[0] != slot as u8 {
                     return EXIT_PROTOCOL_VIOLATION;
                 }
+                if behavior == "require_static_layer_slot3"
+                    && (slot != 3
+                        || layer_width != width
+                        || layer_height != height
+                        || !buffer.chunks_exact(4).all(|pixel| pixel == [3, 7, 11, 255]))
+                {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
                 if dynamic {
                     dynamic_layers.push((slot, handle, layer_bytes));
                     continue;
@@ -724,7 +815,12 @@ mod worker {
                 return EXIT_PROTOCOL_VIOLATION;
             };
             match message["type"].as_str() {
-                Some("close") => break,
+                Some("close") => {
+                    if behavior == "heap_corruption_on_close_after_frame_0" && frames == 1 {
+                        std::process::exit(0xC000_0374_u32 as i32);
+                    }
+                    break;
+                }
                 Some("render_frame") => {}
                 Some("swap_plugin") => {
                     // Exact-key strictness (design §4.1): only v, type, and
@@ -845,10 +941,7 @@ mod worker {
                 "hang_frame" => loop {
                     std::thread::sleep(std::time::Duration::from_secs(3600));
                 },
-                "modal_frame" => {
-                    report_desktop_for_test();
-                    show_modal_dialog_and_wait();
-                }
+                "modal_frame" => show_modal_dialog_and_wait(),
                 "crash_frame" => std::process::exit(0xC000_0005_u32 as i32),
                 "crash_frame_minidump" => {
                     // Same access-violation death as `crash_frame`, but first
@@ -889,6 +982,83 @@ mod worker {
                 let reply = format!(
                     "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
                      \"status\":\"error\",\"render_error\":-40}}"
+                );
+                if !write_message(response, &reply) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                continue;
+            }
+            if matches!(
+                behavior.as_str(),
+                "smart_output_untouched"
+                    | "smart_output_untouched_wrong_error"
+                    | "smart_output_untouched_dependency"
+                    | "smart_output_untouched_return_message"
+                    | "smart_output_untouched_ok"
+            ) && frame_index == 0
+            {
+                let render_error = if behavior == "smart_output_untouched" {
+                    -6
+                } else {
+                    -40
+                };
+                let reply = match behavior.as_str() {
+                    "smart_output_untouched_dependency" => format!(
+                        "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                         \"status\":\"error\",\"render_error\":-6,\
+                         \"missing_dependency\":\"runtime.dll\",\
+                         \"smart_output_untouched\":true}}"
+                    ),
+                    "smart_output_untouched_return_message" => format!(
+                        "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                         \"status\":\"error\",\"render_error\":-6,\
+                         \"return_message\":{{\"text\":\"failed\",\"display_requested\":false}},\
+                         \"smart_output_untouched\":true}}"
+                    ),
+                    "smart_output_untouched_ok" => format!(
+                        "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                         \"status\":\"ok\",\"render_error\":0,\
+                         \"smart_output_untouched\":true}}"
+                    ),
+                    _ => format!(
+                        "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                         \"status\":\"error\",\"render_error\":{render_error},\
+                         \"smart_output_untouched\":true}}"
+                    ),
+                };
+                if !write_message(response, &reply) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                continue;
+            }
+            if matches!(
+                behavior.as_str(),
+                "selector_crash_frame_0"
+                    | "selector_crash_wrong_error_frame_0"
+                    | "selector_crash_bad_selector_frame_0"
+                    | "selector_crash_zero_code_frame_0"
+            ) && frame_index == 0
+            {
+                let render_error = if behavior == "selector_crash_wrong_error_frame_0" {
+                    -40
+                } else {
+                    512
+                };
+                let selector = if behavior == "selector_crash_bad_selector_frame_0" {
+                    "smart render"
+                } else {
+                    "SMART_RENDER"
+                };
+                let exception_code: u32 = if behavior == "selector_crash_zero_code_frame_0" {
+                    0
+                } else {
+                    0xC000_0005
+                };
+                let reply = format!(
+                    "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                     \"status\":\"error\",\"render_error\":{render_error},\
+                     \"selector_crash\":{{\"selector\":\"{selector}\",\
+                     \"exception_code\":{exception_code}}}}}"
                 );
                 if !write_message(response, &reply) {
                     return EXIT_PROTOCOL_VIOLATION;
@@ -949,6 +1119,15 @@ mod worker {
             if view.read_u32(INPUT_GENERATION_OFFSET) != expected_generation {
                 return EXIT_INVARIANT_FAILURE;
             }
+            if matches!(
+                behavior.as_str(),
+                "heap_corruption_after_frame_0" | "heap_corruption_on_close_after_frame_0"
+            ) && frame_index == 0
+            {
+                eprintln!("stage:smart_render_begin");
+                let mut stderr = std::io::stderr();
+                let _ = std::io::Write::flush(&mut stderr);
+            }
             let mut output = vec![0u8; slot_bytes];
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -958,7 +1137,11 @@ mod worker {
                 );
             }
             for byte in &mut output {
-                *byte = 255 - *byte;
+                *byte = if behavior == "plugin_data_secondary" {
+                    *byte ^ 0x5a
+                } else {
+                    255 - *byte
+                };
             }
             // Stamp the received per-frame attribute digests into the frame so
             // integration tests can prove the v:2 fields actually reached the
@@ -1017,6 +1200,9 @@ mod worker {
             if !write_message(response, &reply) {
                 return EXIT_PROTOCOL_VIOLATION;
             }
+            if behavior == "heap_corruption_after_frame_0" && frame_index == 0 {
+                std::process::exit(0xC000_0374_u32 as i32);
+            }
             if behavior == "exit_after_frame_0" && frame_index == 0 {
                 // A unilateral exit with a clean-looking report and exit code
                 // 0, violating only the close-handshake contract.
@@ -1032,7 +1218,11 @@ mod worker {
                             &visited,
                             &swap_epochs,
                             &behavior
-                        )
+                        ),
+                        &behavior,
+                        plugin_data_selector
+                            .as_ref()
+                            .map(|(index, name)| (*index, name.as_str()))
                     )
                 );
                 return 0;
@@ -1050,7 +1240,11 @@ mod worker {
                     &visited,
                     &swap_epochs,
                     &behavior
-                )
+                ),
+                &behavior,
+                plugin_data_selector
+                    .as_ref()
+                    .map(|(index, name)| (*index, name.as_str()))
             )
         );
         0
@@ -1109,13 +1303,19 @@ mod worker {
                 Some("inspect_plugin") => {}
                 _ => return EXIT_PROTOCOL_VIOLATION,
             }
-            // Exact-key strictness (design §4.2): only v, type, plugin_index,
-            // and request_index may ride the message; the index must select a
-            // manifest member and the request serial must advance.
-            let keys_ok = message.as_object().map(|object| object.len()) == Some(4)
+            // Exact-key strictness (design §4.2): an effect selector is an
+            // all-or-nothing {index, exact match-name} extension.
+            let has_effect_selector = message.get("effect_index").is_some()
+                || message.get("effect_match_name_hex").is_some();
+            let keys_ok = message
+                .as_object()
+                .is_some_and(|object| object.len() == if has_effect_selector { 6 } else { 4 })
                 && message.get("v").is_some()
                 && message.get("plugin_index").is_some()
-                && message.get("request_index").is_some();
+                && message.get("request_index").is_some()
+                && (!has_effect_selector
+                    || (message.get("effect_index").is_some()
+                        && message.get("effect_match_name_hex").is_some()));
             let (Some(plugin_index), Some(request_index)) = (
                 message["plugin_index"].as_u64(),
                 message["request_index"].as_u64(),
@@ -1126,6 +1326,9 @@ mod worker {
                 || message["v"].as_u64() != Some(1)
                 || plugin_index as usize >= manifest.plugins.len()
                 || request_index != next_request_index
+                || (has_effect_selector
+                    && (message["effect_index"].as_u64() != Some(1)
+                        || message["effect_match_name_hex"].as_str() != Some("7365636f6e64")))
             {
                 return EXIT_PROTOCOL_VIOLATION;
             }
@@ -1134,6 +1337,69 @@ mod worker {
                 std::process::exit(0xC000_0005_u32 as i32);
             }
             let new_index = plugin_index as usize;
+            if matches!(
+                behavior,
+                "checkpoint_then_crash"
+                    | "checkpoint_then_done"
+                    | "duplicate_checkpoint"
+                    | "wrong_checkpoint_sha"
+                    | "checkpoint_bad_status"
+                    | "checkpoint_bad_setup"
+                    | "checkpoint_bad_params"
+                    | "checkpoint_bad_setdown"
+                    | "checkpoint_missing_parameters"
+                    | "checkpoint_then_noncrash_exit"
+            ) {
+                let (_, manifest_sha256) = &manifest.plugins[new_index];
+                let mut checkpoint = json!({
+                    "v": 1,
+                    "type": "inspect_checkpoint",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "plugin_sha256": if behavior == "wrong_checkpoint_sha" {
+                        "00".repeat(32)
+                    } else {
+                        manifest_sha256.clone()
+                    },
+                    "report": {
+                        "status": "parameters_inspected_pre_setdown",
+                        "global_setup_error": 0,
+                        "params_setup_error": 0,
+                        "global_setdown_error": -1,
+                        "parameters": []
+                    }
+                });
+                match behavior {
+                    "checkpoint_bad_status" => checkpoint["report"]["status"] = json!("wrong"),
+                    "checkpoint_bad_setup" => checkpoint["report"]["global_setup_error"] = json!(4),
+                    "checkpoint_bad_params" => {
+                        checkpoint["report"]["params_setup_error"] = json!(4)
+                    }
+                    "checkpoint_bad_setdown" => {
+                        checkpoint["report"]["global_setdown_error"] = json!(0)
+                    }
+                    "checkpoint_missing_parameters" => {
+                        checkpoint["report"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("parameters");
+                    }
+                    _ => {}
+                }
+                let checkpoint = checkpoint.to_string();
+                if !write_message(response, &checkpoint) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                if behavior == "duplicate_checkpoint" && !write_message(response, &checkpoint) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                if behavior == "checkpoint_then_crash" {
+                    std::process::exit(0xC000_0005_u32 as i32);
+                }
+                if behavior == "checkpoint_then_noncrash_exit" {
+                    std::process::exit(7);
+                }
+            }
             if current != Some(new_index) {
                 if let Some(old_index) = current {
                     epochs.push((old_index, new_index));
@@ -1154,6 +1420,40 @@ mod worker {
                     "error_kind": "selector_error"
                 })
                 .to_string()
+            } else if behavior == "inspect_selector_error_report_plugin_1" && new_index == 1 {
+                // The same parameter-local failure with the partial report the
+                // real worker's inspect column attaches (issue #1063): the
+                // selector outcome fields the caller records so the failure
+                // is attributable without a one-shot re-run.
+                json!({
+                    "v": 1,
+                    "type": "inspect_done",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "status": "error",
+                    "error_kind": "selector_error",
+                    "report": {
+                        "status": "selector_error",
+                        "global_setup_error": 14,
+                        "params_setup_error": -1,
+                        "global_setdown_error": -1,
+                        "reported_num_params": 0,
+                        "parameters": [],
+                        "missing_suites": [{"name": "PF AE Private Effect Suite", "version": 3}]
+                    }
+                })
+                .to_string()
+            } else if behavior == "inspect_entrypoint_aegp_plugin_1" && new_index == 1 {
+                json!({
+                    "v": 1,
+                    "type": "inspect_done",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "status": "error",
+                    "error_kind": "entrypoint_unresolved",
+                    "report": { "plugin_kind": "aegp_candidate" }
+                })
+                .to_string()
             } else if behavior == "inspect_identity_changed_plugin_1" && new_index == 1 {
                 // In-place identity mismatch (issue #751): the bytes on disk
                 // no longer match the manifest — plug-in-local, the session
@@ -1170,6 +1470,18 @@ mod worker {
                 .to_string()
             } else {
                 let (basename, sha256) = &manifest.plugins[new_index];
+                let selected_index = if has_effect_selector { 1 } else { 0 };
+                let plugin_data = if behavior == "plugin_data_secondary" {
+                    json!({
+                        "selected_index": selected_index,
+                        "registrations": [
+                            {"index": 0, "name_hex": "4669727374", "match_name_hex": "6669727374", "category_hex": "54657374", "entrypoint": "EffectFirst"},
+                            {"index": 1, "name_hex": "5365636f6e64", "match_name_hex": "7365636f6e64", "category_hex": "54657374", "entrypoint": "EffectSecond"}
+                        ]
+                    })
+                } else {
+                    Value::Null
+                };
                 json!({
                     "v": 1,
                     "type": "inspect_done",
@@ -1179,7 +1491,17 @@ mod worker {
                     "report": {
                         "status": "inspected",
                         "plugin": {"basename": basename, "sha256": sha256},
-                        "parameters": []
+                        "parameters": if has_effect_selector {
+                            vec![json!({"slot": 1, "name": "secondary", "kind": "float", "default": 2.0})]
+                        } else {
+                            Vec::<Value>::new()
+                        },
+                        "missing_suites": if has_effect_selector {
+                            vec![json!({"name": "Secondary Effect Suite", "version": 2})]
+                        } else {
+                            Vec::<Value>::new()
+                        },
+                        "plugin_data": plugin_data
                     }
                 })
                 .to_string()

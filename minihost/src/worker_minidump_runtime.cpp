@@ -18,7 +18,11 @@ namespace {
 // a pre-started dedicated thread because calling it from the faulting SEH
 // thread can deadlock in an unstable process.
 constexpr uint64_t kMaxMinidumpFileBytes = 64ull * 1024ull * 1024ull;
-constexpr DWORD kMinidumpWriterWaitMs = 2'000;
+// This wait includes DbgHelp generation, the bounded pipe copy, and the
+// broker acknowledgement. A loaded CI runner can legitimately take more than
+// two seconds after the dump itself is complete, but the faulting thread must
+// still fail closed instead of waiting indefinitely for a broken transport.
+constexpr DWORD kMinidumpWriterWaitMs = 10'000;
 constexpr std::array<unsigned char, 16> kMinidumpCompletionMarker{
     'A', 'E', 'X', 'D', 'U', 'M', 'P', '-',
     'C', 'O', 'M', 'P', 'L', 'E', 'T', 'E'};
@@ -33,6 +37,7 @@ std::atomic<bool> g_minidump_attempted{false};
 std::atomic<uint64_t> g_minidump_written_bytes{0};
 std::atomic<bool> g_minidump_broker_rejected{false};
 std::atomic<bool> g_minidump_handle_configured{false};
+std::atomic<bool> g_unhandled_reported{false};
 EXCEPTION_RECORD g_minidump_exception_record{};
 CONTEXT g_minidump_context{};
 EXCEPTION_POINTERS g_minidump_exception_pointers{};
@@ -340,15 +345,81 @@ int capture_seh_exception(EXCEPTION_POINTERS* information,
   return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// A foreign thread has no selector SEH frame or report builder. Emit one
+// bounded, path-free fingerprint before the process dies. Do not use iostream,
+// filesystem, or allocation on a potentially corrupted faulting thread.
+void report_unhandled_exception(EXCEPTION_POINTERS* information) {
+  if (!information || !information->ExceptionRecord ||
+      g_unhandled_reported.exchange(true, std::memory_order_acq_rel)) return;
+  char line[256]{};
+  std::size_t used = 0;
+  const auto append = [&](const char* text) {
+    while (*text && used + 1 < sizeof(line)) line[used++] = *text++;
+  };
+  const auto append_hex = [&](uint64_t value) {
+    append("0x");
+    char digits[16]{};
+    std::size_t count = 0;
+    do {
+      digits[count++] = "0123456789abcdef"[value & 0xf];
+      value >>= 4;
+    } while (value && count < sizeof(digits));
+    while (count && used + 1 < sizeof(line)) line[used++] = digits[--count];
+  };
+  append("stage:unhandled_seh code=");
+  append_hex(information->ExceptionRecord->ExceptionCode);
+
+  const auto address = reinterpret_cast<uintptr_t>(
+      information->ExceptionRecord->ExceptionAddress);
+  HMODULE module{};
+  if (address && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCWSTR>(address), &module)) {
+    append(module == GetModuleHandleW(nullptr) ? " site=worker" : " site=module");
+    wchar_t path[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(module, path, MAX_PATH);
+    if (length > 0 && length < MAX_PATH) {
+      const wchar_t* basename = path;
+      for (const wchar_t* cursor = path; *cursor; ++cursor)
+        if (*cursor == L'\\' || *cursor == L'/') basename = cursor + 1;
+      append(" module=");
+      std::size_t name_length = 0;
+      for (const wchar_t* cursor = basename; *cursor &&
+           name_length < 64 && used + 1 < sizeof(line); ++cursor, ++name_length) {
+        const wchar_t ch = *cursor;
+        line[used++] = (ch >= L'a' && ch <= L'z') ||
+            (ch >= L'A' && ch <= L'Z') ||
+            (ch >= L'0' && ch <= L'9') || ch == L'.' || ch == L'_' || ch == L'-'
+            ? static_cast<char>(ch) : '_';
+      }
+    } else {
+      append(" module=unknown");
+    }
+    append(" rva=");
+    append_hex(address - reinterpret_cast<uintptr_t>(module));
+  } else {
+    append(" site=unknown");
+  }
+  if (used + 1 < sizeof(line)) line[used++] = '\n';
+  DWORD written{};
+  const HANDLE stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
+  if (stderr_handle && stderr_handle != INVALID_HANDLE_VALUE)
+    WriteFile(stderr_handle, line, static_cast<DWORD>(used), &written, nullptr);
+}
+
 // Best-effort coverage for crashes that never reach an __except filter
 // (e.g. on foreign threads). Continue the search so default handling and the
 // nonzero exit code are unchanged.
 LONG WINAPI top_level_crash_filter(EXCEPTION_POINTERS* information) {
+  report_unhandled_exception(information);
   request_crash_minidump(information);
   return EXCEPTION_CONTINUE_SEARCH;
 }
 
 bool configure_from_inherited_handle() {
+  // Fault-site diagnostics are always on. A dump still requires the separate
+  // broker-provided opt-in handles below.
+  SetUnhandledExceptionFilter(top_level_crash_filter);
   wchar_t probe[2]{};
   if (GetEnvironmentVariableW(L"AEXCOMPAT_MINIDUMP_HANDLE", probe,
                               static_cast<DWORD>(std::size(probe))) == 0)
@@ -409,7 +480,6 @@ bool configure_from_inherited_handle() {
   }
   clear_minidump_env();
   g_minidump_handle_configured.store(true);
-  SetUnhandledExceptionFilter(top_level_crash_filter);
   return true;
 }
 
