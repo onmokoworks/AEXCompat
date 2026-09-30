@@ -1,6 +1,9 @@
 import json
+import os
 import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TRANSPORT = ROOT / "target/image-transport"
@@ -109,3 +112,49 @@ def test_sidecar_is_confined_to_broker_owned_transport_and_trailers_are_peeled()
         assert completed.returncode == 3
     finally:
         outside.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction path contract")
+def test_sidecar_accepts_owned_junction_parent_but_rejects_other_directory(tmp_path):
+    worker, kind = _workers()[0]
+    physical = tmp_path / "physical-target"
+    physical.mkdir()
+    junction = tmp_path / "target"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(physical)],
+        text=True, capture_output=True, check=False,
+    )
+    assert created.returncode == 0, created.stderr or created.stdout
+    try:
+        owned = junction / "image-transport"
+        owned.mkdir()
+        sidecar = owned / "animation.json"
+        sidecar.write_text(json.dumps(_valid()), encoding="utf-8")
+        accepted = subprocess.run(
+            [str(worker), "--kind", kind, "--self-test-parameter-animation-sidecar", str(sidecar)],
+            cwd=junction, text=True, capture_output=True, timeout=30, check=False,
+        )
+        assert accepted.returncode == 0, accepted.stderr or accepted.stdout
+        assert json.loads(accepted.stdout)["timelines"] == 1
+
+        outside = junction / "animation-outside.json"
+        outside.write_text(json.dumps(_valid()), encoding="utf-8")
+        rejected = subprocess.run(
+            [str(worker), "--kind", kind, "--self-test-parameter-animation-sidecar", str(outside)],
+            cwd=junction, text=True, capture_output=True, timeout=30, check=False,
+        )
+        assert rejected.returncode == 3, rejected.stderr or rejected.stdout
+
+        alias = owned / "alias.json"
+        try:
+            alias.symlink_to(sidecar)
+        except OSError:
+            pass  # Symlink creation is privilege-dependent on Windows.
+        else:
+            rejected_alias = subprocess.run(
+                [str(worker), "--kind", kind, "--self-test-parameter-animation-sidecar", str(alias)],
+                cwd=junction, text=True, capture_output=True, timeout=30, check=False,
+            )
+            assert rejected_alias.returncode == 3, rejected_alias.stderr or rejected_alias.stdout
+    finally:
+        junction.rmdir()

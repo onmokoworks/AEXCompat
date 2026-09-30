@@ -626,6 +626,53 @@ mod tests {
         fs::remove_dir_all(repository).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn aux_sample_under_target_junction_is_owned_but_external_sample_is_not() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let repository = std::env::temp_dir().join(format!("aexcompat-aux-junction-repo-{nonce}"));
+        let physical_target =
+            std::env::temp_dir().join(format!("aexcompat-aux-junction-target-{nonce}"));
+        let outside = std::env::temp_dir().join(format!("aexcompat-aux-junction-outside-{nonce}"));
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&physical_target).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let linked = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(repository.join("target"))
+            .arg(&physical_target)
+            .output()
+            .unwrap();
+        assert!(linked.status.success(), "mklink /J failed: {}", String::from_utf8_lossy(&linked.stderr));
+
+        let transport_root = repository.join("target/image-transport");
+        fs::create_dir_all(&transport_root).unwrap();
+        let mut channel = aux_fixture(&physical_target, "depth.f32", &[0.0, 0.5]);
+        channel.channel.samples[0].path = repository.join("target/depth.f32");
+        let transport = prepare_aux_transport(&repository, &[channel.clone()], &transport_root, nonce)
+            .expect("target junction is an owned source root")
+            .expect("manifest produced");
+        assert!(transport.manifest_path.is_file());
+        drop(transport);
+
+        let mut external = aux_fixture(&outside, "outside.f32", &[0.0, 0.5]);
+        external.channel.samples[0].path = outside.join("outside.f32");
+        assert!(prepare_aux_transport(&repository, &[external], &transport_root, nonce + 1).is_err());
+        let mut alias = channel.clone();
+        alias.channel.channel_type = i32::from_be_bytes(*b"GEN1");
+        alias.channel.name = "generic-alias".into();
+        alias.channel.samples[0].interpretation = crate::render_request::AuxInterpretation::Generic;
+        assert!(prepare_aux_transport(&repository, &[channel, alias], &transport_root, nonce + 2).is_err());
+
+        fs::remove_dir(repository.join("target")).unwrap();
+        fs::remove_dir_all(repository).unwrap();
+        fs::remove_dir_all(physical_target).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
     #[test]
     fn prepare_aux_transport_output_satisfies_the_session_aux_manifest_contract() {
         // #211: the length-1 session wrapper now carries aux channels through
@@ -689,13 +736,9 @@ mod tests {
         fs::remove_dir_all(repository).unwrap();
     }
 
-    // Issue #231: the worker's aux loader gates every declared path on
-    // `absolute().lexically_normal() == canonical()`, and MSVC drops the `\\?\`
-    // verbatim prefix in `canonical` but keeps it in `absolute`, so a manifest or
-    // sidecar path carrying that prefix (as `Path::canonicalize()` produces on
-    // Windows) is rejected and the render exits 3. prepare_aux_transport must
-    // hand the worker plain absolute paths. This guards the de-verbatim without
-    // needing the real worker; it is Windows-only because the prefix is.
+    // Issue #231: canonicalize() returns verbatim Windows paths, but the worker
+    // transport wire format remains plain absolute paths. This guards the
+    // de-verbatim contract without needing the real worker.
     #[cfg(windows)]
     #[test]
     fn aux_transport_de_verbatims_manifest_and_sidecar_paths() {

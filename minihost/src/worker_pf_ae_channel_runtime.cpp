@@ -1,6 +1,7 @@
 #include "worker_pf_ae_channel_runtime.hpp"
 
 #include "strict_json.hpp"
+#include "transport_path_identity.hpp"
 #include "worker_handle_runtime.hpp"
 
 #include <algorithm>
@@ -83,8 +84,8 @@ bool load_aux_manifest(const std::filesystem::path &manifest_path,
   std::error_code ec;
   const auto absolute = std::filesystem::absolute(manifest_path, ec);
   const auto canonical = std::filesystem::canonical(manifest_path, ec);
-  if (ec || !manifest_path.is_absolute() ||
-      absolute.lexically_normal() != canonical)
+  if (ec || !aexcompat::transport_path::parent_alias_only(
+                manifest_path, canonical, absolute))
     return false;
   const auto manifest_size = std::filesystem::file_size(canonical, ec);
   if (ec || manifest_size == 0 || manifest_size > 1024 * 1024)
@@ -176,7 +177,15 @@ bool load_aux_manifest(const std::filesystem::path &manifest_path,
           (interpretation=="motion_vectors" && dim!=2) ||
           (channel.channel_type==0x44505448 && (interpretation!="depth" || dim!=1))) return false;
       sample.sampling = sampling;
-      sample.time_scale=static_cast<uint32_t>(scale); const std::filesystem::path path=std::filesystem::u8path(path_text); const auto abs=std::filesystem::absolute(path,ec); const auto canon=std::filesystem::canonical(path,ec); if(ec||!path.is_absolute()||abs.lexically_normal()!=canon||canon.parent_path()!=canonical.parent_path()||!paths.insert(canon).second||std::filesystem::file_size(canon,ec)!=bytes)return false; std::string actual_hash; if(ec||!sha256_file(canon,actual_hash)||_stricmp(actual_hash.c_str(),declared_hash.c_str())!=0)return false;
+      sample.time_scale=static_cast<uint32_t>(scale);
+      const std::filesystem::path path=std::filesystem::u8path(path_text);
+      const auto abs=std::filesystem::absolute(path,ec);
+      const auto canon=std::filesystem::canonical(path,ec);
+      if(ec||!aexcompat::transport_path::parent_alias_only(path,canon,abs)||
+          canon.parent_path()!=canonical.parent_path()||!paths.insert(canon).second||
+          std::filesystem::file_size(canon,ec)!=bytes)return false;
+      std::string actual_hash;
+      if(ec||!sha256_file(canon,actual_hash)||_stricmp(actual_hash.c_str(),declared_hash.c_str())!=0)return false;
       std::ifstream raw(canon,std::ios::binary); std::vector<std::byte> raw_bytes(static_cast<std::size_t>(bytes)); if(!raw.read(reinterpret_cast<char*>(raw_bytes.data()),static_cast<std::streamsize>(bytes))||raw.peek()!=EOF)return false; auto values=std::make_shared<std::vector<float>>(static_cast<std::size_t>(width)*height*dim); const std::size_t stride=static_cast<std::size_t>(std::abs(channel.signed_row_bytes)), packed=static_cast<std::size_t>(width)*dim*sizeof(float); for(int32_t y=0;y<height;++y){const int32_t physical=channel.signed_row_bytes<0?height-1-y:y;std::memcpy(values->data()+static_cast<std::size_t>(y)*width*dim,raw_bytes.data()+static_cast<std::size_t>(physical)*stride,packed);} if(std::any_of(values->begin(),values->end(),[](float v){return !std::isfinite(v);}))return false; sample.values=std::move(values); channel.samples.push_back(std::move(sample)); }
     parsed.channels.push_back(std::move(channel));
   }
