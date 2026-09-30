@@ -158,6 +158,9 @@ jobs:
     timeout-minutes: 60
     env:
       PYTHONUTF8: "1"
+      # Preserve line tables for failed-test backtraces without emitting full
+      # debug information into every binary in the shared test archive.
+      CARGO_PROFILE_TEST_DEBUG: "1"
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
