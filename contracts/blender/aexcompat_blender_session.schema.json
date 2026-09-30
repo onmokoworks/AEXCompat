@@ -41,6 +41,7 @@
         "properties": {
           "slot": {"type": "integer", "minimum": 1},
           "name": {"type": "string"},
+          "group_path": {"$ref": "#/$defs/group_path"},
           "kind": {"enum": ["integer", "float", "angle"]},
           "minimum": {"type": "number"},
           "maximum": {"type": "number"},
@@ -65,6 +66,7 @@
         "properties": {
           "slot": {"type": "integer", "minimum": 1},
           "name": {"type": "string"},
+          "group_path": {"$ref": "#/$defs/group_path"},
           "kind": {"const": "color"},
           "color": {"$ref": "#/$defs/argb8"}
         },
@@ -75,6 +77,7 @@
         "properties": {
           "slot": {"type": "integer", "minimum": 1},
           "name": {"type": "string"},
+          "group_path": {"$ref": "#/$defs/group_path"},
           "kind": {"const": "point"},
           "components": {"$ref": "#/$defs/point2"}
         },
@@ -215,6 +218,11 @@
     }
   ],
   "$defs": {
+    "group_path": {
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": {"type": "string", "minLength": 1, "maxLength": 128,
+        "pattern": "^[^\\s\\u0000](?:[^\\u0000]*[^\\s\\u0000])?(?![\\s\\S])"}
+    },
     "argb8": {
       "type": "array", "minItems": 4, "maxItems": 4,
       "items": {"type": "integer", "minimum": 0, "maximum": 255}

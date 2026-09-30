@@ -362,6 +362,69 @@ def test_description_hides_unavailable_scalar_records(fake_render_environment, m
     assert [entry["name"] for entry in result["parameter_catalog"]] == ["Echo"]
 
 
+def test_description_preserves_nested_groups_only_on_editable_parameters(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    base = description["parameters"][0]
+
+    def record(slot, name, kind="float", **changes):
+        return {**base, "slot": slot, "name": name, "kind": kind, **changes}
+
+    description["parameters"] = [
+        record(1, "Flat"),
+        record(2, "Outer", "group_start", enabled=False),
+        record(3, "Strength"),
+        record(4, "Nested", "group_start"),
+        record(5, "Strength", "color"),
+        record(6, "Hidden", visible=False),
+        record(7, "", "group_end"),
+        record(8, "Center", "point", components=[25.0, 75.0, 0.0], component_count=2),
+        record(9, "", "group_end"),
+        record(10, "After"),
+    ]
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert [(entry["slot"], entry.get("group_path")) for entry in result["parameter_catalog"]] == [
+        (1, None), (3, ["Outer"]), (5, ["Outer", "Nested"]),
+        (8, ["Outer"]), (10, None),
+    ]
+    assert [entry["name"] for entry in result["parameter_catalog"]] == [
+        "Flat", "Strength", "Strength", "Center", "After",
+    ]
+    for invalid_path in (["Outer", ""], [" Outer "], ["Outer\n"]):
+        broken = json.loads(json.dumps(result))
+        broken["parameter_catalog"][1]["group_path"] = invalid_path
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, SCHEMA)
+
+
+@pytest.mark.parametrize("markers", [
+    [(2, "", "group_end")],
+    [(2, "Outer", "group_start")],
+    [(2, "", "group_start"), (4, "", "group_end")],
+    [(index, f"Level {index}", "group_start") for index in range(2, 11)]
+    + [(index, "", "group_end") for index in range(12, 21)],
+])
+def test_unbalanced_or_unbounded_group_metadata_falls_back_to_flat_catalog(
+    fake_render_environment, monkeypatch, markers,
+):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    base = description["parameters"][0]
+    description["parameters"] = [base] + [
+        {**base, "slot": slot, "name": name, "kind": kind}
+        for slot, name, kind in markers
+    ] + [{**base, "slot": 11, "name": "Still editable"}]
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert [(entry["slot"], entry["name"], entry.get("group_path"))
+            for entry in result["parameter_catalog"]] == [
+        (1, "Echo", None), (11, "Still editable", None),
+    ]
+
+
 def test_description_exposes_two_component_point_without_render(fake_render_environment, monkeypatch):
     plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
     description = _fake_description(plugin_sha, kind="point")
