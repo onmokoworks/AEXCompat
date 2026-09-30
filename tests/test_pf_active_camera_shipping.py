@@ -304,16 +304,21 @@ def test_shipping_authored_2d_layer_flags_and_transform(probe, tmp_path):
     assert pixels.getpixel((3, 1)) == (0, 0, 0, 255)
 
 
-def test_shipping_authored_layers_in_one_resident_batch(probe, tmp_path):
+@pytest.mark.parametrize("oriented", [False, True])
+def test_shipping_authored_layers_in_one_resident_batch(probe, tmp_path, oriented):
     input_path = tmp_path / "input.png"
     Image.new("RGBA", (4, 4), (50, 60, 70, 255)).save(input_path)
     output_dir = tmp_path / "frames"
     request_path = tmp_path / "batch.json"
     report_path = tmp_path / "report.json"
+    layers = layer_context(True)["scene_layers"]
+    if oriented:
+        layers[2]["rotation_degrees"] = [0, 0, 0]
+        layers[2]["orientation_degrees"] = [0, 0, 90]
     request_path.write_text(json.dumps({
         "schema_version": 1, "plugin": str(probe), "input_frames": [str(input_path)] * 3,
         "output_directory": str(output_dir), "time_scale": 30, "time_step": 1,
-        "scene_layers": layer_context(True)["scene_layers"],
+        "scene_layers": layers,
     }), encoding="utf-8")
     result = subprocess.run([str(BROKER), "render-video-batch", str(request_path), str(report_path)],
                             cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=60)
@@ -339,6 +344,59 @@ def test_shipping_authored_layer_and_animated_camera(probe, tmp_path):
     assert pixels.getpixel((1, 0)) == (20, 30, 40, 255)
     assert pixels.getpixel((0, 1)) == (241, 0, 0, 255)
     assert pixels.getpixel((1, 1)) == (138, 148, 158, 255)
+
+
+@pytest.mark.parametrize("case", ["orientation", "noncommuting", "reverse", "all_axes", "parent"])
+def test_shipping_authored_orientation_matrix(probe, tmp_path, case):
+    context = layer_context(case == "parent")
+    layer = context["scene_layers"][0]
+    if case == "parent":
+        parent = context["scene_layers"][2]
+        parent["rotation_degrees"] = [0, 0, 0]
+        parent["orientation_degrees"] = [0, 0, 90]
+        translation, basis = (70, 160, 173, 255), (0, 30, 20, 255)
+    elif case in ("noncommuting", "reverse", "all_axes"):
+        layer.update(anchor=[1, 2, 3], scale=[200, 300, 400],
+                     rotation_degrees=[90, 0, 0], orientation_degrees=[0, 90, 0])
+        # Rx * Oy * S maps anchor (1,2,3) to (12,2,6), not Oy * Rx.
+        translation, basis = (126, 146, 152, 255), (0, 0, 20, 255)
+        if case == "reverse":
+            layer.update(rotation_degrees=[0, 90, 0], orientation_degrees=[90, 0, 0])
+            translation, basis = (132, 160, 160, 255), (0, 30, 0, 255)
+        elif case == "all_axes":
+            layer.update(rotation_degrees=[0, 0, 0], orientation_degrees=[90, 90, 90])
+            translation, basis = (126, 142, 160, 255), (0, 0, 0, 255)
+    else:
+        layer["orientation_degrees"] = [0, 0, 90]
+        context["active_camera"] = animated_camera_context()["active_camera"]
+        translation, basis = (138, 148, 158, 255), (0, 10, 10, 255)
+    result, output = render(probe, tmp_path, case, 45, context)
+    assert result.returncode == 0, failure_summary(result)
+    assert json.loads(result.stdout)["suite_leases_balanced"] is True
+    pixels = Image.open(output).convert("RGBA")
+    assert pixels.getpixel((1, 1)) == translation
+    assert pixels.getpixel((2, 1)) == basis
+    if case == "orientation":
+        assert pixels.getpixel((0, 0)) == (2, 247, 100, 255)
+        assert pixels.getpixel((1, 0)) == (20, 30, 40, 255)
+
+
+@pytest.mark.parametrize("corruption", ["nonfinite", "range", "2d"])
+def test_shipping_orientation_rejects_without_output(probe, tmp_path, corruption):
+    context = layer_context()
+    layer = context["scene_layers"][0]
+    layer["orientation_degrees"] = [0, 0, 90]
+    if corruption == "nonfinite":
+        layer["orientation_degrees"][0] = float("nan")
+    elif corruption == "range":
+        layer["orientation_degrees"][0] = 36001
+    else:
+        layer["is_3d"] = False
+        layer["position"][2] = 0
+    result, output = render(probe, tmp_path, corruption, 45, context)
+    assert result.returncode != 0
+    assert not output.exists()
+    assert "frame reported error" not in result.stderr
 
 
 @pytest.mark.parametrize("corruption", ["cycle", "stale", "foreign", "parent_index", "duplicate",

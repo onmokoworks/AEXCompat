@@ -37,26 +37,32 @@ then evaluated by both PF Interface and AEGP from the same scene state.
 Single-frame `host_context.scene_layers` and resident-batch root `scene_layers`
 accept at most three static ordinary-layer records, using the existing native
 slots. Each record contains a typed `layer` identity including `index`, optional
-typed `parent`, `anchor`, `position`, percent `scale`, `rotation_degrees`, and
+typed `parent`, `anchor`, `position`, percent `scale`, `rotation_degrees`, optional
+`orientation_degrees` (three Euler angles, default zero), and
 `is_3d`. Every parent must resolve to a record in this same graph, including its
 generation and index; cycles and duplicate slots/IDs are rejected. Omission
-retains existing scene defaults. No orientation, easing, or ordinary-layer
+retains existing scene defaults. No easing or ordinary-layer
 keyframes are inferred from unsupported fields.
 
 Transforms retain the camera's finite positive-scale bounds. A 2D record must
-have zero out-of-plane anchor/position/XY rotation and Z scale 100, rather than
+have zero out-of-plane anchor/position/XY rotation, zero orientation, and Z scale 100, rather than
 silently discarding authored components. A composed near-singular scale is
 rejected before publication. Native composition uses the existing local order
-`T(position) * Rz * Ry * Rx * S * T(-anchor)`, with each parent's matrix on the
+`T(position) * Rz * Ry * Rx * Oz * Oy * Ox * S * T(-anchor)`, where R is per-axis
+rotation and O is orientation, with each parent's matrix on the
 left. This is the deterministic host contract, not established AE parity.
+Orientation must be finite and bounded to +/-36,000 degrees per component.
 
 An optional static/animated camera may coexist in a separate free slot, with a
 distinct ID in the same project; ordinary layers cannot name that camera as a
-parent. A combined `scene-graph:v1` envelope carries camera and ordinary graph
+parent. A combined `scene-graph:v1` envelope (21 fields per ordinary record) carries camera and ordinary graph
 through the existing scene auxiliary carrier. Both are validated before one
 registry bind and non-failing scene publication; a late invalid identity does
 not invalidate earlier handles or leave a partially rebound graph. Camera-only
 input retains its existing v1/v2 payload and camera-less input stays explicit.
+Nonzero orientation selects `scene-graph:v2`, appending three IEEE-f64 bit fields
+to every ordinary record (24 fields). Native decoding retains v1 as zero
+orientation; malformed v2 orientation is rejected before binding any identity.
 Both PF Interface effect-layer lookup and AEGP traversal/world matrices read
 the same bound records. These inputs do not create a general renderer or expand
 the native three-slot scene capacity.

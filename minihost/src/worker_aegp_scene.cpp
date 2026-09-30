@@ -188,6 +188,8 @@ bool build_layer_transform(const AegpLayerTransform& authored, AegpMatrix4& outp
         !finite_bounded(authored.position[index], kLinearLimit) ||
         !finite_bounded(authored.scale[index], kLinearLimit) ||
         !finite_bounded(authored.rotation_degrees[index], kRotationLimit) ||
+        !finite_bounded(authored.orientation_degrees[index], 36000.0) ||
+        (!authored.is_3d && authored.orientation_degrees[index] != 0.0) ||
         authored.scale[index] == 0.0) return false;
   }
 
@@ -249,11 +251,26 @@ bool build_layer_transform(const AegpLayerTransform& authored, AegpMatrix4& outp
   negative_anchor.mat[1][3] = -authored.anchor[1];
   negative_anchor.mat[2][3] = -authored.anchor[2];
 
-  // Row-major matrices multiply column vectors: T(position) * Rz * Ry * Rx
-  // * S(scale / 100) * T(-anchor), matching the authored AE transform order.
+  AegpMatrix4 orientation{};
+  set_identity(orientation);
+  // Separate Euler orientation is a deterministic host policy, not an
+  // assertion of AE parity. Apply X, then Y, then Z to column vectors.
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const double angle = authored.orientation_degrees[axis] * kPi / 180.0;
+    AegpMatrix4 turn{};
+    set_identity(turn);
+    const std::size_t first = (axis + 1) % 3;
+    const std::size_t second = (axis + 2) % 3;
+    turn.mat[first][first] = turn.mat[second][second] = std::cos(angle);
+    turn.mat[first][second] = -std::sin(angle);
+    turn.mat[second][first] = std::sin(angle);
+    orientation = multiply(turn, orientation);
+  }
+  // T(position) * RzRyRx(rotation) * RzRyRx(orientation) * S * T(-anchor).
+  // Zero orientation retains the previous rotation-only matrix contract.
   const AegpMatrix4 result = multiply(
       multiply(multiply(multiply(translation, rotate_z), rotate_y), rotate_x),
-      multiply(scale, negative_anchor));
+      multiply(orientation, multiply(scale, negative_anchor)));
   for (std::size_t row = 0; row < 4; ++row)
     for (std::size_t column = 0; column < 4; ++column)
       if (!std::isfinite(result.mat[row][column])) return false;
