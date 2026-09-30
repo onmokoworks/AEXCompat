@@ -4,6 +4,88 @@ const TEST_CODE: u64 = 0x1000_0000;
 const TEST_CXX_THROW: u64 = STUB_BASE + 0x80460;
 const TEST_THROW_INFO: u64 = TEST_CODE + 0x800;
 
+// Win64 (input records, output records, count, import stub) test trampoline.
+// Each 20-byte record holds XMM0 followed by MXCSR. This executes every
+// vector through the real guest import in one emulation start per MXCSR group.
+// The bytes are assembled from the documented instructions below rather than
+// generated at test time, so the fixture needs no host assembler or SDK.
+// push rbx/r12/r13/r14; align stack; copy arguments to preserved registers;
+// loop: movdqu xmm0,[r12]; ldmxcsr [r12+16]; call rbx;
+//       movdqu [r13],xmm0; stmxcsr [r13+16]; advance records;
+// restore stack/registers; ret.
+const XMM_IMPORT_BATCH_CODE: &[u8] = &[
+    0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x48, 0x83, 0xec, 0x28, 0x49, 0x89, 0xcc, 0x49, 0x89,
+    0xd5, 0x4d, 0x89, 0xc6, 0x4c, 0x89, 0xcb, 0xf3, 0x41, 0x0f, 0x6f, 0x04, 0x24, 0x41, 0x0f, 0xae,
+    0x54, 0x24, 0x10, 0xff, 0xd3, 0xf3, 0x41, 0x0f, 0x7f, 0x45, 0x00, 0x41, 0x0f, 0xae, 0x5d, 0x10,
+    0x49, 0x83, 0xc4, 0x14, 0x49, 0x83, 0xc5, 0x14, 0x49, 0xff, 0xce, 0x75, 0xda, 0x48, 0x83, 0xc4,
+    0x28, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc3,
+];
+const XMM_IMPORT_BATCH_INPUT: u64 = DATA_BASE + PAGE_SIZE;
+const XMM_IMPORT_BATCH_OUTPUT: u64 = DATA_BASE + PAGE_SIZE * 5;
+const XMM_IMPORT_BATCH_BYTES: u64 = PAGE_SIZE * 4;
+const XMM_IMPORT_RECORD_BYTES: usize = 20;
+
+fn map_xmm_import_batch_buffers(engine: &mut GuestEngine<'static>) {
+    for address in [XMM_IMPORT_BATCH_INPUT, XMM_IMPORT_BATCH_OUTPUT] {
+        engine
+            .unicorn
+            .mem_map(address, XMM_IMPORT_BATCH_BYTES, Prot::READ | Prot::WRITE)
+            .unwrap();
+    }
+}
+
+fn call_xmm_import_batch(
+    engine: &mut GuestEngine<'static>,
+    stub: u64,
+    inputs: &[f32],
+    mxcsr: u32,
+    upper_lane: u8,
+) -> Vec<([u8; 16], u32)> {
+    assert!(!inputs.is_empty());
+    let byte_count = inputs.len() * XMM_IMPORT_RECORD_BYTES;
+    assert!(byte_count <= XMM_IMPORT_BATCH_BYTES as usize);
+    let mut source = Vec::with_capacity(byte_count);
+    for &value in inputs {
+        let mut xmm0 = [upper_lane; 16];
+        xmm0[..4].copy_from_slice(&value.to_le_bytes());
+        source.extend_from_slice(&xmm0);
+        source.extend_from_slice(&mxcsr.to_le_bytes());
+    }
+    engine
+        .unicorn
+        .mem_write(XMM_IMPORT_BATCH_INPUT, &source)
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(XMM_IMPORT_BATCH_OUTPUT, &vec![0xcc; byte_count])
+        .unwrap();
+    engine
+        .call_win64(
+            TEST_CODE,
+            [
+                XMM_IMPORT_BATCH_INPUT,
+                XMM_IMPORT_BATCH_OUTPUT,
+                inputs.len() as u64,
+                stub,
+                0,
+                0,
+            ],
+        )
+        .unwrap();
+    engine
+        .unicorn
+        .mem_read_as_vec(XMM_IMPORT_BATCH_OUTPUT, byte_count)
+        .unwrap()
+        .chunks_exact(XMM_IMPORT_RECORD_BYTES)
+        .map(|record| {
+            (
+                record[..16].try_into().unwrap(),
+                u32::from_le_bytes(record[16..20].try_into().unwrap()),
+            )
+        })
+        .collect()
+}
+
 /// RSP at guest entry for a `call_win64` with `argument_count` slots: the
 /// frame holds the return address, the 32-byte home space, and one slot per
 /// argument beyond the four register slots, padded so RSP % 16 == 8 (mirrors
@@ -13130,7 +13212,8 @@ fn win64_crt_round_floor_ceil_family_uses_xmm0_and_preserves_edges() {
 #[test]
 fn win64_crt_floorf_translated_stub_preserves_mxcsr_and_upper_lanes() {
     const FLOORF: u64 = STUB_BASE + 0x1e0;
-    let mut engine = test_engine(&[0xc3]);
+    let mut engine = test_engine(XMM_IMPORT_BATCH_CODE);
+    map_xmm_import_batch_buffers(&mut engine);
     engine.unicorn.mem_write(FLOORF, &[0xc3]).unwrap();
     assert_eq!(
         install_win64_import(
@@ -13174,25 +13257,18 @@ fn win64_crt_floorf_translated_stub_preserves_mxcsr_and_upper_lanes() {
         }
     }
     for mxcsr in [
-        0x1fa0u64, 0x3fa0, 0x5fa0, 0x7fa0, 0x0f80, 0x1fc0, 0x9f80, 0x9fc0,
+        0x1fa0u32, 0x3fa0, 0x5fa0, 0x7fa0, 0x0f80, 0x1fc0, 0x9f80, 0x9fc0,
     ] {
-        for &value in &inputs {
-            let mut xmm0 = [0xa5; 16];
-            xmm0[..4].copy_from_slice(&value.to_le_bytes());
-            engine
-                .unicorn
-                .reg_write_long(RegisterX86::XMM0, &xmm0)
-                .unwrap();
-            engine.unicorn.reg_write(RegisterX86::MXCSR, mxcsr).unwrap();
-            engine.call_win64(FLOORF, [0; 6]).unwrap();
-            let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        let observed = call_xmm_import_batch(&mut engine, FLOORF, &inputs, mxcsr, 0xa5);
+        assert_eq!(observed.len(), inputs.len());
+        for (&value, (result, resulting_mxcsr)) in inputs.iter().zip(observed) {
             assert_eq!(
                 u32::from_le_bytes(result[..4].try_into().unwrap()),
                 value.floor().to_bits(),
                 "floorf({value:?}), MXCSR={mxcsr:#x}"
             );
-            assert_eq!(&result[4..], &xmm0[4..]);
-            assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap(), mxcsr);
+            assert_eq!(&result[4..], &[0xa5; 12]);
+            assert_eq!(resulting_mxcsr, mxcsr);
         }
     }
     for value in [f32::NAN, f32::from_bits(0xffc0_1234)] {
@@ -13285,7 +13361,8 @@ fn cvtsi2ss_just_outside_exact_range_uses_guest_rounding_mode() {
 #[test]
 fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lanes() {
     const ROUNDF: u64 = STUB_BASE + 0x1d0;
-    let mut engine = test_engine(&[0xc3]);
+    let mut engine = test_engine(XMM_IMPORT_BATCH_CODE);
+    map_xmm_import_batch_buffers(&mut engine);
     engine.unicorn.mem_write(ROUNDF, &[0xc3]).unwrap();
     assert_eq!(
         install_win64_import(
@@ -13339,25 +13416,18 @@ fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lan
         }
     }
     for mxcsr in [
-        0x1fa0u64, 0x3fa0, 0x5fa0, 0x7fa0, 0x0f80, 0x1fc0, 0x9f80, 0x9fc0,
+        0x1fa0u32, 0x3fa0, 0x5fa0, 0x7fa0, 0x0f80, 0x1fc0, 0x9f80, 0x9fc0,
     ] {
-        for &value in &inputs {
-            let mut xmm0 = [0x5a; 16];
-            xmm0[..4].copy_from_slice(&value.to_le_bytes());
-            engine
-                .unicorn
-                .reg_write_long(RegisterX86::XMM0, &xmm0)
-                .unwrap();
-            engine.unicorn.reg_write(RegisterX86::MXCSR, mxcsr).unwrap();
-            engine.call_win64(ROUNDF, [0; 6]).unwrap();
-            let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        let observed = call_xmm_import_batch(&mut engine, ROUNDF, &inputs, mxcsr, 0x5a);
+        assert_eq!(observed.len(), inputs.len());
+        for (&value, (result, resulting_mxcsr)) in inputs.iter().zip(observed) {
             assert_eq!(
                 u32::from_le_bytes(result[..4].try_into().unwrap()),
                 value.round().to_bits(),
                 "roundf({value:?}), MXCSR={mxcsr:#x}"
             );
-            assert_eq!(&result[4..], &xmm0[4..], "roundf changed upper XMM0 lanes");
-            assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap(), mxcsr);
+            assert_eq!(&result[4..], &[0x5a; 12], "roundf changed upper XMM0 lanes");
+            assert_eq!(resulting_mxcsr, mxcsr);
         }
     }
     // The guest may unmask inexact; integer rounding must not alter MXCSR.
