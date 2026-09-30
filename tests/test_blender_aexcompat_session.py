@@ -362,6 +362,31 @@ def test_description_hides_unavailable_scalar_records(fake_render_environment, m
     assert [entry["name"] for entry in result["parameter_catalog"]] == ["Echo"]
 
 
+def test_description_exposes_two_component_point_without_render(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind="point")
+    description["parameters"][0].update(name="Center", components=[50.0, 25.0, 0.0], component_count=2)
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    result = SESSION.build_response(description_request())
+    jsonschema.validate(result, SCHEMA)
+    assert result["parameter_catalog"] == [{
+        "slot": 1, "name": "Center", "kind": "point", "components": [50.0, 25.0],
+    }]
+
+
+@pytest.mark.parametrize("components,component_count", [
+    ([32769.0, 25.0, 0.0], 2), ([50.0, 25.0, 0.0], 1),
+])
+def test_description_rejects_unusable_point_default(fake_render_environment, monkeypatch, components, component_count):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind="point")
+    description["parameters"][0].update(components=components, component_count=component_count)
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: json.dumps(description).encode())
+    with pytest.raises(SESSION.SessionRequestError) as error:
+        SESSION.build_response(description_request())
+    assert error.value.failure_class == "parameter_description_error"
+
+
 @pytest.mark.parametrize("choices, maximum, expected", [
     (["Inside", "Outside", "Both"], 3.0, [
         {"value": 1, "label": "Inside"},
@@ -599,6 +624,74 @@ def test_color_and_scalar_overrides_share_one_description_and_frame(fake_render_
     broken["parameter_overrides"][1]["color"] = [255, 17, 34, 256]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(broken, SCHEMA)
+
+
+def test_point_and_scalar_overrides_share_one_description_and_frame(fake_render_environment, monkeypatch):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha)
+    point = {**description["parameters"][0], "slot": 2, "name": "Center", "kind": "point",
+             "components": [50.0, 50.0, 0.0], "component_count": 2}
+    description["parameters"].append(point)
+    description["defaults"].append(dict(point))
+    calls, observed = [], []
+
+    def harness(args, *unused, **kwargs):
+        calls.append(args)
+        if "--describe-aex" in args:
+            return json.dumps(description).encode()
+        observed.append(json.loads(Path(args[4]).read_text())["parameters"])
+        return _fake_harness(args, *unused, **kwargs)
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_overrides"] = [{"slot": 1, "value": 80.0}, {"slot": 2, "components": [20.0, 80.0]}]
+    result = SESSION.build_response(payload)
+    jsonschema.validate(result, SCHEMA)
+    assert observed == [[{**description["parameters"][0], "value": 80.0},
+                         {**point, "components": [20.0, 80.0, 0.0]}]]
+    assert len(calls) == 2
+    assert result["parameter_overrides"][1]["components"] == [20.0, 80.0]
+    assert "value" not in result["parameter_overrides"][1]
+    forged = json.loads(json.dumps(result))
+    forged["parameter_overrides"][1]["components"] = [20.0]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(forged, SCHEMA)
+
+
+@pytest.mark.parametrize("components", [
+    [1.0], [1.0, 2.0, 3.0], [True, 2.0], [float("nan"), 2.0],
+    [32769.0, 0.0], "1,2",
+])
+def test_point_override_rejects_bad_components_before_description(fake_render_environment, monkeypatch, components):
+    monkeypatch.setattr(SESSION, "_invoke_harness", lambda *_args, **_kwargs: pytest.fail("AEX described"))
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_overrides"] = [{"slot": 1, "components": components}]
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+
+
+@pytest.mark.parametrize("kind", ["float", "point"])
+def test_point_override_rejects_wrong_parameter_shape_before_render(fake_render_environment, monkeypatch, kind):
+    plugin_sha = hashlib.sha256(b"public test AEX identity").hexdigest()
+    description = _fake_description(plugin_sha, kind=kind)
+    if kind == "point":
+        description["parameters"][0].update(component_count=1, components=[50.0, 50.0, 0.0])
+    calls = []
+
+    def harness(args, *_unused, **_kwargs):
+        calls.append(args)
+        assert "--describe-aex" in args
+        return json.dumps(description).encode()
+
+    monkeypatch.setattr(SESSION, "_invoke_harness", harness)
+    payload = request("render_aex")
+    payload["plugin"] = {"source_relative_path": "effect.aex"}
+    payload["parameter_overrides"] = [{"slot": 1, "components": [20.0, 80.0]}]
+    with pytest.raises(SESSION.SessionRequestError):
+        SESSION.build_response(payload)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("color", [
