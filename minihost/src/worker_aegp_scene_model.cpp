@@ -374,6 +374,47 @@ bool Registry::identity_for_object(uint64_t project_id, uint64_t object_id,
   return false;
 }
 
+bool Registry::bind_authored_layer_identity(Identity current,
+                                            Identity authored,
+                                            Identity& output) noexcept {
+  if (current.kind != ObjectKind::layer ||
+      authored.kind != ObjectKind::layer ||
+      authored.project_id != current.project_id ||
+      authored.object_id == 0 || authored.object_id > INT32_MAX ||
+      authored.generation != current.generation)
+    return false;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_ || current.project_id != active_project_.project_id)
+    return false;
+  auto* record = find_locked(current);
+  if (!record) return false;
+  if (authored == current) {
+    output = current;
+    return true;
+  }
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    const auto& other = objects_[index];
+    if (other.live && other.snapshot.identity.project_id == authored.project_id &&
+        other.snapshot.identity.object_id == authored.object_id &&
+        other.snapshot.identity.kind == authored.kind)
+      return false;
+  }
+  for (auto& lease : borrowed_leases_)
+    if (lease.live && lease.target == current) lease.live = false;
+  record->snapshot.identity = authored;
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    auto& other = objects_[index];
+    if (!other.live) continue;
+    if (other.snapshot.owner == current) other.snapshot.owner = authored;
+    if (other.snapshot.related_item == current)
+      other.snapshot.related_item = authored;
+    if (other.snapshot.parent_layer == current)
+      other.snapshot.parent_layer = authored;
+  }
+  output = authored;
+  return true;
+}
+
 bool Registry::can_create_child(Identity owner) const noexcept {
   return can_create_children(owner, 1);
 }

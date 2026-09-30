@@ -355,6 +355,10 @@ fn render_with_artifact(
             Some(context) => crate::render_request::encode_spatial_context(context)?,
             None => None,
         };
+        let camera_trailer = match host_context {
+            Some(context) => crate::render_request::encode_active_camera(context)?,
+            None => None,
+        };
         let render_environment_trailer = match host_context {
             Some(context) => crate::render_request::encode_render_environment(context)?,
             None => None,
@@ -416,6 +420,7 @@ fn render_with_artifact(
             layers: session_layers,
             mask_trailer,
             spatial_trailer,
+            camera_trailer,
             render_environment_trailer,
             audio: session_audio,
             alpha_as_coverage_params,
@@ -543,6 +548,7 @@ struct SessionWrapperRequest<'a> {
     layers: Vec<crate::render_session::SessionLayer>,
     mask_trailer: Option<String>,
     spatial_trailer: Option<String>,
+    camera_trailer: Option<String>,
     render_environment_trailer: Option<String>,
     /// The session's audio source, or `None` when the render carries no audio.
     /// The trailer and the sidecar digest travel together so the gate, the
@@ -681,6 +687,7 @@ fn render_classic_via_length_one_session(
         layers: &request.layers,
         mask_trailer: request.mask_trailer.clone(),
         spatial_trailer: request.spatial_trailer.clone(),
+        camera_trailer: request.camera_trailer.clone(),
         render_environment_trailer: request.render_environment_trailer.clone(),
         audio_trailer: request.audio.as_ref().map(|audio| audio.trailer.clone()),
         alpha_as_coverage_params: request.alpha_as_coverage_params,
@@ -1230,6 +1237,7 @@ impl InteractiveRenderSession {
                 output_checksum_detail: false,
                 mask_trailer: None,
                 spatial_trailer: None,
+                camera_trailer: None,
                 render_environment_trailer: None,
                 audio_trailer: None,
                 alpha_as_coverage_params: &[],

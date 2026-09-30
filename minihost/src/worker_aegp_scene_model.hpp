@@ -163,6 +163,8 @@ class Registry {
   bool identity_for_legacy_item(void* legacy, Identity& output) const noexcept;
   bool identity_for_object(uint64_t project_id, uint64_t object_id,
                            ObjectKind expected, Identity& output) const noexcept;
+  bool bind_authored_layer_identity(Identity current, Identity authored,
+                                    Identity& output) noexcept;
 
   bool can_create_child(Identity owner) const noexcept;
   bool can_create_children(Identity owner, std::size_t object_count,

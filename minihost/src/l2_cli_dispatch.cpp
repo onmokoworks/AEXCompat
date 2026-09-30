@@ -38,6 +38,7 @@ AuxiliaryOptionResult strip_auxiliary_options(
   bool saw_dependency_dirs = false;
   bool saw_plugin_data_selector = false;
   bool saw_render_diagnostic_layout = false;
+  bool saw_scene_camera = false;
   int world_capture_count = 0;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
@@ -90,6 +91,10 @@ AuxiliaryOptionResult strip_auxiliary_options(
                hooks.parse_world_capture_target && world_capture_count < 16) {
       accepted = hooks.parse_world_capture_target(hooks.context, value);
       if (accepted) ++world_capture_count;
+    } else if (equals(flag, L"--scene-camera-v1") &&
+               hooks.parse_scene_camera && !saw_scene_camera) {
+      accepted = hooks.parse_scene_camera(hooks.context, value);
+      saw_scene_camera = accepted;
     } else {
       break;
     }

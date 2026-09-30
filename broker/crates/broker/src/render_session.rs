@@ -633,6 +633,8 @@ pub struct SessionOpenRequest<'a> {
     /// `encode_spatial_context`; carried in the session launch argv so the
     /// hoisted SEQUENCE_SETUP and every frame observe it (issue #98 W1-3).
     pub spatial_trailer: Option<String>,
+    /// Validated single authored camera snapshot, parsed before plug-in dispatch.
+    pub camera_trailer: Option<String>,
     /// Static render-environment trailer (`render:v1|`), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
@@ -1929,6 +1931,9 @@ impl RenderSession {
             ]);
         }
         append_plugin_data_selector_args(&mut args_after_plugin, plugin_data_selector)?;
+        if let Some(camera) = &request.camera_trailer {
+            args_after_plugin.extend(["--scene-camera-v1".to_owned(), camera.clone()]);
+        }
         // The session always launches at the render dimensions; an expand grows
         // the output slot in place mid-session (#262), so there is no launch-time
         // output-capacity trailer.
@@ -4178,6 +4183,7 @@ pub fn run_video_batch(
         output_checksum_detail: request.output_checksum_detail,
         mask_trailer: None,
         spatial_trailer: None,
+        camera_trailer: None,
         render_environment_trailer: None,
         audio_trailer: None,
         alpha_as_coverage_params: &request.alpha_as_coverage_params,

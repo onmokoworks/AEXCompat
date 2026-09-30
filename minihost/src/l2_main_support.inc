@@ -3472,6 +3472,7 @@ auto& g_user_changed_parameters = g_parameter_runtime.user_changed_parameters;
 bool parse_layer_transport_key(const wchar_t* text, ExternalLayerInput& layer);
 bool parse_mask_context_payload(const wchar_t* text);
 bool parse_spatial_context_payload(const wchar_t* text);
+bool parse_active_camera_payload(const wchar_t* text);
 bool parse_render_environment_payload(const wchar_t* text);
 bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output);
 
