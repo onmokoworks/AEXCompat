@@ -1111,6 +1111,7 @@ fn run_classic_fallback_once(
         output_checksum_detail: false,
         mask_trailer: None,
         spatial_trailer: None,
+        camera_trailer: None,
         render_environment_trailer: None,
         audio_trailer: None,
         alpha_as_coverage_params: &[],
@@ -1218,6 +1219,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 output_checksum_detail: false,
                 mask_trailer: None,
                 spatial_trailer: None,
+                camera_trailer: None,
                 render_environment_trailer: None,
                 // The multifilter bridge renders video frames only; an audio
                 // source would come from the host's audio graph, which it
