@@ -75,9 +75,16 @@ inline Result inspect(const unsigned char* pixels, std::size_t size,
       const std::size_t offset =
           (static_cast<std::size_t>(y) * width + x) * pixel_bytes;
       bool unwritten = true;
-      for (int32_t channel_byte = 0; channel_byte < pixel_bytes; ++channel_byte)
-        unwritten &= pixels[offset + channel_byte] ==
-            pattern_byte(x, y, pixel_bytes, channel_byte);
+      for (int32_t channel_byte = 0; channel_byte < pixel_bytes; ++channel_byte) {
+        // One differing byte proves this pixel is not the sentinel. Keep the
+        // exact all-byte predicate for matching pixels without generating the
+        // remaining sentinel bytes for already-written output.
+        if (pixels[offset + channel_byte] !=
+            pattern_byte(x, y, pixel_bytes, channel_byte)) {
+          unwritten = false;
+          break;
+        }
+      }
       auto& column_run = column_runs[static_cast<std::size_t>(x - promised[0])];
       if (!unwritten) {
         row_run = 0;

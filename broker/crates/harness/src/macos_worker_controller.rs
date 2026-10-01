@@ -546,7 +546,7 @@ pub(crate) fn terminate_process_group(child: &mut Child) -> Result<(), String> {
     if let Err(error) = signal_identities(&descendants, libc::SIGTERM) {
         errors.push(error);
     }
-    if let Err(error) = signal_group(pid, libc::SIGTERM) {
+    if let Err(error) = signal_group(child, libc::SIGTERM) {
         errors.push(error);
     }
     let leader_reaped = match wait_for_exit(child, TERM_GRACE) {
@@ -574,7 +574,7 @@ pub(crate) fn terminate_process_group(child: &mut Child) -> Result<(), String> {
     if let Err(error) = signal_identities(&descendants, libc::SIGKILL) {
         errors.push(error);
     }
-    if let Err(error) = signal_group(pid, libc::SIGKILL) {
+    if let Err(error) = signal_group(child, libc::SIGKILL) {
         errors.push(error);
     }
     if !leader_reaped {
@@ -735,7 +735,8 @@ fn process_group_exists(pid: libc::pid_t) -> Result<bool, String> {
     }
 }
 
-fn signal_group(pid: libc::pid_t, signal: libc::c_int) -> Result<(), String> {
+fn signal_group(child: &mut Child, signal: libc::c_int) -> Result<(), String> {
+    let pid = child.id() as libc::pid_t;
     // SAFETY: a negative, validated child pid addresses only its process group.
     let result = unsafe { libc::kill(-pid, signal) };
     if result == 0 {
@@ -745,6 +746,21 @@ fn signal_group(pid: libc::pid_t, signal: libc::c_int) -> Result<(), String> {
         if error.raw_os_error() == Some(libc::ESRCH) {
             Ok(())
         } else {
+            // Darwin excludes zombies from group signal delivery and can
+            // return EPERM for a group whose only member is an unreaped
+            // leader. Reap our own child, then require the entire group to
+            // be absent; EPERM alone is never evidence of successful cleanup.
+            // Escaped descendants remain subject to the separate identity
+            // checks in terminate_process_group.
+            if error.raw_os_error() == Some(libc::EPERM) {
+                let reaped = child
+                    .try_wait()
+                    .map_err(|reap_error| format!("reap macOS worker: {reap_error}"))?
+                    .is_some();
+                if reaped && !process_group_exists(pid)? {
+                    return Ok(());
+                }
+            }
             Err(format!("signal macOS worker process group {pid}: {error}"))
         }
     }
@@ -981,6 +997,36 @@ mod tests {
             .unwrap();
         // SAFETY: signal 0 only probes the exact recorded fixture PID.
         assert_eq!(unsafe { libc::kill(child_pid, 0) }, -1);
+    }
+
+    #[test]
+    fn zombie_only_group_is_reaped_before_classifying_signal_failure() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        // Do not use try_wait here: keeping the exited leader unreaped is
+        // precisely the Darwin group EPERM state this regression exercises.
+        let started = Instant::now();
+        loop {
+            // SAFETY: signal 0 probes only the isolated fixture group.
+            let result = unsafe { libc::kill(-pid, 0) };
+            if result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                break;
+            }
+            if started.elapsed() >= Duration::from_secs(2) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("fixture group {pid} did not reach unreaped-zombie EPERM state");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        signal_group(&mut child, libc::SIGTERM).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(!process_group_exists(pid).unwrap());
     }
 
     #[test]

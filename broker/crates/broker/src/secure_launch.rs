@@ -318,6 +318,10 @@ impl SecureSessionProcess {
         self.launched.as_ref()?.job_peak_commit_bytes()
     }
 
+    pub fn process_memory_limit_bytes(&self) -> Option<u64> {
+        Some(self.launched.as_ref()?.process_memory_limit_bytes())
+    }
+
     /// See `LaunchedIsolatedProcess::has_exited`.
     pub fn has_exited(&self) -> bool {
         self.launched
