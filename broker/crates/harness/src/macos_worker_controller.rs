@@ -17,6 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use crate::process_group_cleanup::{GroupState, observe_exit};
+
 const SESSION_PREFIX: &str = "aexcompat-macos-worker";
 const TERM_GRACE: Duration = Duration::from_millis(150);
 const MAX_TRACKED_DESCENDANTS: usize = 64;
@@ -722,15 +724,19 @@ fn signal_identities(identities: &[ProcessIdentity], signal: libc::c_int) -> Res
 }
 
 fn process_group_exists(pid: libc::pid_t) -> Result<bool, String> {
+    Ok(process_group_state(pid)?.exists())
+}
+
+fn process_group_state(pid: libc::pid_t) -> Result<GroupState, String> {
     // SAFETY: signal 0 performs an existence/permission probe without delivery.
     let result = unsafe { libc::kill(-pid, 0) };
     if result == 0 {
-        return Ok(true);
+        return Ok(GroupState::Present);
     }
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
-        Some(libc::ESRCH) => Ok(false),
-        Some(libc::EPERM) => Ok(true),
+        Some(libc::ESRCH) => Ok(GroupState::Absent),
+        Some(libc::EPERM) => Ok(GroupState::PermissionDenied),
         _ => Err(format!("probe macOS worker process group {pid}: {error}")),
     }
 }
@@ -753,13 +759,22 @@ fn signal_group(child: &mut Child, signal: libc::c_int) -> Result<(), String> {
             // Escaped descendants remain subject to the separate identity
             // checks in terminate_process_group.
             if error.raw_os_error() == Some(libc::EPERM) {
-                let reaped = child
+                let initial_reaped = child
                     .try_wait()
                     .map_err(|reap_error| format!("reap macOS worker: {reap_error}"))?
                     .is_some();
-                if reaped && !process_group_exists(pid)? {
+                let observation = observe_exit(
+                    initial_reaped,
+                    || wait_for_exit(child, TERM_GRACE),
+                    || process_group_state(pid),
+                )?;
+                if observation.fully_exited() {
                     return Ok(());
                 }
+                return Err(format!(
+                    "signal macOS worker process group {pid}: {error}; signal={signal}, initial_reaped={}, final_reaped={}, group={:?}",
+                    observation.initial_reaped, observation.final_reaped, observation.group
+                ));
             }
             Err(format!("signal macOS worker process group {pid}: {error}"))
         }
