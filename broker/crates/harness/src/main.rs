@@ -14,6 +14,9 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod macos_worker_controller;
 
+#[cfg(any(target_os = "macos", test))]
+mod process_group_cleanup;
+
 #[cfg(windows)]
 include!("windows.rs");
 
