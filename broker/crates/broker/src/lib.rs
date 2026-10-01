@@ -12,6 +12,7 @@ pub mod image_render;
 pub mod installed_runtime_roots;
 #[cfg(windows)]
 pub mod l2;
+pub mod memory_diagnostics;
 pub mod minidump_policy;
 pub mod observability;
 pub mod opencl_icd_adapter_binding;

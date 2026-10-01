@@ -1122,6 +1122,7 @@ pub struct RenderSession {
     last_output_generation: u32,
     frames_ok: u32,
     frames_errored: u32,
+    memory_monitor: crate::memory_diagnostics::MemoryMonitor,
     smart_output_untouched_frames: u32,
     parameter_update_frames: u32,
     opened: Instant,
@@ -2156,6 +2157,7 @@ impl RenderSession {
             last_output_generation: 0,
             frames_ok: 0,
             frames_errored: 0,
+            memory_monitor: crate::memory_diagnostics::MemoryMonitor::default(),
             smart_output_untouched_frames: 0,
             parameter_update_frames: 0,
             opened: Instant::now(),
@@ -2193,6 +2195,53 @@ impl RenderSession {
 
     pub fn invalidation(&self) -> Option<&SessionInvalidation> {
         self.invalidation.as_ref()
+    }
+
+    /// Bounded advisory telemetry; it never determines frame/session validity.
+    pub fn memory_advisory(&self) -> Value {
+        self.memory_monitor.report()
+    }
+
+    fn observe_frame_memory(&mut self, current_time: i32, outcome: FrameOutcome) -> FrameOutcome {
+        let (width, height) = match &outcome.status {
+            FrameStatus::Rendered { width, height, .. } => (*width, *height),
+            _ => (self.geometry.width, self.geometry.height),
+        };
+        let performance = &outcome.performance;
+        let changed = self
+            .memory_monitor
+            .observe(crate::memory_diagnostics::MemorySample {
+                frame_index: outcome.frame_index,
+                current_time,
+                width,
+                height,
+                live_commit_bytes: performance.worker_live_commit_bytes,
+                process_peak_commit_bytes: performance.worker_peak_commit_bytes,
+                job_peak_commit_bytes: performance.worker_job_peak_commit_bytes,
+                process_limit_bytes: self
+                    .process
+                    .as_ref()
+                    .and_then(|p| p.process_memory_limit_bytes()),
+            });
+        if changed {
+            let advisory = self.memory_advisory();
+            if advisory["warnings"]
+                .as_array()
+                .is_some_and(|w| w.is_empty())
+            {
+                tracing::info!(trend = %advisory["trend"],
+                    "resident worker memory advisory state changed: no active warning (missing telemetry is not recovery proof)");
+            } else {
+                tracing::warn!(
+                    warnings = %advisory["warnings"],
+                    trend = %advisory["trend"],
+                    live_commit_bytes = ?performance.worker_live_commit_bytes,
+                    live_limit_ratio = %advisory["live_limit_ratio"],
+                    "resident worker memory advisory state changed (attribution unknown; not a leak verdict)"
+                );
+            }
+        }
+        outcome
     }
 
     fn collect_exit(&mut self, wait: Duration) {
@@ -2809,7 +2858,7 @@ impl RenderSession {
                         .process
                         .as_ref()
                         .and_then(|process| process.job_peak_commit_bytes());
-                    return Ok(FrameOutcome {
+                    let outcome = FrameOutcome {
                         frame_index,
                         depth_provenance: None,
                         performance: FramePerformance {
@@ -2846,7 +2895,8 @@ impl RenderSession {
                                 selector_crash: done.selector_crash,
                             }
                         },
-                    });
+                    };
+                    return Ok(self.observe_frame_memory(current_time, outcome));
                 }
                 "ok" => {
                     let output_verify_started = Instant::now();
@@ -2934,7 +2984,7 @@ impl RenderSession {
                         .process
                         .as_ref()
                         .and_then(|process| process.job_peak_commit_bytes());
-                    return Ok(FrameOutcome {
+                    let outcome = FrameOutcome {
                         frame_index,
                         depth_provenance,
                         performance: FramePerformance {
@@ -2969,7 +3019,8 @@ impl RenderSession {
                             origin_x: output.origin_x,
                             origin_y: output.origin_y,
                         },
-                    });
+                    };
+                    return Ok(self.observe_frame_memory(current_time, outcome));
                 }
                 "resize_needed" => {
                     // The effect rendered larger than the launch slot; the worker
@@ -3591,6 +3642,7 @@ impl RenderSession {
                 "detail": invalidation.detail,
             })),
             "module_audit_warning": module_audit_warning,
+            "memory_advisory": self.memory_advisory(),
             "worker": worker,
             "final_report": final_report,
             "session_clean": session_clean,

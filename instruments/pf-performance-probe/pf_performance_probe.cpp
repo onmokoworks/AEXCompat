@@ -32,7 +32,7 @@ PF_Err render(PF_ParamDef* params[], PF_LayerDef* output) {
       output->width <= 0 || output->height <= 0)
     return PF_Err_BAD_CALLBACK_PARAM;
   const int mode = static_cast<int>(std::lround(params[kModeSlot]->u.fs_d.value));
-  if (mode < 0 || mode > 4) return PF_Err_BAD_CALLBACK_PARAM;
+  if (mode < 0 || mode > 6) return PF_Err_BAD_CALLBACK_PARAM;
   const std::uint64_t pixels = static_cast<std::uint64_t>(output->width) * output->height;
   volatile std::uint64_t work = 0;
   if (mode == 1) {
@@ -40,12 +40,16 @@ PF_Err render(PF_ParamDef* params[], PF_LayerDef* output) {
     // loop as mode 0. The sink contributes to a pixel so it cannot disappear.
     for (std::uint64_t i = 0; i < 2'000'000; ++i) work += i & 7;
   }
-  if (mode == 3 || mode == 4) {
-    const std::size_t bytes = mode == 3 ? kTemporaryBytes : kAllocationBytes;
+  if (mode >= 3 && mode <= 6) {
+    // Modes 5/6 magnify retained versus recovered commit above allocator
+    // noise, while bounding the retained/temporary allocation to 32 MiB.
+    const std::size_t bytes = mode == 6 ? 32 * kTemporaryBytes
+        : mode == 5 ? 2 * kTemporaryBytes
+        : mode == 3 ? kTemporaryBytes : kAllocationBytes;
     void* memory = VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!memory) return PF_Err_BAD_CALLBACK_PARAM;
     touch_pages(memory, bytes);
-    if (mode == 3) {
+    if (mode == 3 || mode == 6) {
       VirtualFree(memory, 0, MEM_RELEASE);
     } else if (g_retained_count < 16) {
       g_retained[g_retained_count++] = memory;
@@ -85,13 +89,18 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       return PF_Err_NONE;
     case PF_Cmd_PARAMS_SETUP: {
       PF_ParamDef def{};
-      PF_ADD_FLOAT_SLIDERX("Mode", 0, 4, 0, 4, 0, 1,
+      PF_ADD_FLOAT_SLIDERX("Mode", 0, 6, 0, 6, 0, 1,
                            PF_ValueDisplayFlag_NONE, 0, kModeSlot);
       out_data->num_params = 2;
       return PF_Err_NONE;
     }
     case PF_Cmd_RENDER:
       return render(params, output);
+    case PF_Cmd_GLOBAL_SETDOWN:
+      for (std::size_t i = 0; i < g_retained_count; ++i)
+        VirtualFree(g_retained[i], 0, MEM_RELEASE);
+      g_retained_count = 0;
+      return PF_Err_NONE;
     default:
       return PF_Err_NONE;
   }
