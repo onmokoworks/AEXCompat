@@ -288,6 +288,45 @@ fn incomplete(
 /// but no private paths, input bytes, or authorization material.
 #[cfg(windows)]
 pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
+    run_observations(request, None)
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug)]
+pub enum MemoryTimeProfile {
+    Repeat,
+    AdvanceThenRepeat,
+}
+
+#[cfg(windows)]
+impl MemoryTimeProfile {
+    fn time(self, frame: u32) -> i32 {
+        match self {
+            Self::Repeat => 0,
+            Self::AdvanceThenRepeat => frame.min(15) as i32,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Repeat => "repeat_time_zero",
+            Self::AdvanceThenRepeat => "advance_0_to_15_then_repeat_15",
+        }
+    }
+}
+
+/// Longer observations of the same ordinary session monitor. Exactly 32
+/// frames per fresh worker and at most 64 samples; no second classifier.
+#[cfg(windows)]
+pub fn run_memory(request: RunRequest<'_>, profile: MemoryTimeProfile) -> std::io::Result<Value> {
+    run_observations(request, Some(profile))
+}
+
+#[cfg(windows)]
+fn run_observations(
+    request: RunRequest<'_>,
+    profile: Option<MemoryTimeProfile>,
+) -> std::io::Result<Value> {
     use crate::image_render::{MAX_DIMENSION, MAX_PIXELS};
     use crate::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
     use sha2::{Digest, Sha256};
@@ -302,8 +341,11 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
         Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
     }
     if request.resolutions.is_empty()
-        || request.frames_per_resolution < 4
-        || request.frames_per_resolution > 16
+        || if profile.is_some() {
+            request.frames_per_resolution != 32
+        } else {
+            request.frames_per_resolution < 4 || request.frames_per_resolution > 16
+        }
         || request.resolutions.len() * request.frames_per_resolution as usize > MAX_SAMPLES
         || request.timeout_ms == 0
     {
@@ -343,9 +385,10 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
         "parameter_sha256": params_sha256,
         "render_path": if request.smart { "smart" } else { "classic" },
         "pixel_format": request.pixel_format.report_name(),
-        "current_time": 0,
+        "current_time": if profile.is_some() { None } else { Some(0) },
+        "time_profile": profile.map(MemoryTimeProfile::name).unwrap_or("repeat_time_zero"),
         "time_scale": 1,
-        "input_pattern": "normalized_xy_xor_v1",
+        "input_pattern": if profile.is_some() { "slanted_bilevel_lines_v1" } else { "normalized_xy_xor_v1" },
         "worker_admitted_plugin_sha256_per_session": [],
     });
     if request.plugin_path.parent().is_none() {
@@ -358,6 +401,8 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
     let mut samples = Vec::new();
     let mut session_open_ns = Vec::new();
     let mut worker_admitted_hashes = Vec::new();
+    let mut memory_sessions = Vec::new();
+    let mut output_identities = Vec::new();
     for (session_index, &(width, height)) in request.resolutions.iter().enumerate() {
         let pixel_count = width as usize * height as usize;
         let mut rgba = vec![0u8; pixel_count * 4];
@@ -369,6 +414,18 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
                 rgba[offset] = normalized_x;
                 rgba[offset + 1] = normalized_y;
                 rgba[offset + 2] = normalized_x ^ normalized_y;
+                if profile.is_some() {
+                    let level = if ((x * 11 * height as usize + y * 7 * width as usize)
+                        / (width as usize * height as usize))
+                        % 2
+                        == 0
+                    {
+                        0
+                    } else {
+                        255
+                    };
+                    rgba[offset..offset + 3].fill(level);
+                }
                 rgba[offset + 3] = 255;
             }
         }
@@ -401,7 +458,11 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
             height,
             pixel_format: request.pixel_format,
             time_step: 1,
-            total_time: 0,
+            total_time: if matches!(profile, Some(MemoryTimeProfile::AdvanceThenRepeat)) {
+                16
+            } else {
+                0
+            },
             time_scale: 1,
             frame_deadline: Duration::from_millis(request.timeout_ms),
             launch_environment: Default::default(),
@@ -421,7 +482,13 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
         let open_ns = opened_at.elapsed().as_nanos() as u64;
         session_open_ns.push(open_ns);
         for frame_index in 0..request.frames_per_resolution {
-            let outcome = match session.render_frame_with_parameters(frame_index, 0, &rgba, None) {
+            let current_time = profile.map(|p| p.time(frame_index)).unwrap_or(0);
+            let outcome = match session.render_frame_with_parameters(
+                frame_index,
+                current_time,
+                &rgba,
+                None,
+            ) {
                 Ok(outcome) => outcome,
                 Err(_) => {
                     let reason = session
@@ -473,6 +540,14 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
                     ));
                 }
             };
+            if profile.is_some() {
+                output_identities.push(json!({
+                    "session_index": session_index, "frame_index": frame_index,
+                    "current_time": current_time, "output_bytes": pixels.len(),
+                    "output_sha256": format!("{:x}", Sha256::digest(&pixels)),
+                    "changed_rgba_bytes": (pixels.len() == rgba.len()).then(|| pixels.iter().zip(&rgba).filter(|(a, b)| a != b).count()),
+                }));
+            }
             let timing = outcome.performance;
             samples.push(Sample {
                 width,
@@ -528,6 +603,12 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
                 None,
             ));
         }
+        if profile.is_some() {
+            memory_sessions.push(json!({
+                "session_index": session_index, "width": width, "height": height,
+                "cleanup_verified": true, "memory_advisory": close["memory_advisory"],
+            }));
+        }
     }
     let plugin_sha256_after = digest_file(request.plugin_path)?;
     if plugin_sha256_before != plugin_sha256_after
@@ -542,7 +623,14 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
             None,
         ));
     }
-    let mut report = summarize(&samples);
+    let mut report = if profile.is_some() {
+        json!({"advisory": true, "status": "available", "kind": "resident_memory_observations",
+            "sample_limit": MAX_SAMPLES, "sample_count": samples.len(),
+            "session_count": memory_sessions.len(), "sessions": memory_sessions,
+            "output_identities": output_identities})
+    } else {
+        summarize(&samples)
+    };
     identity["plugin_sha256_before_and_after"] = json!(plugin_sha256_before);
     identity["plugin_sha256_at_end"] = json!(plugin_sha256_after);
     report["identity"] = identity;

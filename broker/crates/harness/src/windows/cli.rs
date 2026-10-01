@@ -1052,7 +1052,9 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    if (args.len() == 5 || args.len() == 7) && args[1] == "--render-performance-diagnostics" {
+    if ((args.len() == 5 || args.len() == 7) && args[1] == "--render-performance-diagnostics")
+        || ((args.len() == 6 || args.len() == 8) && args[1] == "--render-memory-diagnostics")
+    {
         use aexcompat_broker::image_render::RenderPixelFormat;
         use aexcompat_broker::performance_diagnostics::{RunRequest, run};
         let plugin = match canonical_deverbatim(Path::new(&args[2])) {
@@ -1065,9 +1067,30 @@ fn main() -> eframe::Result {
         let plugin = plugin.as_path();
         let hash = required_plugin_hash(plugin);
         let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
-        if args.len() == 7 {
-            let slot = args[5].to_string_lossy().parse::<u32>().unwrap_or(0);
-            let value = args[6].to_string_lossy().parse::<f64>().unwrap_or(f64::NAN);
+        let memory = args[1] == "--render-memory-diagnostics";
+        let profile = if memory {
+            use aexcompat_broker::performance_diagnostics::MemoryTimeProfile;
+            Some(match args[5].to_string_lossy().as_ref() {
+                "repeat" => MemoryTimeProfile::Repeat,
+                "advance-then-repeat" => MemoryTimeProfile::AdvanceThenRepeat,
+                _ => {
+                    eprintln!("memory time profile must be repeat or advance-then-repeat");
+                    std::process::exit(1);
+                }
+            })
+        } else {
+            None
+        };
+        let parameter_offset = if memory { 6 } else { 5 };
+        if args.len() == parameter_offset + 2 {
+            let slot = args[parameter_offset]
+                .to_string_lossy()
+                .parse::<u32>()
+                .unwrap_or(0);
+            let value = args[parameter_offset + 1]
+                .to_string_lossy()
+                .parse::<f64>()
+                .unwrap_or(f64::NAN);
             let Some(parameter) = parameters.iter_mut().find(|item| item.slot == slot) else {
                 eprintln!("performance parameter slot was not discovered");
                 std::process::exit(1);
@@ -1096,17 +1119,28 @@ fn main() -> eframe::Result {
             }
         };
         let resolutions = [(320, 180), (640, 360), (1280, 720), (1920, 1080)];
-        let report = run(RunRequest {
+        let memory_resolutions = [(640, 360), (1920, 1080)];
+        let request = RunRequest {
             repository: &repository,
             plugin_path: plugin,
             plugin_sha256: &hash,
             parameters: &parameters,
             smart,
             pixel_format,
-            resolutions: &resolutions,
-            frames_per_resolution: 4,
+            resolutions: if memory {
+                &memory_resolutions
+            } else {
+                &resolutions
+            },
+            frames_per_resolution: if memory { 32 } else { 4 },
             timeout_ms: 30_000,
-        });
+        };
+        let report = match profile {
+            Some(profile) => {
+                aexcompat_broker::performance_diagnostics::run_memory(request, profile)
+            }
+            None => run(request),
+        };
         match report {
             Ok(value) => {
                 println!("{}", serde_json::to_string_pretty(&value).unwrap());
