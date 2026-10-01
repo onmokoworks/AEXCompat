@@ -16,6 +16,28 @@ int main() {
   };
   constexpr int32_t width = 8, height = 6;
   for (int32_t depth : {4, 8, 16}) {
+    // A change in any byte, including the last one, is sufficient. Every
+    // other pixel still matches the sentinel, so counts, bbox and runs must
+    // continue to identify them rather than accepting the whole frame.
+    for (int32_t changed_byte = 0; changed_byte < depth; ++changed_byte) {
+      std::vector<unsigned char> pixels(width * height * depth);
+      check(seed(pixels.data(), pixels.size(), width, height, width * depth,
+                 depth), "single-byte mutation can be seeded");
+      pixels[changed_byte] ^= 1;
+      const auto result = inspect(pixels.data(), pixels.size(), width, height,
+                                  depth, {0, 0, width, height});
+      check(result.geometry_valid && result.promised_pixels == width * height &&
+                result.unwritten_pixels == width * height - 1,
+            "one differing byte changes only its pixel classification");
+      check(result.bbox == std::array<int32_t, 4>{0, 0, width, height} &&
+                result.max_row_run == width && result.max_column_run == height,
+            "matching pixels retain exact bbox and runs after a byte mutation");
+      pixels[changed_byte] ^= 1;
+      const auto restored = inspect(pixels.data(), pixels.size(), width, height,
+                                    depth, {0, 0, width, height});
+      check(restored.unwritten_pixels == width * height,
+            "restored sentinel remains unwritten");
+    }
     for (int mutation = 0; mutation < 6; ++mutation) {
       std::vector<unsigned char> pixels(width * height * depth, 7);
       check(seed(pixels.data(), pixels.size(), width, height, width * depth,
