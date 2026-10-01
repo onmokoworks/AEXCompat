@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -695,9 +696,48 @@ bool verify_matrix_case(bool smart_case) {
   width = -1;
   height = -1;
   ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
-      &width, &height) == 0 && near(matrix.mat[0][3], -100.0) &&
-      near(matrix.mat[1][3], -200.0) && near(matrix.mat[2][3], 0.0) &&
+      &width, &height) == 0 && near(matrix.mat[3][0], 100.0) &&
+      near(matrix.mat[3][1], 200.0) && near(matrix.mat[3][2], 0.0) &&
       distance == expected_width && width == expected_width && height == expected_height;
+
+  // Consume public matrices as mathematical row vectors, as the external
+  // SDK Artie sample does. Testing transformed points avoids blessing the
+  // host's internal column-vector storage as an Adobe ABI convention.
+  const auto transform_sdk_point = [](const AegpMatrix4& value,
+                                      const std::array<double, 4>& point) {
+    std::array<double, 4> result{};
+    for (std::size_t column = 0; column < 4; ++column)
+      for (std::size_t row = 0; row < 4; ++row)
+        result[column] += point[row] * value.mat[row][column];
+    return result;
+  };
+  const std::array<double, 4> local_point{{3.0, -4.0, 5.0, 1.0}};
+  const std::array<double, 4> expected_world{{103.0, 196.0, 5.0, 1.0}};
+  const auto camera_point = transform_sdk_point(matrix, local_point);
+  AegpMatrix4 sdk_view{};
+  for (std::size_t axis = 0; axis < 4; ++axis) sdk_view.mat[axis][axis] = 1.0;
+  sdk_view.mat[3][0] = -100.0;
+  sdk_view.mat[3][1] = -200.0;
+  const auto round_trip_point = transform_sdk_point(sdk_view, camera_point);
+  AegpMatrix4 layer_world{};
+  const bool layer_world_ok = aegp_get_layer_to_world_xform(
+      &g_aegp_layers[2], &time, &layer_world) == 0;
+  const auto layer_point = transform_sdk_point(layer_world, local_point);
+  bool sdk_point_ok = layer_world_ok;
+  for (std::size_t component = 0; component < 4; ++component) {
+    sdk_point_ok = sdk_point_ok && std::isfinite(camera_point[component]) &&
+        near(camera_point[component], expected_world[component]) &&
+        std::isfinite(round_trip_point[component]) &&
+        near(round_trip_point[component], local_point[component]) &&
+        std::isfinite(layer_point[component]) &&
+        near(layer_point[component], expected_world[component]);
+  }
+  if (!sdk_point_ok)
+    std::fprintf(stderr, "AEGP SDK row-vector point contract failed: "
+        "camera=(%.9g,%.9g,%.9g,%.9g) layer=(%.9g,%.9g,%.9g,%.9g)\n",
+        camera_point[0], camera_point[1], camera_point[2], camera_point[3],
+        layer_point[0], layer_point[1], layer_point[2], layer_point[3]);
+  ok = ok && sdk_point_ok;
 
   scene_runtime_state().layer_camera_zoom[2] = 1400.0;
   matrix = {};
@@ -705,8 +745,8 @@ bool verify_matrix_case(bool smart_case) {
   width = -1;
   height = -1;
   ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
-      &width, &height) == 0 && near(matrix.mat[0][3], -100.0) &&
-      near(matrix.mat[1][3], -200.0) && distance == 1400.0 &&
+      &width, &height) == 0 && near(matrix.mat[3][0], 100.0) &&
+      near(matrix.mat[3][1], 200.0) && distance == 1400.0 &&
       width == expected_width && height == expected_height;
 
   auto& zoom_keyframes = scene_runtime_state().layer_camera_zoom_keyframes[2];
@@ -723,8 +763,8 @@ bool verify_matrix_case(bool smart_case) {
   width = -1;
   height = -1;
   ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &zoom_midpoint, &matrix,
-      &distance, &width, &height) == 0 && near(matrix.mat[0][3], -100.0) &&
-      near(matrix.mat[1][3], -200.0) && distance == 1500.0 &&
+      &distance, &width, &height) == 0 && near(matrix.mat[3][0], 100.0) &&
+      near(matrix.mat[3][1], 200.0) && distance == 1500.0 &&
       width == expected_width && height == expected_height;
   const suite_abi::AegpTime zoom_after{90, 30};
   matrix = {};
@@ -1033,8 +1073,8 @@ bool verify_authored_camera_transport_case() {
       g_hooks.get_camera_matrix(g_hooks.effect, &active, &matrix, &zoom,
           &width, &height) == 0 &&
       zoom == 800.0 && width == 640 && height == 480 &&
-      matrix.mat[0][3] == -10.0 && matrix.mat[1][3] == -20.0 &&
-      matrix.mat[2][3] == -30.0;
+      matrix.mat[3][0] == 10.0 && matrix.mat[3][1] == 20.0 &&
+      matrix.mat[3][2] == 30.0;
   ok = ok && observed;
   const suite_abi::AegpTime before{29, 30};
   camera = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
@@ -1071,10 +1111,10 @@ bool verify_authored_camera_transport_case() {
       scene.authored_camera_identity == layer &&
       g_hooks.get_camera_matrix(g_hooks.effect, &active, &matrix, &zoom,
           &width, &height) == 0 && zoom == 1000.0 &&
-      matrix.mat[0][3] == -20.0 && matrix.mat[1][3] == -30.0 &&
-      matrix.mat[2][3] == -40.0;
+      matrix.mat[3][0] == 20.0 && matrix.mat[3][1] == 30.0 &&
+      matrix.mat[3][2] == 40.0;
 
-  // Noncommuting Rz(rotation) * Rx(orientation). Check every inverse element,
+  // Noncommuting Rz(rotation) * Rx(orientation). Check every public world element,
   // including translation, rather than only the positive pixel magnitudes.
   scene.authored_camera_live = false;
   scene.active_camera_layer_index = -1;
@@ -1118,11 +1158,11 @@ bool verify_authored_camera_transport_case() {
   const bool released_orientation = registry.release(borrowed_orientation,
       scene_model::ObjectKind::layer, 1714, true);
   ok = ok && released_orientation;
-  const auto check_inverse = [&](double angle, const suite_abi::AegpTime& time) {
+  const auto check_public_world = [&](double angle, const suite_abi::AegpTime& time) {
     const double c = std::cos(angle), s = std::sin(angle);
     const double expected[4][4] = {
-        {0, 1, 0, -20}, {-c, 0, s, 10 * c - 30 * s},
-        {s, 0, c, -10 * s - 30 * c}, {0, 0, 0, 1}};
+        {0, 1, 0, 0}, {-c, 0, s, 0},
+        {s, 0, c, 0}, {10, 20, 30, 1}};
     if (g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &zoom,
             &width, &height) != 0 || zoom != 800.0 ||
         scene.authored_camera_identity != layer) return false;
@@ -1135,7 +1175,7 @@ bool verify_authored_camera_transport_case() {
   };
   constexpr double pi = 3.14159265358979323846;
   ok = ok && parse_active_camera_payload(payload(oriented).c_str()) &&
-      check_inverse(pi / 2, active);
+      check_public_world(pi / 2, active);
   scene.authored_camera_live = false;
   scene.active_camera_layer_index = -1;
   std::array<uint64_t, 60> oriented_keys{};
@@ -1152,8 +1192,8 @@ bool verify_authored_camera_transport_case() {
   ok = ok && !parse_active_camera_payload(payload(invalid_key_orientation).c_str()) &&
       !scene.authored_camera_live && !scene.layer_transform_keyframes[2][0].valid &&
       parse_active_camera_payload(payload(oriented_keys).c_str()) &&
-      check_inverse(0, {30, 30}) && check_inverse(pi / 4, active) &&
-      check_inverse(pi / 2, {60, 30});
+      check_public_world(0, {30, 30}) && check_public_world(pi / 4, active) &&
+      check_public_world(pi / 2, {60, 30});
 
   scene.active_camera_layer_index = saved_index;
   scene.authored_camera_identity = saved_identity;
@@ -1670,10 +1710,10 @@ bool verify_aegp_resizer_3d_chain() {
     return std::abs(actual - expected) < 1.0e-9;
   };
   const double expected[4][4] = {
-      {0.0, -0.5, 0.0, 11.0},
-      {2.0, 0.0, 0.0, 18.0},
-      {0.0, 0.0, 1.0, 27.0},
-      {0.0, 0.0, 0.0, 1.0}};
+      {0.0, 2.0, 0.0, 0.0},
+      {-0.5, 0.0, 0.0, 0.0},
+      {0.0, 0.0, 1.0, 0.0},
+      {11.0, 18.0, 27.0, 1.0}};
   for (std::size_t row = 0; row < 4; ++row)
     for (std::size_t column = 0; column < 4; ++column)
       ok = ok && near(matrix.mat[row][column], expected[row][column]);
@@ -1708,8 +1748,8 @@ bool verify_aegp_resizer_3d_chain() {
       parent != reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
   const void* expected_parent = parent;
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0 &&
-      near(matrix.mat[0][3], 110.0) && near(matrix.mat[1][3], 220.0) &&
-      near(matrix.mat[2][3], 30.0);
+      near(matrix.mat[3][0], 110.0) && near(matrix.mat[3][1], 220.0) &&
+      near(matrix.mat[3][2], 30.0);
   g_aegp_layer_parent_indices[1] = 2;
   matrix = matrix_sentinel;
   parent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
@@ -1744,8 +1784,8 @@ bool verify_aegp_resizer_3d_chain() {
   const AegpTime midpoint{30, 30};
   matrix = {};
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &midpoint, &matrix) == 0 &&
-      near(matrix.mat[0][3], 40.0) && near(matrix.mat[1][3], 50.0) &&
-      near(matrix.mat[2][3], 15.0);
+      near(matrix.mat[3][0], 40.0) && near(matrix.mat[3][1], 50.0) &&
+      near(matrix.mat[3][2], 15.0);
   keyframes[0].time = {1,1};
   keyframes[1].time = {2,1};
   keyframes[0].transform.anchor = {{0,0,0}};
@@ -1770,7 +1810,7 @@ bool verify_aegp_resizer_3d_chain() {
   const AegpTime fractional{3,2};
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &fractional, &matrix) == 0;
   const double animated_expected[4][4] = {
-      {-2,0,0,-31.5}, {0,-3,0,31}, {0,0,4,37}, {0,0,0,1}};
+      {-2,0,0,0}, {0,-3,0,0}, {0,0,4,0}, {-31.5,31,37,1}};
   for (std::size_t row = 0; row < 4; ++row)
     for (std::size_t column = 0; column < 4; ++column)
       ok = ok && near(matrix.mat[row][column], animated_expected[row][column]);
