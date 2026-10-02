@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <vector>
 
 using namespace aexcompat::render_lifecycle;
 
@@ -643,6 +644,81 @@ void checkpoint_capture_keeps_the_live_world_stride_and_bounds() {
 }  // namespace
 
 int main() {
+  // Primary world construction: independent pixel expectations plus the full
+  // strided allocation detect wrong row starts, shortened copies, padding
+  // writes and channel/depth changes. The legacy deep gradient's unused bytes
+  // deliberately remain zero, not an alternative "corrected" gradient.
+  for (const int32_t depth : {4, 8, 16}) {
+    for (const int32_t width : {1, 2, 3, 7, 16, 65, 1919, 4096}) {
+      for (const int32_t height : {1, 2, 5}) {
+        for (const int32_t padding : {0, 9, 32}) {
+          for (const std::size_t offset : {0u, 1u, 3u, 15u}) {
+            for (const bool external : {false, true}) {
+              if (!external && (width == 1 || height == 1)) continue;
+              const aexcompat::render::ImageRequest request{
+                  width, height, width * depth + padding, depth};
+              const std::size_t pixels = static_cast<std::size_t>(width) * height;
+              std::vector<unsigned char> rgba(pixels * 4);
+              const unsigned char levels[] = {0, 1, 127, 128, 254, 255};
+              for (std::size_t b = 0; b < rgba.size(); ++b) rgba[b] = levels[b % 6];
+              const auto original_rgba = rgba;
+              std::vector<unsigned char> expected_logical(pixels * depth, 0);
+              std::vector<unsigned char> world(32 + offset + request.rowbytes * height + 32, 0x5A);
+              auto expected_world = world;
+              for (int32_t y = 0; y < height; ++y) {
+                for (int32_t x = 0; x < width; ++x) {
+                  const std::size_t p = static_cast<std::size_t>(y) * width + x;
+                  auto* expected_pixel = expected_logical.data() + p * depth;
+                  if (external) {
+                    for (std::size_t c = 0; c < 4; ++c) {
+                      const uint32_t value = rgba[p * 4 + (c + 3) % 4];
+                      if (depth == 4) expected_pixel[c] = static_cast<unsigned char>(value);
+                      if (depth == 8) {
+                        const uint16_t converted = static_cast<uint16_t>((value * 32768 + 127) / 255);
+                        std::memcpy(expected_pixel + c * 2, &converted, 2);
+                      }
+                      if (depth == 16) {
+                        const float converted = value / 255.0f;
+                        std::memcpy(expected_pixel + c * 4, &converted, 4);
+                      }
+                    }
+                  } else {
+                    expected_pixel[0] = 255;
+                    expected_pixel[1] = static_cast<unsigned char>(x * 255 / (width - 1));
+                    expected_pixel[2] = static_cast<unsigned char>(y * 255 / (height - 1));
+                    expected_pixel[3] = static_cast<unsigned char>((x + y) * 255 / (width + height - 2));
+                  }
+                  // Deliberately per-byte reference, not the row-copy mechanism.
+                  for (int32_t b = 0; b < depth; ++b)
+                    expected_world[32 + offset + static_cast<std::size_t>(y) * request.rowbytes +
+                                   static_cast<std::size_t>(x) * depth + b] = expected_pixel[b];
+                }
+              }
+              std::vector<unsigned char> logical{0xDA, 0xDB};
+              check(aexcompat::render::build_argb_input(request, external ? &rgba : nullptr,
+                        logical, world.data() + 32 + offset), "primary input construction succeeds");
+              check(logical == expected_logical, "logical input channels/depth remain exact");
+              check(world == expected_world, "primary world active rows, padding and guards remain exact");
+              check(rgba == original_rgba, "primary RGBA source is unchanged");
+            }
+          }
+        }
+      }
+    }
+  }
+  {
+    const aexcompat::render::ImageRequest request{3, 2, 16, 4};
+    std::vector<unsigned char> invalid_rgba(23, 0xAB), logical{0xDA, 0xDB};
+    std::array<unsigned char, 64> world{};
+    world.fill(0x5A);
+    const auto before = world;
+    check(!aexcompat::render::build_argb_input(request, &invalid_rgba, logical, world.data()),
+          "primary input refuses a short RGBA frame");
+    check(world == before && logical == std::vector<unsigned char>({0xDA, 0xDB}),
+          "malformed input refusal does not write either buffer");
+    check(!aexcompat::render::build_argb_input(request, nullptr, logical, nullptr),
+          "primary input refuses a missing destination");
+  }
   checkpoint_capture_keeps_the_live_world_stride_and_bounds();
   diagnostic_world_layout_rejects_malformed_and_preserves_state();
   frame_setup_receives_the_offered_output_extent();
