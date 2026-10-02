@@ -3185,14 +3185,21 @@ fn native_carrier_opted_in_values(
 }
 
 fn thin_macho_is_x86_64(path: &Path) -> Result<bool, String> {
-    let bytes = std::fs::read(path)
+    let file = std::fs::File::open(path)
         .map_err(|error| format!("read guest worker architecture {}: {error}", path.display()))?;
-    if bytes.len() < 8 {
-        return Err(format!(
-            "guest worker is too small to be Mach-O: {}",
-            path.display()
-        ));
-    }
+    read_thin_macho_is_x86_64(file).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            format!("guest worker is too small to be Mach-O: {}", path.display())
+        } else {
+            format!("read guest worker architecture {}: {error}", path.display())
+        }
+    })
+}
+
+fn read_thin_macho_is_x86_64(mut reader: impl Read) -> std::io::Result<bool> {
+    // Architecture detection needs only magic/cputype, even for a large worker.
+    let mut bytes = [0u8; 8];
+    reader.read_exact(&mut bytes)?;
     let magic = u32::from_le_bytes(bytes[0..4].try_into().expect("four-byte slice"));
     let cpu = match magic {
         0xfeedfacf => u32::from_le_bytes(bytes[4..8].try_into().expect("four-byte slice")),
@@ -3751,6 +3758,88 @@ mod tests {
         std::fs::write(&arm, [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01]).unwrap();
         assert!(thin_macho_is_x86_64(&x86).unwrap());
         assert!(!thin_macho_is_x86_64(&arm).unwrap());
+    }
+
+    #[test]
+    fn explicit_worker_architecture_preserves_header_classification() {
+        for (header, expected) in [
+            ([0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1], true),
+            ([0xfe, 0xed, 0xfa, 0xcf, 1, 0, 0, 7], true),
+            ([0xcf, 0xfa, 0xed, 0xfe, 12, 0, 0, 1], false),
+            ([0xfe, 0xed, 0xfa, 0xcf, 1, 0, 0, 12], false),
+            // 32-bit thin, FAT, FAT64 and unknown magic remain unsupported.
+            ([0xce, 0xfa, 0xed, 0xfe, 7, 0, 0, 0], false),
+            ([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 1], false),
+            ([0xbe, 0xba, 0xfe, 0xca, 1, 0, 0, 0], false),
+            ([0xca, 0xfe, 0xba, 0xbf, 0, 0, 0, 1], false),
+            ([0xbf, 0xba, 0xfe, 0xca, 1, 0, 0, 0], false),
+            ([0; 8], false),
+        ] {
+            assert_eq!(read_thin_macho_is_x86_64(&header[..]).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn explicit_worker_architecture_preserves_short_and_io_errors() {
+        let session = WorkerSession::create().unwrap();
+        let path = session.root().join("worker");
+        assert!(
+            thin_macho_is_x86_64(&path)
+                .unwrap_err()
+                .starts_with("read guest worker architecture ")
+        );
+        let header = [0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1];
+        for length in 0..header.len() {
+            std::fs::write(&path, &header[..length]).unwrap();
+            assert_eq!(
+                thin_macho_is_x86_64(&path).unwrap_err(),
+                format!("guest worker is too small to be Mach-O: {}", path.display())
+            );
+        }
+        // A directory cannot be read as a worker file, including as root.
+        assert!(
+            thin_macho_is_x86_64(session.root())
+                .unwrap_err()
+                .starts_with("read guest worker architecture ")
+        );
+        struct Denied;
+        impl Read for Denied {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        assert_eq!(
+            read_thin_macho_is_x86_64(Denied).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn explicit_worker_architecture_reads_only_header_with_partial_reads() {
+        struct HeaderOnly {
+            remaining: &'static [u8],
+            interrupted: bool,
+        }
+        impl Read for HeaderOnly {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                assert!(!buffer.is_empty());
+                assert!(buffer.len() <= self.remaining.len(), "read beyond header");
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                let count = buffer.len().min(3);
+                buffer[..count].copy_from_slice(&self.remaining[..count]);
+                self.remaining = &self.remaining[count..];
+                Ok(count)
+            }
+        }
+        let mut reader = HeaderOnly {
+            remaining: &[0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1],
+            interrupted: false,
+        };
+        assert!(read_thin_macho_is_x86_64(&mut reader).unwrap());
+        assert!(reader.remaining.is_empty());
     }
 
     #[test]
