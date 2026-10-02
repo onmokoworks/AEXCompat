@@ -48,12 +48,14 @@ INDEPENDENT_BROKER_TARGETS = {
 }
 INDEPENDENT_HARNESS_TARGETS = {"description_cli", "render_fixture_cli"}
 NATIVE_LIB_TEST = "image_render::tests::worker_callback_addr_denial_round_trips_through_broker_diagnostics"
+NATIVE_HARNESS_BIN_TEST = "tests::live_still_primary_reopens_on_same_size_source_change"
 SILENT_SKIP_PREREQUISITES = (
     # One binary serves every route since #1495, so naming it once covers what
     # the discovery and classic executables used to cover separately.
     "target/minihost-build/aex_worker.exe",
     "target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex",
     "target/pf-param-utils-animation-probe-build/Release/pf_param_utils_animation_probe.aex",
+    "target/instruments-build/pf-wide-time-probe/pf_automatic_wide_time_allowed_probe.aex",
 )
 KNOWN_ISSUE_900_SKIP_LINES = {
     "skipping image+audio+layer session test: run tools/build-pf-visual-audio-probe.ps1 -target pf_visual_audio_layer_sidecar_probe first",
@@ -222,7 +224,7 @@ def independent_filter(independent: dict[str, set[str]]) -> str:
             f"({broker} & kind(=lib) - test(={NATIVE_LIB_TEST}))",
             f"({broker} & kind(=bin))",
             f"({broker} & kind(=test) & ({exact_union('binary', independent[BROKER])}))",
-            f"({harness} & kind(=bin))",
+            f"({harness} & kind(=bin) - test(={NATIVE_HARNESS_BIN_TEST}))",
             f"({harness} & kind(=test) & ({exact_union('binary', independent[HARNESS])}))",
         )
     )
@@ -234,6 +236,7 @@ def native_filter(native: dict[str, set[str]]) -> str:
     return " + ".join(
         (
             f"({broker} & kind(=lib) & test(={NATIVE_LIB_TEST}))",
+            f"({harness} & kind(=bin) & test(={NATIVE_HARNESS_BIN_TEST}))",
             f"({broker} & kind(=test) & ({exact_union('binary', native[BROKER])}))",
             f"({harness} & kind(=test) & ({exact_union('binary', native[HARNESS])}))",
         )

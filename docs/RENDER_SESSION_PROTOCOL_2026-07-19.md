@@ -189,6 +189,22 @@ capability になる (#264 の per-layer スロットは #268 でファイル転
 ファイルを session の間保持し、session 終了時 (drop) に削除する。継承 read HANDLE は
 broker が所有し drop で閉じる。
 
+Smart sessions may explicitly publish a time-invariant primary with the same
+four-field form at **slot 0** (#1746). It must match the session dimensions and
+every submitted primary RGBA8 frame. It cannot be timed, dynamic, part of a
+cluster, or combined with custom secondary world layouts, and counts toward
+the 64-layer limit. Changing the still source requires a new session. Current
+time uses the dispatch input; other times use retained exact primary history,
+then this explicitly supplied still source. A session without slot 0 continues
+to reject unavailable times; no current-frame alias or video look-ahead is implied.
+
+The single-image CLI and the GUI's `InteractiveRenderSession::open_still` supply
+this source from decoded pixels. Ordinary `open`/video batch callers do not.
+The GUI reopens on source-content changes, including same-size file rewrites.
+Reports record `primary_input_temporal_model`; slot 0 is not a secondary layer.
+The synthetic sweep declares its constant source as `static_smart_only`, so its
+results must not be presented as proof of future-frame support for moving video.
+
 W1-4b では timed layer を同 trailer の 6 フィールド形式 `slot,w,h,time,scale,handle`
 で運ぶ (4 フィールド `slot,w,h,handle` は static secondary)。物理スロットは layer 配列の
 index ごとに割り当てられるため、同じ semantic `slot` を持つ複数の timed layer

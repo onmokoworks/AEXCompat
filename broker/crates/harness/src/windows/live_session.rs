@@ -80,6 +80,7 @@ fn selected_interactive_session_selection(
 #[derive(Clone, PartialEq)]
 struct LiveSessionKey {
     plugin_sha256: String,
+    input_content_sha256: [u8; 32],
     /// Identity of every approved dependency: staged basename, size, and
     /// content hash. The sealed tree stages dependencies by basename, so a
     /// renamed DLL with identical bytes still needs a fresh session.
@@ -248,12 +249,18 @@ fn live_render(
 ) -> Result<(String, Option<PathBuf>), String> {
     use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
 
-    let (width, height, rgba) = {
+    let (width, height, rgba, input_content_sha256) = {
         let decoded = state.decode_input(&request.input_path)?;
-        (decoded.width, decoded.height, decoded.rgba.clone())
+        (
+            decoded.width,
+            decoded.height,
+            decoded.rgba.clone(),
+            decoded.content_sha256,
+        )
     };
     let key = LiveSessionKey {
         plugin_sha256: request.plugin_sha256.clone(),
+        input_content_sha256,
         dependency_identities: request
             .dependencies
             .iter()
@@ -321,23 +328,27 @@ fn live_render(
         Ok((body, Some(request.output.clone())))
     };
     if state.open.is_none() {
-        let opened = InteractiveRenderSession::open(InteractiveSessionOpen {
-            repository: &request.repository,
-            plugin_id: "experimental",
-            plugin_path: &request.plugin_path,
-            plugin_sha256: &request.plugin_sha256,
-            parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
-            selection: request.selection,
-            dependencies: request.dependencies.clone(),
-            dependency_search_dirs: request.dependency_search_dirs.clone(),
-            width,
-            height,
-            pixel_format: request.pixel_format,
-            time_step: request.timing.time_step,
-            total_time: request.timing.total_time,
-            time_scale: request.timing.time_scale,
-            timeout_ms: LIVE_RENDER_FRAME_DEADLINE_MS,
-        });
+        let opened = InteractiveRenderSession::open_still(
+            InteractiveSessionOpen {
+                repository: &request.repository,
+                plugin_id: "experimental",
+                plugin_path: &request.plugin_path,
+                plugin_sha256: &request.plugin_sha256,
+                parameters: (!request.parameters.is_empty())
+                    .then_some(request.parameters.as_slice()),
+                selection: request.selection,
+                dependencies: request.dependencies.clone(),
+                dependency_search_dirs: request.dependency_search_dirs.clone(),
+                width,
+                height,
+                pixel_format: request.pixel_format,
+                time_step: request.timing.time_step,
+                total_time: request.timing.total_time,
+                time_scale: request.timing.time_scale,
+                timeout_ms: LIVE_RENDER_FRAME_DEADLINE_MS,
+            },
+            &rgba,
+        );
         match opened {
             Ok(session) => {
                 state.session_generation += 1;

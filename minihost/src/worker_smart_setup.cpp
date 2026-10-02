@@ -331,14 +331,17 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
           layer.time_scale == request.external_time_scale &&
           layer.time >= 0 && layer.time <= request.external_total_time &&
           layer.width == plan.width && layer.height == plan.height;
-      if (!historical_input &&
+      const bool still_input = layer.slot == 0 && !layer.timed && !layer.dynamic &&
+          !layer.has_world_layout && layer.width == plan.width &&
+          layer.height == plan.height;
+      if (!historical_input && !still_input &&
           (layer.slot <= 0 ||
            static_cast<std::size_t>(layer.slot) >= definitions.size() ||
            runtime.records[layer.slot - 1].type != 0)) return false;
       if (layer.width <= 0 || layer.height <= 0 || layer.rgba.size() !=
           static_cast<std::size_t>(layer.width) * layer.height * 4) return false;
-      const int32_t layer_pixel_bytes = layer.pixel_bytes != 0
-          ? layer.pixel_bytes : plan.pixel_bytes;
+      const int32_t layer_pixel_bytes = layer.slot == 0 ? plan.input_pixel_bytes :
+          (layer.pixel_bytes != 0 ? layer.pixel_bytes : plan.pixel_bytes);
       if (layer.has_world_layout && layer.row_padding % layer_pixel_bytes != 0)
         return false;
       auto& pixels = prepared.hosted_pixels[layer_index];
@@ -377,6 +380,12 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
         std::memcpy(world.data() + 108, &layer.origin_y, sizeof(layer.origin_y));
         std::memcpy(world.data() + 44, layer.extent.data(), sizeof(layer.extent));
       }
+      if (layer.slot == 0) {
+        // Temporal primary views share the current primary's spatial metadata,
+        // but retain their own pixels and ownership.
+        std::memcpy(world.data() + 104, request.input_world->data() + 104, 8);
+        std::memcpy(world.data() + 44, request.input_world->data() + 44, 16);
+      }
       if (!render::capture_requested_world(
               "smart-layer-slot" + std::to_string(layer.slot), world,
               pixels.data(), pixels.size(), layer_pixel_bytes)) return false;
@@ -388,7 +397,7 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
           request.external_time_scale;
       const bool same_time = static_cast<int64_t>(layer.time) * requested_scale ==
           static_cast<int64_t>(requested_time) * layer.time_scale;
-      if (!historical_input && (!layer.timed || same_time))
+      if (layer.slot != 0 && (!layer.timed || same_time))
         copy_world_into_param_def(definitions[layer.slot], world);
       smart_state.hosted_layers.push_back({layer.slot, layer.time, layer.time_scale,
           layer.timed, layer.width, layer.height, -1, world.data(),

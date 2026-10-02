@@ -294,7 +294,10 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
     write_world_extent_hint(hosted->view_world, hosted->checkout_rect);
     write_checkout_result(result, hosted->checkout_rect,
                           {0, 0, hosted->width, hosted->height},
-                          hosted->width, hosted->height);
+                          index == 0 && runtime.full_resolution_width > 0
+                              ? runtime.full_resolution_width : hosted->width,
+                          index == 0 && runtime.full_resolution_height > 0
+                              ? runtime.full_resolution_height : hosted->height);
     hosted->checkout_id = checkout_id;
     forget_checkout(runtime, checkout_id);
     runtime.pixel_checkouts.push_back({checkout_id, hosted->world,
@@ -670,6 +673,28 @@ bool checkout_intersection_self_test() {
                          hosted_result.data()) == 4 && passed;
   runtime.hosted_layers.pop_back();
   runtime.hosted_layers.pop_back();
+  // Explicit still pixels satisfy a future checkout, without replacing the
+  // current dispatch world. Downsampled views retain primary reference size.
+  runtime.hosted_layers.push_back({0, 0, 1, false, 640, 360, -1,
+      prior_input.data(), prior_view.data(), {-1, -1, -1, -1}});
+  runtime.full_resolution_width = 1280;
+  runtime.full_resolution_height = 720;
+  passed = pre_checkout_layer(nullptr, 0, 12, nullptr, 8, 1, 30,
+                              hosted_result.data()) == 0 &&
+      checkout_pixels(nullptr, 12, &prior_pixels) == 0 &&
+      prior_pixels == prior_view.data() && checkin_pixels(nullptr, 12) == 0 && passed;
+  std::array<int32_t, 2> reference_size{};
+  std::memcpy(reference_size.data(), hosted_result.data() + 44, sizeof(reference_size));
+  passed = reference_size == std::array<int32_t, 2>{1280, 720} && passed;
+  forget_checkout(runtime, 12);
+  passed = pre_checkout_layer(nullptr, 0, 13, nullptr, 7, 1, 30,
+                              hosted_result.data()) == 0 &&
+      checkout_pixels(nullptr, 13, &current_pixels) == 0 &&
+      current_pixels == input_view.data() && checkin_pixels(nullptr, 13) == 0 && passed;
+  forget_checkout(runtime, 13);
+  runtime.hosted_layers.pop_back();
+  runtime.full_resolution_width = 0;
+  runtime.full_resolution_height = 0;
   void* checked_out{};
   // Re-checking out an id answers the NEW geometry, leaves exactly one
   // registration, and that registration carries the new answer. Refusing the
