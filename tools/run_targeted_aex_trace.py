@@ -3,6 +3,13 @@
 
 The input manifest is intentionally local: it names files to execute.  The
 emitted report is portable and contains identities rather than those paths.
+Both successful traces and partial failure reports replace known paths with
+semantic tokens; other absolute path values (Windows/POSIX, even outside home)
+use <absolute-path>, including filename punctuation. Free-form message/reason
+text consumes unknown paths through spaces and ordinary punctuation until a
+newline, ': ' diagnostic suffix, or '; reason=' suffix; enclosing quotes delimit
+quoted paths. This is a conservative diagnostic grammar, not universal natural-
+language path parsing. The diagnostic byte bound applies after redaction.
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
@@ -486,28 +493,53 @@ def stage_sources(
     return staged_worker, staged_cases
 
 
-def _redact_text(value: str, replacements: dict[str, str]) -> str:
+def _replace_known_paths(value: str, replacements: dict[str, str]) -> str:
     for source, token in sorted(
         replacements.items(), key=lambda item: len(item[0]), reverse=True
     ):
         if source:
             value = value.replace(source, token)
-    # Do not let an unanticipated absolute POSIX path become public evidence.
-    value = re.sub(r"(?<![\w.-])/(?:[^/\s:;,]+/)*[^/\s:;,]+", "<absolute-path>", value)
+    return value
+
+
+def _redact_text(value: str, replacements: dict[str, str]) -> str:
+    value = _replace_known_paths(value, replacements)
+    # Recognize foreign-OS paths without filesystem access. Do not collapse an
+    # entire path-prefixed error: its explicit diagnostic suffix must survive.
+    value = re.sub(
+        r"([\"'])((?:[A-Za-z]:[\\/]|\\\\|/)[^\r\n]*?)\1",
+        lambda match: f"{match[1]}<absolute-path>{match[1]}",
+        value,
+    )
+    value = re.sub(
+        r"(?<![\w.-])(?:\\\\[?.]\\(?:UNC\\|[A-Za-z]:\\)?|[A-Za-z]:[\\/]|\\\\|/)"
+        r"[^\r\n]*?(?=:\s|;\s*reason=|[\r\n]|$)",
+        "<absolute-path>",
+        value,
+    )
     encoded = value.encode("utf-8")
     if len(encoded) > MAX_ERROR_BYTES:
         value = encoded[:MAX_ERROR_BYTES].decode("utf-8", errors="ignore")
     return value
 
 
-def _sanitize(value: Any, replacements: dict[str, str]) -> Any:
+def _sanitize(
+    value: Any, replacements: dict[str, str], *, diagnostic_text: bool = False
+) -> Any:
     if isinstance(value, str):
+        if not diagnostic_text:
+            value = _replace_known_paths(value, replacements)
+            if PureWindowsPath(value).is_absolute() or PurePosixPath(value).is_absolute():
+                return "<absolute-path>"
         return _redact_text(value, replacements)
     if isinstance(value, list):
-        return [_sanitize(item, replacements) for item in value]
+        return [
+            _sanitize(item, replacements, diagnostic_text=diagnostic_text)
+            for item in value
+        ]
     if isinstance(value, dict):
         return {
-            key: _sanitize(item, replacements)
+            key: _sanitize(item, replacements, diagnostic_text=key in {"message", "reason"})
             for key, item in value.items()
         }
     return value
