@@ -342,6 +342,8 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
           static_cast<std::size_t>(layer.width) * layer.height * 4) return false;
       const int32_t layer_pixel_bytes = layer.slot == 0 ? plan.input_pixel_bytes :
           (layer.pixel_bytes != 0 ? layer.pixel_bytes : plan.pixel_bytes);
+      if (layer_pixel_bytes != 4 && layer_pixel_bytes != 8 && layer_pixel_bytes != 16)
+        return false;
       if (layer.has_world_layout && layer.row_padding % layer_pixel_bytes != 0)
         return false;
       auto& pixels = prepared.hosted_pixels[layer_index];
@@ -490,6 +492,7 @@ bool verify_animation_extent_wiring_for_test() {
   plan.width = 256;
   plan.height = 144;
   plan.pixel_bytes = 4;
+  plan.input_pixel_bytes = 4;
   plan.rowbytes = plan.width * plan.pixel_bytes;
   parameter_execution::BufferIn input{};
   parameter_execution::BufferOut output{};
@@ -565,6 +568,11 @@ bool verify_animation_extent_wiring_for_test() {
   copy_world_into_param_def(endpoint_prepared.definitions[0], input_world);
   parameter_execution::initialize_parameter_definitions(
       endpoint_prepared.definitions, plan.width, plan.height);
+  // A malformed internal plan must reject before converting into an empty
+  // allocation. Real prepared plans always initialize the primary depth.
+  plan.input_pixel_bytes = 0;
+  if (prepare_parameters(request, endpoint_prepared, hooks)) return false;
+  plan.input_pixel_bytes = 4;
   const bool endpoint_ready = prepare_parameters(request, endpoint_prepared, hooks) &&
       smart::state().hosted_layers.size() == 1 &&
       smart::state().hosted_layers.front().world != nullptr;
