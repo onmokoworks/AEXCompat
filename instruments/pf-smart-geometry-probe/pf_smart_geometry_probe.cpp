@@ -119,6 +119,23 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
   if (width < 8 || height < 4) return PF_Err_BAD_CALLBACK_PARAM;
   const PF_LRect full{0, 0, width, height};
   PF_CheckoutResult checkout{};
+  if (ModuleNameHas("-requestexpand")) {
+    // A normal resizing effect: availability expands, but only the requested
+    // intersection is rendered. No RETURNS_EXTRA_PIXELS workaround.
+    const PF_LRect requested = extra->input->output_request.rect;
+    const PF_LRect available{-width / 2, -height / 2,
+                             width + width / 2, height + height / 2};
+    const PF_Err err = CheckoutInput(in_data, extra, full, &checkout);
+    if (err) return err;
+    const PF_LRect intersection{
+        requested.left > available.left ? requested.left : available.left,
+        requested.top > available.top ? requested.top : available.top,
+        requested.right < available.right ? requested.right : available.right,
+        requested.bottom < available.bottom ? requested.bottom : available.bottom};
+    extra->output->result_rect = intersection;
+    extra->output->max_result_rect = available;
+    return PF_Err_NONE;
+  }
   if (ModuleNameHas("-difftile")) {
     // The diagnostic host request, not a probe-specific host switch, chooses
     // the returned tile. Its output world must be placed at this rect's origin.
@@ -273,6 +290,16 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
   if (!err) err = extra->cb->checkout_output(in_data->effect_ref, &output);
   if (err) return err;
   if (!input || !input->data || !output || !output->data) return PF_Err_BAD_CALLBACK_PARAM;
+  if (ModuleNameHas("-requestexpand")) {
+    const auto& request = extra->input->output_request.rect;
+    const A_long left = request.left > -in_data->width / 2 ? request.left : -in_data->width / 2;
+    const A_long top = request.top > -in_data->height / 2 ? request.top : -in_data->height / 2;
+    const A_long right = request.right < in_data->width * 3 / 2 ? request.right : in_data->width * 3 / 2;
+    const A_long bottom = request.bottom < in_data->height * 3 / 2 ? request.bottom : in_data->height * 3 / 2;
+    if (output->origin_x != left || output->origin_y != top ||
+        output->width != right - left || output->height != bottom - top)
+      return PF_Err_INTERNAL_STRUCT_DAMAGED;
+  }
   const bool hint_only = ModuleNameHas("-difftile-hintonly") &&
       in_data->extent_hint.left >= 0 && in_data->extent_hint.top >= 0 &&
       in_data->extent_hint.right <= output->width &&

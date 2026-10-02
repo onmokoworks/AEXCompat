@@ -2431,7 +2431,9 @@ bool dispatch(const Request& request, const Hooks& hooks,
   std::array<std::byte, 16> pre_callbacks{};
   std::array<std::byte, 24> pre_extra{};
   const auto& diagnostic = render::diagnostic_world_layout();
+  const auto& context = render::render_context_state();
   const std::array<int32_t, 4> expected_request =
+      context.has_smart_output_request ? context.smart_output_request :
       diagnostic.enabled && diagnostic.has_request_rect
           ? diagnostic.request_rect
           : (plan.partial_output_request

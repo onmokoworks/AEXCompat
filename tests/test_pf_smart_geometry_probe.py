@@ -1,6 +1,10 @@
 from pathlib import Path
+import json
+import shutil
+import subprocess
 
 import pytest
+from PIL import Image
 
 from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
@@ -156,3 +160,95 @@ def test_geometry_contract_is_identical_across_depths(tmp_path, mode):
     baseline = {field: reports[0][field] for field in geometry_fields}
     for report in reports[1:]:
         assert {field: report[field] for field in geometry_fields} == baseline
+
+
+def test_shipping_json_can_render_expanded_request_without_extra_pixels(tmp_path):
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
+    plugin = tmp_path / "pf_smart_geometry_probe-requestexpand.aex"
+    shutil.copy2(PROBE, plugin)
+    source = tmp_path / "input.png"
+    Image.new("RGBA", (64, 48), (13, 29, 47, 255)).save(source)
+    # Default demand still crops to input; explicit demand includes negative
+    # origin and also supports a smaller tile within the expanded availability.
+    for command in ("--render-experimental-smart-request",
+                    "--render-experimental-smart-request-16",
+                    "--render-experimental-smart-request-32-cpu"):
+        for index, rect in enumerate((None, [-32, -24, 96, 72], [-8, -6, 80, 60])):
+            context = {"mask_scene": {"masks": []}}
+            if rect is not None:
+                context["smart_output_request_rect"] = rect
+            request = tmp_path / "request.json"
+            request.write_text(json.dumps({"schema_version": 1, "assignments": [], "host_context": context}),
+                               encoding="utf-8")
+            output = tmp_path / f"{command}-{index}.png"
+            completed = subprocess.run(
+                [str(HARNESS), command, str(plugin), str(source), str(output), str(request)],
+                cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=60)
+            assert completed.returncode == 0, completed.stdout + completed.stderr
+            report = json.loads(completed.stdout)
+            expected = rect or [0, 0, 64, 48]
+            assert report["passed"] is True, report
+            assert report["pre_render_error"] == report["smart_render_error"] == 0
+            assert report["result_rect"] == expected
+            assert report["max_result_rect"] == [-32, -24, 96, 72]
+            # PF_InData reports layer origin inside the buffer (opposite of
+            # PF_EffectWorld origin, checked by the compiled probe itself).
+            assert report["output_origin"] == [-expected[0], -expected[1]]
+            assert report["returns_extra_pixels"] is False
+            assert report["result_within_request"] is True
+            with Image.open(output) as image:
+                assert image.size == (expected[2] - expected[0], expected[3] - expected[1])
+                pixels = image.convert("RGBA")
+                assert pixels.getpixel((0, 0)) == (255, 0, 255, 255)
+                assert pixels.getpixel((image.width - 1, image.height - 1)) == (255, 0, 255, 255)
+
+
+def test_shipping_json_rejects_invalid_or_classic_output_requests(tmp_path):
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
+    source = tmp_path / "input.png"
+    Image.new("RGBA", (64, 48), (13, 29, 47, 255)).save(source)
+    for index, (command, rect) in enumerate((
+        ("--render-experimental-request", [-32, -24, 96, 72]),
+        ("--render-experimental-smart-request", [0, 0, 4097, 1]),
+        ("--render-experimental-smart-request", [-16777217, 0, -16777216, 1]),
+        ("--render-experimental-smart-request", [0, 0, 0, 1]),
+    )):
+        request = tmp_path / "request.json"
+        request.write_text(json.dumps({"schema_version": 1, "assignments": [], "host_context": {
+            "mask_scene": {"masks": []}, "smart_output_request_rect": rect}}), encoding="utf-8")
+        output = tmp_path / f"rejected-{index}.png"
+        completed = subprocess.run(
+            [str(HARNESS), command, str(PROBE), str(source), str(output), str(request)],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        assert completed.returncode != 0
+        assert not output.exists()
+        assert "output request" in completed.stdout + completed.stderr
+
+
+def test_worker_rejects_malformed_or_ambiguous_output_demand_before_load():
+    assert WORKER.is_file()
+    invalid = (
+        "render:v2|1,0,0,0,0,0,4097,1",
+        "render:v2|1,0,0,0,-16777217,0,-16777216,1",
+        "render:v2|1,0,0,0,16777216,0,16777217,1",
+        "render:v2|1,0,0,0,0,0,0,1",
+        "render:v2|1,0,0,0,0,0,1,0",
+        "render:v2|1,0,0,0,1,0,0,1",
+        "render:v2|2,0,0,0,-32,-24,96,72",
+        "render:v2|1,0,0,0,-32,-24,96",
+        "render:v2|1,0,0,0,-32,-24,96,72,1",
+    )
+    valid = "render:v2|1,0,0,0,-32,-24,96,72"
+    cases = [("smart", "--smart-session-v1", trailer, []) for trailer in invalid]
+    cases += [("classic", "--render-session-v1", valid, []),
+              ("smart", "--smart-session-v1", valid,
+               ["--render-diagnostic-layout-v1", "v1|0,0,0,0,0,0,64,48,-1,-1,-1,-1"])]
+    for kind, command, trailer, options in cases:
+        completed = subprocess.run(
+            [str(WORKER), "--kind", kind, command, "absent.aex", "0" * 64,
+             "v2|", "64", "48", "1", "1", "1", trailer, *options],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+        # Malformed request exit, not unsupported-command or load/transport failure.
+        assert completed.returncode == 3, (trailer, completed.stdout, completed.stderr)
+        assert "stage:" not in completed.stderr

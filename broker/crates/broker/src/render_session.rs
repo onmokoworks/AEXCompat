@@ -635,7 +635,8 @@ pub struct SessionOpenRequest<'a> {
     pub spatial_trailer: Option<String>,
     /// Validated single authored camera snapshot, parsed before plug-in dispatch.
     pub camera_trailer: Option<String>,
-    /// Static render-environment trailer (`render:v1|`), already encoded by
+    /// Static render-environment trailer (`render:v1|`, or `render:v2|` with
+    /// an explicit SmartFX output request), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
     /// Static audio-source trailer (`session-audio:v1|<samples>|<rate>|<path>`),
