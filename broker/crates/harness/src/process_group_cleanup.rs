@@ -39,9 +39,33 @@ pub(crate) fn observe_exit<E>(
     })
 }
 
+// Diagnostic-only interpretation of the PID/PPID/PGID/status observation.
+// Unavailable/moved samples are not proof of absence or permission to signal.
+#[cfg(test)]
+pub(crate) fn member_state(pid: u32, group: u32, sample: Option<[u32; 4]>) -> &'static str {
+    match sample {
+        None => "unavailable",
+        Some([observed, _, _, _]) if observed != pid => "pid-mismatch",
+        Some([_, _, observed, _]) if observed != group => "group-changed",
+        Some([_, _, _, 5]) => "zombie",
+        Some(_) => "live-or-other",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_members_keep_unknown_and_live_distinct_from_zombies() {
+        assert_eq!(member_state(7, 3, None), "unavailable");
+        assert_eq!(member_state(7, 3, Some([8, 1, 3, 5])), "pid-mismatch");
+        assert_eq!(member_state(7, 3, Some([7, 1, 4, 5])), "group-changed");
+        assert_eq!(member_state(7, 3, Some([7, 1, 3, 5])), "zombie");
+        for status in [0, 1, 2, 3, 4, 6] {
+            assert_eq!(member_state(7, 3, Some([7, 1, 3, status])), "live-or-other");
+        }
+    }
 
     #[test]
     fn delayed_reap_requires_a_fresh_absent_group() {
