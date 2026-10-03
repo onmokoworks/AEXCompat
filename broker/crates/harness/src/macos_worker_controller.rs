@@ -17,7 +17,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use crate::process_group_cleanup::{GroupState, observe_exit};
+use crate::process_group_cleanup::{
+    CleanupError, CleanupObservation, GroupState, finish_cleanup, observe_exit,
+};
 
 const SESSION_PREFIX: &str = "aexcompat-macos-worker";
 const TERM_GRACE: Duration = Duration::from_millis(150);
@@ -69,12 +71,6 @@ unsafe extern "C" {
         pid: libc::pid_t,
         buffer: *mut libc::c_void,
         buffer_size: libc::c_int,
-    ) -> libc::c_int;
-    #[cfg(test)]
-    fn proc_listpgrppids(
-        pid: libc::pid_t,
-        buffer: *mut libc::c_void,
-        size: libc::c_int,
     ) -> libc::c_int;
 }
 
@@ -547,112 +543,79 @@ pub(crate) fn terminate_process_group(child: &mut Child) -> Result<(), String> {
     // PID after the snapshot.
     let snapshot = descendant_identities(pid);
     let descendants = snapshot.identities;
-    let mut errors = Vec::new();
+    let mut errors: Vec<CleanupError> = Vec::new();
     if let Some(diagnostic) = snapshot.diagnostic {
-        errors.push(diagnostic);
+        errors.push(diagnostic.into());
     }
     if let Err(error) = signal_identities(&descendants, libc::SIGTERM) {
+        errors.push(error.into());
+    }
+    if let Err(error) = signal_group(child, libc::SIGTERM) {
         errors.push(error);
     }
-    if let Err(error) = signal_group(child, libc::SIGTERM, &descendants) {
-        errors.push(error);
-    }
-    let leader_reaped = match wait_for_exit(child, TERM_GRACE) {
+    let mut leader_reaped = match wait_for_exit(child, TERM_GRACE) {
         Ok(reaped) => reaped,
         Err(error) => {
-            errors.push(error);
+            errors.push(error.into());
             false
         }
     };
-    let group_exists = process_group_exists(pid).unwrap_or_else(|error| {
-        errors.push(error);
-        true
+    let group = process_group_state(pid).unwrap_or_else(|error| {
+        errors.push(error.into());
+        GroupState::PermissionDenied
     });
     let descendant_exists = identities_exist(&descendants).unwrap_or_else(|error| {
-        errors.push(error);
+        errors.push(error.into());
         true
     });
-    if leader_reaped && !group_exists && !descendant_exists {
-        #[cfg(test)]
-        if !errors.is_empty() {
-            eprintln!(
-                "cleanup-observation final pid={pid} stage=term leader_reaped=true group_absent=true descendants_absent=true tracked_count={} errors={errors:?}",
-                descendants.len()
-            );
-            tests::observe_group("final-term", pid, &descendants);
-        }
-        return if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        };
+    let observation = CleanupObservation {
+        leader_reaped,
+        group,
+        descendants_absent: !descendant_exists,
+    };
+    if observation.fully_exited() {
+        return finish_cleanup(errors, observation);
     }
     if let Err(error) = signal_identities(&descendants, libc::SIGKILL) {
+        errors.push(error.into());
+    }
+    if let Err(error) = signal_group(child, libc::SIGKILL) {
         errors.push(error);
     }
-    if let Err(error) = signal_group(child, libc::SIGKILL, &descendants) {
-        errors.push(error);
-    }
-    #[cfg(test)]
-    let mut observed_leader_reaped = leader_reaped;
     if !leader_reaped {
-        let waited = child.wait();
-        #[cfg(test)]
-        {
-            observed_leader_reaped = waited.is_ok();
-        }
-        if let Err(error) = waited {
-            errors.push(format!(
-                "macos_worker_residual_process: reap leader {pid}: {error}"
-            ));
+        match child.wait() {
+            Ok(_) => leader_reaped = true,
+            Err(error) => errors
+                .push(format!("macos_worker_residual_process: reap leader {pid}: {error}").into()),
         }
     }
     let started = Instant::now();
-    loop {
-        let group_exists = process_group_exists(pid).unwrap_or_else(|error| {
-            errors.push(error);
-            true
+    let final_observation = loop {
+        let group = process_group_state(pid).unwrap_or_else(|error| {
+            errors.push(error.into());
+            GroupState::PermissionDenied
         });
         let descendant_exists = identities_exist(&descendants).unwrap_or_else(|error| {
-            errors.push(error);
+            errors.push(error.into());
             true
         });
-        if !group_exists && !descendant_exists {
-            #[cfg(test)]
-            if !errors.is_empty() {
-                eprintln!(
-                    "cleanup-observation final pid={pid} stage=kill leader_reaped={observed_leader_reaped} group_absent=true descendants_absent=true tracked_count={} errors={errors:?} elapsed_ms={}",
-                    descendants.len(),
-                    started.elapsed().as_millis()
-                );
-                tests::observe_group("final-kill", pid, &descendants);
-            }
-            break;
+        let observation = CleanupObservation {
+            leader_reaped,
+            group,
+            descendants_absent: !descendant_exists,
+        };
+        if !group.exists() && !descendant_exists {
+            break observation;
         }
         if started.elapsed() >= Duration::from_secs(2) {
-            #[cfg(test)]
-            {
-                eprintln!(
-                    "cleanup-observation final pid={pid} stage=residual leader_reaped={observed_leader_reaped} group_absent={} descendants_absent={} tracked_count={} errors={errors:?} elapsed_ms={}",
-                    !group_exists,
-                    !descendant_exists,
-                    descendants.len(),
-                    started.elapsed().as_millis()
-                );
-                tests::observe_group("final-residual", pid, &descendants);
-            }
             errors.push(format!(
                 "macos_worker_residual_process: process group {pid} or an observed descendant remains after SIGKILL"
-            ));
-            break;
+            ).into());
+            break observation;
         }
         thread::sleep(Duration::from_millis(5));
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    };
+    finish_cleanup(errors, final_observation)
 }
 
 fn descendant_identities(root: libc::pid_t) -> DescendantSnapshot {
@@ -764,6 +727,7 @@ fn signal_identities(identities: &[ProcessIdentity], signal: libc::c_int) -> Res
     Ok(())
 }
 
+#[cfg(test)]
 fn process_group_exists(pid: libc::pid_t) -> Result<bool, String> {
     Ok(process_group_state(pid)?.exists())
 }
@@ -782,11 +746,7 @@ fn process_group_state(pid: libc::pid_t) -> Result<GroupState, String> {
     }
 }
 
-fn signal_group(
-    child: &mut Child,
-    signal: libc::c_int,
-    _tracked_descendants: &[ProcessIdentity],
-) -> Result<(), String> {
+fn signal_group(child: &mut Child, signal: libc::c_int) -> Result<(), CleanupError> {
     let pid = child.id() as libc::pid_t;
     // SAFETY: a negative, validated child pid addresses only its process group.
     let result = unsafe { libc::kill(-pid, signal) };
@@ -804,11 +764,6 @@ fn signal_group(
             // Escaped descendants remain subject to the separate identity
             // checks in terminate_process_group.
             if error.raw_os_error() == Some(libc::EPERM) {
-                #[cfg(test)]
-                {
-                    eprintln!("cleanup-observation signal={signal} pgid={pid} errno=EPERM");
-                    tests::observe_group("eperm-before-reap", pid, _tracked_descendants);
-                }
                 let initial_reaped = child
                     .try_wait()
                     .map_err(|reap_error| format!("reap macOS worker: {reap_error}"))?
@@ -818,19 +773,15 @@ fn signal_group(
                     || wait_for_exit(child, TERM_GRACE),
                     || process_group_state(pid),
                 )?;
-                #[cfg(test)]
-                eprintln!(
-                    "cleanup-observation after-reap pgid={pid} signal={signal} observation={observation:?}"
-                );
                 if observation.fully_exited() {
                     return Ok(());
                 }
-                return Err(format!(
+                return Err(CleanupError::PendingGroupPermissionDenied(format!(
                     "signal macOS worker process group {pid}: {error}; signal={signal}, initial_reaped={}, final_reaped={}, group={:?}",
                     observation.initial_reaped, observation.final_reaped, observation.group
-                ));
+                )));
             }
-            Err(format!("signal macOS worker process group {pid}: {error}"))
+            Err(format!("signal macOS worker process group {pid}: {error}").into())
         }
     }
 }
@@ -870,79 +821,6 @@ pub(crate) fn staged_name(prefix: &str, source: &Path) -> String {
 mod tests {
     use super::*;
     use std::os::fd::IntoRawFd;
-
-    // One bounded observation layer for #1733; never changes signal targets,
-    // cleanup decisions or test assertions. Private paths/names are not emitted.
-    pub(super) fn observe_group(stage: &str, group: libc::pid_t, tracked: &[ProcessIdentity]) {
-        let mut members = [0 as libc::pid_t; MAX_TRACKED_DESCENDANTS];
-        // SAFETY: exact PGID filter and writable bounded pid_t array.
-        let count = unsafe {
-            proc_listpgrppids(
-                group,
-                members.as_mut_ptr().cast(),
-                std::mem::size_of_val(&members) as libc::c_int,
-            )
-        };
-        let list_errno = (count < 0).then(|| io::Error::last_os_error().raw_os_error());
-        eprintln!(
-            "cleanup-observation stage={stage} pgid={group} count={count} truncated={} list_errno={list_errno:?} group_probe={:?}",
-            count >= members.len() as i32,
-            process_group_state(group)
-        );
-        for &pid in members
-            .iter()
-            .take((count.max(0) as usize).min(members.len()))
-        {
-            // PROC_PIDT_SHORTBSDINFO returns ESRCH for the known zombie-only
-            // fixture. KERN_PROC_PID also exposes zombies. These 64-bit Darwin
-            // kinfo_proc size/offsets were checked against the local SDK with
-            // compiled assertions. A failed/partial query remains unavailable.
-            let mut record = [0u8; 648];
-            let mut bytes = record.len();
-            let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
-            // SAFETY: MIB and bounded byte buffer are valid for this read-only
-            // sysctl; no new-value pointer is supplied.
-            let result = unsafe {
-                libc::sysctl(
-                    mib.as_mut_ptr(),
-                    mib.len() as libc::c_uint,
-                    record.as_mut_ptr().cast(),
-                    &mut bytes,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            let info_errno = (result != 0).then(|| io::Error::last_os_error().raw_os_error());
-            let sample = (result == 0 && bytes == record.len()).then(|| {
-                let word =
-                    |offset| u32::from_ne_bytes(record[offset..offset + 4].try_into().unwrap());
-                [word(40), word(560), word(564), u32::from(record[36])]
-            });
-            let identity = process_identity(pid);
-            let matched = identity
-                .as_ref()
-                .ok()
-                .and_then(|value| *value)
-                .map(|current| tracked.contains(&current));
-            eprintln!(
-                "cleanup-observation member pid={pid} state={} sample={sample:?} tracked_identity={matched:?} identity={identity:?} result={result} bytes={bytes} info_errno={info_errno:?}",
-                crate::process_group_cleanup::member_state(pid as u32, group as u32, sample)
-            );
-        }
-        for &expected in tracked {
-            let observed = process_identity(expected.pid);
-            let state = match &observed {
-                Ok(None) => "absent",
-                Ok(Some(actual)) if actual == &expected => "present",
-                Ok(Some(_)) => "pid-reused",
-                Err(_) => "unknown",
-            };
-            eprintln!(
-                "cleanup-observation tracked pid={} state={state} observed={observed:?}",
-                expected.pid
-            );
-        }
-    }
 
     fn fixture_shell(_session: &WorkerSession) -> PathBuf {
         // macOS platform binaries are subject to path-sensitive signature
@@ -1166,7 +1044,7 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(5));
         }
-        signal_group(&mut child, libc::SIGTERM, &[]).unwrap();
+        signal_group(&mut child, libc::SIGTERM).unwrap();
         assert!(child.try_wait().unwrap().is_some());
         assert!(!process_group_exists(pid).unwrap());
     }

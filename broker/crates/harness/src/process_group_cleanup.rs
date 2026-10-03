@@ -39,32 +39,168 @@ pub(crate) fn observe_exit<E>(
     })
 }
 
-// Diagnostic-only interpretation of the PID/PPID/PGID/status observation.
-// Unavailable/moved samples are not proof of absence or permission to signal.
-#[cfg(test)]
-pub(crate) fn member_state(pid: u32, group: u32, sample: Option<[u32; 4]>) -> &'static str {
-    match sample {
-        None => "unavailable",
-        Some([observed, _, _, _]) if observed != pid => "pid-mismatch",
-        Some([_, _, observed, _]) if observed != group => "group-changed",
-        Some([_, _, _, 5]) => "zombie",
-        Some(_) => "live-or-other",
+#[derive(Debug)]
+pub(crate) enum CleanupError {
+    // Only an actual group-signal EPERM may remain pending until the existing
+    // cleanup boundary. Identity signals and all other errors stay fatal.
+    PendingGroupPermissionDenied(String),
+    Other(String),
+}
+
+impl From<String> for CleanupError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CleanupObservation {
+    pub(crate) leader_reaped: bool,
+    pub(crate) group: GroupState,
+    pub(crate) descendants_absent: bool,
+}
+
+impl CleanupObservation {
+    pub(crate) fn fully_exited(self) -> bool {
+        self.leader_reaped && self.group == GroupState::Absent && self.descendants_absent
+    }
+}
+
+pub(crate) fn finish_cleanup(
+    errors: Vec<CleanupError>,
+    final_observation: CleanupObservation,
+) -> Result<(), String> {
+    // A past group EPERM does not invalidate a later, complete exit proof.
+    // Never discard accounting, overflow, reap, probe or other signal errors,
+    // even when every observed process has subsequently disappeared.
+    if final_observation.fully_exited()
+        && errors
+            .iter()
+            .all(|error| matches!(error, CleanupError::PendingGroupPermissionDenied(_)))
+    {
+        return Ok(());
+    }
+    if errors.is_empty() {
+        return Err("macos_worker_residual_process: cleanup exit is unconfirmed".into());
+    }
+    Err(errors
+        .into_iter()
+        .map(|error| match error {
+            CleanupError::PendingGroupPermissionDenied(message) | CleanupError::Other(message) => {
+                message
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; "))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn pending_permission_denied() -> CleanupError {
+        CleanupError::PendingGroupPermissionDenied("group SIGKILL EPERM".into())
+    }
+
     #[test]
-    fn diagnostic_members_keep_unknown_and_live_distinct_from_zombies() {
-        assert_eq!(member_state(7, 3, None), "unavailable");
-        assert_eq!(member_state(7, 3, Some([8, 1, 3, 5])), "pid-mismatch");
-        assert_eq!(member_state(7, 3, Some([7, 1, 4, 5])), "group-changed");
-        assert_eq!(member_state(7, 3, Some([7, 1, 3, 5])), "zombie");
-        for status in [0, 1, 2, 3, 4, 6] {
-            assert_eq!(member_state(7, 3, Some([7, 1, 3, status])), "live-or-other");
+    fn delayed_group_disappearance_releases_only_the_pending_group_error() {
+        // Model the observed failure path: owned leader already reaped,
+        // group EPERM, and only later a fresh group ESRCH. This uses the same
+        // exit observation and final decision as signal_group/termination.
+        let mut groups = [GroupState::PermissionDenied, GroupState::Absent].into_iter();
+        let initial = observe_exit::<&str>(
+            true,
+            || panic!("leader is already reaped"),
+            || Ok(groups.next().unwrap()),
+        )
+        .unwrap();
+        assert!(!initial.fully_exited());
+        assert_eq!(
+            finish_cleanup(
+                vec![pending_permission_denied()],
+                CleanupObservation {
+                    leader_reaped: initial.final_reaped,
+                    group: initial.group,
+                    descendants_absent: true,
+                },
+            ),
+            Err("group SIGKILL EPERM".into()),
+        );
+        let final_observation = CleanupObservation {
+            leader_reaped: initial.final_reaped,
+            group: groups.next().unwrap(),
+            descendants_absent: true,
+        };
+        assert_eq!(
+            finish_cleanup(vec![pending_permission_denied()], final_observation),
+            Ok(()),
+        );
+        assert!(groups.next().is_none());
+    }
+
+    #[test]
+    fn pending_group_error_requires_every_exit_condition() {
+        for leader_reaped in [false, true] {
+            for group in [
+                GroupState::Absent,
+                GroupState::Present,
+                GroupState::PermissionDenied,
+            ] {
+                for descendants_absent in [false, true] {
+                    let observation = CleanupObservation {
+                        leader_reaped,
+                        group,
+                        descendants_absent,
+                    };
+                    let expected =
+                        leader_reaped && group == GroupState::Absent && descendants_absent;
+                    assert_eq!(
+                        finish_cleanup(vec![pending_permission_denied()], observation).is_ok(),
+                        expected,
+                        "{observation:?}",
+                    );
+                    // No earlier error is not itself proof of cleanup either.
+                    assert_eq!(finish_cleanup(vec![], observation).is_ok(), expected);
+                }
+            }
         }
+    }
+
+    #[test]
+    fn final_disappearance_keeps_all_hard_errors_and_pending_context() {
+        let exited = CleanupObservation {
+            leader_reaped: true,
+            group: GroupState::Absent,
+            descendants_absent: true,
+        };
+        for message in [
+            "descendant signal EPERM",
+            "group signal EINVAL",
+            "group probe error",
+            "identity accounting error",
+            "descendant tracking overflow",
+            "leader reap error",
+        ] {
+            assert_eq!(
+                finish_cleanup(vec![message.to_string().into()], exited),
+                Err(message.into()),
+            );
+            assert_eq!(
+                finish_cleanup(
+                    vec![pending_permission_denied(), message.to_string().into()],
+                    exited,
+                ),
+                Err(format!("group SIGKILL EPERM; {message}")),
+            );
+        }
+        // Both TERM and KILL may be denied before the final exit boundary.
+        assert_eq!(
+            finish_cleanup(
+                vec![pending_permission_denied(), pending_permission_denied()],
+                exited,
+            ),
+            Ok(()),
+        );
     }
 
     #[test]
