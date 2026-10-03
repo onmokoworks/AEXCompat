@@ -187,7 +187,13 @@ def test_success_report_is_portable_sha_pinned_and_deterministic(
     ] == "<plugin>"
 
 
-def test_failure_extracts_structured_crash_and_redacts_paths(tmp_path, monkeypatch):
+@pytest.mark.parametrize("temp_inside_home", [False, True])
+def test_failure_extracts_structured_crash_and_redacts_paths(
+    tmp_path, monkeypatch, temp_inside_home
+):
+    # Simulate both locations without writing anything in the real user's home.
+    home = tmp_path if temp_inside_home else tmp_path / "different-home"
+    monkeypatch.setattr(RUNNER.Path, "home", lambda: home)
     worker, _, _, manifest = _fixture(tmp_path)
     output = tmp_path / "report.json"
     def fake_run(command, timeout_seconds):
@@ -234,8 +240,134 @@ def test_failure_extracts_structured_crash_and_redacts_paths(tmp_path, monkeypat
     assert result["crash_snapshot"]["registers"]["rip"] == 0
     assert result["crash_snapshot"]["module"] == "<plugin>"
     assert result["partial_report"]["setup"]["execution_backend"] == "unicorn-x86_64"
-    assert result["partial_report"]["output_png"].startswith("<home>")
+    expected = "<home>" if temp_inside_home else "<absolute-path>"
+    assert result["partial_report"]["output_png"].startswith(expected)
     assert str(tmp_path) not in output.read_text()
+
+
+@pytest.mark.parametrize(
+    "private_path",
+    [
+        r"D:\outside-home\output.png",
+        "D:/outside-home/output.png",
+        r"D:\outside home\private image.png",
+        r"\\server\private share\output.png",
+        r"\\?\D:\outside home\output.png",
+        "/private/outside-home/output.png",
+        "/private/outside home/output.png",
+        r"D:\private\alice;secret\output.png",
+        "/private/alice;secret/output.png",
+        r"D:\another user's files\output.png",
+    ],
+)
+def test_unknown_absolute_paths_are_redacted_in_nested_reports(private_path):
+    payload = {
+        "reason": "UC_ERR_FETCH_PROT",
+        "registers": {"rip": 0, "rax": 42},
+        "module": "effect.dll",
+        "nested": [{"output_png": private_path}],
+    }
+    sanitized = RUNNER._sanitize(payload, {})
+    assert sanitized == {
+        **payload,
+        "nested": [{"output_png": "<absolute-path>"}],
+    }
+    assert private_path not in json.dumps(sanitized)
+
+
+@pytest.mark.parametrize(
+    "private_path",
+    [
+        r"D:\private\output.png",
+        r"\\server\share\output.png",
+        r"\\?\D:\private\output.png",
+        "D:/private/output.png",
+        "/private/output.png",
+    ],
+)
+def test_embedded_absolute_paths_preserve_error_reason(private_path):
+    assert RUNNER._redact_text(f"failed at {private_path}; reason=EIO", {}) == (
+        "failed at <absolute-path>; reason=EIO"
+    )
+
+
+@pytest.mark.parametrize(
+    "private_path",
+    [
+        r"D:\private folder\secret image.png",
+        r"\\server\private share\secret.png",
+        "/private folder/secret image.png",
+        r"D:\another user's files\image.png",
+        r"D:\private\alice;secret\output.png",
+    ],
+)
+@pytest.mark.parametrize("prefix", ["", "failed at "])
+def test_unquoted_spaced_paths_preserve_explicit_diagnostic_suffix(
+    private_path, prefix
+):
+    suffix = ": permission denied; reason=EIO"
+    assert RUNNER._redact_text(f"{prefix}{private_path}{suffix}", {}) == (
+        f"{prefix}<absolute-path>{suffix}"
+    )
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+@pytest.mark.parametrize(
+    "private_path",
+    [
+        r"D:\private folder\image.png",
+        r"\\server\private share\image.png",
+        "/private folder/image.png",
+        r"D:\private\alice;secret\image.png",
+    ],
+)
+def test_quoted_paths_with_spaces_preserve_error_reason(private_path, quote):
+    assert RUNNER._redact_text(
+        f"failed at {quote}{private_path}{quote}; reason=EIO", {}
+    ) == f"failed at {quote}<absolute-path>{quote}; reason=EIO"
+
+
+def test_success_unknown_path_is_redacted_in_persisted_report(tmp_path, monkeypatch):
+    worker, _, _, manifest = _fixture(tmp_path)
+    output = tmp_path / "report.json"
+    private_path = r"D:\another user's files\unknown.png"
+
+    def fake_run(command, timeout_seconds):
+        Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
+        return (
+            subprocess.CompletedProcess(
+                command, 0,
+                json.dumps({"execution_traces": [{"selector": "RENDER"}],
+                            "output_png": private_path}).encode(), b""
+            ), False, None,
+        )
+
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
+    report = RUNNER.run(_main_args(worker, manifest, output, tmp_path))
+    assert report["cases"][0]["result"]["report"]["output_png"] == "<absolute-path>"
+    assert json.loads(output.read_text(encoding="utf-8")) == report
+
+
+def test_known_path_tokens_and_non_path_diagnostics_are_preserved():
+    replacements = {r"D:\private\plugin.aex": "<plugin>"}
+    assert RUNNER._redact_text(r"D:\private\plugin.aex", replacements) == "<plugin>"
+    for value in ["effect.dll", "UC_ERR_FETCH_PROT", "RENDER", "relative/output.png"]:
+        assert RUNNER._redact_text(value, {}) == value
+
+
+def test_structured_diagnostic_fields_preserve_path_prefixed_reason():
+    value = {
+        "message": r"D:\private\file.png: permission denied; reason=EIO",
+        "reason": "/private/file.png: permission denied; reason=EIO",
+        "registers": {"rip": 0},
+        "module": r"D:\private\alice;secret\module.dll",
+    }
+    assert RUNNER._sanitize(value, {}) == {
+        "message": "<absolute-path>: permission denied; reason=EIO",
+        "reason": "<absolute-path>: permission denied; reason=EIO",
+        "registers": {"rip": 0},
+        "module": "<absolute-path>",
+    }
 
 
 def test_strict_json_rejects_duplicate_keys():

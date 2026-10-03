@@ -45,6 +45,13 @@ static_assert(std::is_same_v<decltype(AEGP_CompSuite4::AEGP_GetItemFromComp), It
 static_assert(kAEGPItemSuiteVersion6 == 10);
 static_assert(offsetof(AEGP_ItemSuite6, AEGP_GetItemDimensions) == 16 * sizeof(void*));
 static_assert(std::is_same_v<decltype(AEGP_ItemSuite6::AEGP_GetItemDimensions), ItemDimensions>);
+using ItemRatio = A_Err (SPAPI *)(AEGP_ItemH, A_Ratio*);
+static_assert(kAEGPItemSuiteVersion7 == 11);
+static_assert(sizeof(AEGP_ItemSuite7) == 27 * sizeof(void*));
+static_assert(offsetof(AEGP_ItemSuite7, AEGP_GetItemDimensions) == 16 * sizeof(void*));
+static_assert(offsetof(AEGP_ItemSuite7, AEGP_GetItemPixelAspectRatio) == 17 * sizeof(void*));
+static_assert(std::is_same_v<decltype(AEGP_ItemSuite7::AEGP_GetItemDimensions), ItemDimensions>);
+static_assert(std::is_same_v<decltype(AEGP_ItemSuite7::AEGP_GetItemPixelAspectRatio), ItemRatio>);
 int main() { return 0; }
 """
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")

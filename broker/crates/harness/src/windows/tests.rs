@@ -3,6 +3,89 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
+    fn live_still_primary_reopens_on_same_size_source_change() {
+        use aexcompat_broker::image_render::{
+            InteractiveCapabilitySource, InteractiveRenderPath, InteractiveSessionSelection,
+            RenderPixelFormat, RenderTiming,
+        };
+        use sha2::{Digest, Sha256};
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let plugin = repository.join(
+            "target/instruments-build/pf-wide-time-probe/pf_automatic_wide_time_allowed_probe.aex",
+        );
+        if !plugin.is_file()
+            || !repository
+                .join("target/minihost-build/aex_worker.exe")
+                .is_file()
+        {
+            eprintln!(
+                "skipping live still-primary: build the worker and future-primary probe first"
+            );
+            return;
+        }
+        let scratch = temporary_directory("live-still-primary");
+        let input_path = scratch.join("input.png");
+        let mut state = LiveSessionState {
+            decoded: None,
+            open: None,
+            session_generation: 0,
+            pending_close_summary: None,
+        };
+        let (respond, _) = mpsc::channel();
+        let mut request = LiveRenderRequest {
+            repository: repository.clone(),
+            plugin_path: plugin.clone(),
+            plugin_sha256: format!("{:x}", Sha256::digest(fs::read(&plugin).unwrap())),
+            dependencies: Vec::new(),
+            dependency_search_dirs: vec![plugin.parent().unwrap().to_path_buf()],
+            parameters: Vec::new(),
+            selection: InteractiveSessionSelection::new(
+                InteractiveRenderPath::SmartFx,
+                InteractiveCapabilitySource::AdvertisedSmart,
+                1,
+                0,
+            )
+            .unwrap(),
+            input_path: input_path.clone(),
+            timing: RenderTiming::default(),
+            pixel_format: RenderPixelFormat::Argb8,
+            output: scratch.join("first.png"),
+            respond,
+            identity: test_identity(0x11),
+            diagnostic_eligible: false,
+        };
+        for (index, color, generation) in [
+            (0, [17, 83, 149, 255], 1),
+            (1, [17, 83, 149, 255], 1),
+            (2, [71, 23, 9, 255], 2),
+        ] {
+            image::RgbaImage::from_pixel(8, 5, image::Rgba(color))
+                .save(&input_path)
+                .unwrap();
+            request.output = scratch.join(format!("frame-{index}.png"));
+            let (body, _) = live_render(&mut state, &request).unwrap();
+            let report: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(report["passed"], true, "{report}");
+            assert!(
+                report.get("resident_session_fallback").is_none(),
+                "{report}"
+            );
+            assert_eq!(report["primary_input_temporal_model"], "static");
+            assert_eq!(state.session_generation, generation);
+            assert_eq!(
+                image::open(&request.output)
+                    .unwrap()
+                    .into_rgba8()
+                    .into_raw(),
+                color.repeat(40)
+            );
+        }
+        state.close_current();
+        fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
     fn repository_root_prefers_worktree_cwd_to_a_separated_binary_location() {
         let fixture = std::env::temp_dir().join(format!(
             "aexcompat-harness-root-{}-{}",
@@ -768,6 +851,7 @@ mod tests {
             .expect("a valid manual SmartFX choice is retained as manual");
         assert_eq!(manual.source.report_name(), "manual_smart");
         let key = |selection| LiveSessionKey {
+            input_content_sha256: [0; 32],
             plugin_sha256: "a".repeat(64),
             dependency_identities: vec![],
             dependency_search_dirs: vec![],

@@ -39,12 +39,20 @@ inline unsigned char pattern_byte(int32_t x, int32_t y, int32_t pixel_bytes,
   return value == 0xCC ? 0xCD : value;
 }
 
-inline bool seed(unsigned char* pixels, std::size_t size, int32_t width,
-                 int32_t height, int32_t rowbytes, int32_t pixel_bytes) {
+inline bool seed_geometry_valid(const unsigned char* pixels, std::size_t size,
+                                int32_t width, int32_t height, int32_t rowbytes,
+                                int32_t pixel_bytes) {
   if (!pixels || width < 0 || height < 0 || rowbytes < 0 ||
       (pixel_bytes != 4 && pixel_bytes != 8 && pixel_bytes != 16) ||
       static_cast<uint64_t>(width) * pixel_bytes > static_cast<uint64_t>(rowbytes) ||
       static_cast<uint64_t>(rowbytes) * height > size)
+    return false;
+  return true;
+}
+
+inline bool seed(unsigned char* pixels, std::size_t size, int32_t width,
+                 int32_t height, int32_t rowbytes, int32_t pixel_bytes) {
+  if (!seed_geometry_valid(pixels, size, width, height, rowbytes, pixel_bytes))
     return false;
   for (int32_t y = 0; y < height; ++y)
     for (int32_t x = 0; x < width; ++x)
@@ -75,9 +83,16 @@ inline Result inspect(const unsigned char* pixels, std::size_t size,
       const std::size_t offset =
           (static_cast<std::size_t>(y) * width + x) * pixel_bytes;
       bool unwritten = true;
-      for (int32_t channel_byte = 0; channel_byte < pixel_bytes; ++channel_byte)
-        unwritten &= pixels[offset + channel_byte] ==
-            pattern_byte(x, y, pixel_bytes, channel_byte);
+      for (int32_t channel_byte = 0; channel_byte < pixel_bytes; ++channel_byte) {
+        // One differing byte proves this pixel is not the sentinel. Keep the
+        // exact all-byte predicate for matching pixels without generating the
+        // remaining sentinel bytes for already-written output.
+        if (pixels[offset + channel_byte] !=
+            pattern_byte(x, y, pixel_bytes, channel_byte)) {
+          unwritten = false;
+          break;
+        }
+      }
       auto& column_run = column_runs[static_cast<std::size_t>(x - promised[0])];
       if (!unwritten) {
         row_run = 0;

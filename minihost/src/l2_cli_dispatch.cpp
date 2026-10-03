@@ -137,7 +137,8 @@ WorkerMode classify_worker_mode(
           starts_with(argv[effective_argc - 1], L"session-audio:v1|");
       mode.session_audio_argc = effective_argc - (mode.session_audio ? 1 : 0);
       mode.image_render_environment = mode.session_audio_argc >= 11 &&
-          starts_with(argv[mode.session_audio_argc - 1], L"render:v1|");
+          (starts_with(argv[mode.session_audio_argc - 1], L"render:v1|") ||
+           starts_with(argv[mode.session_audio_argc - 1], L"render:v2|"));
       mode.image_environment_argc = mode.session_audio_argc -
           (mode.image_render_environment ? 1 : 0);
       mode.image_spatial_context = mode.image_environment_argc >= 11 &&
@@ -208,7 +209,8 @@ WorkerMode classify_worker_mode(
       // (the trailer), not argv[-1], and the shared request parser reads each
       // context trailer at the index the matching *_argc field records.
       mode.image_render_environment = effective_argc >= 11 &&
-          starts_with(argv[effective_argc - 1], L"render:v1|");
+          (starts_with(argv[effective_argc - 1], L"render:v1|") ||
+           starts_with(argv[effective_argc - 1], L"render:v2|"));
       mode.image_environment_argc = effective_argc -
           (mode.image_render_environment ? 1 : 0);
       mode.image_spatial_context = mode.image_environment_argc >= 11 &&

@@ -780,3 +780,12 @@ target_compile_definitions(worker_companion_manifest_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(worker_companion_manifest_selftest PRIVATE /UNDEBUG)
 target_include_directories(worker_companion_manifest_selftest PRIVATE src)
+
+add_executable(worker_cluster_manifest_path_probe
+  ../tests/native/worker_cluster_manifest_path_probe.cpp
+  src/worker_cluster_manifest.cpp
+  src/strict_json.cpp)
+target_compile_features(worker_cluster_manifest_path_probe PRIVATE cxx_std_17)
+target_compile_definitions(worker_cluster_manifest_path_probe PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_cluster_manifest_path_probe PRIVATE src)

@@ -84,6 +84,8 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
       if (mode.image_spatial_context && (!hooks.parse_spatial_context ||
           !hooks.parse_spatial_context(argv[mode.image_trailer_argc]))) throw 1;
       if (mode.image_render_environment && (!hooks.parse_render_environment ||
+          (kind == Kind::Classic &&
+           std::wstring(argv[mode.image_environment_argc]).compare(0, 10, L"render:v2|") == 0) ||
           !hooks.parse_render_environment(argv[mode.image_environment_argc]))) throw 1;
       // Audio source for the session (`session-audio:v1|<samples>|<rate>|<path>`,
       // issue #339). The one-shot spends argv[13..15] on the same three values
@@ -187,7 +189,11 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
             throw 1;
           }
           if (static_cast<std::size_t>(consumed) != field.size() ||
-              layer.slot <= 0 || layer.slot > 1024 ||
+              layer.slot < 0 || layer.slot > 1024 ||
+              (layer.slot == 0 && (kind != Kind::Smart || layer.timed ||
+                  layer.dynamic || layer.has_world_layout ||
+                  layer.width != invocation.width ||
+                  layer.height != invocation.height)) ||
               layer.width <= 0 || layer.width > 4096 ||
               layer.height <= 0 || layer.height > 4096 ||
               // A zero handle is never a valid inherited layer file (#268).

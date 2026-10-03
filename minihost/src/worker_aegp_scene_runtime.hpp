@@ -119,6 +119,7 @@ struct AegpLayerTransform {
   std::array<double, 3> scale{{100.0, 100.0, 100.0}};
   std::array<double, 3> rotation_degrees{};
   bool is_3d{};
+  std::array<double, 3> orientation_degrees{};
 };
 
 struct AegpLayerTransformKeyframe {
@@ -126,6 +127,11 @@ struct AegpLayerTransformKeyframe {
   AegpLayerTransform transform{};
   bool valid{};
 };
+
+// Pure sampling shared by pre-publication graph validation and scene queries.
+bool sample_layer_transform(const AegpLayerTransform& fallback,
+    const std::array<AegpLayerTransformKeyframe, 2>& keys,
+    const aexcompat::suite_abi::AegpTime& time, AegpLayerTransform& output) noexcept;
 
 struct AegpCameraZoomKeyframe {
   aexcompat::suite_abi::AegpTime time{};
@@ -222,6 +228,7 @@ struct SceneRuntimeState {
   // index directly without claiming an authored camera identity.
   scene_model::Identity authored_camera_identity{};
   bool authored_camera_live{};
+  bool authored_layer_graph_live{};
   AegpSelectionCollection selection{};
 
   SceneRuntimeState() noexcept;

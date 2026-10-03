@@ -635,7 +635,8 @@ pub struct SessionOpenRequest<'a> {
     pub spatial_trailer: Option<String>,
     /// Validated single authored camera snapshot, parsed before plug-in dispatch.
     pub camera_trailer: Option<String>,
-    /// Static render-environment trailer (`render:v1|`), already encoded by
+    /// Static render-environment trailer (`render:v1|`, or `render:v2|` with
+    /// an explicit SmartFX output request), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
     /// Static audio-source trailer (`session-audio:v1|<samples>|<rate>|<path>`),
@@ -756,6 +757,10 @@ fn append_plugin_data_selector_args(
 /// A timed layer (issue #98 W1-4b) additionally carries the frame time at which
 /// the worker admits it; the worker selects the matching timed entry per frame
 /// with the same rational-time test the one-shot path uses.
+/// Slot zero explicitly authors an immutable, time-invariant primary source
+/// for Smart sessions: same dimensions and pixels as every submitted frame,
+/// not timed/dynamic, no custom layer layouts or cluster swaps. Ordinary
+/// streamed sessions omit slot zero and retain missing-time failures.
 #[derive(Clone)]
 pub struct SessionLayer {
     pub slot: u32,
@@ -1122,6 +1127,7 @@ pub struct RenderSession {
     last_output_generation: u32,
     frames_ok: u32,
     frames_errored: u32,
+    memory_monitor: crate::memory_diagnostics::MemoryMonitor,
     smart_output_untouched_frames: u32,
     parameter_update_frames: u32,
     opened: Instant,
@@ -1157,6 +1163,9 @@ pub struct RenderSession {
     /// holds its own read handle to the same file and re-reads it before each
     /// frame, so replacing the bytes here is what animates the map.
     dynamic_layers: Vec<DynamicLayer>,
+    // An explicitly authored still primary is immutable for this session.
+    // This guards source semantics, not plug-in identity or launch permission.
+    still_primary_sha256: Option<[u8; 32]>,
 }
 
 /// The launch plugin set of a cluster render session (issue #405, design
@@ -1244,6 +1253,13 @@ impl Drop for LayerSidecars {
 }
 
 impl RenderSession {
+    pub fn primary_input_temporal_model(&self) -> &'static str {
+        if self.still_primary_sha256.is_some() {
+            "static"
+        } else {
+            "streamed_history_only"
+        }
+    }
     /// Opens a resident render session. The output slot starts sized to the
     /// render dimensions; an expand-output effect that overruns it grows the
     /// slot in place mid-session (protocol §3, issue #262), so there is no
@@ -1396,6 +1412,13 @@ impl RenderSession {
         if request.layers.len() > 64 {
             return Err(invalid("render session layer count exceeds 64"));
         }
+        if request.layers.iter().any(|layer| layer.slot == 0)
+            && (!request.smart || !layer_layouts.is_empty() || cluster.is_some())
+        {
+            return Err(invalid(
+                "still primary requires a non-cluster Smart session without custom layer layouts",
+            ));
+        }
         for (index, shape) in layer_layouts.iter().enumerate() {
             if !request
                 .layers
@@ -1422,7 +1445,11 @@ impl RenderSession {
         // other times, so it is admitted.
         for (index, layer) in request.layers.iter().enumerate() {
             // Same slot and dimension bounds the worker parser enforces.
-            if layer.slot == 0
+            if (layer.slot == 0
+                && (layer.timed.is_some()
+                    || layer.dynamic
+                    || layer.width != request.width
+                    || layer.height != request.height))
                 || layer.slot > 1024
                 || layer.width == 0
                 || layer.height == 0
@@ -2156,6 +2183,7 @@ impl RenderSession {
             last_output_generation: 0,
             frames_ok: 0,
             frames_errored: 0,
+            memory_monitor: crate::memory_diagnostics::MemoryMonitor::default(),
             smart_output_untouched_frames: 0,
             parameter_update_frames: 0,
             opened: Instant::now(),
@@ -2168,6 +2196,11 @@ impl RenderSession {
             _animation_sidecar: animation_sidecar,
             _layer_sidecars: layer_sidecars,
             dynamic_layers,
+            still_primary_sha256: request
+                .layers
+                .iter()
+                .find(|layer| layer.slot == 0)
+                .map(|layer| Sha256::digest(&layer.rgba).into()),
         })
     }
 
@@ -2193,6 +2226,53 @@ impl RenderSession {
 
     pub fn invalidation(&self) -> Option<&SessionInvalidation> {
         self.invalidation.as_ref()
+    }
+
+    /// Bounded advisory telemetry; it never determines frame/session validity.
+    pub fn memory_advisory(&self) -> Value {
+        self.memory_monitor.report()
+    }
+
+    fn observe_frame_memory(&mut self, current_time: i32, outcome: FrameOutcome) -> FrameOutcome {
+        let (width, height) = match &outcome.status {
+            FrameStatus::Rendered { width, height, .. } => (*width, *height),
+            _ => (self.geometry.width, self.geometry.height),
+        };
+        let performance = &outcome.performance;
+        let changed = self
+            .memory_monitor
+            .observe(crate::memory_diagnostics::MemorySample {
+                frame_index: outcome.frame_index,
+                current_time,
+                width,
+                height,
+                live_commit_bytes: performance.worker_live_commit_bytes,
+                process_peak_commit_bytes: performance.worker_peak_commit_bytes,
+                job_peak_commit_bytes: performance.worker_job_peak_commit_bytes,
+                process_limit_bytes: self
+                    .process
+                    .as_ref()
+                    .and_then(|p| p.process_memory_limit_bytes()),
+            });
+        if changed {
+            let advisory = self.memory_advisory();
+            if advisory["warnings"]
+                .as_array()
+                .is_some_and(|w| w.is_empty())
+            {
+                tracing::info!(trend = %advisory["trend"],
+                    "resident worker memory advisory state changed: no active warning (missing telemetry is not recovery proof)");
+            } else {
+                tracing::warn!(
+                    warnings = %advisory["warnings"],
+                    trend = %advisory["trend"],
+                    live_commit_bytes = ?performance.worker_live_commit_bytes,
+                    live_limit_ratio = %advisory["live_limit_ratio"],
+                    "resident worker memory advisory state changed (attribution unknown; not a leak verdict)"
+                );
+            }
+        }
+        outcome
     }
 
     fn collect_exit(&mut self, wait: Duration) {
@@ -2531,6 +2611,14 @@ impl RenderSession {
         if rgba.len() != self.geometry.input_slot_bytes() {
             return Err(invalid("input frame byte count does not match the session"));
         }
+        if self.still_primary_sha256.is_some_and(|expected| {
+            let actual: [u8; 32] = Sha256::digest(rgba).into();
+            actual != expected
+        }) {
+            return Err(invalid(
+                "still primary changed; reopen the session for a new source",
+            ));
+        }
         if current_time < 0 || current_time > self.total_time {
             return Err(invalid("frame time is outside the session's total time"));
         }
@@ -2809,7 +2897,7 @@ impl RenderSession {
                         .process
                         .as_ref()
                         .and_then(|process| process.job_peak_commit_bytes());
-                    return Ok(FrameOutcome {
+                    let outcome = FrameOutcome {
                         frame_index,
                         depth_provenance: None,
                         performance: FramePerformance {
@@ -2846,7 +2934,8 @@ impl RenderSession {
                                 selector_crash: done.selector_crash,
                             }
                         },
-                    });
+                    };
+                    return Ok(self.observe_frame_memory(current_time, outcome));
                 }
                 "ok" => {
                     let output_verify_started = Instant::now();
@@ -2934,7 +3023,7 @@ impl RenderSession {
                         .process
                         .as_ref()
                         .and_then(|process| process.job_peak_commit_bytes());
-                    return Ok(FrameOutcome {
+                    let outcome = FrameOutcome {
                         frame_index,
                         depth_provenance,
                         performance: FramePerformance {
@@ -2969,7 +3058,8 @@ impl RenderSession {
                             origin_x: output.origin_x,
                             origin_y: output.origin_y,
                         },
-                    });
+                    };
+                    return Ok(self.observe_frame_memory(current_time, outcome));
                 }
                 "resize_needed" => {
                     // The effect rendered larger than the launch slot; the worker
@@ -3591,6 +3681,7 @@ impl RenderSession {
                 "detail": invalidation.detail,
             })),
             "module_audit_warning": module_audit_warning,
+            "memory_advisory": self.memory_advisory(),
             "worker": worker,
             "final_report": final_report,
             "session_clean": session_clean,
@@ -4033,6 +4124,11 @@ struct VideoBatchRequest {
     plugin: String,
     input_frames: Vec<String>,
     output_directory: String,
+    /// The same optional bounded camera snapshot used by GUI render requests.
+    #[serde(default)]
+    active_camera: Option<crate::render_request::ActiveCamera>,
+    #[serde(default)]
+    scene_layers: Vec<crate::render_request::SceneLayer>,
     #[serde(default)]
     pixel_format: RenderPixelFormat,
     #[serde(default = "default_time_scale")]
@@ -4111,6 +4207,10 @@ pub fn run_video_batch(
         return Err(invalid("batch requires 1..=10000 input frames"));
     }
     let frame_count = request.input_frames.len();
+    let camera_trailer = crate::render_request::encode_scene_snapshot(
+        &request.scene_layers,
+        request.active_camera.as_ref(),
+    )?;
     let total_time = i32::try_from(frame_count)
         .ok()
         .and_then(|count| count.checked_mul(request.time_step))
@@ -4183,7 +4283,7 @@ pub fn run_video_batch(
         output_checksum_detail: request.output_checksum_detail,
         mask_trailer: None,
         spatial_trailer: None,
-        camera_trailer: None,
+        camera_trailer,
         render_environment_trailer: None,
         audio_trailer: None,
         alpha_as_coverage_params: &request.alpha_as_coverage_params,

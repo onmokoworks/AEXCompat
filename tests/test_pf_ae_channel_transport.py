@@ -6,6 +6,8 @@ import struct
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,11 +55,11 @@ def write_transport(folder: Path, values=(0.0, 0.25, 1.0, 2.0), **sample_updates
     return path, manifest
 
 
-def run_transport(path: Path):
+def run_transport(path: Path, *, preserve_path=False):
     executable = worker()
     assert executable is not None, "build aex_worker.exe (pwsh -File tools/build-native.ps1) before running transport tests"
     return subprocess.run(
-        [str(executable), "--kind", "classic", "--self-test-pf-ae-channel-transport", "--aux-manifest-v1", str(path.resolve())],
+        [str(executable), "--kind", "classic", "--self-test-pf-ae-channel-transport", "--aux-manifest-v1", str(path if preserve_path else path.resolve())],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -105,6 +107,43 @@ def test_aux_manifest_rejects_nonfinite_and_sidecar_outside_manifest_folder(tmp_
     value["channels"][0]["samples"][0]["path"] = str(outside.resolve())
     manifest.write_text(json.dumps(value), encoding="utf-8")
     assert run_transport(manifest).returncode != 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction path contract")
+def test_aux_manifest_accepts_junction_parent_but_rejects_other_folder(tmp_path):
+    physical = tmp_path / "physical-target"
+    physical.mkdir()
+    junction = tmp_path / "target"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(physical)],
+        text=True, capture_output=True, check=False,
+    )
+    assert created.returncode == 0, created.stderr or created.stdout
+    try:
+        manifest, value = write_transport(physical)
+        value["channels"][0]["samples"][0]["path"] = str(junction / "aux-1-0-0.f32le")
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+        accepted = run_transport(junction / manifest.name, preserve_path=True)
+        assert accepted.returncode == 0, accepted.stderr or accepted.stdout
+        assert json.loads(accepted.stdout)["pf_ae_channel_transport"] == "passed"
+
+        manifest_alias = physical / "manifest-alias.json"
+        try:
+            manifest_alias.symlink_to(manifest)
+        except OSError:
+            pass  # Symlink creation is privilege-dependent on Windows.
+        else:
+            rejected_alias = run_transport(junction / manifest_alias.name, preserve_path=True)
+            assert rejected_alias.returncode == 3, rejected_alias.stderr or rejected_alias.stdout
+
+        outside = tmp_path / "outside.f32le"
+        outside.write_bytes((physical / "aux-1-0-0.f32le").read_bytes())
+        value["channels"][0]["samples"][0]["path"] = str(outside)
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+        rejected = run_transport(junction / manifest.name, preserve_path=True)
+        assert rejected.returncode == 3, rejected.stderr or rejected.stdout
+    finally:
+        junction.rmdir()
 
 
 

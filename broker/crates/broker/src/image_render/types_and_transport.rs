@@ -434,12 +434,11 @@ fn aux_type_dimension_matches(
 /// Strip the Windows `\\?\` (or `\\?\UNC\`) extended-length prefix from a path.
 ///
 /// `Path::canonicalize()` — which every repository/transport root passes through
-/// — returns verbatim `\\?\C:\...` paths on Windows. The worker's aux-manifest
-/// loader rejects such paths: it gates each declared path on
-/// `std::filesystem::absolute(p).lexically_normal() == std::filesystem::canonical(p)`,
-/// and MSVC's `canonical` drops the `\\?\` prefix while `absolute` keeps it, so a
-/// verbatim path never matches its own canonical form and the render exits 3
-/// (issue #231). The broker already de-verbatims paths handed to the worker for
+/// — returns verbatim `\\?\C:\...` paths on Windows. The worker's former
+/// path-equality gate rejected those paths and made the render exit 3 (#231).
+/// Keep the worker wire paths plain even though the parent-junction-aware gate
+/// also accepts the owned target's physical path (#1686). The broker already
+/// de-verbatims paths handed to the worker for
 /// minidump and trace targets (`strip_extended_prefix` in minidump_policy.rs /
 /// trace_policy.rs); the aux manifest and its sidecars must follow suit. The
 /// string form is identity on any path without the prefix, so this is a no-op on
@@ -467,12 +466,16 @@ fn prepare_aux_transport(
     if channels.len() > MAX_AUX_CHANNELS {
         return Err(invalid("aux channel count exceeds 16"));
     }
-    // The worker's aux loader requires each declared path to equal its own
-    // canonical form; a `\\?\` verbatim root (from `Path::canonicalize()`) fails
-    // that gate, so hand the manifest and every sidecar plain absolute paths.
+    // Keep the worker transport wire paths plain, absolute, and consistent
+    // with the existing de-verbatim contract (#231).
     let root = strip_extended_prefix(root);
     let root = root.as_path();
     let allowed_root = repository.canonicalize()?;
+    // The repository's build target may be a junction to another drive. That
+    // one explicitly owned subtree is allowed in addition to ordinary paths
+    // beneath the canonical repository; other path aliases still fail closed.
+    let target_root = repository.join("target");
+    let allowed_target = target_root.canonicalize().ok();
     let mut per_param = std::collections::BTreeMap::<u32, usize>::new();
     let mut channel_keys = BTreeSet::new();
     let mut source_paths = HashSet::new();
@@ -579,7 +582,12 @@ fn prepare_aux_transport(
             let canonical = requested
                 .canonicalize()
                 .map_err(|_| invalid("aux sample path is unavailable"))?;
-            if !canonical.starts_with(&allowed_root) || !source_paths.insert(canonical.clone()) {
+            let in_target = allowed_target.as_ref().is_some_and(|root| {
+                requested.starts_with(&target_root) && canonical.starts_with(root)
+            });
+            if !(canonical.starts_with(&allowed_root) || in_target)
+                || !source_paths.insert(canonical.clone())
+            {
                 return Err(invalid(
                     "aux sample path escapes its root or aliases another sample",
                 ));

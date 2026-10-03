@@ -1049,6 +1049,11 @@ impl LaunchedIsolatedProcess {
         query_job_memory_peaks(self.job.raw()).1
     }
 
+    /// The actual configured per-process Job budget, not aggregate job peak.
+    pub fn process_memory_limit_bytes(&self) -> u64 {
+        self.process_memory_limit as u64
+    }
+
     /// Waits up to `timeout` for the worker to exit (terminating the job on
     /// deadline, exactly like the one-shot path), then collects output and
     /// job accounting into a `ProcessResult`.

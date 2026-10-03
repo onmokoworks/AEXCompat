@@ -1213,7 +1213,10 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
   OutputPixelBuffer guarded(static_cast<std::size_t>(plan.output_rowbytes) * height);
   auto* destination = guarded.data();
-  if (!aexcompat::worker_runtime::output_coverage::seed(
+  // Preserve allocation/geometry refusal before installing the guard probe.
+  // prepare_world_buffers seeds this same buffer before publishing any world
+  // or invoking a plug-in callback; writing the pattern here would do it twice.
+  if (!aexcompat::worker_runtime::output_coverage::seed_geometry_valid(
           destination, guarded.size(), width, height,
           plan.output_rowbytes, pixel_bytes)) return result;
   result.guards_intact = true;

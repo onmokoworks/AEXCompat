@@ -598,7 +598,7 @@ jobs:
         shell: pwsh
         run: |
           $env:AE_SDK_ROOT = $env:AFTER_EFFECTS_SDK_ROOT
-          pwsh -File tools\build-native.ps1 -Source instruments -Target pf_smart_past_input_probe
+          & tools\build-native.ps1 -Source instruments -Target pf_smart_past_input_probe,pf_automatic_wide_time_allowed_probe
 
       # built_artifact テストが参照するSDK example fixtures。通常pytestでも
       # 同じSDKを再buildしないよう、producerで一度だけ作って検証する。

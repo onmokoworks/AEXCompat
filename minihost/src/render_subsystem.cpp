@@ -611,10 +611,12 @@ bool build_argb_input(const ImageRequest& request,
         argb[3] = static_cast<unsigned char>((x + y) * 255 /
                                               (request.width + request.height - 2));
       }
-      std::memcpy(strided_destination + static_cast<std::size_t>(y) * request.rowbytes +
-                      static_cast<std::size_t>(x) * request.pixel_bytes,
-                  argb, request.pixel_bytes);
     }
+    // The converted logical row is contiguous. Copy only its active bytes;
+    // the guarded world's row padding keeps the caller's initialization.
+    const std::size_t row_size = static_cast<std::size_t>(request.width) * request.pixel_bytes;
+    std::memcpy(strided_destination + static_cast<std::size_t>(y) * request.rowbytes,
+                logical_argb.data() + static_cast<std::size_t>(y) * row_size, row_size);
   }
   return true;
 }

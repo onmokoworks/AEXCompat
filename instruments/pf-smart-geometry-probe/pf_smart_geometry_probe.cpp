@@ -79,6 +79,36 @@ bool AdvertisesFloatColor() { return !ModuleNameHas("-shallow"); }
 
 bool RewritesFlagsInParamsSetup() { return ModuleNameHas("-rewrite"); }
 
+int InitialSeedPixelBytes() {
+  if (ModuleNameHas("-seed8")) return 4;
+  if (ModuleNameHas("-seed16")) return 8;
+  if (ModuleNameHas("-seed32")) return 16;
+  return 0;
+}
+
+bool initial_seed_checked{};
+
+bool CheckInitialSeed(PF_LayerDef* world, int pixel_bytes) {
+  // Check what the plug-in actually sees before SmartPreRender can cause an
+  // output reset. The differential test uses 17x13 logical pixels at every
+  // depth, with both packed and padded worlds. These baseline fingerprints
+  // deliberately do not call the host's seed or coverage implementation.
+  if (!world || !world->data || world->width != 17 || world->height != 13 ||
+      world->rowbytes < world->width * pixel_bytes) return false;
+  uint64_t fingerprint = 14695981039346656037ULL;
+  const auto* pixels = reinterpret_cast<const unsigned char*>(world->data);
+  for (A_long y = 0; y < world->height; ++y) {
+    const auto* row = pixels + static_cast<std::size_t>(y) * world->rowbytes;
+    for (A_long b = 0; b < world->width * pixel_bytes; ++b)
+      fingerprint = (fingerprint ^ row[b]) * 1099511628211ULL;
+    for (A_long b = world->width * pixel_bytes; b < world->rowbytes; ++b)
+      if (row[b] != 0xCC) return false;
+  }
+  const uint64_t expected = pixel_bytes == 4 ? 0x8e702832acf03dc1ULL :
+      pixel_bytes == 8 ? 0xeb2a75d6871ff104ULL : 0x847373bbca4d3368ULL;
+  return fingerprint == expected;
+}
+
 bool RectEmpty(const PF_LRect& rect) {
   return rect.left >= rect.right || rect.top >= rect.bottom;
 }
@@ -114,11 +144,32 @@ Mode ProbeMode(const PF_InData* in_data) {
 PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
   if (!in_data || !extra || !extra->input || !extra->output || !extra->cb)
     return PF_Err_BAD_CALLBACK_PARAM;
+  if (InitialSeedPixelBytes() != 0) {
+    if (!initial_seed_checked) return PF_Err_INTERNAL_STRUCT_DAMAGED;
+    initial_seed_checked = false;
+  }
   const A_long width = in_data->width;
   const A_long height = in_data->height;
   if (width < 8 || height < 4) return PF_Err_BAD_CALLBACK_PARAM;
   const PF_LRect full{0, 0, width, height};
   PF_CheckoutResult checkout{};
+  if (ModuleNameHas("-requestexpand")) {
+    // A normal resizing effect: availability expands, but only the requested
+    // intersection is rendered. No RETURNS_EXTRA_PIXELS workaround.
+    const PF_LRect requested = extra->input->output_request.rect;
+    const PF_LRect available{-width / 2, -height / 2,
+                             width + width / 2, height + height / 2};
+    const PF_Err err = CheckoutInput(in_data, extra, full, &checkout);
+    if (err) return err;
+    const PF_LRect intersection{
+        requested.left > available.left ? requested.left : available.left,
+        requested.top > available.top ? requested.top : available.top,
+        requested.right < available.right ? requested.right : available.right,
+        requested.bottom < available.bottom ? requested.bottom : available.bottom};
+    extra->output->result_rect = intersection;
+    extra->output->max_result_rect = available;
+    return PF_Err_NONE;
+  }
   if (ModuleNameHas("-difftile")) {
     // The diagnostic host request, not a probe-specific host switch, chooses
     // the returned tile. Its output world must be placed at this rect's origin.
@@ -273,6 +324,16 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
   if (!err) err = extra->cb->checkout_output(in_data->effect_ref, &output);
   if (err) return err;
   if (!input || !input->data || !output || !output->data) return PF_Err_BAD_CALLBACK_PARAM;
+  if (ModuleNameHas("-requestexpand")) {
+    const auto& request = extra->input->output_request.rect;
+    const A_long left = request.left > -in_data->width / 2 ? request.left : -in_data->width / 2;
+    const A_long top = request.top > -in_data->height / 2 ? request.top : -in_data->height / 2;
+    const A_long right = request.right < in_data->width * 3 / 2 ? request.right : in_data->width * 3 / 2;
+    const A_long bottom = request.bottom < in_data->height * 3 / 2 ? request.bottom : in_data->height * 3 / 2;
+    if (output->origin_x != left || output->origin_y != top ||
+        output->width != right - left || output->height != bottom - top)
+      return PF_Err_INTERNAL_STRUCT_DAMAGED;
+  }
   const bool hint_only = ModuleNameHas("-difftile-hintonly") &&
       in_data->extent_hint.left >= 0 && in_data->extent_hint.top >= 0 &&
       in_data->extent_hint.right <= output->width &&
@@ -322,6 +383,10 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       }
       return PF_Err_NONE;
     case PF_Cmd_FRAME_SETUP:
+      if (const int pixel_bytes = InitialSeedPixelBytes()) {
+        initial_seed_checked = CheckInitialSeed(output_world, pixel_bytes);
+        if (!initial_seed_checked) return PF_Err_INTERNAL_STRUCT_DAMAGED;
+      }
       if (ModuleNameHas("-classic-nopresize")) {
         // Exercise the host-owned image placement path without dispatching RENDER.
         out_data->width += 4;

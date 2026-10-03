@@ -5,7 +5,105 @@ production workers. It covers Issue #26 scene identity and scheduling. Mask
 pixel semantics remain owned by Issue #29 APIs, and parent/camera/zoom math
 remains owned by Issue #30 APIs.
 
+## Shipping active-camera input
+
+GUI/CLI render requests accept an optional `host_context.active_camera`.
+`render-video-batch` accepts the same camera object as `active_camera` at the
+request root. Omission explicitly selects the camera-less deterministic policy.
+The camera has one typed `layer` identity (project/object/generation/index),
+static `anchor`, `position`, `scale` (percent), `rotation_degrees`, optional
+`orientation_degrees` (default zero), `zoom`, and
+rational `in_point`/`duration`. Its identity cannot change between frames.
+
+Optional `keyframes` contains exactly two objects, each with rational `time`
+(`value`/`scale`), `anchor`, `position`, `scale`, `rotation_degrees`, optional
+`orientation_degrees` (default zero), and `zoom`.
+Both snapshots use the camera's single identity. Times are strictly increasing
+by rational comparison and lie within 0 inclusive to 10 exclusive seconds; denominators are positive
+and at most 1,000,000. Transform and zoom values retain the static input bounds
+and non-singular positive-scale requirements. Invalid inputs fail before AEX
+dispatch, not by substituting an identity camera or dropping animation.
+
+The existing native scene policy holds the first/last snapshot outside the
+keyframe interval and linearly interpolates transform components and zoom
+inside it at composition rational time. This is a deterministic host policy,
+not verified AE easing, orientation, or pixel equivalence. Active time range
+still governs whether PF Interface returns a camera. Static inputs keep the
+v1 transport when orientation is zero; animated inputs with zero orientation
+use v2. Nonzero static or key orientation selects v3 (24 fields) or v4
+(60 fields: 24 static fields and two 18-field time/transform snapshots).
+The three orientation IEEE-f64 bit fields follow the rotation fields in each
+snapshot. Orientation components are finite and bounded to +/-36,000 degrees.
+Local composition is `T(position) * Rz * Ry * Rx * Oz * Oy * Ox * S * T(-anchor)`;
+Internal composition uses column vectors; public LayerSuite exports the
+transpose for SDK row-vector consumers. PF Interface exports the same
+camera-to-world matrix, whose inverse the SDK consumer uses as model-view.
+The public ABI convention is independently covered by transformed-point
+consumers, not by assuming that internal matrix fields are Adobe semantics.
+Default-camera placement and full projection/PAR equivalence remain unverified.
+Rotation and orientation remain separate,
+and each is component-linearly interpolated, without shortest-angle wrapping.
+Snapshots are installed once at session open,
+then evaluated by both PF Interface and AEGP from the same scene state.
+
 ## Identity and ownership
+
+### Shipping ordinary-layer snapshots
+
+Single-frame `host_context.scene_layers` and resident-batch root `scene_layers`
+accept at most three ordinary-layer records, using the existing native
+slots. Each record contains a typed `layer` identity including `index`, optional
+typed `parent`, `anchor`, `position`, percent `scale`, `rotation_degrees`, optional
+`orientation_degrees` (three Euler angles, default zero), and
+`is_3d`. Every parent must resolve to a record in this same graph, including its
+generation and index; cycles and duplicate slots/IDs are rejected. Omission
+retains existing scene defaults. Optional `keyframes` contains exactly two
+snapshots with rational `time`, `anchor`, `position`, percent `scale`,
+`rotation_degrees`, and optional `orientation_degrees` (default zero).
+Both snapshots share the record's typed identity and dimensionality. Times
+are strictly increasing by rational comparison, within [0,10) seconds, with
+positive denominators at most 1,000,000. No easing is inferred.
+
+At composition time the first/last snapshot is held outside the key interval;
+inside it every transform component is linearly interpolated. Parent and child
+use the same composition time, even with different key intervals. Positive
+scales are validated at every key breakpoint in the graph before publication:
+between breakpoints the logarithm of the composed scale determinant is concave,
+so its minimum occurs at an endpoint. This rejects unsafe intermediate parent
+composition without falsely combining minima that occur at different times.
+The interpolation is deterministic host policy, not verified AE keyframe/easing
+equivalence, and does not add an ordinary-layer keyframe editor.
+
+Transforms retain the camera's finite positive-scale bounds. A 2D record must
+have zero out-of-plane anchor/position/XY rotation, zero orientation, and Z scale 100, rather than
+silently discarding authored components. A composed near-singular scale is
+rejected before publication. Native composition uses the existing local order
+`T(position) * Rz * Ry * Rx * Oz * Oy * Ox * S * T(-anchor)`, where R is per-axis
+rotation and O is orientation, with each parent's matrix on the
+left. This is the deterministic host contract, not established AE parity.
+Orientation must be finite and bounded to +/-36,000 degrees per component.
+
+An optional static/animated camera may coexist in a separate free slot, with a
+distinct ID in the same project; ordinary layers cannot name that camera as a
+parent. A combined `scene-graph:v1` envelope (21 fields per ordinary record) carries camera and ordinary graph
+through the existing scene auxiliary carrier. Both are validated before one
+registry bind and non-failing scene publication; a late invalid identity does
+not invalidate earlier handles or leave a partially rebound graph. Camera-only
+input retains its v1/v2 payload for zero orientation, or uses the camera v3/v4
+payload described above; camera-less input stays explicit.
+Nonzero orientation selects `scene-graph:v2`, appending three IEEE-f64 bit fields
+to every ordinary record (24 fields). Native decoding retains v1 as zero
+orientation; malformed v2 orientation is rejected before binding any identity.
+Any ordinary keyframes select `scene-graph:v3` for the entire graph. Each record
+has 59 fields: the v2 record, one animation flag, then two 17-field snapshots
+(time numerator/denominator and 15 transform IEEE-f64 bit fields). A static
+record uses flag zero and all 34 snapshot fields zero. Invalid key times,
+transforms, flags, or unused snapshot data are rejected before registry binding.
+Snapshots are installed once per session, while every frame queries shared
+scene state at its rational composition time; identities remain stable.
+Both PF Interface effect-layer lookup and AEGP traversal/world matrices read
+the same bound records. These inputs do not create a general renderer or expand
+the native three-slot scene capacity.
 
 - Projects, items, compositions, folders, footage, layers, effects, streams,
   values, and keyframes have registry-owned typed identities:

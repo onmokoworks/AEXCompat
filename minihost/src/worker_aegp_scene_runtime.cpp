@@ -1,11 +1,54 @@
 #include "worker_aegp_scene_runtime.hpp"
 
 #include "worker_aegp_scene_model.hpp"
+#include <cmath>
 
 namespace aexcompat::scene_runtime {
 namespace {
 SceneRuntimeContext g_context{};
 bool g_configured{};
+}
+
+bool sample_layer_transform(const AegpLayerTransform& fallback,
+    const std::array<AegpLayerTransformKeyframe, 2>& keys,
+    const aexcompat::suite_abi::AegpTime& time, AegpLayerTransform& output) noexcept {
+  const auto valid_time = [](const auto& value) {
+    return value.scale != 0 && value.value >= 0 &&
+        static_cast<int64_t>(value.value) < 10 * static_cast<int64_t>(value.scale);
+  };
+  if (!valid_time(time)) return false;
+  if (!keys[0].valid && !keys[1].valid) { output = fallback; return true; }
+  if (!keys[0].valid || !keys[1].valid || !valid_time(keys[0].time) ||
+      !valid_time(keys[1].time) || keys[0].transform.is_3d != keys[1].transform.is_3d)
+    return false;
+  const auto& first = keys[0];
+  const auto& second = keys[1];
+  const int64_t span = static_cast<int64_t>(second.time.value) * first.time.scale -
+      static_cast<int64_t>(first.time.value) * second.time.scale;
+  if (span <= 0) return false;
+  const int64_t current = static_cast<int64_t>(time.value) * first.time.scale;
+  const int64_t start = static_cast<int64_t>(first.time.value) * time.scale;
+  if (current <= start) { output = first.transform; return true; }
+  if (static_cast<int64_t>(time.value) * second.time.scale >=
+      static_cast<int64_t>(second.time.value) * time.scale) {
+    output = second.transform;
+    return true;
+  }
+  const double alpha = static_cast<double>(current - start) / static_cast<double>(span) *
+      (static_cast<double>(second.time.scale) / static_cast<double>(time.scale));
+  if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) return false;
+  AegpLayerTransform result = first.transform;
+  const auto blend = [alpha](auto& destination, const auto& left, const auto& right) {
+    for (std::size_t axis = 0; axis < 3; ++axis)
+      destination[axis] = left[axis] + alpha * (right[axis] - left[axis]);
+  };
+  blend(result.anchor, first.transform.anchor, second.transform.anchor);
+  blend(result.position, first.transform.position, second.transform.position);
+  blend(result.scale, first.transform.scale, second.transform.scale);
+  blend(result.rotation_degrees, first.transform.rotation_degrees, second.transform.rotation_degrees);
+  blend(result.orientation_degrees, first.transform.orientation_degrees, second.transform.orientation_degrees);
+  output = result;
+  return true;
 }
 
 SceneRuntimeState::SceneRuntimeState() noexcept {

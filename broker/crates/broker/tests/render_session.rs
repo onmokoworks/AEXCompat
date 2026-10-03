@@ -1381,7 +1381,7 @@ mod windows_e2e {
     }
 
     #[test]
-    fn open_rejects_a_zero_layer_slot() {
+    fn open_rejects_static_primary_on_classic() {
         let (repository, plugin, sha) = temp_repository();
         let layers = vec![SessionLayer {
             slot: 0,
@@ -1425,8 +1425,13 @@ mod windows_e2e {
             launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
-        .expect_err("a zero layer slot fails fast at open");
-        assert!(error.to_string().contains("slot or dimensions"), "{error}");
+        .expect_err("a static primary requires Smart rendering");
+        assert!(
+            error
+                .to_string()
+                .contains("requires a non-cluster Smart session"),
+            "{error}"
+        );
     }
 
     /// `payload_override` must reach the worker's payload argv slot byte for

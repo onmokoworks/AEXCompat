@@ -338,6 +338,8 @@ struct RenderContextState {
   int32_t render_field{};
   int32_t shutter_angle{};
   int32_t shutter_phase{};
+  bool has_smart_output_request{};
+  std::array<int32_t, 4> smart_output_request{};
 };
 RenderContextState& render_context_state();
 

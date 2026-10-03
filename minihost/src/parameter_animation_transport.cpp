@@ -2,6 +2,7 @@
 #include "worker_parameter_limits.hpp"
 
 #include "strict_json.hpp"
+#include "transport_path_identity.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -84,10 +85,14 @@ bool load_parameter_animation(const std::filesystem::path& path,
   // The broker uses <repository>/target as worker CWD so repository sources
   // are not ambient relative inputs. The transport boundary remains
   // <repository>/target/image-transport.
-  const auto owned = std::filesystem::canonical(
-      std::filesystem::current_path() / "image-transport", error);
-  if (error || !path.is_absolute() || absolute.lexically_normal() != canonical ||
-      canonical.parent_path() != owned)
+  const auto logical_owned =
+      (std::filesystem::current_path(error) / "image-transport").lexically_normal();
+  const auto owned = std::filesystem::canonical(logical_owned, error);
+  const auto supplied_parent = absolute.lexically_normal().parent_path();
+  if (error ||
+      (supplied_parent != logical_owned && supplied_parent != owned) ||
+      canonical.parent_path() != owned ||
+      !aexcompat::transport_path::parent_alias_only(path, canonical, absolute))
     return false;
   const auto size = std::filesystem::file_size(canonical, error);
   if (error || size == 0 || size > 1024 * 1024) return false;

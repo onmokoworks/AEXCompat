@@ -17,6 +17,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use crate::process_group_cleanup::{
+    CleanupError, CleanupObservation, GroupState, finish_cleanup, observe_exit,
+};
+
 const SESSION_PREFIX: &str = "aexcompat-macos-worker";
 const TERM_GRACE: Duration = Duration::from_millis(150);
 const MAX_TRACKED_DESCENDANTS: usize = 64;
@@ -539,77 +543,79 @@ pub(crate) fn terminate_process_group(child: &mut Child) -> Result<(), String> {
     // PID after the snapshot.
     let snapshot = descendant_identities(pid);
     let descendants = snapshot.identities;
-    let mut errors = Vec::new();
+    let mut errors: Vec<CleanupError> = Vec::new();
     if let Some(diagnostic) = snapshot.diagnostic {
-        errors.push(diagnostic);
+        errors.push(diagnostic.into());
     }
     if let Err(error) = signal_identities(&descendants, libc::SIGTERM) {
+        errors.push(error.into());
+    }
+    if let Err(error) = signal_group(child, libc::SIGTERM) {
         errors.push(error);
     }
-    if let Err(error) = signal_group(pid, libc::SIGTERM) {
-        errors.push(error);
-    }
-    let leader_reaped = match wait_for_exit(child, TERM_GRACE) {
+    let mut leader_reaped = match wait_for_exit(child, TERM_GRACE) {
         Ok(reaped) => reaped,
         Err(error) => {
-            errors.push(error);
+            errors.push(error.into());
             false
         }
     };
-    let group_exists = process_group_exists(pid).unwrap_or_else(|error| {
-        errors.push(error);
-        true
+    let group = process_group_state(pid).unwrap_or_else(|error| {
+        errors.push(error.into());
+        GroupState::PermissionDenied
     });
     let descendant_exists = identities_exist(&descendants).unwrap_or_else(|error| {
-        errors.push(error);
+        errors.push(error.into());
         true
     });
-    if leader_reaped && !group_exists && !descendant_exists {
-        return if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        };
+    let observation = CleanupObservation {
+        leader_reaped,
+        group,
+        descendants_absent: !descendant_exists,
+    };
+    if observation.fully_exited() {
+        return finish_cleanup(errors, observation);
     }
     if let Err(error) = signal_identities(&descendants, libc::SIGKILL) {
-        errors.push(error);
+        errors.push(error.into());
     }
-    if let Err(error) = signal_group(pid, libc::SIGKILL) {
+    if let Err(error) = signal_group(child, libc::SIGKILL) {
         errors.push(error);
     }
     if !leader_reaped {
-        if let Err(error) = child.wait() {
-            errors.push(format!(
-                "macos_worker_residual_process: reap leader {pid}: {error}"
-            ));
+        match child.wait() {
+            Ok(_) => leader_reaped = true,
+            Err(error) => errors
+                .push(format!("macos_worker_residual_process: reap leader {pid}: {error}").into()),
         }
     }
     let started = Instant::now();
-    loop {
-        let group_exists = process_group_exists(pid).unwrap_or_else(|error| {
-            errors.push(error);
-            true
+    let final_observation = loop {
+        let group = process_group_state(pid).unwrap_or_else(|error| {
+            errors.push(error.into());
+            GroupState::PermissionDenied
         });
         let descendant_exists = identities_exist(&descendants).unwrap_or_else(|error| {
-            errors.push(error);
+            errors.push(error.into());
             true
         });
-        if !group_exists && !descendant_exists {
-            break;
+        let observation = CleanupObservation {
+            leader_reaped,
+            group,
+            descendants_absent: !descendant_exists,
+        };
+        if !group.exists() && !descendant_exists {
+            break observation;
         }
         if started.elapsed() >= Duration::from_secs(2) {
             errors.push(format!(
                 "macos_worker_residual_process: process group {pid} or an observed descendant remains after SIGKILL"
-            ));
-            break;
+            ).into());
+            break observation;
         }
         thread::sleep(Duration::from_millis(5));
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    };
+    finish_cleanup(errors, final_observation)
 }
 
 fn descendant_identities(root: libc::pid_t) -> DescendantSnapshot {
@@ -721,21 +727,27 @@ fn signal_identities(identities: &[ProcessIdentity], signal: libc::c_int) -> Res
     Ok(())
 }
 
+#[cfg(test)]
 fn process_group_exists(pid: libc::pid_t) -> Result<bool, String> {
+    Ok(process_group_state(pid)?.exists())
+}
+
+fn process_group_state(pid: libc::pid_t) -> Result<GroupState, String> {
     // SAFETY: signal 0 performs an existence/permission probe without delivery.
     let result = unsafe { libc::kill(-pid, 0) };
     if result == 0 {
-        return Ok(true);
+        return Ok(GroupState::Present);
     }
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
-        Some(libc::ESRCH) => Ok(false),
-        Some(libc::EPERM) => Ok(true),
+        Some(libc::ESRCH) => Ok(GroupState::Absent),
+        Some(libc::EPERM) => Ok(GroupState::PermissionDenied),
         _ => Err(format!("probe macOS worker process group {pid}: {error}")),
     }
 }
 
-fn signal_group(pid: libc::pid_t, signal: libc::c_int) -> Result<(), String> {
+fn signal_group(child: &mut Child, signal: libc::c_int) -> Result<(), CleanupError> {
+    let pid = child.id() as libc::pid_t;
     // SAFETY: a negative, validated child pid addresses only its process group.
     let result = unsafe { libc::kill(-pid, signal) };
     if result == 0 {
@@ -745,7 +757,31 @@ fn signal_group(pid: libc::pid_t, signal: libc::c_int) -> Result<(), String> {
         if error.raw_os_error() == Some(libc::ESRCH) {
             Ok(())
         } else {
-            Err(format!("signal macOS worker process group {pid}: {error}"))
+            // Darwin excludes zombies from group signal delivery and can
+            // return EPERM for a group whose only member is an unreaped
+            // leader. Reap our own child, then require the entire group to
+            // be absent; EPERM alone is never evidence of successful cleanup.
+            // Escaped descendants remain subject to the separate identity
+            // checks in terminate_process_group.
+            if error.raw_os_error() == Some(libc::EPERM) {
+                let initial_reaped = child
+                    .try_wait()
+                    .map_err(|reap_error| format!("reap macOS worker: {reap_error}"))?
+                    .is_some();
+                let observation = observe_exit(
+                    initial_reaped,
+                    || wait_for_exit(child, TERM_GRACE),
+                    || process_group_state(pid),
+                )?;
+                if observation.fully_exited() {
+                    return Ok(());
+                }
+                return Err(CleanupError::PendingGroupPermissionDenied(format!(
+                    "signal macOS worker process group {pid}: {error}; signal={signal}, initial_reaped={}, final_reaped={}, group={:?}",
+                    observation.initial_reaped, observation.final_reaped, observation.group
+                )));
+            }
+            Err(format!("signal macOS worker process group {pid}: {error}").into())
         }
     }
 }
@@ -981,6 +1017,36 @@ mod tests {
             .unwrap();
         // SAFETY: signal 0 only probes the exact recorded fixture PID.
         assert_eq!(unsafe { libc::kill(child_pid, 0) }, -1);
+    }
+
+    #[test]
+    fn zombie_only_group_is_reaped_before_classifying_signal_failure() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        // Do not use try_wait here: keeping the exited leader unreaped is
+        // precisely the Darwin group EPERM state this regression exercises.
+        let started = Instant::now();
+        loop {
+            // SAFETY: signal 0 probes only the isolated fixture group.
+            let result = unsafe { libc::kill(-pid, 0) };
+            if result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                break;
+            }
+            if started.elapsed() >= Duration::from_secs(2) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("fixture group {pid} did not reach unreaped-zombie EPERM state");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        signal_group(&mut child, libc::SIGTERM).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(!process_group_exists(pid).unwrap());
     }
 
     #[test]

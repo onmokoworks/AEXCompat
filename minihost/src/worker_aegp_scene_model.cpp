@@ -415,6 +415,62 @@ bool Registry::bind_authored_layer_identity(Identity current,
   return true;
 }
 
+bool Registry::bind_authored_layer_graph(
+    const std::array<Identity, 3>& current,
+    const std::array<Identity, 3>& authored,
+    const std::array<Identity, 3>& parents, std::size_t count) noexcept {
+  if (count == 0 || count > current.size()) return false;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!initialized_) return false;
+  for (std::size_t index = 0; index < count; ++index) {
+    if (current[index].kind != ObjectKind::layer ||
+        authored[index].kind != ObjectKind::layer ||
+        current[index].project_id != active_project_.project_id ||
+        authored[index].project_id != current[index].project_id ||
+        authored[index].generation != current[index].generation ||
+        authored[index].object_id == 0 || authored[index].object_id > INT32_MAX ||
+        !find_locked(current[index])) return false;
+    for (std::size_t previous = 0; previous < index; ++previous)
+      if (current[previous] == current[index] ||
+          authored[previous].object_id == authored[index].object_id) return false;
+    for (const auto& other : objects_)
+      if (other.live && other.snapshot.identity.project_id == authored[index].project_id &&
+          other.snapshot.identity.kind == ObjectKind::layer &&
+          other.snapshot.identity.object_id == authored[index].object_id &&
+          other.snapshot.identity != current[index]) return false;
+    Identity cursor = authored[index];
+    std::array<bool, 3> visited{};
+    while (cursor.kind != ObjectKind::none) {
+      std::size_t slot = 0;
+      while (slot < count && authored[slot] != cursor) ++slot;
+      if (slot == count || visited[slot]) return false;
+      visited[slot] = true;
+      cursor = parents[slot];
+    }
+  }
+  // Every fallible check precedes publication. Remap from the original identity
+  // set once, never through a sequence of partially rebound scene records.
+  const auto remap = [&](Identity identity) {
+    for (std::size_t index = 0; index < count; ++index)
+      if (identity == current[index]) return authored[index];
+    return identity;
+  };
+  for (auto& lease : borrowed_leases_)
+    if (lease.live && remap(lease.target) != lease.target) lease.live = false;
+  for (auto& record : objects_) {
+    if (!record.live) continue;
+    auto& snapshot = record.snapshot;
+    const Identity original = snapshot.identity;
+    snapshot.identity = remap(original);
+    snapshot.owner = remap(snapshot.owner);
+    snapshot.related_item = remap(snapshot.related_item);
+    snapshot.parent_layer = remap(snapshot.parent_layer);
+    for (std::size_t index = 0; index < count; ++index)
+      if (original == current[index]) snapshot.parent_layer = parents[index];
+  }
+  return true;
+}
+
 bool Registry::can_create_child(Identity owner) const noexcept {
   return can_create_children(owner, 1);
 }

@@ -41,13 +41,24 @@ pub struct HostContext {
     #[serde(default)]
     pub active_camera: Option<ActiveCamera>,
     #[serde(default)]
+    pub scene_layers: Vec<SceneLayer>,
+    #[serde(default)]
     pub render_environment: Option<RenderEnvironment>,
+    /// Explicit SmartFX output demand in layer coordinates, independent of input bounds.
+    #[serde(default)]
+    pub smart_output_request_rect: Option<[i32; 4]>,
     #[serde(default)]
     pub aux_channels: Vec<AuxChannel>,
     /// Layer parameter slots whose pre-effect alpha plane may be exposed as COVR.
     /// No other auxiliary plane is inferred from RGBA pixels.
     #[serde(default)]
     pub alpha_as_coverage_params: Vec<u32>,
+}
+
+impl HostContext {
+    pub fn has_authored_scene(&self) -> bool {
+        self.active_camera.is_some() || !self.scene_layers.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -58,18 +69,65 @@ pub struct ActiveCamera {
     pub position: [f64; 3],
     pub scale: [f64; 3],
     pub rotation_degrees: [f64; 3],
+    #[serde(default)]
+    pub orientation_degrees: [f64; 3],
     pub zoom: f64,
     pub in_point: CameraTime,
     pub duration: CameraTime,
+    /// Two bounded linear snapshots; absent retains the static v1 policy.
+    #[serde(default)]
+    pub keyframes: Option<[CameraKeyframe; 2]>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraKeyframe {
+    pub time: CameraTime,
+    pub anchor: [f64; 3],
+    pub position: [f64; 3],
+    pub scale: [f64; 3],
+    pub rotation_degrees: [f64; 3],
+    #[serde(default)]
+    pub orientation_degrees: [f64; 3],
+    pub zoom: f64,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CameraLayerIdentity {
     pub project_id: u64,
     pub object_id: u64,
     pub generation: u32,
     pub index: u8,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SceneLayer {
+    pub layer: CameraLayerIdentity,
+    #[serde(default)]
+    pub parent: Option<CameraLayerIdentity>,
+    pub anchor: [f64; 3],
+    pub position: [f64; 3],
+    pub scale: [f64; 3],
+    pub rotation_degrees: [f64; 3],
+    #[serde(default)]
+    pub orientation_degrees: [f64; 3],
+    pub is_3d: bool,
+    #[serde(default)]
+    pub keyframes: Option<[SceneLayerKeyframe; 2]>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SceneLayerKeyframe {
+    pub time: CameraTime,
+    pub anchor: [f64; 3],
+    pub position: [f64; 3],
+    pub scale: [f64; 3],
+    pub rotation_degrees: [f64; 3],
+    #[serde(default)]
+    pub orientation_degrees: [f64; 3],
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -457,9 +515,220 @@ pub(crate) fn encode_spatial_context(context: &HostContext) -> io::Result<Option
 }
 
 pub(crate) fn encode_active_camera(context: &HostContext) -> io::Result<Option<String>> {
-    let Some(camera) = context.active_camera else {
-        return Ok(None);
+    encode_scene_snapshot(&context.scene_layers, context.active_camera.as_ref())
+}
+
+pub(crate) fn encode_scene_snapshot(
+    layers: &[SceneLayer],
+    camera: Option<&ActiveCamera>,
+) -> io::Result<Option<String>> {
+    let encoded_camera = camera.map(encode_camera).transpose()?;
+    if layers.is_empty() {
+        return Ok(encoded_camera);
+    }
+    if layers.len() > 3 {
+        return Err(invalid("scene requires at most three authored layers"));
+    }
+    let mut records = Vec::with_capacity(layers.len());
+    let animated = layers.iter().any(|layer| layer.keyframes.is_some());
+    let mut breakpoints = vec![CameraTime { value: 0, scale: 1 }];
+    let oriented = animated
+        || layers
+            .iter()
+            .any(|layer| layer.orientation_degrees != [0.0; 3]);
+    for (index, layer) in layers.iter().enumerate() {
+        if layers[..index].iter().any(|previous| {
+            previous.layer.index == layer.layer.index
+                || previous.layer.object_id == layer.layer.object_id
+        }) || layer.layer.project_id != layers[0].layer.project_id
+            || camera.is_some_and(|camera| {
+                camera.layer.project_id != layer.layer.project_id
+                    || camera.layer.index == layer.layer.index
+                    || camera.layer.object_id == layer.layer.object_id
+            })
+        {
+            return Err(invalid("scene layer identity collision or foreign project"));
+        }
+        // Apply the same bounded transform contract as the existing camera path.
+        let validated = encode_camera(&ActiveCamera {
+            layer: layer.layer,
+            anchor: layer.anchor,
+            position: layer.position,
+            scale: layer.scale,
+            rotation_degrees: layer.rotation_degrees,
+            orientation_degrees: [0.0; 3],
+            zoom: 1.0,
+            in_point: CameraTime { value: 0, scale: 1 },
+            duration: CameraTime {
+                value: 10,
+                scale: 1,
+            },
+            keyframes: None,
+        })?;
+        if layer
+            .orientation_degrees
+            .iter()
+            .any(|value| !value.is_finite() || value.abs() > 36_000.0)
+        {
+            return Err(invalid("scene layer orientation is invalid"));
+        }
+        if !layer.is_3d
+            && (layer.position[2] != 0.0
+                || layer.anchor[2] != 0.0
+                || layer.rotation_degrees[0] != 0.0
+                || layer.rotation_degrees[1] != 0.0
+                || layer.scale[2] != 100.0
+                || layer.orientation_degrees != [0.0; 3])
+        {
+            return Err(invalid("2D layer has unsupported out-of-plane transform"));
+        }
+        let parent = layer.parent.unwrap_or(CameraLayerIdentity {
+            project_id: 0,
+            object_id: 0,
+            generation: 0,
+            index: 0,
+        });
+        let mut fields = vec![
+            layer.layer.project_id.to_string(),
+            layer.layer.object_id.to_string(),
+            layer.layer.generation.to_string(),
+            layer.layer.index.to_string(),
+            parent.project_id.to_string(),
+            parent.object_id.to_string(),
+            parent.generation.to_string(),
+            parent.index.to_string(),
+            u8::from(layer.is_3d).to_string(),
+        ];
+        fields.extend(
+            validated
+                .split_once('|')
+                .unwrap()
+                .1
+                .split(',')
+                .skip(9)
+                .map(str::to_owned),
+        );
+        if oriented {
+            fields.extend(
+                layer
+                    .orientation_degrees
+                    .map(|value| value.to_bits().to_string()),
+            );
+        }
+        if animated {
+            fields.push(u8::from(layer.keyframes.is_some()).to_string());
+            if let Some(keys) = layer.keyframes {
+                let [first, second] = keys.map(|key| key.time);
+                if [first, second].into_iter().any(|time| {
+                    time.value < 0
+                        || time.scale == 0
+                        || time.scale > 1_000_000
+                        || i64::from(time.value) >= 10 * i64::from(time.scale)
+                }) || i64::from(first.value) * i64::from(second.scale)
+                    >= i64::from(second.value) * i64::from(first.scale)
+                {
+                    return Err(invalid("scene layer keyframe times are invalid"));
+                }
+                for key in keys {
+                    // Validate each snapshot through exactly the static contract;
+                    // recursion terminates with keyframes=None and no parent.
+                    let mut snapshot = layer.clone();
+                    snapshot.parent = None;
+                    snapshot.keyframes = None;
+                    snapshot.anchor = key.anchor;
+                    snapshot.position = key.position;
+                    snapshot.scale = key.scale;
+                    snapshot.rotation_degrees = key.rotation_degrees;
+                    snapshot.orientation_degrees = key.orientation_degrees;
+                    let encoded = encode_scene_snapshot(&[snapshot], None)?.unwrap();
+                    fields.extend([key.time.value.to_string(), key.time.scale.to_string()]);
+                    fields.extend(
+                        encoded
+                            .split_once('!')
+                            .unwrap()
+                            .1
+                            .split(',')
+                            .skip(9)
+                            .take(12)
+                            .map(str::to_owned),
+                    );
+                    fields.extend(
+                        key.orientation_degrees
+                            .map(|value| value.to_bits().to_string()),
+                    );
+                    breakpoints.push(key.time);
+                }
+            } else {
+                fields.extend((0..34).map(|_| "0".to_owned()));
+            }
+        }
+        records.push(fields.join(","));
+    }
+    for layer in layers {
+        for time in &breakpoints {
+            let mut cursor = Some(layer.layer);
+            let mut visited = [false; 3];
+            let mut determinant = 1.0;
+            while let Some(identity) = cursor {
+                let current = layers
+                    .iter()
+                    .find(|candidate| candidate.layer == identity)
+                    .ok_or_else(|| invalid("scene parent is absent, foreign or stale"))?;
+                let index = usize::from(current.layer.index);
+                if visited[index] {
+                    return Err(invalid("scene parent cycle"));
+                }
+                visited[index] = true;
+                let scale = scene_layer_scale_at(current, *time);
+                determinant *= scale.iter().product::<f64>() / 1_000_000.0;
+                cursor = current.parent;
+            }
+            if !determinant.is_finite() || determinant <= 1.001e-12 {
+                return Err(invalid("scene composed transform is singular"));
+            }
+        }
+    }
+    let encoded = format!(
+        "scene-graph:{}|{}!{}",
+        if animated {
+            "v3"
+        } else if oriented {
+            "v2"
+        } else {
+            "v1"
+        },
+        encoded_camera.unwrap_or_default(),
+        records.join(";")
+    );
+    if encoded.len() > 4096 {
+        return Err(invalid("scene graph payload exceeds native bound"));
+    }
+    Ok(Some(encoded))
+}
+
+fn scene_layer_scale_at(layer: &SceneLayer, time: CameraTime) -> [f64; 3] {
+    let Some([first, second]) = layer.keyframes else {
+        return layer.scale;
     };
+    let before = i64::from(time.value) * i64::from(first.time.scale);
+    let start = i64::from(first.time.value) * i64::from(time.scale);
+    if before <= start {
+        return first.scale;
+    }
+    if i64::from(time.value) * i64::from(second.time.scale)
+        >= i64::from(second.time.value) * i64::from(time.scale)
+    {
+        return second.scale;
+    }
+    let span = i64::from(second.time.value) * i64::from(first.time.scale)
+        - i64::from(first.time.value) * i64::from(second.time.scale);
+    let alpha = (before - start) as f64 / span as f64
+        * (f64::from(second.time.scale) / f64::from(time.scale));
+    std::array::from_fn(|axis| first.scale[axis] + alpha * (second.scale[axis] - first.scale[axis]))
+}
+
+pub(crate) fn encode_camera(camera: &ActiveCamera) -> io::Result<String> {
+    let camera = *camera;
     if camera.layer.project_id == 0
         || camera.layer.project_id > i32::MAX as u64
         || camera.layer.object_id == 0
@@ -502,9 +771,13 @@ pub(crate) fn encode_active_camera(context: &HostContext) -> io::Result<Option<S
     if !scale_determinant.is_finite() || scale_determinant <= 1.001e-12 {
         return Err(invalid("active camera scale is singular or out of range"));
     }
-    for value in camera.rotation_degrees {
+    for value in camera
+        .rotation_degrees
+        .into_iter()
+        .chain(camera.orientation_degrees)
+    {
         if !value.is_finite() || value.abs() > 36_000.0 {
-            return Err(invalid("active camera rotation is invalid"));
+            return Err(invalid("active camera rotation or orientation is invalid"));
         }
     }
     let mut fields = vec![
@@ -526,13 +799,81 @@ pub(crate) fn encode_active_camera(context: &HostContext) -> io::Result<Option<S
     {
         fields.push(value.to_bits().to_string());
     }
-    Ok(Some(format!("scene-camera:v1|{}", fields.join(","))))
+    let oriented = camera.orientation_degrees != [0.0; 3]
+        || camera
+            .keyframes
+            .is_some_and(|keys| keys.iter().any(|key| key.orientation_degrees != [0.0; 3]));
+    if oriented {
+        fields.extend(
+            camera
+                .orientation_degrees
+                .map(|value| value.to_bits().to_string()),
+        );
+    }
+    let version = if let Some(keyframes) = camera.keyframes {
+        let [first, second] = keyframes.map(|keyframe| keyframe.time);
+        if [first, second].into_iter().any(|time| {
+            time.value < 0
+                || time.scale == 0
+                || time.scale > 1_000_000
+                || i64::from(time.value) >= 10 * i64::from(time.scale)
+        }) || i64::from(first.value) * i64::from(second.scale)
+            >= i64::from(second.value) * i64::from(first.scale)
+        {
+            return Err(invalid("active camera keyframe times are invalid"));
+        }
+        for keyframe in keyframes {
+            let snapshot = ActiveCamera {
+                anchor: keyframe.anchor,
+                position: keyframe.position,
+                scale: keyframe.scale,
+                rotation_degrees: keyframe.rotation_degrees,
+                orientation_degrees: keyframe.orientation_degrees,
+                zoom: keyframe.zoom,
+                keyframes: None,
+                ..camera
+            };
+            // Reuse exactly the static transform/zoom validation and bit encoding.
+            let encoded = encode_camera(&snapshot)?;
+            fields.extend([
+                keyframe.time.value.to_string(),
+                keyframe.time.scale.to_string(),
+            ]);
+            fields.extend(
+                encoded
+                    .split('|')
+                    .nth(1)
+                    .expect("camera fields")
+                    .split(',')
+                    .skip(8)
+                    .take(13)
+                    .map(str::to_owned),
+            );
+            if oriented {
+                fields.extend(
+                    keyframe
+                        .orientation_degrees
+                        .map(|value| value.to_bits().to_string()),
+                );
+            }
+        }
+        if oriented { "v4" } else { "v2" }
+    } else {
+        if oriented { "v3" } else { "v1" }
+    };
+    Ok(format!("scene-camera:{version}|{}", fields.join(",")))
 }
 
 pub(crate) fn encode_render_environment(context: &HostContext) -> io::Result<Option<String>> {
-    let Some(environment) = context.render_environment else {
+    if context.render_environment.is_none() && context.smart_output_request_rect.is_none() {
         return Ok(None);
-    };
+    }
+    let environment = context.render_environment.unwrap_or(RenderEnvironment {
+        quality: RenderQuality::High,
+        field: RenderField::Frame,
+        shutter_angle: 0.0,
+        shutter_phase: 0.0,
+    });
     if !environment.shutter_angle.is_finite()
         || !(0.0..=1.0).contains(&environment.shutter_angle)
         || !environment.shutter_phase.is_finite()
@@ -551,6 +892,24 @@ pub(crate) fn encode_render_environment(context: &HostContext) -> io::Result<Opt
     };
     let angle = (environment.shutter_angle * 65536.0).round() as i32;
     let phase = (environment.shutter_phase * 65536.0).round() as i32;
+    if let Some([left, top, right, bottom]) = context.smart_output_request_rect {
+        let width = i64::from(right) - i64::from(left);
+        let height = i64::from(bottom) - i64::from(top);
+        if [left, top, right, bottom]
+            .iter()
+            .any(|value| i64::from(*value).abs() > (1 << 24))
+            || !(1..=4096).contains(&width)
+            || !(1..=4096).contains(&height)
+            || width * height > 16_777_216
+        {
+            return Err(invalid(
+                "SmartFX output request rectangle is outside enabled range",
+            ));
+        }
+        return Ok(Some(format!(
+            "render:v2|{quality},{field},{angle},{phase},{left},{top},{right},{bottom}"
+        )));
+    }
     Ok(Some(format!("render:v1|{quality},{field},{angle},{phase}")))
 }
 
@@ -932,13 +1291,13 @@ pub fn execute_smart(
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request
-        .host_context
-        .as_ref()
-        .is_some_and(|context| context.active_camera.is_some())
-    {
+    if request.host_context.as_ref().is_some_and(|context| {
+        context.active_camera.is_some()
+            || !context.scene_layers.is_empty()
+            || context.smart_output_request_rect.is_some()
+    }) {
         return Err(invalid(
-            "active camera is not supported by the fixture SmartFX render route",
+            "active camera, scene layers and output requests are not supported by the fixture SmartFX render route",
         ));
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
@@ -2086,6 +2445,226 @@ mod tests {
     }
 
     #[test]
+    fn request_v4_retains_authored_layer_parent_graph() {
+        let input = json!({
+            "mask_scene": {"masks": []},
+            "scene_layers": [
+                {
+                    "layer": {"project_id": 1, "object_id": 2801, "generation": 1, "index": 0},
+                    "parent": {"project_id": 1, "object_id": 2802, "generation": 1, "index": 1},
+                    "anchor": [0, 0, 0], "position": [10, 20, 30],
+                    "scale": [100, 100, 100], "rotation_degrees": [0, 0, 0], "is_3d": true
+                },
+                {
+                    "layer": {"project_id": 1, "object_id": 2802, "generation": 1, "index": 1},
+                    "parent": null,
+                    "anchor": [0, 0, 0], "position": [40, 50, 60],
+                    "scale": [100, 100, 100], "rotation_degrees": [0, 0, 0], "is_3d": true
+                }
+            ]
+        });
+        let context: HostContext = serde_json::from_value(input).unwrap();
+        let encoded = encode_active_camera(&context).unwrap().unwrap();
+        assert!(context.has_authored_scene());
+        let mut cleared = context.clone();
+        cleared.scene_layers.clear();
+        assert!(!cleared.has_authored_scene());
+        assert!(encoded.starts_with("scene-graph:v1|!"));
+        let records: Vec<_> = encoded.split_once('!').unwrap().1.split(';').collect();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| record.split(',').count() == 21));
+        let mut invalid = context.clone();
+        invalid.scene_layers[0].parent.as_mut().unwrap().generation = 2;
+        assert!(encode_active_camera(&invalid).is_err());
+        invalid = context.clone();
+        invalid.scene_layers[1].parent = Some(invalid.scene_layers[0].layer);
+        assert!(encode_active_camera(&invalid).is_err());
+        invalid = context.clone();
+        invalid.scene_layers[0].scale[0] = f64::NAN;
+        assert!(encode_active_camera(&invalid).is_err());
+        invalid = context.clone();
+        invalid.scene_layers[1].layer.index = 0;
+        assert!(encode_active_camera(&invalid).is_err());
+        invalid = context.clone();
+        invalid.scene_layers[0].is_3d = false;
+        assert!(encode_active_camera(&invalid).is_err());
+        let serialized = serde_json::to_value(context).unwrap();
+        assert_eq!(serialized["scene_layers"][0]["position"][0], 10.0);
+        assert_eq!(serialized["scene_layers"][0]["parent"]["object_id"], 2802);
+        assert_eq!(serialized["scene_layers"][1]["layer"]["object_id"], 2802);
+    }
+
+    #[test]
+    fn authored_layer_orientation_round_trips_and_rejects_invalid_input() {
+        let mut input = json!({"mask_scene":{"masks":[]},"scene_layers":[{
+            "layer":{"project_id":1,"object_id":2801,"generation":1,"index":0},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[90,0,0],"orientation_degrees":[0,90,0],"is_3d":true
+        }]});
+        let context: HostContext = serde_json::from_value(input.clone()).unwrap();
+        let encoded = encode_active_camera(&context).unwrap().unwrap();
+        assert!(encoded.starts_with("scene-graph:v2|!"));
+        let fields: Vec<u64> = encoded
+            .split_once('!')
+            .unwrap()
+            .1
+            .split(',')
+            .map(|field| field.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 24);
+        assert_eq!(f64::from_bits(fields[22]), 90.0);
+        assert_eq!(
+            serde_json::to_value(context).unwrap()["scene_layers"][0]["orientation_degrees"],
+            json!([0.0, 90.0, 0.0])
+        );
+        for orientation in [json!([0, 36001, 0]), json!([0, 0]), json!([null, 0, 0])] {
+            input["scene_layers"][0]["orientation_degrees"] = orientation;
+            assert!(
+                serde_json::from_value::<HostContext>(input.clone())
+                    .and_then(
+                        |context| encode_active_camera(&context).map_err(serde::de::Error::custom)
+                    )
+                    .is_err()
+            );
+        }
+        input["scene_layers"][0]["orientation_degrees"] = json!([0, 0, 90]);
+        input["scene_layers"][0]["position"] = json!([0, 0, 0]);
+        input["scene_layers"][0]["rotation_degrees"] = json!([0, 0, 0]);
+        input["scene_layers"][0]["is_3d"] = json!(false);
+        let context: HostContext = serde_json::from_value(input).unwrap();
+        assert!(encode_active_camera(&context).is_err());
+    }
+
+    #[test]
+    fn authored_layer_keyframes_retain_rational_time_and_transform() {
+        let first = json!({"time":{"value":2,"scale":2},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"orientation_degrees":[0,0,0]});
+        let mut second = first.clone();
+        second["time"] = json!({"value":4,"scale":2});
+        second["position"] = json!([30, 40, 50]);
+        second["orientation_degrees"] = json!([0, 0, 90]);
+        let mut input = json!({"mask_scene":{"masks":[]},"scene_layers":[{
+            "layer":{"project_id":1,"object_id":2801,"generation":1,"index":0},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"is_3d":true,"keyframes":[first,second]
+        }]});
+        let context: HostContext = serde_json::from_value(input.clone()).unwrap();
+        let encoded = encode_active_camera(&context).unwrap().unwrap();
+        assert!(encoded.starts_with("scene-graph:v3|!"));
+        let fields: Vec<u64> = encoded
+            .split_once('!')
+            .unwrap()
+            .1
+            .split(',')
+            .map(|field| field.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 59);
+        assert_eq!(&fields[24..27], &[1, 2, 2]);
+        assert_eq!(&fields[42..44], &[4, 2]);
+        assert_eq!(f64::from_bits(fields[47]), 30.0);
+        assert_eq!(f64::from_bits(fields[58]), 90.0);
+        let serialized = serde_json::to_value(context).unwrap();
+        assert_eq!(
+            serialized["scene_layers"][0]["keyframes"][0]["time"]["scale"],
+            2
+        );
+        for time in [
+            json!({"value":1,"scale":1}),
+            json!({"value":-1,"scale":2}),
+            json!({"value":20,"scale":2}),
+            json!({"value":4,"scale":0}),
+        ] {
+            input["scene_layers"][0]["keyframes"][1]["time"] = time;
+            assert!(
+                serde_json::from_value::<HostContext>(input.clone())
+                    .and_then(
+                        |context| encode_active_camera(&context).map_err(serde::de::Error::custom)
+                    )
+                    .is_err()
+            );
+        }
+        input["scene_layers"][0]["keyframes"] = json!([first]);
+        assert!(serde_json::from_value::<HostContext>(input).is_err());
+    }
+
+    #[test]
+    fn animated_parent_scale_is_validated_at_every_key_breakpoint() {
+        let layer = json!({"layer":{"project_id":1,"object_id":2801,"generation":1,"index":0},
+            "anchor":[0,0,0],"position":[0,0,0],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"is_3d":true});
+        let key = |value, scale| {
+            json!({"time":{"value":value,"scale":1},
+            "anchor":[0,0,0],"position":[0,0,0],"scale":scale,"rotation_degrees":[0,0,0]})
+        };
+        let mut child = layer.clone();
+        let mut parent = layer;
+        parent["layer"]["object_id"] = json!(2802);
+        parent["layer"]["index"] = json!(1);
+        child["parent"] = parent["layer"].clone();
+        child["keyframes"] = json!([key(1, [100.0; 3]), key(3, [0.02; 3])]);
+        parent["keyframes"] = json!([key(2, [0.02; 3]), key(4, [100.0; 3])]);
+        let input = json!({"mask_scene":{"masks":[]},"scene_layers":[child,parent]});
+        let context: HostContext = serde_json::from_value(input).unwrap();
+        // The global first/last times are safe, but 2s and 3s are singular.
+        assert!(encode_active_camera(&context).is_err());
+        let mut valid = context.scene_layers[0].clone();
+        valid.parent = None;
+        valid.keyframes.as_mut().unwrap()[0].scale = [0.01, 0.01, 10_000.0];
+        valid.keyframes.as_mut().unwrap()[1].scale = [10_000.0, 10_000.0, 0.01];
+        // Independent component minima would falsely reject this safe curve.
+        assert!(encode_scene_snapshot(&[valid], None).is_ok());
+    }
+
+    #[test]
+    fn camera_orientation_json_retains_static_and_animated_components() {
+        let mut camera = json!({"layer":{"project_id":1,"object_id":2807,"generation":1,"index":2},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"orientation_degrees":[0,0,90],"zoom":800,
+            "in_point":{"value":0,"scale":1},"duration":{"value":10,"scale":1}});
+        let parsed: ActiveCamera = serde_json::from_value(camera.clone()).unwrap();
+        let encoded = encode_camera(&parsed).unwrap();
+        assert!(encoded.starts_with("scene-camera:v3|"));
+        let fields: Vec<u64> = encoded
+            .split_once('|')
+            .unwrap()
+            .1
+            .split(',')
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 24);
+        assert_eq!(f64::from_bits(fields[23]), 90.0);
+        let key = |value, orientation| {
+            json!({"time":{"value":value,"scale":2},
+            "anchor":[0,0,0],"position":[10,20,30],"scale":[100,100,100],
+            "rotation_degrees":[0,0,0],"orientation_degrees":orientation,"zoom":800})
+        };
+        camera["orientation_degrees"] = json!([0, 0, 0]);
+        camera["keyframes"] = json!([key(2, [0, 0, 0]), key(4, [0, 0, 90])]);
+        let parsed: ActiveCamera = serde_json::from_value(camera.clone()).unwrap();
+        let encoded = encode_camera(&parsed).unwrap();
+        assert!(encoded.starts_with("scene-camera:v4|"));
+        let fields: Vec<u64> = encoded
+            .split_once('|')
+            .unwrap()
+            .1
+            .split(',')
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 60);
+        assert_eq!(&fields[24..26], &[2, 2]);
+        assert_eq!(&fields[42..44], &[4, 2]);
+        assert_eq!(f64::from_bits(fields[59]), 90.0);
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["keyframes"][1]["orientation_degrees"][2],
+            90.0
+        );
+        camera["keyframes"][1]["orientation_degrees"][0] = json!(36001);
+        let invalid: ActiveCamera = serde_json::from_value(camera).unwrap();
+        assert!(encode_camera(&invalid).is_err());
+    }
+
+    #[test]
     fn request_v4_accepts_an_authored_active_camera_snapshot() {
         let request: Request = serde_json::from_str(
             r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[]},"active_camera":{"layer":{"project_id":1,"object_id":2807,"generation":1,"index":2},"anchor":[0.0,0.0,0.0],"position":[10.0,20.0,30.0],"scale":[100.0,100.0,100.0],"rotation_degrees":[0.0,0.0,0.0],"zoom":800.0,"in_point":{"value":0,"scale":30},"duration":{"value":300,"scale":30}}}}"#,
@@ -2102,6 +2681,76 @@ mod tests {
         invalid.active_camera.as_mut().unwrap().zoom = 800.0;
         invalid.active_camera.as_mut().unwrap().scale = [0.01; 3];
         assert!(encode_active_camera(&invalid).is_err());
+    }
+
+    #[test]
+    fn camera_keyframes_encode_exact_bits_and_reject_invalid_time_or_transform() {
+        let mut camera: ActiveCamera = serde_json::from_value(json!({
+            "layer": {"project_id": 1, "object_id": 2807, "generation": 1, "index": 2},
+            "anchor": [0,0,0], "position": [10,20,30], "scale": [100,100,100],
+            "rotation_degrees": [0,0,0], "zoom": 800,
+            "in_point": {"value":0,"scale":30},
+            "duration": {"value":300,"scale":30}
+        }))
+        .unwrap();
+        let static_encoded = encode_camera(&camera).unwrap();
+        let first = CameraKeyframe {
+            time: CameraTime { value: 1, scale: 1 },
+            anchor: camera.anchor,
+            position: camera.position,
+            scale: camera.scale,
+            rotation_degrees: camera.rotation_degrees,
+            orientation_degrees: camera.orientation_degrees,
+            zoom: camera.zoom,
+        };
+        let second = CameraKeyframe {
+            time: CameraTime { value: 4, scale: 2 },
+            position: [30.0, 40.0, 50.0],
+            zoom: 1200.0,
+            ..first
+        };
+        camera.keyframes = Some([first, second]);
+        let encoded = encode_camera(&camera).unwrap();
+        let fields: Vec<u64> = encoded
+            .split('|')
+            .nth(1)
+            .unwrap()
+            .split(',')
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert_eq!(fields.len(), 51);
+        assert_eq!(&fields[21..23], &[1, 1]);
+        assert_eq!(&fields[36..38], &[4, 2]);
+        assert_eq!(f64::from_bits(fields[23]), 800.0);
+        assert_eq!(f64::from_bits(fields[38]), 1200.0);
+        assert_eq!(f64::from_bits(fields[42]), 30.0);
+        for time in [
+            CameraTime { value: 2, scale: 2 },
+            CameraTime { value: 0, scale: 1 },
+            CameraTime { value: 1, scale: 0 },
+            CameraTime {
+                value: 11,
+                scale: 1,
+            },
+            CameraTime {
+                value: 10,
+                scale: 1,
+            },
+        ] {
+            camera.keyframes.as_mut().unwrap()[1].time = time;
+            assert!(encode_camera(&camera).is_err());
+        }
+        camera.keyframes = Some([first, second]);
+        camera.keyframes.as_mut().unwrap()[1].scale = [0.01; 3];
+        assert!(encode_camera(&camera).is_err());
+        camera.keyframes = Some([first, second]);
+        camera.keyframes.as_mut().unwrap()[1].zoom = f64::NAN;
+        assert!(encode_camera(&camera).is_err());
+        camera.keyframes = None;
+        assert_eq!(encode_camera(&camera).unwrap(), static_encoded);
+        let mut malformed = serde_json::to_value(camera).unwrap();
+        malformed["keyframes"] = json!([first]);
+        assert!(serde_json::from_value::<ActiveCamera>(malformed).is_err());
     }
 
     #[test]
@@ -2188,6 +2837,57 @@ mod tests {
     }
 
     #[test]
+    fn smart_output_request_extends_beyond_input_in_shipping_host_context() {
+        let context: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"smart_output_request_rect":[-32,-24,96,72]}"#,
+        )
+        .expect("shipping host context must represent an extended SmartFX request");
+        assert_eq!(
+            encode_render_environment(&context).unwrap().as_deref(),
+            Some("render:v2|1,0,0,0,-32,-24,96,72")
+        );
+    }
+
+    #[test]
+    fn smart_output_request_bounds_and_environment_are_preserved() {
+        for rect in [
+            [0, 0, 0, 1],
+            [1, 0, 0, 1],
+            [0, 0, 1, 0],
+            [0, 0, 4097, 1],
+            [0, 0, 1, 4097],
+            [-(1 << 24) - 1, 0, -(1 << 24), 1],
+            [(1 << 24), 0, (1 << 24) + 1, 1],
+            [i32::MIN, 0, i32::MAX, 1],
+        ] {
+            let context: HostContext = serde_json::from_value(serde_json::json!({
+                "mask_scene":{"masks":[]}, "smart_output_request_rect":rect
+            }))
+            .unwrap();
+            assert!(encode_render_environment(&context).is_err(), "{rect:?}");
+        }
+        for rect in [
+            [-4096, -4096, 0, 0],
+            [-(1 << 24), 0, -(1 << 24) + 1, 1],
+            [(1 << 24) - 1, 0, (1 << 24), 1],
+        ] {
+            let context: HostContext = serde_json::from_value(serde_json::json!({
+                "mask_scene":{"masks":[]}, "smart_output_request_rect":rect,
+                "render_environment":{"quality":"low","field":"upper",
+                    "shutter_angle":0.5,"shutter_phase":-0.25}
+            }))
+            .unwrap();
+            assert_eq!(
+                encode_render_environment(&context).unwrap().unwrap(),
+                format!(
+                    "render:v2|0,1,32768,-16384,{},{},{},{}",
+                    rect[0], rect[1], rect[2], rect[3]
+                )
+            );
+        }
+    }
+
+    #[test]
     fn mask_context_accepts_open_and_rejects_excess_and_legacy_injection() {
         let open: Request = serde_json::from_str(
             r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[{"open":true,"vertices":[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]}]}}}"#,
@@ -2228,7 +2928,9 @@ mod tests {
             },
             spatial: None,
             active_camera: None,
+            scene_layers: Vec::new(),
             render_environment: None,
+            smart_output_request_rect: None,
             aux_channels: Vec::new(),
             alpha_as_coverage_params: Vec::new(),
         };

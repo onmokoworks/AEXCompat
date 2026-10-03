@@ -93,46 +93,8 @@ bool finite_bounded(double value, double limit) {
 bool resolve_layer_transform(std::size_t index, const AegpTime& comp_time,
     AegpLayerTransform& output) {
   if (index >= g_aegp_layer_transforms.size() || !valid_comp_time(comp_time)) return false;
-  const auto& keyframes = state().layer_transform_keyframes[index];
-  if (!keyframes[0].valid && !keyframes[1].valid) {
-    output = g_aegp_layer_transforms[index];
-    return true;
-  }
-  if (!keyframes[0].valid || !keyframes[1].valid ||
-      !valid_comp_time(keyframes[0].time) || !valid_comp_time(keyframes[1].time) ||
-      keyframes[0].transform.is_3d != keyframes[1].transform.is_3d) return false;
-  const long double first_time = static_cast<long double>(keyframes[0].time.value) /
-      static_cast<long double>(keyframes[0].time.scale);
-  const long double second_time = static_cast<long double>(keyframes[1].time.value) /
-      static_cast<long double>(keyframes[1].time.scale);
-  const long double current_time = static_cast<long double>(comp_time.value) /
-      static_cast<long double>(comp_time.scale);
-  if (!std::isfinite(first_time) || !std::isfinite(second_time) ||
-      !std::isfinite(current_time) || !(first_time < second_time)) return false;
-  if (current_time <= first_time) {
-    output = keyframes[0].transform;
-    return true;
-  }
-  if (current_time >= second_time) {
-    output = keyframes[1].transform;
-    return true;
-  }
-  const long double alpha = (current_time - first_time) / (second_time - first_time);
-  if (!std::isfinite(alpha) || alpha < 0.0L || alpha > 1.0L) return false;
-  output = keyframes[0].transform;
-  const auto blend = [alpha](std::array<double, 3>& destination,
-      const std::array<double, 3>& first, const std::array<double, 3>& second) {
-    for (std::size_t component = 0; component < 3; ++component) {
-      destination[component] = first[component] +
-          static_cast<double>(alpha) * (second[component] - first[component]);
-    }
-  };
-  blend(output.anchor, keyframes[0].transform.anchor, keyframes[1].transform.anchor);
-  blend(output.position, keyframes[0].transform.position, keyframes[1].transform.position);
-  blend(output.scale, keyframes[0].transform.scale, keyframes[1].transform.scale);
-  blend(output.rotation_degrees, keyframes[0].transform.rotation_degrees,
-      keyframes[1].transform.rotation_degrees);
-  return true;
+  return aexcompat::scene_runtime::sample_layer_transform(g_aegp_layer_transforms[index],
+      state().layer_transform_keyframes[index], comp_time, output);
 }
 
 bool resolve_layer_camera_zoom(std::size_t index, const AegpTime& comp_time,
@@ -188,6 +150,8 @@ bool build_layer_transform(const AegpLayerTransform& authored, AegpMatrix4& outp
         !finite_bounded(authored.position[index], kLinearLimit) ||
         !finite_bounded(authored.scale[index], kLinearLimit) ||
         !finite_bounded(authored.rotation_degrees[index], kRotationLimit) ||
+        !finite_bounded(authored.orientation_degrees[index], 36000.0) ||
+        (!authored.is_3d && authored.orientation_degrees[index] != 0.0) ||
         authored.scale[index] == 0.0) return false;
   }
 
@@ -249,11 +213,26 @@ bool build_layer_transform(const AegpLayerTransform& authored, AegpMatrix4& outp
   negative_anchor.mat[1][3] = -authored.anchor[1];
   negative_anchor.mat[2][3] = -authored.anchor[2];
 
-  // Row-major matrices multiply column vectors: T(position) * Rz * Ry * Rx
-  // * S(scale / 100) * T(-anchor), matching the authored AE transform order.
+  AegpMatrix4 orientation{};
+  set_identity(orientation);
+  // Separate Euler orientation is a deterministic host policy, not an
+  // assertion of AE parity. Apply X, then Y, then Z to column vectors.
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    const double angle = authored.orientation_degrees[axis] * kPi / 180.0;
+    AegpMatrix4 turn{};
+    set_identity(turn);
+    const std::size_t first = (axis + 1) % 3;
+    const std::size_t second = (axis + 2) % 3;
+    turn.mat[first][first] = turn.mat[second][second] = std::cos(angle);
+    turn.mat[first][second] = -std::sin(angle);
+    turn.mat[second][first] = std::sin(angle);
+    orientation = multiply(turn, orientation);
+  }
+  // T(position) * RzRyRx(rotation) * RzRyRx(orientation) * S * T(-anchor).
+  // Zero orientation retains the previous rotation-only matrix contract.
   const AegpMatrix4 result = multiply(
       multiply(multiply(multiply(translation, rotate_z), rotate_y), rotate_x),
-      multiply(scale, negative_anchor));
+      multiply(orientation, multiply(scale, negative_anchor)));
   for (std::size_t row = 0; row < 4; ++row)
     for (std::size_t column = 0; column < 4; ++column)
       if (!std::isfinite(result.mat[row][column])) return false;
@@ -399,6 +378,11 @@ aexcompat::scene_model::Registry& scene_registry() noexcept {
 
 bool resolve_scene_item(void* handle, ObjectSnapshot& output,
                         uint64_t required_project_id = 0) noexcept {
+  // The PF effect layer publishes this composition item through its parent.
+  // Normalize only that live facade identity; null and foreign handles must
+  // still be rejected by the registry below.
+  void* const facade_comp = aexcompat::worker_runtime::bee_facade::comp_item_handle();
+  if (facade_comp && handle == facade_comp) handle = &g_aegp_comp_item;
   return scene_registry().resolve_item_or_legacy(
       handle, output, required_project_id);
 }
@@ -839,6 +823,8 @@ int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type) {
 AegpLegacyItemSuite6 g_aegp_legacy_item_suite6{};
 std::array<void*, 27> g_aegp_item_suite13{};
 static_assert(sizeof(g_aegp_item_suite13) == 27 * sizeof(void*));
+std::array<void*, 27> g_aegp_item_suite11{};
+static_assert(sizeof(g_aegp_item_suite11) == 27 * sizeof(void*));
 std::array<void*, 20> g_aegp_item_suite1{};
 static_assert(sizeof(g_aegp_item_suite1) == 20 * sizeof(void*));
 
@@ -995,7 +981,13 @@ int32_t __cdecl aegp_get_layer_to_world_xform(
   if (index < 0 || !comp_time || !transform || !valid_comp_time(*comp_time)) return 4;
   AegpMatrix4 result{};
   if (!build_layer_world_transform(static_cast<std::size_t>(index), *comp_time, result)) return 4;
-  *transform = result;
+  // Composition is internal column-vector math. Adobe's public A_Matrix4
+  // consumer (SDK Artie) applies row vectors, so adapt only at this boundary.
+  AegpMatrix4 public_result{};
+  for (std::size_t row = 0; row < 4; ++row)
+    for (std::size_t column = 0; column < 4; ++column)
+      public_result.mat[row][column] = result.mat[column][row];
+  *transform = public_result;
   return 0;
 }
 int32_t __cdecl aegp_get_item_from_comp(void* comp, void** item) {
@@ -2780,6 +2772,16 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_item_suite13[16] = reinterpret_cast<void*>(&aegp_get_item_dimensions);
     g_aegp_item_suite13[17] = reinterpret_cast<void*>(&aegp_get_item_pixel_aspect_ratio);
     *suite = g_aegp_item_suite13.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
+  if (named("AEGP Item Suite") && version == 11) {
+    // Frozen ItemSuite7 has legacy string signatures. Expose only its
+    // signature-compatible geometry slots; do not alias the newer v13 table.
+    g_aegp_item_suite11 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_item_11, 27>();
+    g_aegp_item_suite11[16] = reinterpret_cast<void*>(&aegp_get_item_dimensions);
+    g_aegp_item_suite11[17] = reinterpret_cast<void*>(&aegp_get_item_pixel_aspect_ratio);
+    *suite = g_aegp_item_suite11.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Item Suite") && version == 10) {
