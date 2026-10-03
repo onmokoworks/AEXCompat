@@ -3,6 +3,7 @@
 #include "AE_Effect.h"
 
 #include <cstring>
+#include <algorithm>
 
 extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
                                         PF_OutData* out_data, PF_ParamDef* params[],
@@ -16,6 +17,8 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
 #endif
 #if AEXCOMPAT_ADVERTISE_AUTOMATIC_WIDE_TIME
       out_data->out_flags2 |= PF_OutFlag2_AUTOMATIC_WIDE_TIME_INPUT;
+      out_data->out_flags |= PF_OutFlag_DEEP_COLOR_AWARE;
+      out_data->out_flags2 |= PF_OutFlag2_FLOAT_COLOR_AWARE;
 #endif
 #if AEXCOMPAT_ADVERTISE_WIDE_TIME
       out_data->out_flags |= PF_OutFlag_WIDE_TIME_INPUT;
@@ -87,10 +90,14 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       PF_Err error = smart->cb->checkout_layer_pixels(in_data->effect_ref, 0, &input);
       if (!error) error = smart->cb->checkout_output(in_data->effect_ref, &smart_output);
       if (error) return error;
+      if (!input || !smart_output || !input->data || !smart_output->data ||
+          input->width != smart_output->width || input->height != smart_output->height ||
+          input->rowbytes <= 0 || smart_output->rowbytes <= 0)
+        return PF_Err_BAD_CALLBACK_PARAM;
       for (A_long y = 0; y < input->height; ++y)
         std::memcpy(reinterpret_cast<A_u_char*>(smart_output->data) + y * smart_output->rowbytes,
                     reinterpret_cast<A_u_char*>(input->data) + y * input->rowbytes,
-                    static_cast<std::size_t>(input->width) * 4);
+                    static_cast<std::size_t>(std::min(input->rowbytes, smart_output->rowbytes)));
       return PF_Err_NONE;
     }
 #endif

@@ -316,7 +316,7 @@ fn render_with_artifact(
         // crash. This render's own sidecars do not exist yet (open writes them
         // with a fresh nonce) and freshly written aux sidecars survive the age
         // cutoff, so it is idempotent with the aux/one-shot calls.
-        if !secondaries.is_empty() || !timed_secondaries.is_empty() {
+        if smart || !secondaries.is_empty() || !timed_secondaries.is_empty() {
             fs::create_dir_all(&root)?;
             cleanup_stale_image_transport(&root, SystemTime::now())?;
         }
@@ -327,7 +327,7 @@ fn render_with_artifact(
         // the one-shot code that reads `secondaries`/`timed_secondaries`; move
         // the decoded RGBA buffers into the session layers instead of cloning
         // them, so a large layered render does not double broker memory (#268).
-        let session_layers = secondaries
+        let mut session_layers = secondaries
             .into_iter()
             .map(
                 |(slot, width, height, rgba)| crate::render_session::SessionLayer {
@@ -354,6 +354,18 @@ fn render_with_artifact(
                     ),
             )
             .collect::<Vec<_>>();
+        // This entry point decoded one still image, not a video frame. Publish
+        // its actual (already premultiplied when requested) pixels at all times.
+        if smart {
+            session_layers.push(crate::render_session::SessionLayer {
+                slot: 0,
+                width,
+                height,
+                rgba: rgba.clone(),
+                timed: None,
+                dynamic: false,
+            });
+        }
         // A host context always sends the mask trailer (the one-shot path does
         // too, even for an empty mask scene), keeping the argv shapes identical.
         let mask_trailer = match host_context {
@@ -1062,7 +1074,7 @@ fn render_classic_via_length_one_session(
             request
                 .layers
                 .iter()
-                .filter(|layer| layer.timed.is_none())
+                .filter(|layer| layer.slot != 0 && layer.timed.is_none())
                 .map(|layer| json!({
                     "slot": layer.slot,
                     "width": layer.width,
@@ -1097,6 +1109,12 @@ fn render_classic_via_length_one_session(
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut report = build_interactive_image_report(&final_report, facts);
+    report["primary_input_temporal_model"] =
+        json!(if request.layers.iter().any(|layer| layer.slot == 0) {
+            "static"
+        } else {
+            "streamed_history_only"
+        });
     report["depth_provenance"] = json!(frame_depth_provenance);
     report["visual_diagnostics"] = visual_diagnostics::inspect(
         Some(request.rgba),
@@ -1228,6 +1246,31 @@ pub struct InteractiveRenderSession {
 #[cfg(windows)]
 impl InteractiveRenderSession {
     pub fn open(request: InteractiveSessionOpen<'_>) -> io::Result<Self> {
+        Self::open_with_source(request, None)
+    }
+
+    /// Open a static image source. Smart temporal checkouts read these owned
+    /// pixels; changing the primary pixels requires opening a new session.
+    pub fn open_still(request: InteractiveSessionOpen<'_>, rgba: &[u8]) -> io::Result<Self> {
+        Self::open_with_source(request, Some(rgba))
+    }
+
+    fn open_with_source(
+        request: InteractiveSessionOpen<'_>,
+        rgba: Option<&[u8]>,
+    ) -> io::Result<Self> {
+        let layers = rgba
+            .filter(|_| request.selection.path.is_smart())
+            .map(|rgba| crate::render_session::SessionLayer {
+                slot: 0,
+                width: request.width,
+                height: request.height,
+                rgba: rgba.to_vec(),
+                timed: None,
+                dynamic: false,
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
         let dependency_search_dirs = in_place_session_search_dirs(
             request.plugin_path,
             &request.dependencies,
@@ -1251,7 +1294,7 @@ impl InteractiveRenderSession {
                 audio_trailer: None,
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
-                layers: &[],
+                layers: &layers,
                 smart: request.selection.path.is_smart(),
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
@@ -1382,6 +1425,7 @@ impl InteractiveRenderSession {
                     "height": frame_height,
                     "input_width": self.width,
                     "input_height": self.height,
+                    "primary_input_temporal_model": self.session.primary_input_temporal_model(),
                     // Deep formats ship the depth-preserving raw next to an
                     // 8-bit preview PNG, matching the one-shot contract.
                     "output_transport": if self.pixel_format == RenderPixelFormat::Argb8 {

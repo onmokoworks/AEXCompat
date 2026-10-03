@@ -886,7 +886,19 @@ fn sweep_one(
 
     let smart =
         smart_render_route_supported(record.smart, record.out_flags2) && !options.force_classic;
-    let layers = probe_layers(record, options, layer_pixels);
+    let mut layers = probe_layers(record, options, layer_pixels);
+    // Synthetic primary pixels are constant for every sampled time. Explicitly
+    // author a still source; this is not evidence of future-video support.
+    if smart {
+        layers.push(SessionLayer {
+            slot: 0,
+            width: options.width,
+            height: options.height,
+            rgba: input.to_vec(),
+            timed: None,
+            dynamic: false,
+        });
+    }
     // The sweep has no host edits, so it has no parameter assignments. This
     // drives the same changed-only contract as an untouched bridge object;
     // `--plugin-defaults` remains a compatible explicit spelling of it.
@@ -1568,6 +1580,7 @@ fn report(
             "current_time": options.current_time,
             "frames": options.frames,
             "secondary_layer": !options.no_layer,
+            "primary_input_temporal_model": "static_smart_only",
             "force_classic": options.force_classic,
             "plugin_defaults": options.plugin_defaults,
             "verify_pixel_determinism": options.verify_pixel_determinism,

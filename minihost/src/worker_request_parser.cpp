@@ -189,7 +189,11 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
             throw 1;
           }
           if (static_cast<std::size_t>(consumed) != field.size() ||
-              layer.slot <= 0 || layer.slot > 1024 ||
+              layer.slot < 0 || layer.slot > 1024 ||
+              (layer.slot == 0 && (kind != Kind::Smart || layer.timed ||
+                  layer.dynamic || layer.has_world_layout ||
+                  layer.width != invocation.width ||
+                  layer.height != invocation.height)) ||
               layer.width <= 0 || layer.width > 4096 ||
               layer.height <= 0 || layer.height > 4096 ||
               // A zero handle is never a valid inherited layer file (#268).

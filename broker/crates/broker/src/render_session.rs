@@ -757,6 +757,10 @@ fn append_plugin_data_selector_args(
 /// A timed layer (issue #98 W1-4b) additionally carries the frame time at which
 /// the worker admits it; the worker selects the matching timed entry per frame
 /// with the same rational-time test the one-shot path uses.
+/// Slot zero explicitly authors an immutable, time-invariant primary source
+/// for Smart sessions: same dimensions and pixels as every submitted frame,
+/// not timed/dynamic, no custom layer layouts or cluster swaps. Ordinary
+/// streamed sessions omit slot zero and retain missing-time failures.
 #[derive(Clone)]
 pub struct SessionLayer {
     pub slot: u32,
@@ -1159,6 +1163,9 @@ pub struct RenderSession {
     /// holds its own read handle to the same file and re-reads it before each
     /// frame, so replacing the bytes here is what animates the map.
     dynamic_layers: Vec<DynamicLayer>,
+    // An explicitly authored still primary is immutable for this session.
+    // This guards source semantics, not plug-in identity or launch permission.
+    still_primary_sha256: Option<[u8; 32]>,
 }
 
 /// The launch plugin set of a cluster render session (issue #405, design
@@ -1246,6 +1253,13 @@ impl Drop for LayerSidecars {
 }
 
 impl RenderSession {
+    pub fn primary_input_temporal_model(&self) -> &'static str {
+        if self.still_primary_sha256.is_some() {
+            "static"
+        } else {
+            "streamed_history_only"
+        }
+    }
     /// Opens a resident render session. The output slot starts sized to the
     /// render dimensions; an expand-output effect that overruns it grows the
     /// slot in place mid-session (protocol §3, issue #262), so there is no
@@ -1398,6 +1412,13 @@ impl RenderSession {
         if request.layers.len() > 64 {
             return Err(invalid("render session layer count exceeds 64"));
         }
+        if request.layers.iter().any(|layer| layer.slot == 0)
+            && (!request.smart || !layer_layouts.is_empty() || cluster.is_some())
+        {
+            return Err(invalid(
+                "still primary requires a non-cluster Smart session without custom layer layouts",
+            ));
+        }
         for (index, shape) in layer_layouts.iter().enumerate() {
             if !request
                 .layers
@@ -1424,7 +1445,11 @@ impl RenderSession {
         // other times, so it is admitted.
         for (index, layer) in request.layers.iter().enumerate() {
             // Same slot and dimension bounds the worker parser enforces.
-            if layer.slot == 0
+            if (layer.slot == 0
+                && (layer.timed.is_some()
+                    || layer.dynamic
+                    || layer.width != request.width
+                    || layer.height != request.height))
                 || layer.slot > 1024
                 || layer.width == 0
                 || layer.height == 0
@@ -2171,6 +2196,11 @@ impl RenderSession {
             _animation_sidecar: animation_sidecar,
             _layer_sidecars: layer_sidecars,
             dynamic_layers,
+            still_primary_sha256: request
+                .layers
+                .iter()
+                .find(|layer| layer.slot == 0)
+                .map(|layer| Sha256::digest(&layer.rgba).into()),
         })
     }
 
@@ -2580,6 +2610,14 @@ impl RenderSession {
         }
         if rgba.len() != self.geometry.input_slot_bytes() {
             return Err(invalid("input frame byte count does not match the session"));
+        }
+        if self.still_primary_sha256.is_some_and(|expected| {
+            let actual: [u8; 32] = Sha256::digest(rgba).into();
+            actual != expected
+        }) {
+            return Err(invalid(
+                "still primary changed; reopen the session for a new source",
+            ));
         }
         if current_time < 0 || current_time > self.total_time {
             return Err(invalid("frame time is outside the session's total time"));

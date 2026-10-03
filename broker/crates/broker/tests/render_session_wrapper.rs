@@ -3479,6 +3479,173 @@ mod windows_e2e {
         }
     }
 
+    /// A still source supplies actual owned primary pixels at other times;
+    /// ordinary streamed sessions must not alias the current frame to them.
+    #[test]
+    fn explicit_still_primary_supplies_future_pixels_without_relaxing_streams() {
+        use aexcompat_broker::render_session::SessionLayer;
+        let _guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let root = plain_windows_path(&repository_root());
+        let plugin = root.join(
+            "target/instruments-build/pf-wide-time-probe/pf_automatic_wide_time_allowed_probe.aex",
+        );
+        if !plugin.is_file() || !root.join("target/minihost-build/aex_worker.exe").is_file() {
+            eprintln!(
+                "skipping static primary: build aex_worker and pf_automatic_wide_time_allowed_probe first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&plugin).unwrap()));
+        let open_at = |layers: &[SessionLayer], pixel_format, smart| {
+            RenderSession::open(SessionOpenRequest {
+                repository: &root,
+                plugin_path: &plugin,
+                plugin_sha256: &sha,
+                parameters: None,
+                payload_override: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                camera_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers,
+                dependencies: Vec::new(),
+                companions: Vec::new(),
+                dependency_search_dirs: vec![plugin.parent().unwrap().to_path_buf()],
+                width: 8,
+                height: 5,
+                pixel_format,
+                time_step: 1,
+                total_time: 4,
+                time_scale: 1,
+                frame_deadline: Duration::from_secs(30),
+                smart,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default(),
+            })
+        };
+        let open = |layers: &[SessionLayer]| open_at(layers, RenderPixelFormat::Argb8, true);
+        let input = [17, 83, 149, 255].repeat(40);
+        let mut streamed = open(&[]).unwrap();
+        let streamed_result = streamed.render_frame(0, 0, &input);
+        let streamed_close = streamed.close();
+        assert!(
+            matches!(
+                streamed_result.as_ref().map(|outcome| &outcome.status),
+                Ok(FrameStatus::FrameError {
+                    render_error: 4,
+                    ..
+                })
+            ),
+            "streamed={streamed_result:?} close={streamed_close:?}"
+        );
+        let layer = SessionLayer {
+            slot: 0,
+            width: 8,
+            height: 5,
+            rgba: input.clone(),
+            timed: None,
+            dynamic: false,
+        };
+        for variant in 0..5 {
+            let mut invalid = layer.clone();
+            match variant {
+                0 => invalid.timed = Some((1, 1)),
+                1 => invalid.dynamic = true,
+                2 => invalid.width = 7,
+                3 => {
+                    invalid.rgba.pop();
+                }
+                _ => invalid.height = 0,
+            }
+            assert!(
+                open(&[invalid]).is_err(),
+                "invalid static primary case {variant}"
+            );
+        }
+        assert!(open(&[layer.clone(), layer.clone()]).is_err());
+        assert!(open_at(&[layer.clone()], RenderPixelFormat::Argb8, false).is_err());
+        let mut still = open(&[layer.clone()]).expect("explicit static primary must open");
+        assert_eq!(
+            rendered_pixels(still.render_frame(0, 0, &input).unwrap(), "still future"),
+            input
+        );
+        let changed = [71, 23, 9, 255].repeat(40);
+        assert!(still.render_frame(1, 1, &changed).is_err());
+        assert_eq!(
+            rendered_pixels(
+                still.render_frame(1, 1, &input).unwrap(),
+                "still after rejection"
+            ),
+            input
+        );
+        assert_eq!(still.close()["session_clean"], true);
+        let mut reopened = open(&[SessionLayer {
+            slot: 0,
+            width: 8,
+            height: 5,
+            rgba: changed.clone(),
+            timed: None,
+            dynamic: false,
+        }])
+        .unwrap();
+        assert_eq!(
+            rendered_pixels(reopened.render_frame(0, 0, &changed).unwrap(), "new still"),
+            changed
+        );
+        assert_eq!(reopened.close()["session_clean"], true);
+        for format in [RenderPixelFormat::Argb16, RenderPixelFormat::Argb32f] {
+            let mut deep = open_at(&[layer.clone()], format, true).unwrap();
+            let pixels = rendered_pixels(deep.render_frame(0, 0, &input).unwrap(), "deep still");
+            let expected = if format == RenderPixelFormat::Argb16 {
+                input
+                    .iter()
+                    .flat_map(|v| ((u32::from(*v) * 32768 + 127) / 255).to_le_bytes()[..2].to_vec())
+                    .collect::<Vec<_>>()
+            } else {
+                input
+                    .iter()
+                    .flat_map(|v| (f32::from(*v) / 255.0).to_le_bytes())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(pixels, expected);
+            assert_eq!(deep.close()["session_clean"], true);
+        }
+        // Exercise the shipping still-image wrapper and its report/PNG, not
+        // only the low-level layer transport.
+        let scratch = std::env::temp_dir().join(format!(
+            "aex-still-primary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let source = scratch.join("source.png");
+        let output = scratch.join("output.png");
+        image::RgbaImage::from_raw(8, 5, input.clone())
+            .unwrap()
+            .save(&source)
+            .unwrap();
+        let report =
+            render_experimental_smart_image(&root, &plugin, &sha, &source, &output, &[]).unwrap();
+        assert_eq!(report["passed"], true, "{report}");
+        assert_eq!(report["primary_input_temporal_model"], "static");
+        assert_eq!(report["secondary_layers"], serde_json::json!([]));
+        assert_eq!(image::open(output).unwrap().into_rgba8().into_raw(), input);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
     /// A normal shipping session must bypass the render selector for an
     /// AUDIO_EFFECT_ONLY effect at every supported image depth. The fixture's
     /// render selector deliberately fails, so exact pixels prove passthrough;
