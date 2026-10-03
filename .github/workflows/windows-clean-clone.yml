@@ -593,6 +593,11 @@ jobs:
             throw "probe builds failed: $(($failed.Probe) -join ', ')"
           }
 
+      - name: Build optional-layer future-checkout probe
+        if: matrix.producer == 'aex' && steps.sdk.outcome == 'success'
+        shell: pwsh
+        run: ./tools/build-pf-empty-layer-contract-probe.ps1 -MapTimeOffset 1
+
       - name: Build SmartFX temporal primary probe
         if: matrix.producer == 'aex' && steps.sdk.outcome == 'success'
         shell: pwsh

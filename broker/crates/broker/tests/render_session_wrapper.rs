@@ -1535,6 +1535,102 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    #[test]
+    fn optional_future_checkout_distinguishes_absent_and_missing_timed_input() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let aex = root.join(
+            "target/pf-empty-layer-contract-probe-time1-build/Release/pf_empty_layer_contract_probe.aex",
+        );
+        assert!(
+            aex.is_file(),
+            "build the optional-layer future-checkout probe"
+        );
+        assert!(root.join("target/minihost-build/aex_worker.exe").is_file());
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-optional-future-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&scratch).expect("probe scratch directory");
+        let primary = scratch.join("primary.png");
+        let map = scratch.join("map.png");
+        image::RgbaImage::from_pixel(64, 32, image::Rgba([25, 43, 61, 255]))
+            .save(&primary)
+            .unwrap();
+        image::RgbaImage::from_pixel(64, 32, image::Rgba([137, 71, 223, 255]))
+            .save(&map)
+            .unwrap();
+        let mut parameter = layer_parameter(1, &map);
+        parameter.layer_path = None;
+        let timing = RenderTiming {
+            current_time: 0,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+        };
+        let decode = |output: &Path| {
+            let pixels = image::open(output).unwrap().into_rgba8();
+            let mut words = [0u32; 32];
+            for (index, word) in words.iter_mut().enumerate() {
+                for bit in 0..32 {
+                    let position = index * 32 + bit;
+                    let pixel = pixels.get_pixel((position % 64) as u32, (position / 64) as u32);
+                    assert_eq!(pixel[3], 255);
+                    assert_eq!(pixel[0], pixel[1]);
+                    assert_eq!(pixel[1], pixel[2]);
+                    *word = (*word << 1) | u32::from(pixel[0] >= 128);
+                }
+            }
+            assert_eq!(&words[..3], &[0x554c5031, 1, 32]);
+            words
+        };
+        for (label, supplied_time, expected_error) in [
+            ("absent", None, 4),
+            ("missing-timed", Some(0), 4),
+            ("matched-timed", Some(1), 0),
+        ] {
+            let layers: Vec<_> = supplied_time
+                .map(|value| TimedLayerImage {
+                    slot: 1,
+                    time: AnimationTime { value, scale: 30 },
+                    image_path: map.clone(),
+                })
+                .into_iter()
+                .collect();
+            let output = scratch.join(format!("{label}.png"));
+            let report = render_experimental_image_with_timed_layers(
+                &root,
+                &aex,
+                &sha,
+                &primary,
+                &output,
+                std::slice::from_ref(&parameter),
+                &layers,
+                timing,
+                true,
+                RenderPixelFormat::Argb8,
+            )
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_session_render_is_healthy(&report, label);
+            let words = decode(&output);
+            assert_eq!(words[3], expected_error, "{label}");
+            if expected_error == 0 {
+                assert_eq!(words[12], 0);
+                assert_eq!(&words[13..17], &[1, 1, 64, 32]);
+                assert_eq!(&words[23..27], &[255, 137, 71, 223]);
+            } else {
+                assert_eq!(words[12], u32::MAX, "no failed pixel lease: {label}");
+                assert_eq!(&words[13..15], &[0, 0]);
+                assert_eq!(&words[23..27], &[u32::MAX; 4]);
+            }
+        }
+        std::fs::remove_dir_all(&scratch).expect("remove owned probe scratch directory");
+    }
+
     fn layer_parameter(slot: u32, path: &Path) -> InteractiveParameter {
         serde_json::from_value(serde_json::json!({
             "slot": slot, "name": "layer", "kind": "layer",

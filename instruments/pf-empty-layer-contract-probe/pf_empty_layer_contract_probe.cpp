@@ -13,7 +13,12 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <new>
+
+#ifndef AEXCOMPAT_PROBE_MAP_TIME_OFFSET
+#define AEXCOMPAT_PROBE_MAP_TIME_OFFSET 0
+#endif
 
 namespace {
 
@@ -111,9 +116,17 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
     delete snapshot;
     return err;
   }
-  snapshot->map_pre_error = extra->cb->checkout_layer(
-      in_data->effect_ref, kMapSlot, kMapId, &request, in_data->current_time,
-      in_data->time_step, in_data->time_scale, &snapshot->map_pre);
+  const int64_t map_time = static_cast<int64_t>(in_data->current_time) +
+      static_cast<int64_t>(AEXCOMPAT_PROBE_MAP_TIME_OFFSET) * in_data->time_step;
+  if (map_time < std::numeric_limits<A_long>::min() ||
+      map_time > std::numeric_limits<A_long>::max()) {
+    snapshot->map_pre_error = PF_Err_BAD_CALLBACK_PARAM;
+  } else {
+    snapshot->map_pre_error = extra->cb->checkout_layer(
+        in_data->effect_ref, kMapSlot, kMapId, &request,
+        static_cast<A_long>(map_time), in_data->time_step, in_data->time_scale,
+        &snapshot->map_pre);
+  }
   // Even a failed optional-layer checkout is data to encode, not a reason to
   // suppress SmartRender. Primary geometry keeps the output non-empty.
   extra->output->result_rect = primary.result_rect;

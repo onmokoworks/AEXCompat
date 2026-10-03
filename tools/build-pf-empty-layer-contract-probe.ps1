@@ -3,6 +3,8 @@ param(
     [string]$Generator = "",
     [string]$Architecture = "x64",
     [string]$CMake = "",
+    [ValidateRange(-5, 5)]
+    [int]$MapTimeOffset = 0,
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release"
 )
@@ -11,14 +13,15 @@ $ErrorActionPreference = "Stop"
 $AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
 $repository = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $repository "instruments\pf-empty-layer-contract-probe"
-$build = Join-Path $repository "target\pf-empty-layer-contract-probe-build"
+$buildName = if ($MapTimeOffset -eq 0) { "pf-empty-layer-contract-probe-build" } else { "pf-empty-layer-contract-probe-time$MapTimeOffset-build" }
+$build = Join-Path $repository "target\$buildName"
 $headers = Join-Path $AfterEffectsSdk "Examples\Headers\AE_Effect.h"
 if (-not (Test-Path -LiteralPath $headers)) { throw "After Effects SDK headers were not found: $headers" }
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
 $ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
-& $CMake -S $source -B $build -G $Generator @ConfigureArgs
+& $CMake -S $source -B $build -G $Generator @ConfigureArgs "-DMAP_TIME_OFFSET=$MapTimeOffset"
 if ($LASTEXITCODE -ne 0) { throw "Empty layer contract probe configure failed" }
 & $CMake --build $build --config $Configuration --target pf_empty_layer_contract_probe --clean-first
 if ($LASTEXITCODE -ne 0) { throw "Empty layer contract probe build failed" }

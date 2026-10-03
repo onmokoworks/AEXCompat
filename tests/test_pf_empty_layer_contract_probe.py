@@ -14,6 +14,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from _render_session import HARNESS, assert_artifact_fresh
@@ -63,16 +64,21 @@ def render(plugin: Path, input_image: Path, output: Path, layer: Path | None):
     return decode_contract(output)
 
 
-def test_unassigned_and_assigned_smart_layer_emit_decodable_contract(tmp_path):
+@pytest.mark.parametrize("map_time_offset", [0, 1])
+def test_unassigned_and_assigned_smart_layer_emit_decodable_contract(tmp_path, map_time_offset):
+    plugin = PROBE if map_time_offset == 0 else ROOT / (
+        "target/pf-empty-layer-contract-probe-time1-build/Release/"
+        "pf_empty_layer_contract_probe.aex"
+    )
     assert WORKER.is_file() and HARNESS.is_file()
-    assert_artifact_fresh(PROBE, PROBE_SOURCE, WORKER, HARNESS)
+    assert_artifact_fresh(plugin, PROBE_SOURCE, WORKER, HARNESS)
     source = tmp_path / "primary.png"
     secondary = tmp_path / "secondary.png"
     Image.new("RGBA", (64, 32), (25, 43, 61, 255)).save(source)
     Image.new("RGBA", (64, 32), (137, 71, 223, 255)).save(secondary)
 
-    absent = render(PROBE, source, tmp_path / "absent.png", None)
-    assigned = render(PROBE, source, tmp_path / "assigned.png", secondary)
+    absent = render(plugin, source, tmp_path / "absent.png", None)
+    assigned = render(plugin, source, tmp_path / "assigned.png", secondary)
     assert absent[30:32] == assigned[30:32] == [1, 1]
     assert absent[28] == assigned[28] == 0  # output format checkout
     assert assigned[3] == assigned[12] == assigned[22] == 0
@@ -80,6 +86,18 @@ def test_unassigned_and_assigned_smart_layer_emit_decodable_contract(tmp_path):
     assert assigned[15:17] == [64, 32]
     assert assigned[17:22] == [256, 0, 0, 64, 32]
     assert assigned[23:27] == [255, 137, 71, 223]
+    assert assigned[4:12] == [0, 0, 64, 32] * 2
+    assert assigned[27] == assigned[29] == 0x62677261
+    if map_time_offset:
+        # Observed host behavior, not an AE oracle: absent future footage is
+        # refused while an explicitly supplied time-invariant image is served.
+        assert absent[3] == 4
+        assert absent[4:12] == [0] * 8
+        assert absent[12] == 0xffffffff  # pixel checkout was not attempted
+        assert absent[13:15] == [0, 0]
+        assert absent[15:22] == [0xffffffff] * 7
+        assert absent[23:27] == [0xffffffff] * 4
+        return
     assert absent[3] == absent[12] == absent[22] == 0
     assert absent[4:12] == [0] * 8  # no PreRender map geometry
     assert assigned[4:12] == [0, 0, 64, 32] * 2
