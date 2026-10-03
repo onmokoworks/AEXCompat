@@ -39,12 +39,20 @@ inline unsigned char pattern_byte(int32_t x, int32_t y, int32_t pixel_bytes,
   return value == 0xCC ? 0xCD : value;
 }
 
-inline bool seed(unsigned char* pixels, std::size_t size, int32_t width,
-                 int32_t height, int32_t rowbytes, int32_t pixel_bytes) {
+inline bool seed_geometry_valid(const unsigned char* pixels, std::size_t size,
+                                int32_t width, int32_t height, int32_t rowbytes,
+                                int32_t pixel_bytes) {
   if (!pixels || width < 0 || height < 0 || rowbytes < 0 ||
       (pixel_bytes != 4 && pixel_bytes != 8 && pixel_bytes != 16) ||
       static_cast<uint64_t>(width) * pixel_bytes > static_cast<uint64_t>(rowbytes) ||
       static_cast<uint64_t>(rowbytes) * height > size)
+    return false;
+  return true;
+}
+
+inline bool seed(unsigned char* pixels, std::size_t size, int32_t width,
+                 int32_t height, int32_t rowbytes, int32_t pixel_bytes) {
+  if (!seed_geometry_valid(pixels, size, width, height, rowbytes, pixel_bytes))
     return false;
   for (int32_t y = 0; y < height; ++y)
     for (int32_t x = 0; x < width; ++x)

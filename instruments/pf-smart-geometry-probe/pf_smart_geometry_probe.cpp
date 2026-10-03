@@ -79,6 +79,36 @@ bool AdvertisesFloatColor() { return !ModuleNameHas("-shallow"); }
 
 bool RewritesFlagsInParamsSetup() { return ModuleNameHas("-rewrite"); }
 
+int InitialSeedPixelBytes() {
+  if (ModuleNameHas("-seed8")) return 4;
+  if (ModuleNameHas("-seed16")) return 8;
+  if (ModuleNameHas("-seed32")) return 16;
+  return 0;
+}
+
+bool initial_seed_checked{};
+
+bool CheckInitialSeed(PF_LayerDef* world, int pixel_bytes) {
+  // Check what the plug-in actually sees before SmartPreRender can cause an
+  // output reset. The differential test uses 17x13 logical pixels at every
+  // depth, with both packed and padded worlds. These baseline fingerprints
+  // deliberately do not call the host's seed or coverage implementation.
+  if (!world || !world->data || world->width != 17 || world->height != 13 ||
+      world->rowbytes < world->width * pixel_bytes) return false;
+  uint64_t fingerprint = 14695981039346656037ULL;
+  const auto* pixels = reinterpret_cast<const unsigned char*>(world->data);
+  for (A_long y = 0; y < world->height; ++y) {
+    const auto* row = pixels + static_cast<std::size_t>(y) * world->rowbytes;
+    for (A_long b = 0; b < world->width * pixel_bytes; ++b)
+      fingerprint = (fingerprint ^ row[b]) * 1099511628211ULL;
+    for (A_long b = world->width * pixel_bytes; b < world->rowbytes; ++b)
+      if (row[b] != 0xCC) return false;
+  }
+  const uint64_t expected = pixel_bytes == 4 ? 0x8e702832acf03dc1ULL :
+      pixel_bytes == 8 ? 0xeb2a75d6871ff104ULL : 0x847373bbca4d3368ULL;
+  return fingerprint == expected;
+}
+
 bool RectEmpty(const PF_LRect& rect) {
   return rect.left >= rect.right || rect.top >= rect.bottom;
 }
@@ -114,6 +144,10 @@ Mode ProbeMode(const PF_InData* in_data) {
 PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
   if (!in_data || !extra || !extra->input || !extra->output || !extra->cb)
     return PF_Err_BAD_CALLBACK_PARAM;
+  if (InitialSeedPixelBytes() != 0) {
+    if (!initial_seed_checked) return PF_Err_INTERNAL_STRUCT_DAMAGED;
+    initial_seed_checked = false;
+  }
   const A_long width = in_data->width;
   const A_long height = in_data->height;
   if (width < 8 || height < 4) return PF_Err_BAD_CALLBACK_PARAM;
@@ -349,6 +383,10 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       }
       return PF_Err_NONE;
     case PF_Cmd_FRAME_SETUP:
+      if (const int pixel_bytes = InitialSeedPixelBytes()) {
+        initial_seed_checked = CheckInitialSeed(output_world, pixel_bytes);
+        if (!initial_seed_checked) return PF_Err_INTERNAL_STRUCT_DAMAGED;
+      }
       if (ModuleNameHas("-classic-nopresize")) {
         // Exercise the host-owned image placement path without dispatching RENDER.
         out_data->width += 4;

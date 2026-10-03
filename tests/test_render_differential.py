@@ -75,7 +75,10 @@ def run_differential(tmp_path: Path, marker: str, depth: str = "argb8", route: s
 
 @pytest.mark.parametrize("depth", ("argb8", "argb16", "argb32f"))
 def test_odd_frame_matches_both_tile_axes_at_native_depth(tmp_path, depth):
-    code, report = run_differential(tmp_path, "-difftile", depth)
+    # FRAME_SETUP verifies all initial output bytes and padding before any
+    # PreRender reset can hide a missing/late initialization (#1734).
+    seed_depth = {"argb8": 8, "argb16": 16, "argb32f": 32}[depth]
+    code, report = run_differential(tmp_path, f"-difftile-seed{seed_depth}", depth)
     assert code == 0, report
     assert report["passed"] is True
     assert [case["status"] for case in report["cases"]] == [
