@@ -93,6 +93,7 @@ def test_padded_host_rows_reach_aex_as_packed_rgba_and_publish_verified_packet(r
     packet, seen = render(runtime, monkeypatch)
     packed = input_frame()[:8] + input_frame()[12:20]
     assert len(seen) == 1
+    assert seen[0]["timeout_ms"] == 30_000
     assert base64.b64decode(seen[0]["input"]["data"]) == packed
     assert seen[0]["frame"]["frame_time"] == {"seconds": 1.0}
     assert packet["session_open"]["geometry"]["rowbytes"] == 8
