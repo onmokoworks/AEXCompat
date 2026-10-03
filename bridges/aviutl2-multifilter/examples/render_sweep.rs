@@ -1733,15 +1733,9 @@ mod tests {
     fn write_build_layout(root: &Path) -> PathBuf {
         let cli = root.join("render_sweep.exe");
         std::fs::write(&cli, b"render-sweep-v1").unwrap();
-        for (kind, bytes) in [
-            (WorkerKind::Discovery, b"l2-v1".as_slice()),
-            (WorkerKind::Classic, b"classic-v1".as_slice()),
-            (WorkerKind::Smart, b"smart-v1".as_slice()),
-        ] {
-            let worker = root.join(kind.repository_relative_program());
-            std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
-            std::fs::write(worker, bytes).unwrap();
-        }
+        let worker = root.join(WorkerKind::Smart.repository_relative_program());
+        std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        std::fs::write(worker, b"worker-v1").unwrap();
         cli
     }
 
@@ -1765,34 +1759,47 @@ mod tests {
             "executable_path_boundary_snapshot_not_launch_receipt"
         );
         assert_eq!(first.verification, "pre_run_candidate");
-        assert!(first.smart_worker.error.is_none());
-        assert_eq!(first.smart_worker.size_bytes, Some(8));
+        for worker in [&first.l2_worker, &first.classic_worker, &first.smart_worker] {
+            assert_eq!(
+                worker.sha256,
+                Some(format!("{:x}", Sha256::digest(b"worker-v1")))
+            );
+            assert_eq!(worker.size_bytes, Some(9));
+            assert!(worker.error.is_none());
+        }
 
         let stable = finalize_report_build_fingerprint(&first, &root, Ok(cli.clone()));
         assert!(stable.complete);
         assert_eq!(stable.verification, "run_boundary_verified");
 
         let smart = root.join(WorkerKind::Smart.repository_relative_program());
-        std::fs::write(&smart, b"smart-v2-changed").unwrap();
+        std::fs::write(&smart, b"worker-v2-changed").unwrap();
         let changed = finalize_report_build_fingerprint(&first, &root, Ok(cli.clone()));
         assert!(!changed.complete);
         assert_eq!(changed.verification, "run_boundary_incomplete");
-        assert_eq!(changed.smart_worker.sha256, None);
-        assert_eq!(
-            changed.smart_worker.error,
-            Some("changed_between_boundary_snapshots")
-        );
+        // All three routes dispatch the same executable, so changing its
+        // bytes invalidates every route's boundary fingerprint.
+        for worker in [
+            &changed.l2_worker,
+            &changed.classic_worker,
+            &changed.smart_worker,
+        ] {
+            assert_eq!(worker.sha256, None);
+            assert_eq!(worker.size_bytes, None);
+            assert_eq!(worker.error, Some("changed_between_boundary_snapshots"));
+        }
         assert_eq!(first.cli, changed.cli);
-        assert_eq!(first.l2_worker, changed.l2_worker);
-        assert_eq!(first.classic_worker, changed.classic_worker);
 
         // Boundary evidence deliberately cannot prove continuous identity or
         // actual per-launch admission. Restore the candidate bytes and pin that
         // limitation in the machine-readable scope instead of overclaiming.
-        std::fs::write(&smart, b"smart-v1").unwrap();
+        std::fs::write(&smart, b"worker-v1").unwrap();
         let restored = finalize_report_build_fingerprint(&first, &root, Ok(cli.clone()));
         assert!(restored.complete);
         assert_eq!(restored.verification, "run_boundary_verified");
+        assert_eq!(first.l2_worker, restored.l2_worker);
+        assert_eq!(first.classic_worker, restored.classic_worker);
+        assert_eq!(first.smart_worker, restored.smart_worker);
         assert_eq!(
             restored.scope,
             "executable_path_boundary_snapshot_not_launch_receipt"
@@ -1802,9 +1809,15 @@ mod tests {
         let missing_start = capture_report_build_fingerprint(&root, Ok(cli.clone()));
         let missing = finalize_report_build_fingerprint(&missing_start, &root, Ok(cli));
         assert!(!missing.complete);
-        assert_eq!(missing.smart_worker.sha256, None);
-        assert_eq!(missing.smart_worker.size_bytes, None);
-        assert_eq!(missing.smart_worker.error, Some("open_failed"));
+        for worker in [
+            &missing.l2_worker,
+            &missing.classic_worker,
+            &missing.smart_worker,
+        ] {
+            assert_eq!(worker.sha256, None);
+            assert_eq!(worker.size_bytes, None);
+            assert_eq!(worker.error, Some("open_failed"));
+        }
         let serialized = serde_json::to_string(&missing).unwrap();
         assert!(
             !serialized.contains(&root.to_string_lossy().to_string()),
@@ -1843,6 +1856,8 @@ mod tests {
     fn rendered_bucket_requires_and_reports_pixel_bytes() {
         let rendered = frame_outcome(Ok(FrameOutcome {
             frame_index: 0,
+            depth_provenance: None,
+            performance: Default::default(),
             status: FrameStatus::Rendered {
                 pixels: vec![0; 16],
                 width: 2,
@@ -1856,6 +1871,8 @@ mod tests {
 
         let empty = frame_outcome(Ok(FrameOutcome {
             frame_index: 0,
+            depth_provenance: None,
+            performance: Default::default(),
             status: FrameStatus::Rendered {
                 pixels: Vec::new(),
                 width: 2,
@@ -1871,6 +1888,8 @@ mod tests {
     fn rendered_pixels(bytes: &[u8]) -> Outcome {
         frame_outcome(Ok(FrameOutcome {
             frame_index: 0,
+            depth_provenance: None,
+            performance: Default::default(),
             status: FrameStatus::Rendered {
                 pixels: bytes.to_vec(),
                 width: 1,
@@ -2406,6 +2425,8 @@ mod tests {
     fn selector_crash_has_its_own_frame_bucket() {
         let outcome = frame_outcome(Ok(FrameOutcome {
             frame_index: 0,
+            depth_provenance: None,
+            performance: Default::default(),
             status: FrameStatus::FrameError {
                 render_error: 512,
                 missing_dependency: None,
@@ -2432,6 +2453,8 @@ mod tests {
         // the bucket string is an artifact-compatibility contract.
         let outcome = frame_outcome(Ok(FrameOutcome {
             frame_index: 0,
+            depth_provenance: None,
+            performance: Default::default(),
             status: FrameStatus::FrameError {
                 render_error: 512,
                 missing_dependency: None,
