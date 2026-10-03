@@ -8,6 +8,9 @@ pub const WINDOW_LIMIT: usize = 32;
 const WARMUP: usize = 4;
 const TAIL: usize = 8;
 const GROWTH_PER_FRAME: f64 = 131_072.0;
+const EARLY_SAMPLES: usize = 4;
+const EARLY_MIN_STEP: u64 = 4 * 1024 * 1024;
+const EARLY_BUDGET_DIVISOR: u64 = 64;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct MemorySample {
@@ -42,6 +45,16 @@ fn median(values: &[u64]) -> u64 {
 const NEAR_LIMIT: u8 = 1;
 const GROWTH: u8 = 2;
 const RETENTION: u8 = 4;
+const EARLY_HEADROOM: u8 = 8;
+
+struct EarlyGrowth {
+    sample_count: usize,
+    horizon: usize,
+    minimum_step: Option<u64>,
+    projected_frames: Option<f64>,
+    candidate: bool,
+    unavailable_reason: Option<&'static str>,
+}
 
 struct Assessment {
     warnings: u8,
@@ -56,6 +69,7 @@ struct Assessment {
     tail_range: Option<u64>,
     tail_count: usize,
     recovered_peak: bool,
+    early: EarlyGrowth,
 }
 
 impl MemoryMonitor {
@@ -81,6 +95,75 @@ impl MemoryMonitor {
         changed
     }
 
+    fn early_growth(&self) -> EarlyGrowth {
+        let mut result = EarlyGrowth {
+            sample_count: self.samples.len().min(EARLY_SAMPLES),
+            horizon: 0,
+            minimum_step: None,
+            projected_frames: None,
+            candidate: false,
+            unavailable_reason: Some("insufficient_compatible_samples"),
+        };
+        if self.count >= (WARMUP + TAIL) as u64 {
+            result.unavailable_reason = Some("regular_trend_window_reached");
+            return result;
+        }
+        result.horizon = WARMUP + TAIL - self.count as usize;
+        if result.sample_count < EARLY_SAMPLES {
+            return result;
+        }
+        let latest = self.samples.back().unwrap();
+        if latest.width == 0 || latest.height == 0 {
+            result.unavailable_reason = Some("invalid_geometry");
+            return result;
+        }
+        let (Some(live), Some(limit)) = (latest.live_commit_bytes, latest.process_limit_bytes)
+        else {
+            result.unavailable_reason = Some("missing_live_or_process_budget");
+            return result;
+        };
+        if limit == 0 || live >= limit {
+            result.unavailable_reason = Some("no_positive_headroom");
+            return result;
+        }
+        let minimum_growth = EARLY_MIN_STEP.max(limit / EARLY_BUDGET_DIVISOR);
+        let mut previous: Option<&MemorySample> = None;
+        let mut minimum_step = u64::MAX;
+        for observation in self.samples.iter().skip(self.samples.len() - EARLY_SAMPLES) {
+            if observation.live_commit_bytes.is_none()
+                || observation.process_limit_bytes != Some(limit)
+                || (observation.width, observation.height) != (latest.width, latest.height)
+            {
+                result.unavailable_reason = Some("missing_or_incompatible_sample");
+                return result;
+            }
+            if let Some(previous) = previous {
+                if previous.frame_index.checked_add(1) != Some(observation.frame_index) {
+                    result.unavailable_reason = Some("nonconsecutive_frame_samples");
+                    return result;
+                }
+                let step = observation
+                    .live_commit_bytes
+                    .unwrap()
+                    .checked_sub(previous.live_commit_bytes.unwrap());
+                if !step.is_some_and(|step| step >= minimum_growth) {
+                    result.unavailable_reason = Some("insufficient_repeated_rapid_growth");
+                    return result;
+                }
+                minimum_step = minimum_step.min(step.unwrap());
+            }
+            previous = Some(observation);
+        }
+        let remaining = limit - live;
+        result.minimum_step = Some(minimum_step);
+        result.projected_frames = Some(remaining as f64 / minimum_step as f64);
+        // Use the slowest of all three increments and integer comparison. This
+        // is conditional headroom, not a prediction that growth will continue.
+        result.candidate = remaining as u128 <= minimum_step as u128 * result.horizon as u128;
+        result.unavailable_reason = None;
+        result
+    }
+
     // Classification is fixed-size stack work: no JSON, strings, sorting
     // buffers or geometry sets are allocated on the ordinary frame hot path.
     fn assess(&self) -> Assessment {
@@ -93,6 +176,10 @@ impl MemoryMonitor {
         let mut warnings = 0;
         if ratio.is_some_and(|r| r >= 0.8) {
             warnings |= NEAR_LIMIT;
+        }
+        let early = self.early_growth();
+        if early.candidate {
+            warnings |= EARLY_HEADROOM;
         }
         let mut values = [0; TAIL];
         let mut tail_count = 0;
@@ -171,6 +258,7 @@ impl MemoryMonitor {
             tail_range,
             tail_count,
             recovered_peak,
+            early,
         }
     }
 
@@ -181,6 +269,7 @@ impl MemoryMonitor {
             (NEAR_LIMIT, "process_limit_near"),
             (GROWTH, "sustained_live_growth_candidate"),
             (RETENTION, "post_frame_retention_candidate"),
+            (EARLY_HEADROOM, "rapid_live_growth_headroom_candidate"),
         ]
         .into_iter()
         .filter_map(|(bit, reason)| (a.warnings & bit != 0).then_some(reason))
@@ -198,7 +287,11 @@ impl MemoryMonitor {
             "growth_min_nondecreasing_steps": 6, "growth_min_half_median_delta_bytes": 524_288,
             "near_limit_ratio": 0.8, "plateau_range_min_bytes": 262_144,
             "plateau_range_fraction": 0.02, "retention_min_bytes": 1_048_576,
-            "retention_baseline_fraction": 0.1, "median": "lower_midpoint", "outliers_removed": 0});
+            "retention_baseline_fraction": 0.1, "median": "lower_midpoint", "outliers_removed": 0,
+            "early_growth_samples": EARLY_SAMPLES, "early_growth_min_step_bytes": EARLY_MIN_STEP,
+            "early_growth_min_step_budget_divisor": EARLY_BUDGET_DIVISOR,
+            "early_growth_horizon": "samples_remaining_until_regular_trend_minimum",
+            "early_growth_projection": "minimum_of_all_three_positive_increments"});
         json!({
             "advisory": true,
             "scope": "resident_worker_session",
@@ -213,6 +306,17 @@ impl MemoryMonitor {
             "trend": a.trend,
             "trend_status": if a.trend == "unavailable" { "unavailable" } else { "available" },
             "trend_unavailable_reason": a.unavailable_reason,
+            "early_growth": {
+                "provisional": true,
+                "status": if a.early.minimum_step.is_some() { "available" } else { "unavailable" },
+                "unavailable_reason": a.early.unavailable_reason,
+                "candidate": a.early.candidate,
+                "sample_count": a.early.sample_count,
+                "regular_trend_samples_remaining": a.early.horizon,
+                "minimum_observed_growth_bytes_per_frame": a.early.minimum_step,
+                "projected_frames_to_limit": a.early.projected_frames,
+                "caveat": "Conditional on the recent growth continuing; initialization and bounded caches may plateau. No leak diagnosis or future failure verdict."
+            },
             "tail_sample_count": a.tail_count,
             "live_slope_bytes_per_frame": a.slope,
             "tail_live_range_bytes": a.tail_range,
@@ -259,6 +363,203 @@ mod tests {
             monitor.observe(s);
         }
         monitor
+    }
+    #[test]
+    fn short_rapid_growth_warns_before_the_regular_trend_window() {
+        let mut monitor = MemoryMonitor::default();
+        for (i, live) in [218_685_440, 418_160_640, 617_709_568, 817_242_112]
+            .into_iter()
+            .enumerate()
+        {
+            let mut observation = sample(Some(live), Some(live));
+            observation.process_limit_bytes = Some(2048 * M);
+            observation.frame_index = i as u32;
+            let changed = monitor.observe(observation);
+            assert_eq!(changed, i == 3);
+        }
+        let report = monitor.report();
+        assert_eq!(report["trend_status"], "unavailable");
+        assert_eq!(
+            report["warnings"],
+            json!(["rapid_live_growth_headroom_candidate"])
+        );
+        assert_eq!(report["early_growth"]["provisional"], true);
+        assert_eq!(report["early_growth"]["sample_count"], 4);
+        assert!(
+            report["early_growth"]["projected_frames_to_limit"]
+                .as_f64()
+                .unwrap()
+                < 8.0
+        );
+        assert_eq!(report["live_commit_bytes"], 817_242_112u64);
+        assert_eq!(report["sample_count"], 4);
+    }
+    fn early_series(values: &[u64]) -> MemoryMonitor {
+        let mut monitor = MemoryMonitor::default();
+        for (i, live) in values.iter().enumerate() {
+            let mut observation = sample(Some(*live), Some(*live));
+            observation.frame_index = i as u32;
+            monitor.observe(observation);
+        }
+        monitor
+    }
+    #[test]
+    fn early_growth_is_provisional_and_clears_on_a_cache_plateau() {
+        let mut monitor = early_series(&[32 * M, 132 * M, 232 * M, 332 * M]);
+        assert_eq!(
+            monitor.report()["warnings"],
+            json!(["rapid_live_growth_headroom_candidate"])
+        );
+        let mut plateau = sample(Some(332 * M), Some(332 * M));
+        plateau.frame_index = 4;
+        assert!(monitor.observe(plateau.clone()));
+        assert_eq!(monitor.report()["warnings"], json!([]));
+        for i in 5..32 {
+            plateau.frame_index = i;
+            assert!(!monitor.observe(plateau.clone()));
+        }
+        let report = monitor.report();
+        assert_eq!(report["trend"], "stable_plateau");
+        assert_eq!(report["warning_state_change_count"], 2);
+    }
+    #[test]
+    fn early_growth_ignores_cold_spikes_noise_slow_growth_and_distant_headroom() {
+        for values in [
+            [32 * M, 332 * M, 332 * M, 332 * M],
+            [32 * M, 332 * M, 232 * M, 432 * M],
+            [32 * M, 332 * M, 342 * M, 442 * M],
+            [32 * M, 33 * M, 34 * M, 35 * M],
+            [32 * M, 52 * M, 72 * M, 92 * M],
+        ] {
+            assert_eq!(
+                early_series(&values).report()["warnings"],
+                json!([]),
+                "{values:?}"
+            );
+        }
+        let mut monitor = early_series(&[32 * M, 132 * M, 232 * M, 332 * M]);
+        let mut decline = sample(Some(232 * M), Some(332 * M));
+        decline.frame_index = 4;
+        assert!(monitor.observe(decline));
+        assert_eq!(monitor.report()["warnings"], json!([]));
+    }
+    #[test]
+    fn early_growth_requires_compatible_live_budget_geometry_and_frame_samples() {
+        for variant in 0..9 {
+            let mut monitor = MemoryMonitor::default();
+            for i in 0..4 {
+                let mut observation = sample(Some((32 + i * 100) * M), Some(332 * M));
+                observation.frame_index = i as u32;
+                if i == 1 {
+                    match variant {
+                        0 => observation.live_commit_bytes = None,
+                        1 => observation.process_limit_bytes = None,
+                        2 => observation.process_limit_bytes = Some(0),
+                        3 => observation.process_limit_bytes = Some(2048 * M),
+                        4 => observation.width = 640,
+                        5 => observation.height = 360,
+                        6 => observation.frame_index = 7,
+                        7 => observation.width = 0,
+                        8 => observation.height = 0,
+                        _ => unreachable!(),
+                    }
+                }
+                assert!(!monitor.observe(observation));
+            }
+            let report = monitor.report();
+            assert_eq!(report["warnings"], json!([]));
+            assert_eq!(report["early_growth"]["status"], "unavailable");
+            assert!(report["early_growth"]["projected_frames_to_limit"].is_null());
+        }
+        for limit in [None, Some(0)] {
+            let mut monitor = MemoryMonitor::default();
+            for i in 0..4 {
+                let mut observation = sample(Some((32 + i * 100) * M), Some(332 * M));
+                observation.frame_index = i as u32;
+                observation.process_limit_bytes = limit;
+                assert!(!monitor.observe(observation));
+            }
+            assert!(monitor.report()["early_growth"]["projected_frames_to_limit"].is_null());
+        }
+    }
+    #[test]
+    fn early_growth_state_is_not_spammed_and_transfers_to_regular_trend() {
+        let mut monitor = MemoryMonitor::default();
+        for i in 0..12 {
+            let live = (20 + i * 180) * M;
+            let mut observation = sample(Some(live), Some(live));
+            observation.process_limit_bytes = Some(2000 * M);
+            observation.frame_index = i as u32;
+            let changed = monitor.observe(observation);
+            assert_eq!(changed, i == 3 || i == 9 || i == 11);
+        }
+        let report = monitor.report();
+        assert_eq!(
+            report["warnings"],
+            json!(["process_limit_near", "sustained_live_growth_candidate"])
+        );
+        assert_eq!(report["early_growth"]["status"], "unavailable");
+        assert_eq!(
+            report["early_growth"]["unavailable_reason"],
+            "regular_trend_window_reached"
+        );
+        assert_eq!(report["warning_state_change_count"], 3);
+    }
+    #[test]
+    fn early_warning_clears_on_missing_data_and_requires_four_fresh_samples() {
+        let mut monitor = early_series(&[32 * M, 132 * M, 232 * M, 332 * M]);
+        let mut missing = sample(None, Some(332 * M));
+        missing.frame_index = 4;
+        assert!(monitor.observe(missing));
+        let report = monitor.report();
+        assert_eq!(report["warnings"], json!([]));
+        assert_eq!(report["early_growth"]["status"], "unavailable");
+        assert!(report["early_growth"]["projected_frames_to_limit"].is_null());
+        for (i, live) in [332 * M, 482 * M, 632 * M, 782 * M].into_iter().enumerate() {
+            let mut observation = sample(Some(live), Some(live));
+            observation.frame_index = 5 + i as u32;
+            assert_eq!(monitor.observe(observation), i == 3);
+        }
+        assert_eq!(
+            monitor.report()["warnings"],
+            json!(["rapid_live_growth_headroom_candidate"])
+        );
+        assert_eq!(monitor.report()["warning_state_change_count"], 3);
+    }
+    #[test]
+    fn early_growth_uses_the_smallest_step_and_an_inclusive_integer_horizon() {
+        let at_boundary = early_series(&[32 * M, 132 * M, 232 * M, 332 * M]);
+        // A 1,024MiB budget leaves692MiB: under8 *100MiB.
+        assert_eq!(
+            at_boundary.report()["early_growth"]["minimum_observed_growth_bytes_per_frame"],
+            100 * M
+        );
+        let mut monitor = MemoryMonitor::default();
+        for (i, live) in [16 * M, 56 * M, 72 * M, 96 * M].into_iter().enumerate() {
+            let mut observation = sample(Some(live), Some(live));
+            observation.process_limit_bytes = Some(224 * M);
+            observation.frame_index = i as u32;
+            monitor.observe(observation);
+        }
+        let report = monitor.report();
+        assert_eq!(
+            report["early_growth"]["minimum_observed_growth_bytes_per_frame"],
+            16 * M
+        );
+        assert_eq!(report["early_growth"]["projected_frames_to_limit"], 8.0);
+        assert_eq!(
+            report["warnings"],
+            json!(["rapid_live_growth_headroom_candidate"])
+        );
+        // One byte more headroom must not round into an inclusive boundary.
+        let mut outside = MemoryMonitor::default();
+        for (i, live) in [16 * M, 56 * M, 72 * M, 96 * M].into_iter().enumerate() {
+            let mut observation = sample(Some(live), Some(live));
+            observation.process_limit_bytes = Some(224 * M + 1);
+            observation.frame_index = i as u32;
+            outside.observe(observation);
+        }
+        assert_eq!(outside.report()["warnings"], json!([]));
     }
     #[test]
     fn short_warmup_growth_is_not_sustained_after_plateau() {
