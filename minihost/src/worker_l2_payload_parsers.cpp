@@ -582,25 +582,37 @@ bool parse_authored_layer_graph(const wchar_t* text) {
 bool parse_render_environment_payload(const wchar_t* text) {
   if (!text) return false;
   const std::wstring encoded(text);
-  if (encoded.compare(0, 10, L"render:v1|") != 0 || encoded.size() > 96) return false;
+  const bool version2 = encoded.compare(0, 10, L"render:v2|") == 0;
+  if ((!version2 && encoded.compare(0, 10, L"render:v1|") != 0) ||
+      encoded.size() > 160) return false;
   const std::wstring payload = encoded.substr(10);
-  std::array<int32_t, 4> values{};
+  std::array<int32_t, 8> values{};
+  const std::size_t count = version2 ? 8 : 4;
   std::size_t offset = 0;
-  for (std::size_t index = 0; index < values.size(); ++index) {
+  for (std::size_t index = 0; index < count; ++index) {
     const auto comma = payload.find(L',', offset);
-    const bool final = index + 1 == values.size();
+    const bool final = index + 1 == count;
     if ((final && comma != std::wstring::npos) || (!final && comma == std::wstring::npos)) return false;
     const auto end = final ? payload.size() : comma;
     if (!parse_i32_arg(payload.substr(offset, end - offset).c_str(),
-                       index == 3 ? -65536 : 0,
-                       index < 2 ? (index == 0 ? 1 : 2) : 65536,
+                       index >= 4 ? -(1 << 24) : (index == 3 ? -65536 : 0),
+                       index >= 4 ? (1 << 24) : (index < 2 ? (index == 0 ? 1 : 2) : 65536),
                        values[index])) return false;
     offset = end + 1;
+  }
+  const std::array<int32_t, 4> rect{values[4], values[5], values[6], values[7]};
+  if (version2) {
+    const auto width = int64_t{rect[2]} - rect[0];
+    const auto height = int64_t{rect[3]} - rect[1];
+    if (width <= 0 || height <= 0 || !render::smart_geometry_rect_valid(rect) ||
+        render::diagnostic_world_layout().has_request_rect) return false;
   }
   g_render_quality = values[0];
   g_render_field = values[1];
   g_shutter_angle = values[2];
   g_shutter_phase = values[3];
+  g_render_context_state.has_smart_output_request = version2;
+  g_render_context_state.smart_output_request = rect;
   return true;
 }
 

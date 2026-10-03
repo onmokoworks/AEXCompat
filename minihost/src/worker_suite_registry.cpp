@@ -101,6 +101,7 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::aegp_proj_9: return {"AEGP Proj Suite", 9};
     case UnsupportedSuiteId::aegp_item_14: return {"AEGP Item Suite", 14};
     case UnsupportedSuiteId::aegp_item_13: return {"AEGP Item Suite", 13};
+    case UnsupportedSuiteId::aegp_item_11: return {"AEGP Item Suite", 11};
     case UnsupportedSuiteId::aegp_item_10: return {"AEGP Item Suite", 10};
     case UnsupportedSuiteId::aegp_item_3: return {"AEGP Item Suite", 3};
     case UnsupportedSuiteId::aegp_comp_25: return {"AEGP Comp Suite", 25};

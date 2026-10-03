@@ -17,7 +17,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use crate::process_group_cleanup::{GroupState, observe_exit};
+use crate::process_group_cleanup::{
+    CleanupError, CleanupObservation, GroupState, finish_cleanup, observe_exit,
+};
 
 const SESSION_PREFIX: &str = "aexcompat-macos-worker";
 const TERM_GRACE: Duration = Duration::from_millis(150);
@@ -541,77 +543,79 @@ pub(crate) fn terminate_process_group(child: &mut Child) -> Result<(), String> {
     // PID after the snapshot.
     let snapshot = descendant_identities(pid);
     let descendants = snapshot.identities;
-    let mut errors = Vec::new();
+    let mut errors: Vec<CleanupError> = Vec::new();
     if let Some(diagnostic) = snapshot.diagnostic {
-        errors.push(diagnostic);
+        errors.push(diagnostic.into());
     }
     if let Err(error) = signal_identities(&descendants, libc::SIGTERM) {
-        errors.push(error);
+        errors.push(error.into());
     }
     if let Err(error) = signal_group(child, libc::SIGTERM) {
         errors.push(error);
     }
-    let leader_reaped = match wait_for_exit(child, TERM_GRACE) {
+    let mut leader_reaped = match wait_for_exit(child, TERM_GRACE) {
         Ok(reaped) => reaped,
         Err(error) => {
-            errors.push(error);
+            errors.push(error.into());
             false
         }
     };
-    let group_exists = process_group_exists(pid).unwrap_or_else(|error| {
-        errors.push(error);
-        true
+    let group = process_group_state(pid).unwrap_or_else(|error| {
+        errors.push(error.into());
+        GroupState::PermissionDenied
     });
     let descendant_exists = identities_exist(&descendants).unwrap_or_else(|error| {
-        errors.push(error);
+        errors.push(error.into());
         true
     });
-    if leader_reaped && !group_exists && !descendant_exists {
-        return if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        };
+    let observation = CleanupObservation {
+        leader_reaped,
+        group,
+        descendants_absent: !descendant_exists,
+    };
+    if observation.fully_exited() {
+        return finish_cleanup(errors, observation);
     }
     if let Err(error) = signal_identities(&descendants, libc::SIGKILL) {
-        errors.push(error);
+        errors.push(error.into());
     }
     if let Err(error) = signal_group(child, libc::SIGKILL) {
         errors.push(error);
     }
     if !leader_reaped {
-        if let Err(error) = child.wait() {
-            errors.push(format!(
-                "macos_worker_residual_process: reap leader {pid}: {error}"
-            ));
+        match child.wait() {
+            Ok(_) => leader_reaped = true,
+            Err(error) => errors
+                .push(format!("macos_worker_residual_process: reap leader {pid}: {error}").into()),
         }
     }
     let started = Instant::now();
-    loop {
-        let group_exists = process_group_exists(pid).unwrap_or_else(|error| {
-            errors.push(error);
-            true
+    let final_observation = loop {
+        let group = process_group_state(pid).unwrap_or_else(|error| {
+            errors.push(error.into());
+            GroupState::PermissionDenied
         });
         let descendant_exists = identities_exist(&descendants).unwrap_or_else(|error| {
-            errors.push(error);
+            errors.push(error.into());
             true
         });
-        if !group_exists && !descendant_exists {
-            break;
+        let observation = CleanupObservation {
+            leader_reaped,
+            group,
+            descendants_absent: !descendant_exists,
+        };
+        if !group.exists() && !descendant_exists {
+            break observation;
         }
         if started.elapsed() >= Duration::from_secs(2) {
             errors.push(format!(
                 "macos_worker_residual_process: process group {pid} or an observed descendant remains after SIGKILL"
-            ));
-            break;
+            ).into());
+            break observation;
         }
         thread::sleep(Duration::from_millis(5));
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    };
+    finish_cleanup(errors, final_observation)
 }
 
 fn descendant_identities(root: libc::pid_t) -> DescendantSnapshot {
@@ -723,6 +727,7 @@ fn signal_identities(identities: &[ProcessIdentity], signal: libc::c_int) -> Res
     Ok(())
 }
 
+#[cfg(test)]
 fn process_group_exists(pid: libc::pid_t) -> Result<bool, String> {
     Ok(process_group_state(pid)?.exists())
 }
@@ -741,7 +746,7 @@ fn process_group_state(pid: libc::pid_t) -> Result<GroupState, String> {
     }
 }
 
-fn signal_group(child: &mut Child, signal: libc::c_int) -> Result<(), String> {
+fn signal_group(child: &mut Child, signal: libc::c_int) -> Result<(), CleanupError> {
     let pid = child.id() as libc::pid_t;
     // SAFETY: a negative, validated child pid addresses only its process group.
     let result = unsafe { libc::kill(-pid, signal) };
@@ -771,12 +776,12 @@ fn signal_group(child: &mut Child, signal: libc::c_int) -> Result<(), String> {
                 if observation.fully_exited() {
                     return Ok(());
                 }
-                return Err(format!(
+                return Err(CleanupError::PendingGroupPermissionDenied(format!(
                     "signal macOS worker process group {pid}: {error}; signal={signal}, initial_reaped={}, final_reaped={}, group={:?}",
                     observation.initial_reaped, observation.final_reaped, observation.group
-                ));
+                )));
             }
-            Err(format!("signal macOS worker process group {pid}: {error}"))
+            Err(format!("signal macOS worker process group {pid}: {error}").into())
         }
     }
 }

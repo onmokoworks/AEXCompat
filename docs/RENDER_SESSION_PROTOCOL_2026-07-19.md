@@ -152,6 +152,23 @@ path を最後に置くのは、path 中の `|` が数値フィールドをず�
 W1-3 では mask (`v2|`)、spatial (`spatial:v1/v2/v3`)、
 render-environment (`render:v1|`) を broker が送出する (host_context がある
 ときは one-shot と同じく mask trailer を常に送る、空 mask scene でも "v2|")。
+
+明示的な SmartFX 出力要求は request JSON の
+`host_context.smart_output_request_rect: [left, top, right, bottom]` で指定する。
+例えば `--render-experimental-smart-request <aex> <input.png> <output.png> <request.json>`
+に `{"schema_version":1,"assignments":[],"host_context":{"mask_scene":{"masks":[]},"smart_output_request_rect":[-32,-24,96,72]}}`
+を渡せる。GUI の typed request 読み込みも同じ host_context を使う。
+入力レイヤー外や負の原点を許すが、各座標の絶対値は 2^24 以下、非空の各辺は
+4096 以下、面積は 16,777,216 以下に制限する。これは入力 checkout の
+availability を変更せず、効果の `result_rect` と `max_result_rect` も上書きしない。
+出力 world は引き続き実際の `result_rect` の寸法と原点で確保される。
+broker は `render:v2|quality,field,angle,phase,left,top,right,bottom` に符号付き整数を
+載せる (angle/phase は v1 と同じ 16.16)。render_environment を省略した場合は
+High/Frame/0/0。worker は PreRender と SmartRender に同じ request を渡す。
+この矩形は session の全フレームで固定であり、変更には新しい session が必要。
+Classic、fixture 専用 render route、diagnostic request_rect との二重指定は拒否する。
+省略時は従来の入力サイズ要求のまま。自動 max-result 再要求や AE 既定値の
+同等性を主張する機能ではない。
 W1-4c では alpha-as-coverage の parameter slot 群を `--alpha-as-coverage-v1
 <slot,...>` auxiliary option で送る。worker (Render entry) は one-shot と共有の
 auxiliary フック (`parse_l2_alpha_coverage`) でこれを parse し、launch 時に一度

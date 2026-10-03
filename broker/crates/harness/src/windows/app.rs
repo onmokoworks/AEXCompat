@@ -3432,6 +3432,7 @@ impl eframe::App for HarnessApp {
                                             active_camera: None,
                                             scene_layers: Vec::new(),
                                             render_environment: None,
+                                            smart_output_request_rect: None,
                                             aux_channels: Vec::new(),
                                             alpha_as_coverage_params: Vec::new(),
                                         }
@@ -3463,6 +3464,7 @@ impl eframe::App for HarnessApp {
                                     if context.mask_scene.masks.is_empty()
                                         && !context.has_authored_scene()
                                         && context.render_environment.is_none()
+                                        && context.smart_output_request_rect.is_none()
                                     {
                                         self.host_context = None;
                                     }
@@ -3625,6 +3627,7 @@ impl eframe::App for HarnessApp {
                                     active_camera: None,
                                     scene_layers: Vec::new(),
                                     render_environment: None,
+                                    smart_output_request_rect: None,
                                     aux_channels: Vec::new(),
                                     alpha_as_coverage_params: Vec::new(),
                                 });
@@ -3638,6 +3641,7 @@ impl eframe::App for HarnessApp {
                                 context.render_environment = None;
                                 if context.mask_scene.masks.is_empty()
                                     && context.spatial.is_none()
+                                    && context.smart_output_request_rect.is_none()
                                     && !context.has_authored_scene()
                                 { self.host_context = None; }
                             }
@@ -3742,6 +3746,7 @@ impl eframe::App for HarnessApp {
                                         if context.spatial.is_none()
                                             && !context.has_authored_scene()
                                             && context.render_environment.is_none()
+                                            && context.smart_output_request_rect.is_none()
                                         {
                                             self.host_context = None;
                                         }

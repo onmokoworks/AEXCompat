@@ -378,6 +378,11 @@ aexcompat::scene_model::Registry& scene_registry() noexcept {
 
 bool resolve_scene_item(void* handle, ObjectSnapshot& output,
                         uint64_t required_project_id = 0) noexcept {
+  // The PF effect layer publishes this composition item through its parent.
+  // Normalize only that live facade identity; null and foreign handles must
+  // still be rejected by the registry below.
+  void* const facade_comp = aexcompat::worker_runtime::bee_facade::comp_item_handle();
+  if (facade_comp && handle == facade_comp) handle = &g_aegp_comp_item;
   return scene_registry().resolve_item_or_legacy(
       handle, output, required_project_id);
 }
@@ -818,6 +823,8 @@ int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type) {
 AegpLegacyItemSuite6 g_aegp_legacy_item_suite6{};
 std::array<void*, 27> g_aegp_item_suite13{};
 static_assert(sizeof(g_aegp_item_suite13) == 27 * sizeof(void*));
+std::array<void*, 27> g_aegp_item_suite11{};
+static_assert(sizeof(g_aegp_item_suite11) == 27 * sizeof(void*));
 std::array<void*, 20> g_aegp_item_suite1{};
 static_assert(sizeof(g_aegp_item_suite1) == 20 * sizeof(void*));
 
@@ -2765,6 +2772,16 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_item_suite13[16] = reinterpret_cast<void*>(&aegp_get_item_dimensions);
     g_aegp_item_suite13[17] = reinterpret_cast<void*>(&aegp_get_item_pixel_aspect_ratio);
     *suite = g_aegp_item_suite13.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
+  if (named("AEGP Item Suite") && version == 11) {
+    // Frozen ItemSuite7 has legacy string signatures. Expose only its
+    // signature-compatible geometry slots; do not alias the newer v13 table.
+    g_aegp_item_suite11 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_item_11, 27>();
+    g_aegp_item_suite11[16] = reinterpret_cast<void*>(&aegp_get_item_dimensions);
+    g_aegp_item_suite11[17] = reinterpret_cast<void*>(&aegp_get_item_pixel_aspect_ratio);
+    *suite = g_aegp_item_suite11.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Item Suite") && version == 10) {
