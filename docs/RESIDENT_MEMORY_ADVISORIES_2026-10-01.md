@@ -30,6 +30,14 @@ Reasons distinguish:
   peak is not used as its numerator or denominator.
 - `post_frame_retention_candidate`: stable latest tail, with a lower-median
   increase from samples 5–8 >= max(1 MiB, 10% of baseline).
+- `rapid_live_growth_headroom_candidate`: a provisional warning before the
+  normal 12-observation trend window. The latest four observations must have
+  live values, the same nonzero process cap and geometry, and consecutive
+  frame indices. All three increments must be at least max(4 MiB, cap / 64).
+  Using the smallest increment, remaining headroom would be consumed within
+  the number of observations still needed for the normal trend window, if
+  growth continued. An isolated cold spike, a flat or falling step, or a
+  changed/missing observation does not satisfy this rule.
 - `stable_plateau`: latest-tail range <= max(256 KiB, 2% of its lower median),
   when the sustained-growth rule is not satisfied.
 - `temporary_peak_or_recovered_commit`: historical process peak exceeds the
@@ -39,6 +47,16 @@ Trend requires at least 12 completed observations and all eight tail live
 values. Signed decline and variable commit remain distinct. No outliers are
 removed. Numeric policies, observation counts, geometry, times, slopes, ratio,
 baseline and retained delta are published with each report.
+
+`early_growth` publishes the provisional status, smallest observed increment,
+conditional `projected_frames_to_limit`, and remaining observations until the
+regular trend window. The regular `trend_status` stays unavailable for a
+short run. The warning clears as soon as the four-observation predicate stops
+holding, including when initialization or a bounded cache plateaus. At sample
+12 it gives way to the regular trend classifier; near-limit pressure remains
+independent. A repeated cold-cache initialization can temporarily satisfy the
+provisional rule, so this projection neither predicts continued growth nor
+establishes a leak, future render failure, or which allocator owns the memory.
 
 These are whole-worker candidates, including cluster-session member changes,
 not attribution to an AEX leak. The worker returns after render/FRAME_SETDOWN
@@ -101,7 +119,11 @@ ownership; this is actionable investigation evidence, not leak diagnosis.
 Rust behavioral tests cover four-frame insufficiency against the existing
 production summary, sustained growth, retained plateau, recovered peak,
 pressure, missing/short/zero-budget observations, signed decline, bounded
-1,000-frame history and non-spamming state changes. Native public fixture
+1,000-frame history and non-spamming state changes. Short-series tests also
+cover the recorded four-frame rapid increase, cold spikes/noise, provisional
+warning entry/clear, missing or changed budget/geometry/frame indices,
+smallest-increment projection and its inclusive integer headroom boundary.
+Native public fixture
 modes add bounded retention and temporary committed-memory recovery. Native
 tests check actual sample-derived slopes/baselines/ratios, output identity and
 close; allocator noise is allowed to remain variable/declining rather than
