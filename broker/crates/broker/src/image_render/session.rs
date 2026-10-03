@@ -23,6 +23,15 @@ fn render_with_artifact(
     deep_png_output: bool,
     artifact_kind: Option<RenderArtifactKind>,
 ) -> io::Result<Value> {
+    if !smart && host_context.is_some_and(|context| context.smart_output_request_rect.is_some()) {
+        return Err(invalid(
+            "explicit output request requires SmartFX rendering",
+        ));
+    }
+    // Validate the public context before any worker launch or output allocation.
+    if let Some(context) = host_context {
+        crate::render_request::encode_render_environment(context)?;
+    }
     if !timing.is_valid() {
         return Err(invalid("render timing is invalid"));
     }
