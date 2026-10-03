@@ -44,6 +44,9 @@ pub struct HostContext {
     pub scene_layers: Vec<SceneLayer>,
     #[serde(default)]
     pub render_environment: Option<RenderEnvironment>,
+    /// Explicit SmartFX output demand in layer coordinates, independent of input bounds.
+    #[serde(default)]
+    pub smart_output_request_rect: Option<[i32; 4]>,
     #[serde(default)]
     pub aux_channels: Vec<AuxChannel>,
     /// Layer parameter slots whose pre-effect alpha plane may be exposed as COVR.
@@ -862,9 +865,15 @@ pub(crate) fn encode_camera(camera: &ActiveCamera) -> io::Result<String> {
 }
 
 pub(crate) fn encode_render_environment(context: &HostContext) -> io::Result<Option<String>> {
-    let Some(environment) = context.render_environment else {
+    if context.render_environment.is_none() && context.smart_output_request_rect.is_none() {
         return Ok(None);
-    };
+    }
+    let environment = context.render_environment.unwrap_or(RenderEnvironment {
+        quality: RenderQuality::High,
+        field: RenderField::Frame,
+        shutter_angle: 0.0,
+        shutter_phase: 0.0,
+    });
     if !environment.shutter_angle.is_finite()
         || !(0.0..=1.0).contains(&environment.shutter_angle)
         || !environment.shutter_phase.is_finite()
@@ -883,6 +892,24 @@ pub(crate) fn encode_render_environment(context: &HostContext) -> io::Result<Opt
     };
     let angle = (environment.shutter_angle * 65536.0).round() as i32;
     let phase = (environment.shutter_phase * 65536.0).round() as i32;
+    if let Some([left, top, right, bottom]) = context.smart_output_request_rect {
+        let width = i64::from(right) - i64::from(left);
+        let height = i64::from(bottom) - i64::from(top);
+        if [left, top, right, bottom]
+            .iter()
+            .any(|value| i64::from(*value).abs() > (1 << 24))
+            || !(1..=4096).contains(&width)
+            || !(1..=4096).contains(&height)
+            || width * height > 16_777_216
+        {
+            return Err(invalid(
+                "SmartFX output request rectangle is outside enabled range",
+            ));
+        }
+        return Ok(Some(format!(
+            "render:v2|{quality},{field},{angle},{phase},{left},{top},{right},{bottom}"
+        )));
+    }
     Ok(Some(format!("render:v1|{quality},{field},{angle},{phase}")))
 }
 
@@ -1264,13 +1291,13 @@ pub fn execute_smart(
     }
     let request: Request = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("invalid render request: {error}")))?;
-    if request
-        .host_context
-        .as_ref()
-        .is_some_and(|context| context.active_camera.is_some() || !context.scene_layers.is_empty())
-    {
+    if request.host_context.as_ref().is_some_and(|context| {
+        context.active_camera.is_some()
+            || !context.scene_layers.is_empty()
+            || context.smart_output_request_rect.is_some()
+    }) {
         return Err(invalid(
-            "active camera is not supported by the fixture SmartFX render route",
+            "active camera, scene layers and output requests are not supported by the fixture SmartFX render route",
         ));
     }
     let profile = crate::fixture_profiles::find(&request.plugin_id)
@@ -2810,6 +2837,57 @@ mod tests {
     }
 
     #[test]
+    fn smart_output_request_extends_beyond_input_in_shipping_host_context() {
+        let context: HostContext = serde_json::from_str(
+            r#"{"mask_scene":{"masks":[]},"smart_output_request_rect":[-32,-24,96,72]}"#,
+        )
+        .expect("shipping host context must represent an extended SmartFX request");
+        assert_eq!(
+            encode_render_environment(&context).unwrap().as_deref(),
+            Some("render:v2|1,0,0,0,-32,-24,96,72")
+        );
+    }
+
+    #[test]
+    fn smart_output_request_bounds_and_environment_are_preserved() {
+        for rect in [
+            [0, 0, 0, 1],
+            [1, 0, 0, 1],
+            [0, 0, 1, 0],
+            [0, 0, 4097, 1],
+            [0, 0, 1, 4097],
+            [-(1 << 24) - 1, 0, -(1 << 24), 1],
+            [(1 << 24), 0, (1 << 24) + 1, 1],
+            [i32::MIN, 0, i32::MAX, 1],
+        ] {
+            let context: HostContext = serde_json::from_value(serde_json::json!({
+                "mask_scene":{"masks":[]}, "smart_output_request_rect":rect
+            }))
+            .unwrap();
+            assert!(encode_render_environment(&context).is_err(), "{rect:?}");
+        }
+        for rect in [
+            [-4096, -4096, 0, 0],
+            [-(1 << 24), 0, -(1 << 24) + 1, 1],
+            [(1 << 24) - 1, 0, (1 << 24), 1],
+        ] {
+            let context: HostContext = serde_json::from_value(serde_json::json!({
+                "mask_scene":{"masks":[]}, "smart_output_request_rect":rect,
+                "render_environment":{"quality":"low","field":"upper",
+                    "shutter_angle":0.5,"shutter_phase":-0.25}
+            }))
+            .unwrap();
+            assert_eq!(
+                encode_render_environment(&context).unwrap().unwrap(),
+                format!(
+                    "render:v2|0,1,32768,-16384,{},{},{},{}",
+                    rect[0], rect[1], rect[2], rect[3]
+                )
+            );
+        }
+    }
+
+    #[test]
     fn mask_context_accepts_open_and_rejects_excess_and_legacy_injection() {
         let open: Request = serde_json::from_str(
             r#"{"schema_version":4,"plugin_id":"maskoffset","assignments":{},"host_context":{"mask_scene":{"masks":[{"open":true,"vertices":[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]}]}}}"#,
@@ -2852,6 +2930,7 @@ mod tests {
             active_camera: None,
             scene_layers: Vec::new(),
             render_environment: None,
+            smart_output_request_rect: None,
             aux_channels: Vec::new(),
             alpha_as_coverage_params: Vec::new(),
         };
