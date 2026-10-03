@@ -48,7 +48,7 @@ enum {
   kOfxStatErrBadHandle = 9,
   kOfxStatErrBadIndex = 10,
   kOfxStatErrValue = 11,
-  kOfxStatReplyDefault = 12,
+  kOfxStatReplyDefault = 14,
 };
 
 #define kOfxImageEffectPluginApi "OfxImageEffectPluginAPI"
@@ -83,7 +83,7 @@ enum {
 #define kOfxImagePropData "OfxImagePropData"
 #define kOfxImagePropBounds "OfxImagePropBounds"
 #define kOfxImagePropRowBytes "OfxImagePropRowBytes"
-#define kOfxImagePreMultiplied "OfxImagePreMultiplied"
+#define kOfxImagePreMultiplied "OfxImageAlphaPremultiplied"
 #define kOfxPropTime "OfxPropTime"
 #define kOfxPropLabel "OfxPropLabel"
 #define kOfxPropInstanceData "OfxPropInstanceData"

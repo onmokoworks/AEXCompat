@@ -24,7 +24,9 @@ standard discovery exports.
 
 The lifecycle smoke drives load, describe, describe-in-context, create-instance,
 render, destroy-instance, and unload through a local property/image/parameter
-suite host. Describe and lifecycle are real binary calls. The control render is
+suite host. Describe and lifecycle are real binary calls. The fake host uses the official
+alpha string independently of our header and checks that SyncPrivateData and
+an unknown action return ReplyDefault (14), rather than ReplyYes (12). The control render is
 also a real OFX image-suite call: it darkens RGBA8 and 32-bit float RGBA
 fixtures' RGB channels,
 preserves premultiplied alpha, honors a non-packed render window and rowbytes,
@@ -86,7 +88,7 @@ PNGs are RGB previews, so they do not prove the host alpha channel. The native
 float fixture separately verifies alpha and padding. File hashes, frame
 dimensions, and the changed region are recorded in the JSON contract. That
 earlier Resolve run was control-only; a real Resolve AEX render must be
-recorded separately.
+recorded separately below.
 
 The new native OFX smoke used the locally held license-free
 `DistanceGradation.aex` at 64×64, OpenFX frame 6 at 24 fps (250 ms). The host supplied padded float
@@ -98,6 +100,20 @@ padding was preserved. A deliberately missing runner returned
 the host and worker frame hashes plus AEX/worker hashes. This native smoke
 does not by itself prove that Resolve invoked the AEX route. Compact evidence
 files report `worker_rendered` and do not claim successful host publication.
+
+A separate real Resolve 21.0.4.0005 run loaded the rebuilt arm64 bundle and
+connected MediaIn → AEXCompat Resolve OFX → MediaOut in a dedicated Fusion
+composition. A 256×256 patterned image exported unchanged with the effect
+disconnected, including a repeated export. With DistanceGradation connected,
+all 65,536 RGB pixels changed to white. The RGB export exactly matches the
+worker's opaque RGBA8 white output after dropping alpha. The unmodified AEX
+default parameters produced this uniform image; this does not establish
+gradient quality or parameter mapping. Resolve supplied float RGBA with
+4096-byte rows. Separate callbacks at frames 0 and 6 of a 24 fps project
+recorded 0 and 250 ms and produced matching exports. The new
+`macos_aex_host_evidence` contract records these identities, PNG hashes, and
+comparisons. RGB exports do not prove host alpha; the padded native fixture
+remains the alpha evidence. The Windows real-host path remains unverified.
 
 The bounded render path accepts positive rowbytes. Negative rowbytes, although
 valid in OpenFX, return `kOfxStatErrFormat`; the tested Resolve host provided

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AEXCompat Resolve OFX surface contract",
   "type": "object",
-  "required": ["schema_version", "provenance", "package", "lifecycle", "pixel_contract", "identity", "control_render", "float_control_render", "aex_render_gate", "aex_native_render", "host_evidence", "macos_host_evidence"],
+  "required": ["schema_version", "provenance", "package", "lifecycle", "pixel_contract", "identity", "control_render", "float_control_render", "aex_render_gate", "aex_native_render", "host_evidence", "macos_host_evidence", "macos_aex_host_evidence"],
   "properties": {
     "schema_version": {"const": 1},
     "provenance": {
@@ -122,10 +122,10 @@
       "type": "object",
       "required": ["state", "success_status", "blocked_status", "reason"],
       "properties": {
-        "state": {"const": "verified_mac_native_fixture"},
+        "state": {"const": "verified_mac_resolve"},
         "success_status": {"const": "kOfxStatOK"},
         "blocked_status": {"const": "kOfxStatErrUnsupported"},
-        "reason": {"const": "real Resolve AEX render pending; Windows host unverified"}
+        "reason": {"const": "macOS Resolve AEX export verified; Windows host unverified"}
       },
       "additionalProperties": false
     },
@@ -189,6 +189,143 @@
         "effect_on_png_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
         "changed_exported_pixels": {"const": 1166400},
         "changed_bbox": {"const": [420, 0, 1500, 1080]}
+      },
+      "additionalProperties": false
+    },
+    "macos_aex_host_evidence": {
+      "type": "object",
+      "required": [
+        "state",
+        "resolve_version",
+        "binary_sha256",
+        "aex_sha256",
+        "worker_sha256",
+        "width",
+        "height",
+        "host_pixel_depth",
+        "source_rowbytes",
+        "output_rowbytes",
+        "frame_rate",
+        "ofx_frames",
+        "time_ms",
+        "exported_frame_format",
+        "input_png_sha256",
+        "effect_off_png_sha256",
+        "effect_off_repeat_png_sha256",
+        "effect_on_png_sha256",
+        "effect_on_frame6_png_sha256",
+        "worker_input_sha256",
+        "worker_output_sha256",
+        "changed_exported_pixels",
+        "changed_bbox",
+        "export_matches_worker_rgb",
+        "effect_off_matches_input_rgb",
+        "output_description",
+        "host_alpha_verified"
+      ],
+      "properties": {
+        "state": {
+          "const": "verified_effect_toggle_and_png_export"
+        },
+        "resolve_version": {
+          "const": "21.0.4.0005"
+        },
+        "binary_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "aex_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "worker_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "width": {
+          "const": 256
+        },
+        "height": {
+          "const": 256
+        },
+        "host_pixel_depth": {
+          "const": "32-bit float"
+        },
+        "source_rowbytes": {
+          "const": 4096
+        },
+        "output_rowbytes": {
+          "const": 4096
+        },
+        "frame_rate": {
+          "const": 24.0
+        },
+        "ofx_frames": {
+          "const": [
+            0,
+            6
+          ]
+        },
+        "time_ms": {
+          "const": [
+            0,
+            250
+          ]
+        },
+        "exported_frame_format": {
+          "const": "PNG RGB"
+        },
+        "input_png_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "effect_off_png_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "effect_off_repeat_png_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "effect_on_png_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "effect_on_frame6_png_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "worker_input_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "worker_output_sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "changed_exported_pixels": {
+          "const": 65536
+        },
+        "changed_bbox": {
+          "const": [
+            0,
+            0,
+            256,
+            256
+          ]
+        },
+        "export_matches_worker_rgb": {
+          "const": true
+        },
+        "effect_off_matches_input_rgb": {
+          "const": true
+        },
+        "output_description": {
+          "const": "Uniform opaque white from the unmodified AEX default parameters; visual gradient quality is unverified."
+        },
+        "host_alpha_verified": {
+          "const": false
+        }
       },
       "additionalProperties": false
     }

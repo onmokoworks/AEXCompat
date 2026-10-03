@@ -365,7 +365,7 @@ static void set_image_property(FakePropertySet &properties, const char *name,
                   kOfxImageEffectPropComponents, 0, kOfxImageComponentRGBA);
   prop_set_string(reinterpret_cast<OfxPropertySetHandle>(&properties),
                   kOfxImageEffectPropPreMultiplication, 0,
-                  kOfxImagePreMultiplied);
+                  "OfxImageAlphaPremultiplied");
 }
 
 static void set_image_bounds(FakePropertySet &properties, int x1, int y1,
@@ -665,6 +665,15 @@ int main(int argc, char **argv) {
                   kOfxImageEffectPropFrameRate, 0, 24.0);
   const auto create_status = plugin->mainEntry(
       kOfxActionCreateInstance, &instance, nullptr, nullptr);
+  const auto untouched_output = instance.output_pixels;
+  // OpenFX ofxCore.h defines ReplyDefault as 14, distinct from ReplyYes (12).
+  // Compare the host-observed integer rather than our shared ABI constant.
+  const auto sync_private_status = plugin->mainEntry(
+      "OfxActionSyncPrivateData", &instance, nullptr, nullptr);
+  const bool default_actions_ok = sync_private_status == 14 &&
+      plugin->mainEntry("AEXCompatUnknownAction", &instance, nullptr,
+                        nullptr) == 14 &&
+      instance.output_pixels == untouched_output;
   FakePropertySet render_args;
   prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&render_args),
                   kOfxPropTime, 0, 7.0);
@@ -763,7 +772,8 @@ int main(int argc, char **argv) {
     const auto unload_status = plugin->mainEntry(kOfxActionUnload, nullptr, nullptr, nullptr);
     const bool verified = load_status == kOfxStatOK &&
         describe_status == kOfxStatOK && context_status == kOfxStatOK &&
-        create_status == kOfxStatOK && aex_status == kOfxStatOK &&
+        create_status == kOfxStatOK && default_actions_ok &&
+        aex_status == kOfxStatOK &&
         changed > 0 && alpha_and_padding_ok && invalid_rate_preserved_output &&
         failure_preserved_output &&
         destroy_status == kOfxStatOK && unload_status == kOfxStatOK;
@@ -894,6 +904,7 @@ int main(int argc, char **argv) {
                             context_status == kOfxStatOK &&
                             descriptor_contract_ok &&
                             create_status == kOfxStatOK &&
+                            default_actions_ok &&
                             render_status == kOfxStatOK && render_verified &&
                             float_render_status == kOfxStatOK &&
                             float_render_verified && mismatched_depth_rejected &&
@@ -907,6 +918,9 @@ int main(int argc, char **argv) {
             << plugin->pluginIdentifier << "\",\"load\":" << load_status
             << ",\"describe\":" << describe_status << ",\"describe_in_context\":"
             << context_status << ",\"create_instance\":" << create_status
+            << ",\"sync_private_data\":" << sync_private_status
+            << ",\"default_actions_ok\":"
+            << (default_actions_ok ? "true" : "false")
             << ",\"descriptor_contract_ok\":"
             << (descriptor_contract_ok ? "true" : "false")
             << ",\"render\":" << render_status

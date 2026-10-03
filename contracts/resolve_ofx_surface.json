@@ -27,9 +27,9 @@
   "identity": {
     "plugin_identifier": "com.aexcompat.resolve.ofx",
     "source_sha256": "3FA355CB5F130521AD5B0E884E581F1E2C05870E8CB4D526DD515F0A9A6709D8",
-    "binary_sha256": "5A3AE0B4941948DF184483B7521B55D6BF5FA459F103D0172C34538F7B583573",
+    "binary_sha256": "169010A77A5A490AFF98979F003084962A8E6A45E822524940831BC69F63CE17",
     "binary_platform": "macos-arm64",
-    "worker_identity": "ce7d358f81f0d6fdc5fa0322c9e772cbb282a42a7f053e13e3dd3a695fa13087",
+    "worker_identity": "714c10b6dbe613e4720f3bfb70edce3f2346cc90d981bfd34605088d10085988",
     "input_sha256": "5703DD607685DF69C7D73A4002CB0C2E381E7CDCC79B011ADCAF52E693FBFED3",
     "output_sha256": "F337FC673099D7A18549D9E838B45682D83186B8DB1DC5D26E667932F5C473C7",
     "pixel_diff": "9157 changed RGB float values in native OFX fixture"
@@ -74,10 +74,10 @@
     "mismatched_depth_rejected": true
   },
   "aex_render_gate": {
-    "state": "verified_mac_native_fixture",
+    "state": "verified_mac_resolve",
     "success_status": "kOfxStatOK",
     "blocked_status": "kOfxStatErrUnsupported",
-    "reason": "real Resolve AEX render pending; Windows host unverified"
+    "reason": "macOS Resolve AEX export verified; Windows host unverified"
   },
   "aex_native_render": {
     "state": "verified_mac_native_fixture",
@@ -97,7 +97,7 @@
     "worker_input_sha256": "73a75a7d71ddb69661492961396eeacc86ff3e138e7e24e6de9ed2c9b2e344f1",
     "worker_output_sha256": "8f79e067b7aebed8c1ad9c0b09c8ea6a1d37c14e6b6e285cee21c20522301dea",
     "aex_sha256": "a1d317c0e18371494bc9c9933684593ca903eb6f3fe262ec06d5147b4c0bcbae",
-    "worker_sha256": "ce7d358f81f0d6fdc5fa0322c9e772cbb282a42a7f053e13e3dd3a695fa13087"
+    "worker_sha256": "714c10b6dbe613e4720f3bfb70edce3f2346cc90d981bfd34605088d10085988"
   },
   "host_evidence": {
     "resolve_version": "18.6.6.7",
@@ -126,5 +126,45 @@
     "effect_on_png_sha256": "3CE482990140C338F1E0AAB17B8FF1C8DDD56918D4B29533412606C1B53A25C4",
     "changed_exported_pixels": 1166400,
     "changed_bbox": [420, 0, 1500, 1080]
+  },
+  "macos_aex_host_evidence": {
+    "state": "verified_effect_toggle_and_png_export",
+    "resolve_version": "21.0.4.0005",
+    "binary_sha256": "169010A77A5A490AFF98979F003084962A8E6A45E822524940831BC69F63CE17",
+    "aex_sha256": "a1d317c0e18371494bc9c9933684593ca903eb6f3fe262ec06d5147b4c0bcbae",
+    "worker_sha256": "714c10b6dbe613e4720f3bfb70edce3f2346cc90d981bfd34605088d10085988",
+    "width": 256,
+    "height": 256,
+    "host_pixel_depth": "32-bit float",
+    "source_rowbytes": 4096,
+    "output_rowbytes": 4096,
+    "frame_rate": 24.0,
+    "ofx_frames": [
+      0,
+      6
+    ],
+    "time_ms": [
+      0,
+      250
+    ],
+    "exported_frame_format": "PNG RGB",
+    "input_png_sha256": "e2abf4db8b5e0a68f4858abd86f543c8ca0a8b9898bb99c33e8754eb893efd2b",
+    "effect_off_png_sha256": "a3f3e2367e047e571786700ddee1439ecb6656660a4c1a2089fa1ea4ed0deeec",
+    "effect_off_repeat_png_sha256": "a3f3e2367e047e571786700ddee1439ecb6656660a4c1a2089fa1ea4ed0deeec",
+    "effect_on_png_sha256": "fa771c42c2d171ceab93299da1108ba5696b17bde2fab1cc721036aebd013ed8",
+    "effect_on_frame6_png_sha256": "fa771c42c2d171ceab93299da1108ba5696b17bde2fab1cc721036aebd013ed8",
+    "worker_input_sha256": "550b5b2cbb9925737dbb6ab8bfd5a77ea409a1c75070897b5987bee3ea057030",
+    "worker_output_sha256": "3b874d3ba46c638fc3094f8e92fb744ca974893873f8885f54e23760f9b6311b",
+    "changed_exported_pixels": 65536,
+    "changed_bbox": [
+      0,
+      0,
+      256,
+      256
+    ],
+    "export_matches_worker_rgb": true,
+    "effect_off_matches_input_rgb": true,
+    "output_description": "Uniform opaque white from the unmodified AEX default parameters; visual gradient quality is unverified.",
+    "host_alpha_verified": false
   }
 }
