@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AEXCompat Resolve OFX surface contract",
+  "type": "object",
+  "required": ["schema_version", "provenance", "package", "lifecycle", "pixel_contract", "identity", "control_render", "float_control_render", "aex_render_gate", "aex_native_render", "host_evidence", "macos_host_evidence"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "provenance": {
+      "type": "object",
+      "required": ["source", "license", "vendored_headers"],
+      "properties": {
+        "source": {"type": "string", "format": "uri"},
+        "license": {"const": "BSD-3-Clause"},
+        "vendored_headers": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "package": {
+      "type": "object",
+      "required": ["bundle_suffix", "windows_architecture", "macos_architecture", "binary_suffix"],
+      "properties": {
+        "bundle_suffix": {"const": ".ofx.bundle"},
+        "binary_suffix": {"const": ".ofx"},
+        "windows_architecture": {"const": "Win64"},
+        "macos_architecture": {"const": "MacOS/arm64"}
+      },
+      "additionalProperties": false
+    },
+    "lifecycle": {
+      "type": "object",
+      "required": ["exports", "actions"],
+      "properties": {
+        "exports": {"type": "array", "items": {"type": "string"}, "minItems": 4},
+        "actions": {"type": "array", "items": {"type": "string"}, "minItems": 6}
+      },
+      "additionalProperties": false
+    },
+    "pixel_contract": {
+      "type": "object",
+      "required": ["components", "depths", "channel_order", "alpha", "stride", "frame_time", "render_window"],
+      "properties": {
+        "components": {"const": "RGBA"},
+        "depths": {"const": ["8-bit", "32-bit float"]},
+        "channel_order": {"const": "RGBA"},
+        "alpha": {"enum": ["premultiplied", "straight"]},
+        "stride": {"type": "string"},
+        "frame_time": {"const": "OfxTime double"},
+        "render_window": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "required": ["plugin_identifier", "source_sha256", "binary_sha256", "binary_platform", "worker_identity", "input_sha256", "output_sha256", "pixel_diff"],
+      "properties": {
+        "plugin_identifier": {"type": "string"},
+        "source_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "binary_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "binary_platform": {"const": "macos-arm64"},
+        "worker_identity": {"type": "string"},
+        "input_sha256": {"type": ["string", "null"]},
+        "output_sha256": {"type": ["string", "null"]},
+        "pixel_diff": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "control_render": {
+      "type": "object",
+      "required": ["state", "status", "render_claim", "aex_render_claim", "width", "height", "render_window", "source_rowbytes", "output_rowbytes", "frame_time", "parameter", "input_sha256", "output_sha256", "pixel_diff", "alpha_preserved", "padding_preserved"],
+      "properties": {
+        "state": {"const": "verified_local_fixture"},
+        "status": {"const": "kOfxStatOK"},
+        "render_claim": {"const": "builtin_rgba8_control"},
+        "aex_render_claim": {"const": "blocked_missing_aex_rendersession"},
+        "width": {"const": 3},
+        "height": {"const": 2},
+        "render_window": {"const": [1, 0, 3, 2]},
+        "source_rowbytes": {"const": 20},
+        "output_rowbytes": {"const": 24},
+        "frame_time": {"const": 7.0},
+        "parameter": {
+          "type": "object",
+          "required": ["name", "time", "value"],
+          "properties": {
+            "name": {"const": "strength"},
+            "time": {"const": 7.0},
+            "value": {"const": 0.25}
+          },
+          "additionalProperties": false
+        },
+        "input_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "output_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "pixel_diff": {"const": 12},
+        "alpha_preserved": {"const": true},
+        "padding_preserved": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "float_control_render": {
+      "type": "object",
+      "required": ["state", "status", "width", "height", "render_window", "source_rowbytes", "output_rowbytes", "frame_time", "parameter_value", "input_sha256", "output_sha256", "changed_rgb_values", "alpha_preserved", "padding_preserved", "mismatched_depth_rejected"],
+      "properties": {
+        "state": {"const": "verified_local_fixture"},
+        "status": {"const": "kOfxStatOK"},
+        "width": {"const": 3},
+        "height": {"const": 2},
+        "render_window": {"const": [1, 0, 3, 2]},
+        "source_rowbytes": {"const": 64},
+        "output_rowbytes": {"const": 80},
+        "frame_time": {"const": 7.0},
+        "parameter_value": {"const": 0.25},
+        "input_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "output_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "changed_rgb_values": {"const": 12},
+        "alpha_preserved": {"const": true},
+        "padding_preserved": {"const": true},
+        "mismatched_depth_rejected": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "aex_render_gate": {
+      "type": "object",
+      "required": ["state", "success_status", "blocked_status", "reason"],
+      "properties": {
+        "state": {"const": "verified_mac_native_fixture"},
+        "success_status": {"const": "kOfxStatOK"},
+        "blocked_status": {"const": "kOfxStatErrUnsupported"},
+        "reason": {"const": "real Resolve AEX render pending; Windows host unverified"}
+      },
+      "additionalProperties": false
+    },
+    "aex_native_render": {
+      "type": "object",
+      "required": ["state", "width", "height", "source_rowbytes", "output_rowbytes", "time_ms", "ofx_frame", "frame_rate", "changed_rgb_values", "alpha_and_padding_ok", "failure_preserved_output", "invalid_rate_preserved_output", "host_input_sha256", "host_output_sha256", "worker_input_sha256", "worker_output_sha256", "aex_sha256", "worker_sha256"],
+      "properties": {
+        "state": {"const": "verified_mac_native_fixture"},
+        "width": {"const": 64},
+        "height": {"const": 64},
+        "source_rowbytes": {"const": 1040},
+        "output_rowbytes": {"const": 1056},
+        "time_ms": {"const": 250},
+        "ofx_frame": {"const": 6.0},
+        "frame_rate": {"const": 24.0},
+        "changed_rgb_values": {"type": "integer", "minimum": 1},
+        "alpha_and_padding_ok": {"const": true},
+        "failure_preserved_output": {"const": true},
+        "invalid_rate_preserved_output": {"const": true},
+        "host_input_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "host_output_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "worker_input_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "worker_output_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "aex_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "worker_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "host_evidence": {
+      "type": "object",
+      "required": ["resolve_version", "resolve_exe_sha256", "ofxloader_exe_sha256", "internal_openfx_plugin_sha256", "historical_windows_plugin_binary_sha256", "standard_external_path_entries", "real_resolve_smoke"],
+      "properties": {
+        "resolve_version": {"type": "string"},
+        "resolve_exe_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "ofxloader_exe_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "internal_openfx_plugin_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "historical_windows_plugin_binary_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "standard_external_path_entries": {"const": 0},
+        "real_resolve_smoke": {"const": "blocked_external_path_empty"}
+      },
+      "additionalProperties": false
+    },
+    "macos_host_evidence": {
+      "type": "object",
+      "required": ["resolve_version", "discovery", "control_render", "bundle_path", "binary_architecture", "binary_sha256", "host_pixel_depth", "host_rowbytes", "exported_frame_format", "control_input_sha256", "exported_frame_width", "exported_frame_height", "effect_strength", "effect_off_png_sha256", "effect_on_png_sha256", "changed_exported_pixels", "changed_bbox"],
+      "properties": {
+        "resolve_version": {"const": "21.0.4.0005"},
+        "discovery": {"const": "verified"},
+        "control_render": {"const": "verified_effect_toggle_and_png_export"},
+        "bundle_path": {"const": "AEXCompatResolve.ofx.bundle/Contents/MacOS/AEXCompatResolve.ofx"},
+        "binary_architecture": {"const": "Mach-O arm64 bundle"},
+        "binary_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "host_pixel_depth": {"const": "32-bit float"},
+        "host_rowbytes": {"const": 30720},
+        "exported_frame_format": {"const": "PNG RGB"},
+        "control_input_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "exported_frame_width": {"const": 1920},
+        "exported_frame_height": {"const": 1080},
+        "effect_strength": {"const": 0.5},
+        "effect_off_png_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "effect_on_png_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "changed_exported_pixels": {"const": 1166400},
+        "changed_bbox": {"const": [420, 0, 1500, 1080]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
