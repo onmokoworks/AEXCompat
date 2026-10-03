@@ -6,6 +6,7 @@
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_suite_tables.hpp"
 #include "worker_aegp_scene.hpp"
+#include "worker_aegp_pf_interface_suite.hpp"
 #include "worker_aegp_scene_model.hpp"
 #include "worker_aegp_scene_transaction.hpp"
 #include "worker_aegp_scene_runtime.hpp"
@@ -1857,6 +1858,62 @@ bool verify_aegp_resizer_3d_chain() {
       item != nullptr &&
       aegp_get_item_dimensions(item, &width, &height) == 0 &&
       width == 1920 && height == 1080;
+
+  // Invoke the frozen ItemSuite7 ABI (acquisition version 11), including the
+  // parent composition identity that a real effect receives through PF.
+  const void* item11 = nullptr;
+  const bool acquired11 = acquire_suite("AEGP Item Suite", 11, &item11) == 0;
+  bool item11_ok = acquired11 && item11;
+  if (item11_ok) {
+    auto slots = static_cast<void* const*>(item11);
+    using Dimensions = int32_t (__cdecl *)(void*, int32_t*, int32_t*);
+    using Ratio = int32_t (__cdecl *)(void*, void*);
+    auto dimensions = reinterpret_cast<Dimensions>(slots[16]);
+    auto ratio = reinterpret_cast<Ratio>(slots[17]);
+    void* effect_layer = nullptr;
+    void* parent_comp = nullptr;
+    int32_t par[2] = {-1, -1};
+    int32_t expected_par[2] = {-2, -2};
+    const void* item13 = nullptr;
+    const bool acquired13 = acquire_suite("AEGP Item Suite", 13, &item13) == 0;
+    const auto current_ratio = item13
+        ? reinterpret_cast<Ratio>(static_cast<void* const*>(item13)[17]) : nullptr;
+    width = height = -1;
+    item11_ok = dimensions && ratio &&
+        get_effect_layer(g_hooks.effect, &effect_layer) == 0 &&
+        aegp_get_layer_parent_comp(effect_layer, &parent_comp) == 0 &&
+        dimensions(parent_comp, &width, &height) == 0 &&
+        width == 1920 && height == 1080 &&
+        current_ratio && current_ratio(item, expected_par) == 0 &&
+        ratio(parent_comp, par) == 0 &&
+        par[0] == expected_par[0] && par[1] == expected_par[1] &&
+        par[0] > 0 && par[1] > 0;
+    if (acquired13) item11_ok = release_suite("AEGP Item Suite", 13) == 0 && item11_ok;
+    if (dimensions && ratio) {
+      auto& registry = aexcompat::scene_model::registry();
+      const auto identity = registry.active_item();
+      void* stale_item = registry.borrow_unique(identity, 1741);
+      item11_ok = stale_item &&
+          dimensions(stale_item, &width, &height) == 0 &&
+          width == 1920 && height == 1080 && item11_ok;
+      if (stale_item)
+        item11_ok = registry.release(stale_item, identity.kind, 1741, true) && item11_ok;
+      for (void* invalid_item : {static_cast<void*>(nullptr), g_hooks.pf_layer,
+               reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234)), stale_item}) {
+        width = -2; height = -3;
+        par[0] = -4; par[1] = -5;
+        item11_ok = dimensions(invalid_item, &width, &height) != 0 &&
+            width == -2 && height == -3 && ratio(invalid_item, par) != 0 &&
+            par[0] == -4 && par[1] == -5 && item11_ok;
+      }
+      width = -2; height = -3;
+      item11_ok = dimensions(parent_comp, nullptr, &height) != 0 && height == -3 &&
+          dimensions(parent_comp, &width, nullptr) != 0 && width == -2 &&
+          ratio(parent_comp, nullptr) != 0 && item11_ok;
+    }
+  }
+  if (acquired11) item11_ok = release_suite("AEGP Item Suite", 11) == 0 && item11_ok;
+  ok = item11_ok && ok;
 
   AegpLegacyStreamVal sentinel{-2.0};
   type = -2;
