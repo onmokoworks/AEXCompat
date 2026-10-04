@@ -49,6 +49,139 @@ class TraceRunnerError(RuntimeError):
     pass
 
 
+class _WindowsCaptureJob:
+    """Own a non-inheritable Job before allowing the worker to execute.
+
+    Popen closes CreateProcess's primary-thread handle. Enumerating the threads
+    of our still-suspended process recovers that one thread; this snapshot is
+    never used to discover or terminate descendants. Job inheritance owns those.
+    """
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        self._wintypes = wintypes
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        signatures = {
+            "CreateJobObjectW": ([wintypes.LPVOID, wintypes.LPCWSTR], wintypes.HANDLE),
+            "SetInformationJobObject": (
+                [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD], wintypes.BOOL
+            ),
+            "AssignProcessToJobObject": ([wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
+            "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
+            "CreateToolhelp32Snapshot": ([wintypes.DWORD, wintypes.DWORD], wintypes.HANDLE),
+            "OpenThread": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
+            "GetProcessIdOfThread": ([wintypes.HANDLE], wintypes.DWORD),
+            "ResumeThread": ([wintypes.HANDLE], wintypes.DWORD),
+        }
+        for name, (arguments, result) in signatures.items():
+            function = getattr(self._kernel32, name)
+            function.argtypes = arguments
+            function.restype = result
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimits),
+                ("IoInfo", ctypes.c_uint64 * 6),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        # NULL security attributes produce a non-inheritable unnamed handle.
+        self._job = self._kernel32.CreateJobObjectW(None, None)
+        if not self._job:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        if not self._kernel32.SetInformationJobObject(
+            self._job, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            error = ctypes.get_last_error()
+            self.close()
+            raise ctypes.WinError(error)
+
+    def close(self) -> None:
+        if self._job:
+            if not self._kernel32.CloseHandle(self._job):
+                raise self._ctypes.WinError(self._ctypes.get_last_error())
+            self._job = None
+
+    def assign_and_resume(self, process: subprocess.Popen[bytes]) -> None:
+        # Popen retains the process handle, so the PID cannot be reused here.
+        if not self._kernel32.AssignProcessToJobObject(self._job, int(process._handle)):
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        self._resume_primary_thread(process)
+
+    def _resume_primary_thread(self, process: subprocess.Popen[bytes]) -> None:
+        ctypes, wintypes, kernel32 = self._ctypes, self._wintypes, self._kernel32
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        for name in ("Thread32First", "Thread32Next"):
+            function = getattr(kernel32, name)
+            function.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+            function.restype = wintypes.BOOL
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x4, 0)  # TH32CS_SNAPTHREAD only
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = ThreadEntry()
+            entry.dwSize = ctypes.sizeof(entry)
+            found = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            thread_ids = []
+            while found:
+                if entry.th32OwnerProcessID == process.pid:
+                    thread_ids.append(entry.th32ThreadID)
+                entry.dwSize = ctypes.sizeof(entry)
+                found = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+            if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel32.CloseHandle(snapshot)
+        if len(thread_ids) != 1:
+            raise TraceRunnerError("suspended worker did not have one primary thread")
+        # QUERY_LIMITED_INFORMATION lets us verify ownership after opening the TID.
+        thread = kernel32.OpenThread(0x2 | 0x800, False, thread_ids[0])
+        if not thread:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            if kernel32.GetProcessIdOfThread(thread) != process.pid or process.poll() is not None:
+                raise TraceRunnerError("suspended worker thread ownership changed")
+            previous_count = kernel32.ResumeThread(thread)
+            if previous_count == 0xFFFFFFFF:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if previous_count != 1:
+                raise TraceRunnerError("worker primary thread was not suspended exactly once")
+        finally:
+            kernel32.CloseHandle(thread)
+
+
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     """Best-effort termination of the worker and descendants it spawned."""
     if os.name == "posix":
@@ -130,95 +263,135 @@ def _run_bounded_process(
     if os.name == "posix":
         popen_options["start_new_session"] = True
     elif os.name == "nt":
-        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    process = subprocess.Popen(command, **popen_options)
-    assert process.stdout is not None and process.stderr is not None
+        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | 0x4  # CREATE_SUSPENDED
+    job = _WindowsCaptureJob() if os.name == "nt" else None
+    process = None
+    threads = []
+    finished = False
 
-    captures = {"stdout": bytearray(), "stderr": bytearray()}
-    total = 0
-    lock = threading.Lock()
-    overflow = threading.Event()
-    stream_errors: list[BaseException] = []
+    def stop_worker() -> None:
+        assert process is not None
+        if job is not None:
+            job.close()
+            process.wait(timeout=2)
+        else:
+            _terminate_process_group(process)
 
-    def drain(name: str, stream: Any) -> None:
-        nonlocal total
-        try:
-            while True:
-                chunk = stream.read(64 * 1024)
-                if not chunk:
-                    return
-                with lock:
-                    per_stream_remaining = MAX_CAPTURE_BYTES - len(captures[name])
-                    combined_remaining = MAX_COMBINED_CAPTURE_BYTES - total
-                    accepted = min(len(chunk), per_stream_remaining, combined_remaining)
-                    if accepted > 0:
-                        captures[name].extend(chunk[:accepted])
-                        total += accepted
-                    if accepted != len(chunk):
-                        overflow.set()
+    try:
+        process = subprocess.Popen(command, **popen_options)
+        if job is not None:
+            job.assign_and_resume(process)
+        assert process.stdout is not None and process.stderr is not None
+
+        captures = {"stdout": bytearray(), "stderr": bytearray()}
+        total = 0
+        lock = threading.Lock()
+        overflow = threading.Event()
+        stream_errors: list[BaseException] = []
+
+        def drain(name: str, stream: Any) -> None:
+            nonlocal total
+            try:
+                while True:
+                    chunk = stream.read(64 * 1024)
+                    if not chunk:
                         return
-        except (OSError, ValueError) as error:
-            # Closing pipes during forced cleanup is expected.
-            if process.poll() is None:
-                stream_errors.append(error)
+                    with lock:
+                        per_stream_remaining = MAX_CAPTURE_BYTES - len(captures[name])
+                        combined_remaining = MAX_COMBINED_CAPTURE_BYTES - total
+                        accepted = min(len(chunk), per_stream_remaining, combined_remaining)
+                        if accepted > 0:
+                            captures[name].extend(chunk[:accepted])
+                            total += accepted
+                        if accepted != len(chunk):
+                            overflow.set()
+                            return
+            except (OSError, ValueError) as error:
+                # Closing pipes during forced cleanup is expected.
+                if process.poll() is None:
+                    stream_errors.append(error)
 
-    threads = [
-        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
-        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
+        threads = [
+            threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+            threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
 
-    deadline = time.monotonic() + timeout_seconds
-    timed_out = False
-    while process.poll() is None:
-        if overflow.is_set():
-            _terminate_process_group(process)
-            break
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            _terminate_process_group(process)
-            break
-        try:
-            process.wait(timeout=min(remaining, 0.05))
-        except subprocess.TimeoutExpired:
-            pass
-
-    for stream in (process.stdout, process.stderr):
-        if overflow.is_set() or timed_out:
+        deadline = time.monotonic() + timeout_seconds
+        timed_out = False
+        while process.poll() is None:
+            if overflow.is_set():
+                stop_worker()
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                stop_worker()
+                break
             try:
-                stream.close()
-            except OSError:
+                process.wait(timeout=min(remaining, 0.05))
+            except subprocess.TimeoutExpired:
                 pass
-    for thread in threads:
-        thread.join(timeout=2)
-    if any(thread.is_alive() for thread in threads):
-        # A descendant may have inherited a pipe after the direct worker exited.
-        _terminate_process_group(process)
+
+        # Close the Job even after a normal leader exit, before any blocking pipe
+        # close or join. Descendants can otherwise outlive the leader and hold pipes.
+        if job is not None:
+            job.close()
+
         for stream in (process.stdout, process.stderr):
-            try:
-                stream.close()
-            except OSError:
-                pass
+            if overflow.is_set() or timed_out:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
         for thread in threads:
             thread.join(timeout=2)
         if any(thread.is_alive() for thread in threads):
-            raise TraceRunnerError("worker capture threads did not stop")
-    if stream_errors:
-        raise TraceRunnerError(f"worker pipe capture failed: {stream_errors[0]}")
-    completed = subprocess.CompletedProcess(
-        command,
-        process.returncode,
-        bytes(captures["stdout"]),
-        bytes(captures["stderr"]),
-    )
-    reason = (
-        "timeout"
-        if timed_out
-        else ("capture_limit" if overflow.is_set() else None)
-    )
-    return completed, timed_out, reason
+            # A descendant may have inherited a pipe after the direct worker exited.
+            stop_worker()
+            for stream in (process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+            for thread in threads:
+                thread.join(timeout=2)
+            if any(thread.is_alive() for thread in threads):
+                raise TraceRunnerError("worker capture threads did not stop")
+        if stream_errors:
+            raise TraceRunnerError(f"worker pipe capture failed: {stream_errors[0]}")
+        completed = subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            bytes(captures["stdout"]),
+            bytes(captures["stderr"]),
+        )
+        reason = (
+            "timeout"
+            if timed_out
+            else ("capture_limit" if overflow.is_set() else None)
+        )
+        finished = True
+        return completed, timed_out, reason
+    finally:
+        if job is not None:
+            job.close()
+        if process is not None:
+            # Covers Popen/Job assignment, thread startup, capture and interruption
+            # failures too. An unassigned suspended worker must never be resumed.
+            if job is None and not finished:
+                # POSIX descendants may still own pipes after the leader exits.
+                _terminate_process_group(process)
+            elif process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
+            for thread in threads:
+                if thread.is_alive():
+                    thread.join(timeout=2)
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 def _object_without_duplicate_keys(
