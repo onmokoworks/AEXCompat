@@ -1,0 +1,960 @@
+#include "resolve_ofx_abi.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
+#elif defined(__APPLE__)
+#include <CommonCrypto/CommonDigest.h>
+#include <dlfcn.h>
+#endif
+
+#include <climits>
+#include <cmath>
+#include <cstdarg>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <iomanip>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+struct Value {
+  enum class Kind { String, Double, Int, Pointer } kind = Kind::String;
+  std::string string_value;
+  std::vector<std::string> string_values;
+  double double_value = 0.0;
+  int int_value = 0;
+  std::vector<int> int_values;
+  void *pointer_value = nullptr;
+};
+
+struct FakeImageObject;
+
+struct FakePropertySet {
+  std::unordered_map<std::string, Value> values;
+  std::string defined_clip_name;
+  void *owner = nullptr;
+  bool fail_set_instance_data = false;
+  bool fail_clear_instance_data = false;
+  bool fail_param_define = false;
+  bool fail_param_default = false;
+};
+
+struct FakeParam {
+  FakePropertySet properties;
+  double value = 0.5;
+  double last_time = -1.0;
+};
+
+struct FakeClip {
+  FakeImageObject *owner = nullptr;
+  bool source = false;
+  FakePropertySet properties;
+};
+
+struct FakeImageObject {
+  FakePropertySet properties;
+  FakePropertySet params;
+  FakeParam strength;
+  std::vector<std::unique_ptr<FakePropertySet>> children;
+  FakeClip source_clip;
+  FakeClip output_clip;
+  FakePropertySet source_image;
+  FakePropertySet output_image;
+  std::vector<unsigned char> source_pixels;
+  std::vector<unsigned char> output_pixels;
+  double last_source_time = -1.0;
+  double last_output_time = -1.0;
+};
+
+static FakePropertySet *as_props(OfxPropertySetHandle handle) {
+  return reinterpret_cast<FakePropertySet *>(handle);
+}
+
+static OfxStatus prop_set_pointer(OfxPropertySetHandle h, const char *name,
+                                  int index, void *value) {
+  if (!h || !name || index != 0) return kOfxStatErrBadIndex;
+  auto *props = as_props(h);
+  if (std::strcmp(name, kOfxPropInstanceData) == 0 &&
+      ((value && props->fail_set_instance_data) ||
+       (!value && props->fail_clear_instance_data))) {
+    return kOfxStatErrMissingHostFeature;
+  }
+  auto &v = props->values[name];
+  v.kind = Value::Kind::Pointer;
+  v.pointer_value = value;
+  return kOfxStatOK;
+}
+
+static OfxStatus prop_set_string(OfxPropertySetHandle h, const char *name,
+                                 int index, const char *value) {
+  if (!h || !name || !value || index < 0) return kOfxStatErrBadIndex;
+  auto &v = as_props(h)->values[name];
+  v.kind = Value::Kind::String;
+  if (static_cast<int>(v.string_values.size()) <= index)
+    v.string_values.resize(static_cast<size_t>(index) + 1);
+  v.string_values[static_cast<size_t>(index)] = value;
+  if (index == 0) v.string_value = value;
+  return kOfxStatOK;
+}
+
+static OfxStatus prop_set_double(OfxPropertySetHandle h, const char *name,
+                                 int index, double value) {
+  if (!h || !name || index != 0) return kOfxStatErrBadIndex;
+  if (std::strcmp(name, kOfxParamPropDefault) == 0 &&
+      as_props(h)->fail_param_default) return kOfxStatErrMissingHostFeature;
+  auto &v = as_props(h)->values[name];
+  v.kind = Value::Kind::Double;
+  v.double_value = value;
+  return kOfxStatOK;
+}
+
+static OfxStatus prop_set_int(OfxPropertySetHandle h, const char *name,
+                              int index, int value) {
+  if (!h || !name || index < 0) return kOfxStatErrBadIndex;
+  auto &v = as_props(h)->values[name];
+  v.kind = Value::Kind::Int;
+  v.int_value = value;
+  if (static_cast<int>(v.int_values.size()) <= index) {
+    v.int_values.resize(static_cast<size_t>(index) + 1);
+  }
+  v.int_values[static_cast<size_t>(index)] = value;
+  return kOfxStatOK;
+}
+
+static OfxStatus prop_set_string_n(OfxPropertySetHandle h, const char *name,
+                                   int count, const char *const *value) {
+  if (!h || !name || !value || count < 1) return kOfxStatErrBadIndex;
+  return prop_set_string(h, name, 0, value[0]);
+}
+
+static OfxStatus prop_get_pointer(OfxPropertySetHandle h, const char *name,
+                                  int index, void **value) {
+  if (!h || !name || !value || index != 0) return kOfxStatErrBadIndex;
+  auto it = as_props(h)->values.find(name);
+  if (it == as_props(h)->values.end() || it->second.kind != Value::Kind::Pointer)
+    return kOfxStatErrUnknown;
+  *value = it->second.pointer_value;
+  return kOfxStatOK;
+}
+
+static OfxStatus prop_get_string(OfxPropertySetHandle h, const char *name,
+                                 int index, char **value) {
+  if (!h || !name || !value || index < 0) return kOfxStatErrBadIndex;
+  auto it = as_props(h)->values.find(name);
+  if (it == as_props(h)->values.end() || it->second.kind != Value::Kind::String ||
+      static_cast<int>(it->second.string_values.size()) <= index)
+    return kOfxStatErrUnknown;
+  *value = const_cast<char *>(
+      it->second.string_values[static_cast<size_t>(index)].c_str());
+  return kOfxStatOK;
+}
+
+static OfxStatus prop_get_double(OfxPropertySetHandle h, const char *name,
+                                 int index, double *value) {
+  if (!h || !name || !value || index != 0) return kOfxStatErrBadIndex;
+  auto it = as_props(h)->values.find(name);
+  if (it == as_props(h)->values.end() || it->second.kind != Value::Kind::Double)
+    return kOfxStatErrUnknown;
+  *value = it->second.double_value;
+  return kOfxStatOK;
+}
+
+static OfxStatus prop_get_int(OfxPropertySetHandle h, const char *name,
+                              int index, int *value) {
+  if (!h || !name || !value || index < 0) return kOfxStatErrBadIndex;
+  auto it = as_props(h)->values.find(name);
+  if (it == as_props(h)->values.end() || it->second.kind != Value::Kind::Int ||
+      index >= static_cast<int>(it->second.int_values.size()))
+    return kOfxStatErrUnknown;
+  *value = it->second.int_values[static_cast<size_t>(index)];
+  return kOfxStatOK;
+}
+
+static OfxStatus image_get_properties(OfxImageEffectHandle h,
+                                      OfxPropertySetHandle *out) {
+  if (!h || !out) return kOfxStatErrBadHandle;
+  *out = reinterpret_cast<OfxPropertySetHandle>(
+      &reinterpret_cast<FakeImageObject *>(h)->properties);
+  return kOfxStatOK;
+}
+
+static OfxStatus image_get_params(OfxImageEffectHandle h,
+                                  OfxParamSetHandle *out) {
+  if (!h || !out) return kOfxStatErrBadHandle;
+  auto *image = reinterpret_cast<FakeImageObject *>(h);
+  image->params.owner = image;
+  *out = reinterpret_cast<OfxParamSetHandle>(&image->params);
+  return kOfxStatOK;
+}
+
+static OfxStatus image_clip_define(OfxImageEffectHandle h, const char *name,
+                                   OfxPropertySetHandle *out) {
+  if (!h || !name || !out) return kOfxStatErrBadHandle;
+  auto *image = reinterpret_cast<FakeImageObject *>(h);
+  for (const auto &child : image->children)
+    if (child->defined_clip_name == name) return kOfxStatErrExists;
+  image->children.emplace_back(std::make_unique<FakePropertySet>());
+  image->children.back()->defined_clip_name = name;
+  *out = reinterpret_cast<OfxPropertySetHandle>(image->children.back().get());
+  return kOfxStatOK;
+}
+
+static OfxStatus image_clip_get_handle(OfxImageEffectHandle h, const char *name,
+                                        OfxImageClipHandle *clip,
+                                        OfxPropertySetHandle *properties) {
+  if (!h || !name || !clip || !properties) return kOfxStatErrBadHandle;
+  auto *image = reinterpret_cast<FakeImageObject *>(h);
+  FakeClip *selected = nullptr;
+  if (std::strcmp(name, kOfxImageEffectSimpleSourceClipName) == 0) {
+    selected = &image->source_clip;
+  } else if (std::strcmp(name, kOfxImageEffectOutputClipName) == 0) {
+    selected = &image->output_clip;
+  }
+  if (!selected) return kOfxStatErrUnknown;
+  *clip = reinterpret_cast<OfxImageClipHandle>(selected);
+  *properties = reinterpret_cast<OfxPropertySetHandle>(&selected->properties);
+  return kOfxStatOK;
+}
+
+static OfxStatus image_clip_get_property_set(OfxImageClipHandle clip,
+                                              OfxPropertySetHandle *out) {
+  if (!clip || !out) return kOfxStatErrBadHandle;
+  *out = reinterpret_cast<OfxPropertySetHandle>(
+      &reinterpret_cast<FakeClip *>(clip)->properties);
+  return kOfxStatOK;
+}
+
+static OfxStatus image_clip_get_image(OfxImageClipHandle clip, OfxTime time,
+                                      const OfxRectD *,
+                                      OfxPropertySetHandle *out) {
+  if (!clip || !out) return kOfxStatErrBadHandle;
+  auto *fake_clip = reinterpret_cast<FakeClip *>(clip);
+  if (!fake_clip->owner) return kOfxStatErrBadHandle;
+  if (fake_clip->source) fake_clip->owner->last_source_time = time;
+  else fake_clip->owner->last_output_time = time;
+  *out = reinterpret_cast<OfxPropertySetHandle>(
+      fake_clip->source ? &fake_clip->owner->source_image
+                        : &fake_clip->owner->output_image);
+  return kOfxStatOK;
+}
+
+static OfxStatus image_clip_release_image(OfxPropertySetHandle) {
+  return kOfxStatOK;
+}
+
+static OfxStatus parameter_define(OfxParamSetHandle h, const char *,
+                                  const char *, OfxPropertySetHandle *out) {
+  if (!h || !out) return kOfxStatErrBadHandle;
+  auto *props = reinterpret_cast<FakePropertySet *>(h);
+  if (props->fail_param_define) return kOfxStatErrMissingHostFeature;
+  props->values.emplace("defined", Value{});
+  *out = reinterpret_cast<OfxPropertySetHandle>(props);
+  return kOfxStatOK;
+}
+
+static OfxStatus parameter_get_handle(OfxParamSetHandle h, const char *name,
+                                      OfxParamHandle *param,
+                                      OfxPropertySetHandle *properties) {
+  if (!h || !name || !param || std::strcmp(name, "strength") != 0) {
+    return kOfxStatErrBadHandle;
+  }
+  auto *set = reinterpret_cast<FakePropertySet *>(h);
+  auto *image = static_cast<FakeImageObject *>(set->owner);
+  if (!image) return kOfxStatErrBadHandle;
+  image->strength.properties.owner = image;
+  *param = reinterpret_cast<OfxParamHandle>(&image->strength);
+  if (properties) {
+    *properties = reinterpret_cast<OfxPropertySetHandle>(
+        &image->strength.properties);
+  }
+  return kOfxStatOK;
+}
+
+static OfxStatus parameter_get_value_at_time(OfxParamHandle handle,
+                                             OfxTime time, ...) {
+  if (!handle || !std::isfinite(time)) return kOfxStatErrBadHandle;
+  auto *param = reinterpret_cast<FakeParam *>(handle);
+  va_list args;
+  va_start(args, time);
+  auto *value = va_arg(args, double *);
+  va_end(args);
+  if (!value) return kOfxStatErrBadHandle;
+  param->last_time = time;
+  *value = param->value;
+  return kOfxStatOK;
+}
+
+static OfxPropertySuiteV1 g_properties = {prop_set_pointer,
+                                          prop_set_string,
+                                          prop_set_double,
+                                          prop_set_int,
+                                          nullptr,
+                                          prop_set_string_n,
+                                          nullptr,
+                                          nullptr,
+                                          prop_get_pointer,
+                                          prop_get_string,
+                                          prop_get_double,
+                                          prop_get_int};
+static OfxImageEffectSuiteV1 g_image_effect = {image_get_properties,
+                                                image_get_params,
+                                                image_clip_define,
+                                                image_clip_get_handle,
+                                                image_clip_get_property_set,
+                                                image_clip_get_image,
+                                                image_clip_release_image};
+static OfxParameterSuiteV1 g_parameters = {parameter_define, parameter_get_handle, nullptr, nullptr, nullptr, parameter_get_value_at_time};
+
+static const void *fetch_suite(OfxPropertySetHandle, const char *name, int) {
+  if (std::strcmp(name, kOfxPropertySuite) == 0) return &g_properties;
+  if (std::strcmp(name, kOfxImageEffectSuite) == 0) return &g_image_effect;
+  if (std::strcmp(name, kOfxParameterSuite) == 0) return &g_parameters;
+  return nullptr;
+}
+
+static bool has_string(FakePropertySet &props, const char *name,
+                       const char *expected) {
+  auto it = props.values.find(name);
+  return it != props.values.end() && it->second.kind == Value::Kind::String &&
+         it->second.string_value == expected;
+}
+
+static bool has_int(FakePropertySet &props, const char *name, int expected) {
+  auto it = props.values.find(name);
+  return it != props.values.end() && it->second.kind == Value::Kind::Int &&
+         it->second.int_value == expected;
+}
+
+static bool has_double(FakePropertySet &props, const char *name,
+                       double expected) {
+  auto it = props.values.find(name);
+  return it != props.values.end() && it->second.kind == Value::Kind::Double &&
+         it->second.double_value == expected;
+}
+
+static bool has_string_at(FakePropertySet &props, const char *name, int index,
+                          const char *expected) {
+  auto it = props.values.find(name);
+  return index >= 0 && it != props.values.end() &&
+         it->second.kind == Value::Kind::String &&
+         static_cast<int>(it->second.string_values.size()) > index &&
+         it->second.string_values[static_cast<size_t>(index)] == expected;
+}
+
+static void set_image_property(FakePropertySet &properties, const char *name,
+                               void *data, int row_bytes,
+                               const char *depth = kOfxBitDepthByte) {
+  prop_set_pointer(reinterpret_cast<OfxPropertySetHandle>(&properties),
+                   kOfxImagePropData, 0, data);
+  for (int index = 0; index < 4; ++index) {
+    const int bounds[] = {0, 0, 3, 2};
+    prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&properties),
+                 kOfxImagePropBounds, index, bounds[index]);
+  }
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&properties),
+               kOfxImagePropRowBytes, 0, row_bytes);
+  prop_set_string(reinterpret_cast<OfxPropertySetHandle>(&properties),
+                  kOfxImageEffectPropPixelDepth, 0, depth);
+  prop_set_string(reinterpret_cast<OfxPropertySetHandle>(&properties),
+                  kOfxImageEffectPropComponents, 0, kOfxImageComponentRGBA);
+  prop_set_string(reinterpret_cast<OfxPropertySetHandle>(&properties),
+                  kOfxImageEffectPropPreMultiplication, 0,
+                  "OfxImageAlphaPremultiplied");
+}
+
+static void set_image_bounds(FakePropertySet &properties, int x1, int y1,
+                             int x2, int y2) {
+  const int bounds[] = {x1, y1, x2, y2};
+  for (int index = 0; index < 4; ++index) {
+    prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&properties),
+                 kOfxImagePropBounds, index, bounds[index]);
+  }
+}
+
+static void set_render_window(FakePropertySet &properties, int x1, int y1,
+                              int x2, int y2) {
+  const int bounds[] = {x1, y1, x2, y2};
+  for (int index = 0; index < 4; ++index) {
+    prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&properties),
+                 kOfxImageEffectPropRenderWindow, index, bounds[index]);
+  }
+}
+
+static void initialize_fixture(FakeImageObject &instance) {
+  instance.strength.value = 0.25;
+  instance.source_clip.owner = &instance;
+  instance.source_clip.source = true;
+  instance.output_clip.owner = &instance;
+  instance.output_clip.source = false;
+  prop_set_string(reinterpret_cast<OfxPropertySetHandle>(
+                      &instance.source_clip.properties),
+                  kOfxImageEffectPropPixelDepth, 0, kOfxBitDepthByte);
+  prop_set_string(reinterpret_cast<OfxPropertySetHandle>(
+                      &instance.source_clip.properties),
+                  kOfxImageEffectPropComponents, 0, kOfxImageComponentRGBA);
+  prop_set_string(reinterpret_cast<OfxPropertySetHandle>(
+                      &instance.output_clip.properties),
+                  kOfxImageEffectPropPixelDepth, 0, kOfxBitDepthByte);
+  prop_set_string(reinterpret_cast<OfxPropertySetHandle>(
+                      &instance.output_clip.properties),
+                  kOfxImageEffectPropComponents, 0, kOfxImageComponentRGBA);
+  instance.source_pixels.assign(2 * 20, 0xEE);
+  instance.output_pixels.assign(2 * 24, 0xCD);
+  const unsigned char pixels[] = {
+      10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120,
+      130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240};
+  std::memcpy(instance.source_pixels.data(), pixels, sizeof(pixels));
+  set_image_property(instance.source_image, kOfxImagePropData,
+                     instance.source_pixels.data(), 20);
+  set_image_property(instance.output_image, kOfxImagePropData,
+                     instance.output_pixels.data(), 24);
+}
+
+static bool rendered_fixture_ok(const FakeImageObject &instance,
+                                int *changed_bytes) {
+  int changed = 0;
+  for (int y = 0; y < 2; ++y) {
+    const auto *source = instance.source_pixels.data() + y * 20;
+    const auto *output = instance.output_pixels.data() + y * 24;
+    for (int x = 0; x < 3; ++x) {
+      const auto source_offset = x * 4;
+      const auto output_offset = x * 4;
+      if (x == 0) {
+        for (int channel = 0; channel < 4; ++channel) {
+          if (output[output_offset + channel] != 0xCD) return false;
+        }
+        continue;
+      }
+      for (int channel = 0; channel < 3; ++channel) {
+        const auto expected = static_cast<unsigned char>(
+            source[source_offset + channel] * 0.75 + 0.5);
+        if (output[output_offset + channel] != expected) return false;
+        ++changed;
+      }
+      if (output[output_offset + 3] != source[source_offset + 3]) return false;
+    }
+    for (int offset = 12; offset < 24; ++offset) {
+      if (output[offset] != 0xCD) return false;
+    }
+  }
+  if (changed_bytes) *changed_bytes = changed;
+  return instance.last_source_time == 7.0 && instance.last_output_time == 7.0 && instance.strength.last_time == 7.0;
+}
+
+static void prepare_float_fixture(FakeImageObject &instance) {
+  instance.source_pixels.assign(2 * 64, 0xEE);
+  instance.output_pixels.assign(2 * 80, 0xCD);
+  for (int y = 0; y < 2; ++y) {
+    for (int x = 0; x < 3; ++x) {
+      const float rgba[] = {0.1f * (x + 1), 0.05f * (y + 1),
+                            0.15f * (x + 1), 1.0f};
+      std::memcpy(instance.source_pixels.data() + y * 64 + x * 16,
+                  rgba, sizeof(rgba));
+    }
+  }
+  set_image_property(instance.source_image, kOfxImagePropData,
+                     instance.source_pixels.data(), 64, kOfxBitDepthFloat);
+  set_image_property(instance.output_image, kOfxImagePropData,
+                     instance.output_pixels.data(), 80, kOfxBitDepthFloat);
+}
+
+static bool rendered_float_fixture_ok(const FakeImageObject &instance,
+                                      int *changed_values) {
+  int changed = 0;
+  for (int y = 0; y < 2; ++y) {
+    const auto *source = instance.source_pixels.data() + y * 64;
+    const auto *output = instance.output_pixels.data() + y * 80;
+    for (int x = 0; x < 3; ++x) {
+      if (x == 0) {
+        for (int byte = 0; byte < 16; ++byte)
+          if (output[x * 16 + byte] != 0xCD) return false;
+        continue;
+      }
+      for (int channel = 0; channel < 4; ++channel) {
+        float source_value = 0.0f;
+        float output_value = 0.0f;
+        std::memcpy(&source_value, source + x * 16 + channel * 4, 4);
+        std::memcpy(&output_value, output + x * 16 + channel * 4, 4);
+        const float expected = channel == 3 ? source_value
+                                             : source_value * 0.75f;
+        if (output_value != expected) return false;
+        if (channel != 3) ++changed;
+      }
+    }
+    for (int byte = 48; byte < 80; ++byte)
+      if (output[byte] != 0xCD) return false;
+  }
+  if (changed_values) *changed_values = changed;
+  return instance.last_source_time == 7.0 &&
+         instance.last_output_time == 7.0 &&
+         instance.strength.last_time == 7.0;
+}
+
+static std::string sha256(const std::vector<unsigned char> &bytes) {
+#ifdef _WIN32
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr,
+                                  0) < 0) {
+    return "";
+  }
+  DWORD object_length = 0;
+  DWORD result_length = 0;
+  if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                        reinterpret_cast<PUCHAR>(&object_length),
+                        sizeof(object_length), &result_length, 0) < 0) {
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return "";
+  }
+  std::vector<unsigned char> object(object_length);
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  if (BCryptCreateHash(algorithm, &hash, object.data(), object_length, nullptr, 0,
+                       0) < 0 ||
+      BCryptHashData(hash, const_cast<PUCHAR>(bytes.data()),
+                     static_cast<ULONG>(bytes.size()), 0) < 0) {
+    if (hash) BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return "";
+  }
+  unsigned char digest[32] = {};
+  if (BCryptFinishHash(hash, digest, sizeof(digest), 0) < 0) {
+    BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return "";
+  }
+  BCryptDestroyHash(hash);
+  BCryptCloseAlgorithmProvider(algorithm, 0);
+  std::ostringstream result;
+  result << std::uppercase << std::hex << std::setfill('0');
+  for (unsigned char byte : digest) result << std::setw(2) << static_cast<int>(byte);
+  return result.str();
+#elif defined(__APPLE__)
+  if (bytes.size() > UINT_MAX) return "";
+  unsigned char digest[CC_SHA256_DIGEST_LENGTH] = {};
+  if (!CC_SHA256(bytes.data(), static_cast<CC_LONG>(bytes.size()), digest)) return "";
+  std::ostringstream result;
+  result << std::uppercase << std::hex << std::setfill('0');
+  for (unsigned char byte : digest) result << std::setw(2) << static_cast<int>(byte);
+  return result.str();
+#else
+  (void)bytes;
+  return "";
+#endif
+}
+
+#ifdef _WIN32
+using ModuleHandle = HMODULE;
+static ModuleHandle load_module(const char *path) { return LoadLibraryA(path); }
+static void close_module(ModuleHandle module) { FreeLibrary(module); }
+template <typename T> static T load_symbol(HMODULE module, const char *name) {
+  return reinterpret_cast<T>(GetProcAddress(module, name));
+}
+#elif defined(__APPLE__)
+using ModuleHandle = void *;
+static ModuleHandle load_module(const char *path) {
+  return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+static void close_module(ModuleHandle module) { dlclose(module); }
+template <typename T> static T load_symbol(ModuleHandle module, const char *name) {
+  return reinterpret_cast<T>(dlsym(module, name));
+}
+#endif
+
+int main(int argc, char **argv) {
+#if !defined(_WIN32) && !defined(__APPLE__)
+  std::cerr << "unsupported_platform" << std::endl;
+  return 2;
+#else
+  if (argc != 2) {
+    std::cerr << "usage: resolve_ofx_smoke <plugin.ofx>" << std::endl;
+    return 2;
+  }
+  ModuleHandle module = load_module(argv[1]);
+  if (!module) {
+    std::cerr << "load_failed" << std::endl;
+    return 3;
+  }
+  using GetNumber = int (*)();
+  using GetPlugin = OfxPlugin *(*)(int);
+  using SetHost = OfxStatus (*)(const OfxHost *);
+  auto get_number = load_symbol<GetNumber>(module, "OfxGetNumberOfPlugins");
+  auto get_plugin = load_symbol<GetPlugin>(module, "OfxGetPlugin");
+  auto set_host = load_symbol<SetHost>(module, "OfxSetHost");
+  auto plugin_main = load_symbol<OfxPluginEntryPoint *>(module, "OfxPluginMain");
+  if (!get_number || !get_plugin || !set_host || !plugin_main ||
+      get_number() != 1) {
+    std::cerr << "exports_failed" << std::endl;
+    close_module(module);
+    return 4;
+  }
+
+  OfxHost host{nullptr, fetch_suite};
+  if (set_host(&host) != kOfxStatOK) {
+    std::cerr << "set_host_failed" << std::endl;
+    close_module(module);
+    return 5;
+  }
+  OfxPlugin *plugin = get_plugin(0);
+  FakeImageObject descriptor;
+  FakePropertySet context;
+  prop_set_string(reinterpret_cast<OfxPropertySetHandle>(&context),
+                  kOfxImageEffectPropContext, 0,
+                  kOfxImageEffectContextFilter);
+  const auto load_status = plugin->mainEntry(kOfxActionLoad, nullptr, nullptr, nullptr);
+  const auto describe_status = plugin->mainEntry(
+      kOfxActionDescribe, &descriptor, nullptr, nullptr);
+  const auto context_status = plugin->mainEntry(
+      kOfxImageEffectActionDescribeInContext, &descriptor,
+      reinterpret_cast<OfxPropertySetHandle>(&context), nullptr);
+  FakeImageObject failed_define_descriptor;
+  failed_define_descriptor.params.fail_param_define = true;
+  const bool param_define_failure_rejected =
+      plugin->mainEntry(kOfxImageEffectActionDescribeInContext,
+                        &failed_define_descriptor,
+                        reinterpret_cast<OfxPropertySetHandle>(&context),
+                        nullptr) == kOfxStatErrMissingHostFeature;
+  FakeImageObject failed_default_descriptor;
+  failed_default_descriptor.params.fail_param_default = true;
+  const bool param_default_failure_rejected =
+      plugin->mainEntry(kOfxImageEffectActionDescribeInContext,
+                        &failed_default_descriptor,
+                        reinterpret_cast<OfxPropertySetHandle>(&context),
+                        nullptr) == kOfxStatErrMissingHostFeature;
+  const bool descriptor_contract_ok =
+      has_string(descriptor.properties, kOfxImageEffectPropSupportedContexts,
+                 kOfxImageEffectContextFilter) &&
+      has_string(descriptor.properties,
+                 kOfxImageEffectPropSupportedPixelDepths,
+                 kOfxBitDepthByte) &&
+      has_string_at(descriptor.properties,
+                    kOfxImageEffectPropSupportedPixelDepths, 1,
+                    kOfxBitDepthFloat) &&
+      has_int(descriptor.properties, kOfxImageEffectPropSupportsTiles, 0) &&
+      descriptor.children.size() == 2 &&
+      descriptor.children[0]->defined_clip_name ==
+          kOfxImageEffectSimpleSourceClipName &&
+      descriptor.children[1]->defined_clip_name ==
+          kOfxImageEffectOutputClipName &&
+      has_string(*descriptor.children[0],
+                 kOfxImageEffectPropSupportedComponents,
+                 kOfxImageComponentRGBA) &&
+      has_string(*descriptor.children[1],
+                 kOfxImageEffectPropSupportedComponents,
+                 kOfxImageComponentRGBA) &&
+      has_int(*descriptor.children[0], kOfxImageEffectPropSupportsTiles, 0) &&
+      has_int(*descriptor.children[1], kOfxImageEffectPropSupportsTiles, 0) &&
+      has_string(descriptor.params, kOfxPropLabel, "Strength") &&
+      has_double(descriptor.params, kOfxParamPropDefault, 0.5) &&
+      has_double(descriptor.params, kOfxParamPropDisplayMin, 0.0) &&
+      has_double(descriptor.params, kOfxParamPropDisplayMax, 1.0);
+  FakeImageObject failed_create_instance;
+  initialize_fixture(failed_create_instance);
+  failed_create_instance.properties.fail_set_instance_data = true;
+  const bool instance_publish_failure_rejected =
+      plugin->mainEntry(kOfxActionCreateInstance, &failed_create_instance,
+                        nullptr, nullptr) == kOfxStatErrMissingHostFeature &&
+      failed_create_instance.properties.values.count(kOfxPropInstanceData) == 0;
+  FakeImageObject instance;
+  initialize_fixture(instance);
+  prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&instance.properties),
+                  kOfxImageEffectPropFrameRate, 0, 24.0);
+  const auto create_status = plugin->mainEntry(
+      kOfxActionCreateInstance, &instance, nullptr, nullptr);
+  const auto untouched_output = instance.output_pixels;
+  // OpenFX ofxCore.h defines ReplyDefault as 14, distinct from ReplyYes (12).
+  // Compare the host-observed integer rather than our shared ABI constant.
+  const auto sync_private_status = plugin->mainEntry(
+      "OfxActionSyncPrivateData", &instance, nullptr, nullptr);
+  const bool default_actions_ok = sync_private_status == 14 &&
+      plugin->mainEntry("AEXCompatUnknownAction", &instance, nullptr,
+                        nullptr) == 14 &&
+      instance.output_pixels == untouched_output;
+  FakePropertySet render_args;
+  prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&render_args),
+                  kOfxPropTime, 0, 7.0);
+  set_render_window(render_args, 1, 0, 3, 2);
+#ifdef __APPLE__
+  if (const char *source = std::getenv("AEXCOMPAT_RESOLVE_AEX_PATH");
+      source && *source) {
+    constexpr int width = 64;
+    constexpr int height = 64;
+    constexpr int source_rowbytes = width * 16 + 16;
+    constexpr int output_rowbytes = width * 16 + 32;
+    instance.source_pixels.assign(height * source_rowbytes, 0xEE);
+    instance.output_pixels.assign(height * output_rowbytes, 0xCD);
+    for (int y = 0; y < height; ++y) {
+      for (int x = 0; x < width; ++x) {
+        const float alpha = x % 4 == 0 ? 0.0f : (x % 4 == 1 ? 0.5f : 1.0f);
+        const float pixel[] = {
+            static_cast<float>((x * 17 + y * 3) % 256) / 255.0f * alpha,
+            static_cast<float>((x * 11 + y * 7) % 256) / 255.0f * alpha,
+            static_cast<float>((x * 5 + y * 13) % 256) / 255.0f * alpha, alpha};
+        std::memcpy(instance.source_pixels.data() + y * source_rowbytes + x * 16,
+                    pixel, sizeof(pixel));
+      }
+    }
+    set_image_property(instance.source_image, kOfxImagePropData,
+                       instance.source_pixels.data(), source_rowbytes,
+                       kOfxBitDepthFloat);
+    set_image_property(instance.output_image, kOfxImagePropData,
+                       instance.output_pixels.data(), output_rowbytes,
+                       kOfxBitDepthFloat);
+    set_image_bounds(instance.source_image, 0, 0, width, height);
+    set_image_bounds(instance.output_image, 0, 0, width, height);
+    set_render_window(render_args, 0, 0, width, height);
+    prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&render_args),
+                    kOfxPropTime, 0, 6.0);
+    const auto input_hash = sha256(instance.source_pixels);
+    const auto aex_status = plugin->mainEntry(
+        kOfxImageEffectActionRender, &instance,
+        reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+    int changed = 0;
+    bool alpha_and_padding_ok = true;
+    for (int y = 0; y < height; ++y) {
+      const auto *input = instance.source_pixels.data() + y * source_rowbytes;
+      const auto *output = instance.output_pixels.data() + y * output_rowbytes;
+      for (int x = 0; x < width; ++x) {
+        for (int channel = 0; channel < 3; ++channel) {
+          float before = 0.0f, after = 0.0f;
+          std::memcpy(&before, input + x * 16 + channel * 4, 4);
+          std::memcpy(&after, output + x * 16 + channel * 4, 4);
+          if (std::fabs(after - before) > 1.0f / 255.0f) ++changed;
+        }
+        float alpha = 0.0f;
+        std::memcpy(&alpha, output + x * 16 + 12, 4);
+        const float expected_alpha = x % 4 == 0 ? 0.0f :
+            (x % 4 == 1 ? 128.0f / 255.0f : 1.0f);
+        if (std::fabs(alpha - expected_alpha) > 1.0f / 255.0f) {
+          alpha_and_padding_ok = false;
+        }
+        for (int channel = 0; channel < 3; ++channel) {
+          float value = 0.0f;
+          std::memcpy(&value, output + x * 16 + channel * 4, 4);
+          if (!std::isfinite(value) || value < 0.0f || value > alpha + 1.0f / 255.0f) {
+            alpha_and_padding_ok = false;
+          }
+        }
+      }
+      for (int offset = width * 16; offset < output_rowbytes; ++offset) {
+        if (output[offset] != 0xCD) alpha_and_padding_ok = false;
+      }
+    }
+    const auto output_hash = sha256(instance.output_pixels);
+    const auto saved_output = instance.output_pixels;
+    prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&instance.properties),
+                    kOfxImageEffectPropFrameRate, 0, 0.0);
+    const auto invalid_rate_status = plugin->mainEntry(
+        kOfxImageEffectActionRender, &instance,
+        reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+    const bool invalid_rate_preserved_output =
+        invalid_rate_status == kOfxStatErrFormat &&
+        instance.output_pixels == saved_output;
+    prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&instance.properties),
+                    kOfxImageEffectPropFrameRate, 0, 24.0);
+    const char *runner = std::getenv("AEXCOMPAT_RESOLVE_RUNNER");
+    const std::string saved_runner = runner ? runner : "";
+    setenv("AEXCOMPAT_RESOLVE_RUNNER", "/missing/aexcompat-runner.py", 1);
+    const auto rejected_status = plugin->mainEntry(
+        kOfxImageEffectActionRender, &instance,
+        reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+    if (runner) setenv("AEXCOMPAT_RESOLVE_RUNNER", saved_runner.c_str(), 1);
+    else unsetenv("AEXCOMPAT_RESOLVE_RUNNER");
+    const bool failure_preserved_output =
+        rejected_status == kOfxStatErrUnsupported &&
+        instance.output_pixels == saved_output;
+    const auto destroy_status = plugin->mainEntry(
+        kOfxActionDestroyInstance, &instance, nullptr, nullptr);
+    const auto unload_status = plugin->mainEntry(kOfxActionUnload, nullptr, nullptr, nullptr);
+    const bool verified = load_status == kOfxStatOK &&
+        describe_status == kOfxStatOK && context_status == kOfxStatOK &&
+        create_status == kOfxStatOK && default_actions_ok &&
+        aex_status == kOfxStatOK &&
+        changed > 0 && alpha_and_padding_ok && invalid_rate_preserved_output &&
+        failure_preserved_output &&
+        destroy_status == kOfxStatOK && unload_status == kOfxStatOK;
+    std::cout << "{\"aex_render_claim\":\""
+              << (verified ? "verified_mac_native_fixture" : "failed")
+              << "\",\"render\":" << aex_status
+              << ",\"changed_rgb_values\":" << changed
+              << ",\"alpha_and_padding_ok\":"
+              << (alpha_and_padding_ok ? "true" : "false")
+              << ",\"failure_preserved_output\":"
+              << (failure_preserved_output ? "true" : "false")
+              << ",\"invalid_rate_preserved_output\":"
+              << (invalid_rate_preserved_output ? "true" : "false")
+              << ",\"ofx_frame\":6.0,\"frame_rate\":24.0,\"time_ms\":250"
+              << ",\"input_sha256\":\"" << input_hash
+              << "\",\"output_sha256\":\"" << output_hash << "\"}"
+              << std::endl;
+    close_module(module);
+    return verified ? 0 : 7;
+  }
+#endif
+  const auto render_status = plugin->mainEntry(
+      kOfxImageEffectActionRender, &instance,
+      reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+  int changed_bytes = 0;
+  const bool render_verified = rendered_fixture_ok(instance, &changed_bytes);
+  const auto output_after_render = instance.output_pixels;
+  const auto rejected_without_output_write = [&](OfxStatus expected) {
+    const auto status = plugin->mainEntry(
+        kOfxImageEffectActionRender, &instance,
+        reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+    return status == expected && instance.output_pixels == output_after_render;
+  };
+
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 0);
+  const bool zero_rowbytes_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, -20);
+  const bool negative_rowbytes_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, INT_MIN);
+  const bool int_min_rowbytes_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 8);
+  const bool short_row_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, INT_MAX);
+  const bool oversized_span_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 20);
+
+  set_image_bounds(instance.source_image, INT_MIN, 0, INT_MAX, 1);
+  set_image_bounds(instance.output_image, INT_MIN, 0, INT_MAX, 1);
+  const bool overflow_bounds_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  set_image_bounds(instance.source_image, 0, 0, 3, 2);
+  set_image_bounds(instance.output_image, 0, 0, 3, 2);
+
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 65536);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.output_image),
+               kOfxImagePropRowBytes, 0, 65536);
+  set_image_bounds(instance.source_image, 0, 0, 16384, 16384);
+  set_image_bounds(instance.output_image, 0, 0, 16384, 16384);
+  const bool oversized_pixel_span_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  set_image_bounds(instance.source_image, 0, 0, 3, 2);
+  set_image_bounds(instance.output_image, 0, 0, 3, 2);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 20);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.output_image),
+               kOfxImagePropRowBytes, 0, 24);
+
+  set_render_window(render_args, -1, 0, 3, 2);
+  const bool out_of_bounds_window_rejected =
+      rejected_without_output_write(kOfxStatErrValue);
+  set_render_window(render_args, 1, 0, 3, 2);
+  const bool safety_checks_ok = zero_rowbytes_rejected &&
+                                negative_rowbytes_rejected &&
+                                int_min_rowbytes_rejected && short_row_rejected &&
+                                oversized_span_rejected && overflow_bounds_rejected &&
+                                oversized_pixel_span_rejected &&
+                                out_of_bounds_window_rejected;
+  const auto input_sha256 = sha256(instance.source_pixels);
+  const auto output_sha256 = sha256(instance.output_pixels);
+  prepare_float_fixture(instance);
+  const auto float_input_sha256 = sha256(instance.source_pixels);
+  const auto float_render_status = plugin->mainEntry(
+      kOfxImageEffectActionRender, &instance,
+      reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+  int changed_float_values = 0;
+  const bool float_render_verified =
+      rendered_float_fixture_ok(instance, &changed_float_values);
+  const auto float_output_sha256 = sha256(instance.output_pixels);
+  const auto output_after_float = instance.output_pixels;
+  prop_set_string(reinterpret_cast<OfxPropertySetHandle>(&instance.output_image),
+                  kOfxImageEffectPropPixelDepth, 0, kOfxBitDepthByte);
+  const bool mismatched_depth_rejected =
+      plugin->mainEntry(kOfxImageEffectActionRender, &instance,
+                        reinterpret_cast<OfxPropertySetHandle>(&render_args),
+                        nullptr) == kOfxStatErrFormat &&
+      instance.output_pixels == output_after_float;
+  instance.properties.fail_clear_instance_data = true;
+  const bool instance_clear_failure_rejected =
+      plugin->mainEntry(kOfxActionDestroyInstance, &instance, nullptr,
+                        nullptr) == kOfxStatErrMissingHostFeature &&
+      instance.properties.values.count(kOfxPropInstanceData) == 1 &&
+      instance.properties.values.at(kOfxPropInstanceData).pointer_value != nullptr;
+  instance.properties.fail_clear_instance_data = false;
+  const auto destroy_status = plugin->mainEntry(
+      kOfxActionDestroyInstance, &instance, nullptr, nullptr);
+  const bool repeated_destroy_rejected =
+      plugin->mainEntry(kOfxActionDestroyInstance, &instance, nullptr,
+                        nullptr) == kOfxStatErrBadHandle;
+  const bool instance_data_failure_checks =
+      instance_publish_failure_rejected && instance_clear_failure_rejected &&
+      repeated_destroy_rejected && param_define_failure_rejected &&
+      param_default_failure_rejected;
+  const auto unload_status = plugin->mainEntry(kOfxActionUnload, nullptr, nullptr, nullptr);
+  const bool lifecycle_ok = load_status == kOfxStatOK &&
+                            describe_status == kOfxStatOK &&
+                            context_status == kOfxStatOK &&
+                            descriptor_contract_ok &&
+                            create_status == kOfxStatOK &&
+                            default_actions_ok &&
+                            render_status == kOfxStatOK && render_verified &&
+                            float_render_status == kOfxStatOK &&
+                            float_render_verified && mismatched_depth_rejected &&
+                            instance_data_failure_checks &&
+                            safety_checks_ok &&
+                            destroy_status == kOfxStatOK &&
+                            unload_status == kOfxStatOK &&
+                            has_string(descriptor.properties, kOfxPropLabel,
+                                       "AEXCompat Resolve OFX");
+  std::cout << "{\"schema_version\":1,\"plugin_identifier\":\""
+            << plugin->pluginIdentifier << "\",\"load\":" << load_status
+            << ",\"describe\":" << describe_status << ",\"describe_in_context\":"
+            << context_status << ",\"create_instance\":" << create_status
+            << ",\"sync_private_data\":" << sync_private_status
+            << ",\"default_actions_ok\":"
+            << (default_actions_ok ? "true" : "false")
+            << ",\"descriptor_contract_ok\":"
+            << (descriptor_contract_ok ? "true" : "false")
+            << ",\"render\":" << render_status
+            << ",\"render_claim\":\""
+            << ((render_status == kOfxStatOK && render_verified)
+                    ? "builtin_rgba8_control"
+                    : "failed_control_render") << "\""
+            << ",\"aex_render_claim\":\"blocked_missing_aex_rendersession\""
+            << ",\"destroy_instance\":" << destroy_status
+            << ",\"unload\":" << unload_status
+            << ",\"rgba8_contract\":"
+            << ((render_status == kOfxStatOK && render_verified) ? "true" : "false")
+            << ",\"stride_checked\":"
+            << (render_verified ? "true" : "false")
+            << ",\"alpha_preserved\":" << (render_verified ? "true" : "false")
+            << ",\"frame_time\":7.0,\"parameter\":{\"name\":\"strength\",\"time\":7.0,\"value\":0.25},\"input_sha256\":\"" << input_sha256
+            << "\",\"output_sha256\":\"" << output_sha256
+            << "\",\"pixel_diff\":" << changed_bytes
+            << ",\"float_render\":" << float_render_status
+            << ",\"rgba_float_contract\":"
+            << ((float_render_status == kOfxStatOK && float_render_verified)
+                    ? "true" : "false")
+            << ",\"float_pixel_diff\":" << changed_float_values
+            << ",\"float_input_sha256\":\"" << float_input_sha256
+            << "\",\"float_output_sha256\":\"" << float_output_sha256
+            << "\",\"mismatched_depth_rejected\":"
+            << (mismatched_depth_rejected ? "true" : "false")
+            << ",\"instance_data_failure_checks\":"
+            << (instance_data_failure_checks ? "true" : "false")
+            << ",\"safety_checks\":"
+            << (safety_checks_ok ? "true" : "false")
+            << ",\"lifecycle_ok\":"
+            << (lifecycle_ok ? "true" : "false") << "}" << std::endl;
+  close_module(module);
+  return lifecycle_ok ? 0 : 6;
+#endif
+}
