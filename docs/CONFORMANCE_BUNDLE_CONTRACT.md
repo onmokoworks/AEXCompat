@@ -54,6 +54,14 @@ the default exit code is `3` and `diagnostics/run.json` records `completed_with_
 collectors that intentionally aggregate failed cells must pass `--allow-failures`; that keeps exit
 code `0` while retaining the `completed_with_failures` state.
 
+On a nonzero native exit, zero width, height, and row bytes describe no rendered frame
+only when the remaining world fields are schema-valid and match the requested depth,
+alpha mode, and input bounds. That absent frame is recorded as `world: null`, with
+the failure and selector error unchanged. The original stdout is retained under the
+existing size limit in `diagnostics/run.json`; its truncation flag must be checked.
+Positive worlds are retained; other malformed layouts and zero-size successful outputs
+still fail the existing report validator.
+
 ## Agent-facing harness contract
 
 The native harness exposes its existing CLI surface without requiring an agent to parse
