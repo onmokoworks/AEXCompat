@@ -283,6 +283,142 @@ def test_explicit_loader_error_is_preserved():
     )
     assert result["classification"] == "loader_error"
 
+
+@pytest.mark.parametrize("output_shape", ["absent", "zero", "valid"])
+@pytest.mark.parametrize("raw_classification,error_code", [("nonzero_exit", 516), ("ok", 4)])
+def test_failed_native_world_publishes_failure_with_original_diagnostics(
+    tmp_path, monkeypatch, output_shape, raw_classification, error_code
+):
+    module = load_runner_module()
+    manifest_path, _ = fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["requested_depths"] = ["argb8"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    input_world = module.world(2, 2, "argb8", "straight")
+    output_world = {
+        "absent": None,
+        "zero": {**input_world, "width": 0, "height": 0, "row_bytes": 0},
+        "valid": input_world,
+    }[output_shape]
+    raw = {
+        "passed": False,
+        "classification": raw_classification,
+        "pre_render_error": error_code,
+        "input_world": input_world,
+        "output_world": output_world,
+        "parameter_metadata": [],
+    }
+    stdout = json.dumps(raw)
+    # Native protocol boundary, without requiring a machine-specific executable
+    # or loading an AEX. The real producer still normalizes and validates it.
+    monkeypatch.setattr(module, "copy_native_workers", lambda root: [])
+    monkeypatch.setattr(
+        module,
+        "run_process",
+        lambda *args: (
+            20, stdout, "", False,
+            {"stdout": {"text": stdout, "bytes_kept": len(stdout), "truncated": False}},
+        ),
+    )
+    output = tmp_path / "failed-native"
+    monkeypatch.setattr(
+        sys, "argv",
+        [str(RUNNER), "--manifest", str(manifest_path), "--out", str(output), "--allow-failures"],
+    )
+    assert module.main() == 0
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    result = report["results"][0]
+    assert result["classification"] == "selector_error"
+    assert result["selector"] == {
+        "render_path": "smartfx", "completed": False, "error_code": error_code,
+    }
+    assert result["world"] == (input_world if output_shape == "valid" else None)
+    assert result["raw_output"] is None
+    assert result["output_sha256"] is None
+    assert not (output / "outputs/argb8.png").exists()
+    run = json.loads((output / "diagnostics/run.json").read_text(encoding="utf-8"))
+    assert run["status"] == "completed_with_failures"
+    assert run["failure_classifications"] == ["selector_error"]
+    assert json.loads(run["depths"]["argb8"]["stdout"]["text"]) == raw
+
+
+def test_zero_world_is_not_sanitized_from_a_success(tmp_path):
+    module = load_runner_module()
+    input_world = module.world(2, 2, "argb8", "straight")
+    output = tmp_path / "output.png"
+    Image.new("RGBA", (2, 2), (1, 2, 3, 255)).save(output)
+    value = {
+        "passed": True, "parameter_metadata": [], "input_world": input_world,
+        "output_world": {**input_world, "width": 0, "height": 0, "row_bytes": 0},
+    }
+    result = module.normalize_harness_report(
+        "argb8", value, output, input_world, "straight", "smartfx"
+    )
+    # A malformed successful frame must still fail the report contract; this
+    # change applies only to the nonzero-exit failure path, never to pixels.
+    schema = json.loads((SCHEMAS / "conformance-report.schema.json").read_text(encoding="utf-8"))
+    world_schema = {
+        "$schema": schema["$schema"], "$defs": schema["$defs"],
+        "$ref": "#/$defs/world",
+    }
+    validator = Draft202012Validator(world_schema)
+    assert validator.is_valid(input_world)
+    assert not validator.is_valid(result["world"])
+
+
+@pytest.mark.parametrize("invalid_field", ["width", "height", "row_bytes"])
+def test_partial_zero_failure_world_is_retained_for_validation(invalid_field):
+    module = load_runner_module()
+    input_world = module.world(2, 2, "argb8", "straight")
+    malformed = {**input_world, invalid_field: 0}
+    result = module.normalize_structured_failure(
+        "argb8", {"pre_render_error": 516, "output_world": malformed}, input_world
+    )
+    assert result["classification"] == "selector_error"
+    assert result["world"] == malformed
+
+
+@pytest.mark.parametrize("mutation", [
+    "unknown_format", "wrong_depth", "unknown_alpha", "wrong_alpha", "missing_extent",
+    "missing_extent_field", "extra_world_field", "extra_extent_field", "string_extent",
+    "negative_extent", "inverted_extent", "oversized_extent",
+])
+def test_zero_failure_world_with_malformed_metadata_is_not_discarded(mutation):
+    module = load_runner_module()
+    input_world = module.world(2, 2, "argb8", "straight")
+    malformed = {**input_world, "width": 0, "height": 0, "row_bytes": 0}
+    malformed["extent_hint"] = dict(input_world["extent_hint"])
+    if mutation == "unknown_format":
+        malformed["pixel_format"] = "invalid"
+    elif mutation == "wrong_depth":
+        malformed["pixel_format"] = "argb16"
+    elif mutation == "unknown_alpha":
+        malformed["premultiplication"] = "invalid"
+    elif mutation == "wrong_alpha":
+        malformed["premultiplication"] = "opaque"
+    elif mutation == "missing_extent":
+        del malformed["extent_hint"]
+    elif mutation == "missing_extent_field":
+        del malformed["extent_hint"]["right"]
+    elif mutation == "extra_world_field":
+        malformed["unexpected"] = True
+    elif mutation == "extra_extent_field":
+        malformed["extent_hint"]["unexpected"] = True
+    elif mutation == "string_extent":
+        malformed["extent_hint"]["right"] = "2"
+    elif mutation == "negative_extent":
+        malformed["extent_hint"]["left"] = -1
+    elif mutation == "inverted_extent":
+        malformed["extent_hint"].update(left=2, right=1)
+    elif mutation == "oversized_extent":
+        malformed["extent_hint"]["right"] = 3
+    result = module.normalize_structured_failure(
+        "argb8", {"pre_render_error": 4, "output_world": malformed}, input_world
+    )
+    assert result["classification"] == "selector_error"
+    assert result["selector"]["error_code"] == 4
+    assert result["world"] == malformed
+
 def test_generic_nonzero_exit_is_refined_by_report_evidence():
     module = load_runner_module()
     input_world = {

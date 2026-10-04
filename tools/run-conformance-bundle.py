@@ -517,6 +517,35 @@ def schema_valid_suite_timeline(timeline: Any) -> list[dict[str, Any]] | None:
     return [event for event in timeline if _valid_suite_event(event)][:512]
 
 
+def absent_failed_output_world(value: Any, depth: str, input_world: dict[str, Any]) -> bool:
+    if not isinstance(value, dict) or not all(
+        _is_bounded_int(value.get(key), 0, 0)
+        for key in ("width", "height", "row_bytes")
+    ):
+        return False
+    report_schema = validator("conformance-report.schema.json").schema
+    world_schema = report_schema["$defs"]["world"]
+    zero_schema = {
+        **world_schema, "$defs": report_schema["$defs"],
+        "properties": {
+            **world_schema["properties"],
+            **{key: {"const": 0} for key in ("width", "height", "row_bytes")},
+        },
+    }
+    if not Draft202012Validator(zero_schema).is_valid(value):
+        return False
+    if value["pixel_format"] != depth or value["premultiplication"] != input_world.get("premultiplication"):
+        return False
+    width, height = input_world.get("width"), input_world.get("height")
+    if not _is_bounded_int(width, 1, 65535) or not _is_bounded_int(height, 1, 65535):
+        return False
+    extent = value["extent_hint"]
+    return (
+        0 <= extent["left"] <= extent["right"] <= width
+        and 0 <= extent["top"] <= extent["bottom"] <= height
+    )
+
+
 def normalize_structured_failure(
     depth: str,
     value: dict[str, Any],
@@ -572,7 +601,11 @@ def normalize_structured_failure(
     if not isinstance(actual_input_world, dict):
         actual_input_world = input_world
     actual_world = value.get("output_world")
-    if not isinstance(actual_world, dict):
+    # A failed SmartFX selector may never commit an output allocation. Accept
+    # that native zero-geometry shape only with valid, request-matching metadata;
+    # other malformed layouts remain visible to the strict bundle validator.
+    # The unchanged raw report uses the existing bounded run.json diagnostic.
+    if not isinstance(actual_world, dict) or absent_failed_output_world(actual_world, depth, actual_input_world):
         actual_world = None
     result = {
         "depth": depth,
