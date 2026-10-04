@@ -560,6 +560,7 @@ jobs:
             'build-pf-smart-geometry-probe'
             'build-pf-empty-layer-contract-probe'
             'build-pf-smart-param-time-probe'
+            'build-pf-smart-timed-multilayer-probe'
             'build-pf-transfer-mask-probe'
             'build-pf-transfer-rect-probe'
             'build-pf-transform-affine-probe'

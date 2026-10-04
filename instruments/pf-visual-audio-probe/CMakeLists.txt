@@ -22,7 +22,8 @@ target_compile_definitions(pf_visual_audio_cluster_video_probe PRIVATE
 # representative artifact. Keep the cluster fixtures in that same built set so
 # the production cluster behavioral test cannot silently skip in CI.
 add_dependencies(pf_visual_audio_sidecar_probe
-  pf_visual_audio_audio_only_probe pf_visual_audio_cluster_video_probe)
+  pf_visual_audio_audio_only_probe pf_visual_audio_cluster_video_probe
+  pf_visual_audio_layer_sidecar_probe)
 target_compile_definitions(pf_visual_audio_advertised_probe PRIVATE AEXCOMPAT_ADVERTISE_AUDIO=1)
 target_compile_definitions(pf_visual_audio_sidecar_probe PRIVATE
   AEXCOMPAT_ADVERTISE_AUDIO=1 AEXCOMPAT_REQUIRE_AUDIO_SIDECAR=1)

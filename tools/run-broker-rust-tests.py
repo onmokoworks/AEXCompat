@@ -56,11 +56,9 @@ SILENT_SKIP_PREREQUISITES = (
     "target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex",
     "target/pf-param-utils-animation-probe-build/Release/pf_param_utils_animation_probe.aex",
     "target/instruments-build/pf-wide-time-probe/pf_automatic_wide_time_allowed_probe.aex",
+    "target/pf-visual-audio-probe-build/pf-visual-audio-probe/Release/pf_visual_audio_layer_sidecar_probe.aex",
+    "target/pf-smart-timed-multilayer-probe-build/Release/pf_smart_timed_multilayer_probe.aex",
 )
-KNOWN_ISSUE_900_SKIP_LINES = {
-    "skipping image+audio+layer session test: run tools/build-pf-visual-audio-probe.ps1 -target pf_visual_audio_layer_sidecar_probe first",
-    "skipping smart timed-multilayer: build the smart worker and the probe",
-}
 
 
 def cargo_metadata() -> dict[str, object]:
@@ -203,10 +201,7 @@ def listed_tests(filterset: str) -> set[tuple[str, str]]:
 
 
 def unexpected_skip_lines(output: str) -> list[str]:
-    skip_lines = [line for line in output.lower().splitlines() if "skipping" in line]
-    return [
-        line for line in skip_lines if line.strip() not in KNOWN_ISSUE_900_SKIP_LINES
-    ]
+    return [line for line in output.lower().splitlines() if "skipping" in line]
 
 
 def exact_union(predicate: str, values: set[str]) -> str:

@@ -60,7 +60,7 @@ def test_partitions_are_disjoint_complete_and_fail_closed_on_stale_native_target
         runner.partitions(current_metadata)
 
 
-def test_only_the_existing_issue_900_visual_audio_skip_is_allowlisted() -> None:
+def test_all_native_artifact_skips_are_rejected() -> None:
     runner = load_runner()
     assert (
         runner.unexpected_skip_lines(
@@ -69,7 +69,12 @@ def test_only_the_existing_issue_900_visual_audio_skip_is_allowlisted() -> None:
             "-Target pf_visual_audio_layer_sidecar_probe first\n"
             "skipping smart timed-multilayer: build the smart worker and the probe\n"
         )
-        == []
+        == [
+            "skipping image+audio+layer session test: run "
+            "tools/build-pf-visual-audio-probe.ps1 "
+            "-target pf_visual_audio_layer_sidecar_probe first",
+            "skipping smart timed-multilayer: build the smart worker and the probe",
+        ]
     )
     regressions = [
         "skipping audio-only session: build pf-visual-audio-probe first",
@@ -81,6 +86,44 @@ def test_only_the_existing_issue_900_visual_audio_skip_is_allowlisted() -> None:
     ]
     for regression in regressions:
         assert runner.unexpected_skip_lines(regression) == [regression]
+
+
+@pytest.mark.parametrize("missing", [
+    "target/pf-visual-audio-probe-build/pf-visual-audio-probe/Release/pf_visual_audio_layer_sidecar_probe.aex",
+    "target/pf-smart-timed-multilayer-probe-build/Release/pf_smart_timed_multilayer_probe.aex",
+])
+def test_native_preflight_refuses_missing_remaining_probe(tmp_path, missing) -> None:
+    runner = load_runner()
+    runner.ROOT = tmp_path
+    for relative in runner.SILENT_SKIP_PREREQUISITES:
+        if relative != missing:
+            artifact = tmp_path / relative
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_bytes(b"fixture")
+    calls = []
+    runner.nextest_run = lambda *args, **kwargs: calls.append((args, kwargs))
+    with pytest.raises(SystemExit, match="prerequisites are missing"):
+        runner.run_native({runner.BROKER: runner.NATIVE_BROKER_TARGETS,
+                           runner.HARNESS: runner.NATIVE_HARNESS_TARGETS})
+    assert calls == []
+
+
+@pytest.mark.parametrize("skip", [
+    "skipping image+audio+layer session test: run tools/build-pf-visual-audio-probe.ps1 -Target pf_visual_audio_layer_sidecar_probe first",
+    "skipping smart timed-multilayer: build the smart worker and the probe",
+])
+def test_successful_nextest_cannot_hide_remaining_probe_skip(tmp_path, monkeypatch, skip) -> None:
+    runner = load_runner()
+    archive = tmp_path / "archive.tar.zst"
+    archive.write_bytes(b"fixture")
+    runner.NEXTEST_ARCHIVE = archive
+    class Result:
+        returncode = 0
+        stdout = skip
+        stderr = ""
+    monkeypatch.setattr(runner.subprocess, "run", lambda *args, **kwargs: Result())
+    with pytest.raises(SystemExit, match="unexpected artifact skip"):
+        runner.nextest_run("all()", reject_skip=True)
 
 
 def test_each_nextest_surface_is_planned_once_across_both_partitions() -> None:
