@@ -436,6 +436,157 @@ def test_bounded_capture_timeout_cleans_up_descendant(tmp_path):
     assert _wait_for_process_exit(child_pid), f"descendant PID {child_pid} survived"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job descendant containment")
+@pytest.mark.parametrize("inherit_pipes", [False, True])
+@pytest.mark.parametrize("finish", ["exit", "timeout", "capture_limit"])
+def test_bounded_capture_cleans_descendants(tmp_path, monkeypatch, inherit_pipes, finish):
+    ready = tmp_path / "ready.json"
+    grandchild_ready = tmp_path / "grandchild.pid"
+    marker = tmp_path / "escaped.txt"
+    grandchild_code = (
+        "import os,pathlib,time\n"
+        f"pathlib.Path({str(grandchild_ready)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(10)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('escaped')\n"
+    )
+    child_code = (
+        "import json,os,pathlib,subprocess,sys,time\n"
+        f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}])\n"
+        f"ready=pathlib.Path({str(grandchild_ready)!r})\n"
+        "deadline=time.monotonic()+5\n"
+        "while not ready.exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+        "assert ready.exists()\n"
+        f"pathlib.Path({str(ready)!r}).write_text(json.dumps([os.getpid(),child.pid]))\n"
+        "time.sleep(30)\n"
+    )
+    streams = "" if inherit_pipes else ", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+    ending = {
+        "exit": "sys.stdout.buffer.write(b'parent done')\n",
+        "timeout": "time.sleep(30)\n",
+        "capture_limit": "while True: os.write(1, b'x'*65536)\n",
+    }[finish]
+    parent_code = (
+        "import os,pathlib,subprocess,sys,time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}]{streams})\n"
+        f"ready=pathlib.Path({str(ready)!r})\n"
+        "deadline=time.monotonic()+5\n"
+        "while not ready.exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+        "assert ready.exists()\n"
+        + ending
+    )
+    monkeypatch.setattr(RUNNER, "MAX_CAPTURE_BYTES", 1024)
+    monkeypatch.setattr(RUNNER, "MAX_COMBINED_CAPTURE_BYTES", 1024)
+    started = time.monotonic()
+    try:
+        completed, timed_out, reason = RUNNER._run_bounded_process(
+            [sys.executable, "-c", parent_code], 2 if finish == "timeout" else 15
+        )
+        assert completed.returncode is not None
+        assert timed_out == (finish == "timeout")
+        assert reason == (None if finish == "exit" else finish)
+        if finish == "exit":
+            assert completed.returncode == 0
+            assert completed.stdout == b"parent done"
+        assert len(completed.stdout) + len(completed.stderr) <= 1024
+        assert time.monotonic() - started < 5, "inherited pipe delayed cleanup"
+        assert ready.exists()
+        for pid in json.loads(ready.read_text()):
+            assert _wait_for_process_exit(pid, 2), f"descendant PID {pid} survived"
+        assert not marker.exists()
+    finally:
+        # A failing baseline must not leave either fixture descendant running.
+        pids = json.loads(ready.read_text()) if ready.exists() else []
+        if grandchild_ready.exists():
+            pids.append(int(grandchild_ready.read_text()))
+        for pid in set(pids):
+            if not _process_has_exited(pid):
+                os.kill(pid, 9)
+                assert _wait_for_process_exit(pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended launch failure")
+@pytest.mark.parametrize("stage", ["assignment", "resume", "capture_thread"])
+def test_bounded_capture_launch_failure_cleans_owned_process(tmp_path, monkeypatch, stage):
+    marker = tmp_path / "executed.txt"
+    launched = []
+    popen = subprocess.Popen
+
+    def record_popen(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        launched.append(process)
+        return process
+
+    def fail(*args, **kwargs):
+        raise KeyboardInterrupt("injected startup interruption")
+
+    monkeypatch.setattr(RUNNER.subprocess, "Popen", record_popen)
+    if stage == "assignment":
+        monkeypatch.setattr(RUNNER._WindowsCaptureJob, "assign_and_resume", fail)
+    elif stage == "resume":
+        monkeypatch.setattr(RUNNER._WindowsCaptureJob, "_resume_primary_thread", fail)
+    else:
+        monkeypatch.setattr(RUNNER.threading.Thread, "start", fail)
+    code = f"from pathlib import Path; import time; time.sleep(2); Path({str(marker)!r}).write_text('executed')"
+    with pytest.raises(KeyboardInterrupt, match="injected startup"):
+        RUNNER._run_bounded_process([sys.executable, "-c", code], 5)
+    assert len(launched) == 1
+    assert launched[0].poll() is not None
+    assert launched[0].stdout.closed and launched[0].stderr.closed
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name not in {"nt", "posix"}, reason="process tree cleanup")
+def test_bounded_capture_partial_reader_start_failure_after_parent_exit(tmp_path, monkeypatch):
+    pid_file = tmp_path / "descendant.pid"
+    marker = tmp_path / "escaped.txt"
+    child_code = (
+        "import pathlib,time\n"
+        "time.sleep(10)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('escaped')\n"
+    )
+    parent_code = (
+        "import pathlib,subprocess,sys\n"
+        f"child=subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+    )
+    launched = []
+    popen = subprocess.Popen
+    start = RUNNER.threading.Thread.start
+    calls = 0
+
+    def record_popen(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        launched.append(process)
+        return process
+
+    def fail_second_start(thread):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            assert launched[0].wait(timeout=5) == 0
+            raise KeyboardInterrupt("injected second reader interruption")
+        return start(thread)
+
+    monkeypatch.setattr(RUNNER.subprocess, "Popen", record_popen)
+    monkeypatch.setattr(RUNNER.threading.Thread, "start", fail_second_start)
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt, match="second reader"):
+            RUNNER._run_bounded_process([sys.executable, "-c", parent_code], 15)
+        assert time.monotonic() - started < 5
+        assert launched[0].stdout.closed and launched[0].stderr.closed
+        assert pid_file.exists()
+        pid = int(pid_file.read_text())
+        assert _wait_for_process_exit(pid, 2), f"descendant PID {pid} survived"
+        assert not marker.exists()
+    finally:
+        if pid_file.exists():
+            pid = int(pid_file.read_text())
+            if not _process_has_exited(pid):
+                os.kill(pid, 9)
+                assert _wait_for_process_exit(pid)
+
+
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_bounded_capture_preserves_normal_success_and_failure(exit_code):
     code = (
