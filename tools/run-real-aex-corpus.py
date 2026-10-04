@@ -199,9 +199,9 @@ def gap_records(rows,matrix,public_root):
     for value,case_id in pending: grouped[canonical(value)].append((value,case_id))
     records=[];mapping=[]
     replay=["python","tools/run-real-aex-corpus.py","--inventory","<PUBLIC_INVENTORY>","--locator","<PRIVATE_LOCATOR>","--matrix","<MATRIX>","--runner","<PINNED_RUNNER>","--input","<INPUT>","--out","<NEW_PUBLIC_OUT>","--private-evidence-out","<NEW_PRIVATE_OUT>","--case-list","<PRIVATE_CASE_LIST>"]
-    evidence_schema=Draft202012Validator(strict_json(SCHEMAS/"real-aex-public-evidence.schema.json"))
+    evidence_schema=Draft202012Validator(strict_json(SCHEMAS/"real-aex-public-evidence-v2.schema.json"))
     for index,key in enumerate(sorted(grouped),1):
-        values=grouped[key];value=values[0][0];gap_id=f"gap-{index:06d}"; evidence={"schema_version":1,"gap_id":gap_id,"occurrence_count":len(values),**value};evidence_schema.validate(evidence);reject_private_paths(evidence);destination=public_root/"evidence"/f"{gap_id}.json";destination.parent.mkdir(parents=True,exist_ok=True);data=canonical(evidence);destination.write_bytes(data)
+        values=grouped[key];value=values[0][0];gap_id=f"gap-{index:06d}"; evidence={"schema_version":2,"gap_id":gap_id,"occurrence_count":len(values),**value};evidence_schema.validate(evidence);reject_private_paths(evidence);destination=public_root/"evidence"/f"{gap_id}.json";destination.parent.mkdir(parents=True,exist_ok=True);data=canonical(evidence);destination.write_bytes(data)
         records.append({"gap_id":gap_id,"occurrence_count":len(values),**{field:value[field] for field in ("render_path","depth","time","parameter_shape","classification","stage","error_code","missing_suites")},"evidence":{"path":destination.relative_to(public_root).as_posix(),"sha256":hashlib.sha256(data).hexdigest()},"replay":replay})
         mapping.append({"gap_id":gap_id,"case_ids":sorted(case_id for _,case_id in values)})
     return records,mapping
@@ -237,7 +237,7 @@ def main():
      if not rows: raise ValueError("case selection did not select a matrix cell")
      suites=aggregate(rows)
      inventory_hash=hashlib.sha256(canonical(inventory)).hexdigest();matrix_hash=hashlib.sha256(canonical(matrix)).hexdigest()
-     triage={"schema_version":1,"inventory_sha256":inventory_hash,"matrix_sha256":matrix_hash,"results":rows,"missing_suite_aggregation":suites};Draft202012Validator(strict_json(SCHEMAS/"real-aex-triage.schema.json")).validate(triage);atomic_write(private_publish/"triage.json",triage)
+     triage={"schema_version":2,"inventory_sha256":inventory_hash,"matrix_sha256":matrix_hash,"results":rows,"missing_suite_aggregation":suites};Draft202012Validator(strict_json(SCHEMAS/"real-aex-triage-v2.schema.json")).validate(triage);atomic_write(private_publish/"triage.json",triage)
      records,mapping=gap_records(rows,matrix,publish);atomic_write(private_publish/"gap-map.json",{"schema_version":1,"mapping":mapping})
      gaps={"schema_version":1,"corpus_shape":{"aex_count":len(inventory["entries"]),"supplier_count":len({item["supplier"] for item in inventory["entries"]})},"matrix_shape":{"render_path_count":len(matrix["render_paths"]),"depth_count":len(matrix["depths"]),"time_count":len(matrix["times"]),"parameter_shape_count":len(matrix["parameter_sets"])},"records":records,"missing_suite_aggregation":suites};Draft202012Validator(strict_json(SCHEMAS/"real-aex-gaps.schema.json")).validate(gaps);atomic_write(publish/"reproducible-gaps.json",gaps)
      publish_outputs(publish,private_publish,public_destination,private_destination);publish=None;private_publish=None;return 0

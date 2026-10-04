@@ -1,7 +1,8 @@
-import importlib.util, json
+import copy, importlib.util, json
 from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
 
 ROOT=Path(__file__).resolve().parents[1]
 def load(name,path):
@@ -15,7 +16,7 @@ def test_public_inventory_matrix_and_case_count():
     assert set(matrix["render_paths"])=={"classic","smartfx"} and len(list(corpus.matrix_cases(inventory,matrix)))==120
 
 def test_all_corpus_schemas_are_valid_draft_2020_12():
-    for name in ("real-aex-corpus.schema.json","real-aex-locator.schema.json","real-aex-matrix.schema.json","real-aex-triage.schema.json","real-aex-gaps.schema.json","real-aex-public-evidence.schema.json"):
+    for name in ("real-aex-corpus.schema.json","real-aex-locator.schema.json","real-aex-matrix.schema.json","real-aex-triage.schema.json","real-aex-gaps.schema.json","real-aex-public-evidence.schema.json","real-aex-triage-v2.schema.json","real-aex-public-evidence-v2.schema.json"):
         Draft202012Validator.check_schema(json.loads((ROOT/"schemas"/name).read_text(encoding="utf-8")))
 
 def test_suite_aggregation_is_distinct_sha_and_gap_safe():
@@ -80,9 +81,15 @@ def test_private_case_list_replays_every_group_occurrence(tmp_path):
         case_list.write_text(value)
         with pytest.raises(ValueError): corpus.selected_case_ids(None,case_list)
 
-def test_public_group_replay_uses_complete_private_case_list(tmp_path):
-    identities={"input":{"role":"input","sha256":"1"*64,"size_bytes":1},"runner":{"role":"runner","sha256":"2"*64,"size_bytes":1},"workers":[{"role":f"worker-{index:03d}","sha256":str(index+3)*64,"size_bytes":1} for index in range(3)]}
+@pytest.mark.parametrize("worker_count", [1, 0, 2, 3])
+def test_public_group_replay_uses_complete_private_case_list(tmp_path, worker_count):
+    identities={"input":{"role":"input","sha256":"1"*64,"size_bytes":1},"runner":{"role":"runner","sha256":"2"*64,"size_bytes":1},"workers":[{"role":f"worker-{index:03d}","sha256":str(index+3)*64,"size_bytes":1} for index in range(worker_count)]}
     rows=[{"case_id":case_id,"classification":"loader_error","render_path":"classic","depth":"argb8","time":{"value":0,"scale":1},"parameter_set_index":0,"selector_error_code":None,"missing_suites":[],"identities":identities} for case_id in ("case-000001","case-000025","case-000049","case-000073")]
+    if worker_count != 1:
+        with pytest.raises(ValidationError):
+            corpus.gap_records(rows,{"parameter_sets":[[]]},tmp_path)
+        assert not (tmp_path / "evidence").exists()
+        return
     records,mapping=corpus.gap_records(rows,{"parameter_sets":[[]]},tmp_path)
     assert records[0]["occurrence_count"]==4
     assert records[0]["replay"][-2:]==["--case-list","<PRIVATE_CASE_LIST>"]
@@ -98,7 +105,8 @@ def test_publish_rolls_back_private_when_public_commit_fails(tmp_path,monkeypatc
     with pytest.raises(OSError,match="injected"):corpus.publish_outputs(public_tmp,private_tmp,public,private)
     assert not private.exists() and not public.exists()
 
-def test_synthetic_main_publishes_schema_valid_redacted_gap_and_private_mapping(tmp_path,monkeypatch):
+@pytest.mark.parametrize("worker_count", [1, 0, 2, 3])
+def test_synthetic_main_publishes_schema_valid_redacted_gap_and_private_mapping(tmp_path,monkeypatch,worker_count):
     runner=tmp_path/"runner.exe";input_path=tmp_path/"input.png";runner.write_bytes(b"runner");input_path.write_bytes(b"input")
     public=tmp_path/"public";private=tmp_path/"private"
     @corpus.contextmanager
@@ -110,11 +118,56 @@ def test_synthetic_main_publishes_schema_valid_redacted_gap_and_private_mapping(
     # schema-validating load must succeed: write a minimal valid locator to tmp.
     locator_path=tmp_path/"local-locator.json";locator_path.write_text(json.dumps({"schema_version":1,"plugins":{"ntsc-rs":{"source_root":"C:/local/ntsc-rs","aex":{"path":"ntsc-rs.aex","sha256":"a"*64,"size_bytes":1}}}}),encoding="utf-8")
     identity=lambda path,sha,size:{"path":path,"sha256":sha,"size_bytes":size}
-    identities={"aex":identity("plugin/private-name.aex","a"*64,1),"dependencies":[],"input":identity("inputs/private.png","b"*64,1),"runner":identity("runner/private.exe","c"*64,1),"workers":[identity(f"target/worker-{i}.exe",str(i+1)*64,1) for i in range(3)]}
+    identities={"aex":identity("plugin/private-name.aex","a"*64,1),"dependencies":[],"input":identity("inputs/private.png","b"*64,1),"runner":identity("runner/private.exe","c"*64,1),"workers":[identity(f"target/worker-{i}.exe",str(i+1)*64,1) for i in range(worker_count)]}
     report={"identities":identities};result={"classification":"missing_suite","selector":{"render_path":"classic","error_code":7},"missing_suites":[{"name":"PF World Suite","version":2}]};report_bytes=b'{"private":"local-only"}\n'
     monkeypatch.setattr(corpus,"execute_case",lambda *args:(report,result,corpus.hashlib.sha256(report_bytes).hexdigest(),{"manifest.json":b"{}\n","report.json":report_bytes,"run.json":b"{}\n"}))
     monkeypatch.setattr(corpus.sys,"argv",["run-real-aex-corpus.py","--inventory",str(ROOT/"corpus/real-aex-public.json"),"--locator",str(locator_path),"--matrix",str(ROOT/"corpus/common-matrix.json"),"--runner",str(runner),"--input",str(input_path),"--out",str(public),"--private-evidence-out",str(private),"--case-id","case-000001"])
+    if worker_count != 1:
+        with pytest.raises(ValidationError):
+            corpus.main()
+        assert not public.exists() and not private.exists()
+        assert not list(tmp_path.glob(".aexcompat-corpus-*"))
+        return
     assert corpus.main()==0
+    triage = corpus.strict_json(private / "triage.json")
+    assert triage["schema_version"] == 2
+    assert triage["results"][0]["identities"]["workers"] == [
+        {"role": "worker-000", "sha256": "1" * 64, "size_bytes": 1}
+    ]
+    triage_validator = Draft202012Validator(corpus.strict_json(
+        ROOT / "schemas/real-aex-triage-v2.schema.json"
+    ))
+    public_evidence = corpus.strict_json(next((public / "evidence").glob("*.json")))
+    assert public_evidence["schema_version"] == 2
+    public_validator = Draft202012Validator(corpus.strict_json(
+        ROOT / "schemas/real-aex-public-evidence-v2.schema.json"
+    ))
+    for changes in ({"role": "worker-001"}, {"role": "runner"},
+                    {"sha256": "not-a-digest"}, {"private_path": "C:/private/worker.exe"}):
+        bad_triage = copy.deepcopy(triage)
+        bad_triage["results"][0]["identities"]["workers"][0].update(changes)
+        with pytest.raises(ValidationError):
+            triage_validator.validate(bad_triage)
+        bad_public = copy.deepcopy(public_evidence)
+        bad_public["host_identities"]["workers"][0].update(changes)
+        with pytest.raises(ValidationError):
+            public_validator.validate(bad_public)
+    # Historical v1 documents keep their original contract and schema ID.
+    legacy_triage, legacy_public = copy.deepcopy(triage), copy.deepcopy(public_evidence)
+    legacy_triage["schema_version"] = legacy_public["schema_version"] = 1
+    workers = [{"role": f"worker-{i:03d}", "sha256": str(i + 1) * 64, "size_bytes": 1}
+               for i in range(3)]
+    legacy_triage["results"][0]["identities"]["workers"] = workers
+    legacy_public["host_identities"]["workers"] = workers
+    Draft202012Validator(corpus.strict_json(
+        ROOT / "schemas/real-aex-triage.schema.json"
+    )).validate(legacy_triage)
+    Draft202012Validator(corpus.strict_json(
+        ROOT / "schemas/real-aex-public-evidence.schema.json"
+    )).validate(legacy_public)
+    for validator, old in ((triage_validator, legacy_triage), (public_validator, legacy_public)):
+        with pytest.raises(ValidationError):
+            validator.validate(old)
     gaps=json.loads((public/"reproducible-gaps.json").read_text(encoding="utf-8"));Draft202012Validator(json.loads((ROOT/"schemas/real-aex-gaps.schema.json").read_text(encoding="utf-8"))).validate(gaps)
     encoded=(public/"reproducible-gaps.json").read_text(encoding="utf-8")+next((public/"evidence").glob("*.json")).read_text(encoding="utf-8")
     assert "ntsc-rs" not in encoded and "private-name" not in encoded and "case-000001" not in encoded and "0.5" not in encoded

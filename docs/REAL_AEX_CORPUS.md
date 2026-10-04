@@ -37,8 +37,14 @@ python tools/run-real-aex-corpus.py `
 The local source AEX and declared dependencies are first copied through the
 Issue #4 single-handle identity boundary into a private temporary source tree;
 dependency basenames are preserved exactly for PE import resolution. Each
-temporary bundle binds the AEX, dependencies, input, harness, and all three
-native workers, is fully validated, and is deleted before publication.
+temporary bundle binds the AEX, dependencies, input, harness, and the single
+native worker, is fully validated, and is deleted before publication.
+Discovery, Classic, and SmartFX select routes within that worker; they are not
+three executable identities. Current triage and public gap evidence require
+exactly one `worker-000` identity, with `schema_version: 2` validated by
+`real-aex-triage-v2.schema.json` and `real-aex-public-evidence-v2.schema.json`.
+The original v1 schemas retain the three-worker contract for archived packets.
+Do not duplicate a hash into three role aliases or rewrite historical packets.
 
 The private-local triage report retains corpus identities and exact Issue #4
 manifest/report diagnostics for auditability. It is never an attachment and
