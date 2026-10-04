@@ -17,6 +17,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 object = { version = "0.39.1", default-features = false, features = ["read", "pe", "std"] }
 
+[dev-dependencies]
+jsonschema = { version = "0.49.5", default-features = false }
+
 [lib]
 name = "aexcompat_broker"
 path = "src/lib.rs"
