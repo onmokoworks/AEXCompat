@@ -928,6 +928,17 @@ def run_depth(
     ), detail
 
 
+def raw_dump_candidates(dump_dir: Path, role: str, depth: str) -> list[Path]:
+    if not dump_dir.exists():
+        return []
+    # Native dispatch may use another depth from the requested transport. Never
+    # relabel those checkpoints; keep them in outputs/<depth>-worlds instead.
+    matching = sorted(dump_dir.glob(f"*{role}*.{RAW_SUFFIX[depth]}"))
+    # Legacy adapters use untyped .raw files; the final validator still checks
+    # their byte layout and identity. Typed checkpoints take priority.
+    return matching or sorted(dump_dir.glob(f"*{role}*.raw"))
+
+
 def attach_raw_artifacts(
     result: dict[str, Any],
     depth: str,
@@ -939,8 +950,8 @@ def attach_raw_artifacts(
 ) -> None:
     raw_root = bundle_root / "raw" / depth
     raw_root.mkdir(parents=True, exist_ok=True)
-    input_candidates = sorted(dump_dir.glob("*input*")) if dump_dir.exists() else []
-    output_candidates = sorted(dump_dir.glob("*output*")) if dump_dir.exists() else []
+    input_candidates = raw_dump_candidates(dump_dir, "input", depth)
+    output_candidates = raw_dump_candidates(dump_dir, "output", depth)
     raw_input = raw_root / f"input.{RAW_SUFFIX[depth]}"
     if input_candidates:
         shutil.copyfile(input_candidates[-1], raw_input)

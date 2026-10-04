@@ -248,6 +248,82 @@ def test_classic_report_without_world_objects_is_ok(tmp_path):
         "error_code": 0,
     }
 
+@pytest.mark.parametrize("depth", ["argb16", "argb32f"])
+@pytest.mark.parametrize("dump_shape", ["foreign-only", "mixed", "malformed-matching", "no-sidecar"])
+def test_native_raw_attachment_uses_transport_depth_without_hiding_dispatch_depth(
+    tmp_path, monkeypatch, depth, dump_shape
+):
+    module = load_runner_module()
+    manifest_path, _ = fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["requested_depths"] = [depth]
+    manifest["execution"]["render_path"] = "classic"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    if depth == "argb16":
+        native_output = struct.pack("<4H", 32768, 1234, 32766, 2) * 4
+        native_input = b"".join(struct.pack("<H", (sample * 32768 + 127) // 255)
+                                for sample in bytes((10, 20, 30, 255)) * 4)
+    else:
+        native_output = struct.pack("<4f", 0.125, 0.5, 1.25, -0.2) * 4
+        native_input = b"".join(struct.pack("<f", sample / 255.0)
+                                for sample in bytes((10, 20, 30, 255)) * 4)
+    raw = {
+        "passed": True, "render_path": "classic", "pixel_format": depth,
+        "width": 2, "height": 2, "row_bytes": 2 * module.PIXEL_BYTES[depth],
+        "input_world": None, "output_world": None, "parameter_metadata": [],
+        "depth_provenance": {
+            "advertised_depth_supported": False,
+            "planned_dispatch_pixel_bytes": 4, "dispatch_pixel_bytes": 4,
+        },
+    }
+    stdout = json.dumps(raw)
+    output = tmp_path / "native-depth"
+
+    def native_process(command, cwd, environment):
+        preview = Path(command[4])
+        Image.new("RGBA", (2, 2), (1, 2, 3, 255)).save(preview)
+        if dump_shape != "no-sidecar":
+            preview.with_suffix("." + module.RAW_SUFFIX[depth]).write_bytes(native_output)
+        dumps = output / environment["AEXCOMPAT_DUMP_WORLDS_DIR"]
+        dumps.mkdir(parents=True)
+        (dumps / "000-classic-input-2x2.rgba8").write_bytes(b"i" * 16)
+        (dumps / "001-classic-output-2x2.rgba8").write_bytes(b"o" * 16)
+        if dump_shape in {"mixed", "malformed-matching"}:
+            captured_input = native_input[:-1] if dump_shape == "malformed-matching" else native_input
+            (dumps / ("000-classic-input-2x2." + module.RAW_SUFFIX[depth])).write_bytes(captured_input)
+            (dumps / ("001-classic-output-2x2." + module.RAW_SUFFIX[depth])).write_bytes(native_output)
+            (dumps / "999-classic-input-2x2.raw").write_bytes(b"l" * len(native_input))
+            (dumps / "999-classic-output-2x2.raw").write_bytes(b"r" * len(native_output))
+        return 0, stdout, "", False, {
+            "stdout": {"text": stdout, "bytes_kept": len(stdout), "truncated": False},
+        }
+
+    monkeypatch.setattr(module, "copy_native_workers", lambda root: [])
+    monkeypatch.setattr(module, "run_process", native_process)
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--manifest", str(manifest_path), "--out", str(output)])
+    if dump_shape == "malformed-matching":
+        with pytest.raises(ValueError, match="raw_input size does not match input_world layout"):
+            module.main()
+        assert not (output / "report.json").exists()
+        return
+    assert module.main() == (module.RESULT_FAILURE_EXIT_CODE if dump_shape == "no-sidecar" else 0)
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    result = report["results"][0]
+    assert (output / result["raw_input"]["path"]).read_bytes() == native_input
+    if dump_shape == "no-sidecar":
+        assert result["classification"] == "invalid_output"
+        assert result["world"] is None and result["raw_output"] is None
+    else:
+        assert result["classification"] == "ok"
+        assert (output / result["raw_output"]["path"]).read_bytes() == native_output
+        assert result["output_sha256"] == hashlib.sha256(native_output).hexdigest()
+    assert (output / "outputs" / f"{depth}-worlds/000-classic-input-2x2.rgba8").read_bytes() == b"i" * 16
+    assert (output / "outputs" / f"{depth}-worlds/001-classic-output-2x2.rgba8").read_bytes() == b"o" * 16
+    run = json.loads((output / "diagnostics/run.json").read_text(encoding="utf-8"))
+    assert json.loads(run["depths"][depth]["stdout"]["text"]) == raw
+    assert run["status"] == ("completed_with_failures" if dump_shape == "no-sidecar" else "completed")
+
+
 @pytest.mark.parametrize("plugin_kind", ["aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"])
 def test_plugin_kind_maps_to_loader_error(plugin_kind):
     module = load_runner_module()
