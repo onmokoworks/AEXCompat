@@ -22,6 +22,7 @@ NEXTEST_ARCHIVE = Path(
 BROKER = "aexcompat-broker"
 HARNESS = "aexcompat-harness"
 NATIVE_BROKER_TARGETS = {
+    "discovery_session_native",
     "parameter_animation",
     "render_differential_real_aex",
     "render_session_wrapper",
@@ -59,6 +60,7 @@ SILENT_SKIP_PREREQUISITES = (
     "target/instruments-build/pf-wide-time-probe/pf_automatic_wide_time_allowed_probe.aex",
     "target/pf-visual-audio-probe-build/pf-visual-audio-probe/Release/pf_visual_audio_layer_sidecar_probe.aex",
     "target/pf-smart-timed-multilayer-probe-build/Release/pf_smart_timed_multilayer_probe.aex",
+    "target/pf-host-catalog-param-probe-build/Release/pf_host_catalog_param_probe.aex",
 )
 
 
