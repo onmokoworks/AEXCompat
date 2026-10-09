@@ -554,6 +554,7 @@ jobs:
             'build-pf-aegp-render-options4-tail-probe'
             'build-pf-aegp-render-suite5-probe'
             'build-pf-convolve-depth-probe'
+            'build-pf-host-catalog-param-probe'
             'build-pf-parameter-echo-probe'
             'build-pf-layer-param-probe'
             'build-pf-param-utils-animation-probe'
