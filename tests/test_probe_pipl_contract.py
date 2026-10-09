@@ -26,6 +26,7 @@ PROBES = (
     "pf-convolve-depth-probe",
     "pf-fill-premultiply-probe",
     "pf-frame-origin-probe",
+    "pf-host-catalog-param-probe",
     "pf-transfer-mask-probe",
     "pf-transfer-rect-probe",
     "pf-transform-affine-probe",

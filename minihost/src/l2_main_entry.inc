@@ -2502,6 +2502,22 @@ int run_discovery_session(const std::wstring& manifest_argument,
       if (!ok) error_kind = "selector_error";
       if (!checkpoint_written) protocol_violation = true;
     };
+    // Each column starts from the empty mask scene a fresh one-shot process
+    // presents, the per-column fresh-state rule reset_cluster_effect_state
+    // applies to parameter state (issue #1764). Mask and stream ids keep
+    // counting across columns, so they are not the values a fresh process
+    // would hand out. The reset runs after the outgoing plug-in's
+    // GLOBAL_SETDOWN so its own teardown still sees its masks. The reset fails
+    // when a previous column leaked live stream refs, stream values or
+    // AddKeyframes transactions (or when its storage cannot be reserved); the
+    // session cannot present fresh host state then, so it ends as a swap
+    // failure, and the request being served is reported as an invalidated
+    // session rather than inspected.
+    const auto reset_member_mask_scene = [] {
+      if (configure_mask_scene("empty")) return true;
+      std::cerr << "stage:cluster_swap step=mask_scene_reset\n" << std::flush;
+      return false;
+    };
     if (plugin_index != current_index ||
         requested_plugin_data_selector != current_plugin_data_selector) {
       // Swap to plugins[N] (design §4.2): the same column as the render
@@ -2599,6 +2615,10 @@ int run_discovery_session(const std::wstring& manifest_argument,
         // calls belong to that plug-in, and a re-inspect of the current
         // plug-in takes no swap at all (issue #1264).
         aexcompat::worker_runtime::bee_facade::begin_attribution_window();
+        if (!reset_member_mask_scene()) {
+          swap_failure = true;
+          break;
+        }
         inspect_column();
       } else {
         current_global_error = -1;
@@ -2628,6 +2648,10 @@ int run_discovery_session(const std::wstring& manifest_argument,
       // calls belong to that plug-in, and a re-inspect of the current
       // plug-in takes no swap at all (issue #1264).
       aexcompat::worker_runtime::bee_facade::begin_attribution_window();
+      if (!reset_member_mask_scene()) {
+        swap_failure = true;
+        break;
+      }
       inspect_column();
     }
 
@@ -2865,9 +2889,27 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     g_user_changed_param_requested = invocation.user_changed_param_requested;
     g_user_changed_parameters = std::move(invocation.user_changed_parameters);
   }
+  // The layer-scoped suites (mask, mask outline, stream, keyframe, dynamic
+  // stream, path data and path query) are offered on every route, so
+  // discovery and rendering present one suite catalog. A plug-in that probes
+  // the catalog to identify its host registers different parameters when the
+  // catalog differs, and a launch payload built from discovery then no longer
+  // matches the render worker's own parameter table: Sapphire registers its
+  // preset buttons as checkboxes unless PF Path Data Suite is offered at
+  // GLOBAL_SETUP, so it exited 3 before frame 0 (issue #1764). That AE itself
+  // offers these suites at every selector is inferred from that observation,
+  // not from an AE capture.
+  //
+  // A route that did not set a scene up (no mask-context payload, no comp-idle
+  // fixture) gets the empty one: configuring it reserves the mask storage that
+  // live mask and stream handles point into and binds the scene to the host
+  // layer, which the suites must not be offered without.
+  aexcompat::mask_runtime::set_model_enabled(true);
   if (g_aegp_comp_idle_roundtrip_mode) {
-    aexcompat::mask_runtime::set_model_enabled(true);
     if (!configure_mask_scene("rectangle")) return 4;
+  } else if (aexcompat::mask_runtime::mask_scene_id() == "none" &&
+             !configure_mask_scene("empty")) {
+    return 4;
   }
   if (!g_cluster_manifest_path.empty())
     invocation.cluster_manifest_path = g_cluster_manifest_path;
@@ -2880,9 +2922,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     if (!g_dependency_search_dirs.empty()) return 2;
     return run_discovery_session(invocation.cluster_manifest_path, runtime_hooks);
   }
-  // Every rendered effect instance belongs to a layer, even when that layer has no masks.
   if (is_rendering_worker()) {
-    aexcompat::mask_runtime::set_model_enabled(true);
     auto& render_context = aexcompat::render::render_context_state();
     render_context.frame_width = invocation.external_width;
     render_context.frame_height = invocation.external_height;
