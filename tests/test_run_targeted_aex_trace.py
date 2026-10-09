@@ -147,6 +147,8 @@ class _FixtureProcess:
         record = json.loads(path.read_text(encoding="ascii"))
         self.pid = int(record["pid"])
         self._handle = None
+        # Once seen exited, never look at this PID again: it may be recycled.
+        self._exited = False
         if os.name == "nt":
             self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             self._kernel32.WaitForSingleObject.restype = ctypes.c_uint32
@@ -158,17 +160,24 @@ class _FixtureProcess:
             self._kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
             self._handle = int(record["handle"])
             # The handle value came from a file; make sure it is the recorded process.
+            # On a mismatch the value may be some other handle of this process,
+            # so it is neither used nor closed.
             if self._kernel32.GetProcessId(self._handle) != self.pid:
-                raise OSError(ctypes.get_last_error(), f"handle does not name PID {self.pid}")
+                self._handle = None
+                raise AssertionError(f"recorded handle does not name PID {self.pid}")
 
     def __repr__(self) -> str:
         return f"fixture process {self.pid}"
 
     def wait_exit(self, timeout_seconds: float = 5) -> bool:
+        if self._exited:
+            return True
         if self._handle is None:
-            return _wait_for_process_exit(self.pid, timeout_seconds)
+            self._exited = _wait_for_process_exit(self.pid, timeout_seconds)
+            return self._exited
         result = self._kernel32.WaitForSingleObject(self._handle, int(timeout_seconds * 1000))
         if result == 0:  # WAIT_OBJECT_0
+            self._exited = True
             return True
         if result == 258:  # WAIT_TIMEOUT
             return False
@@ -554,14 +563,18 @@ def test_bounded_capture_timeout_cleans_up_descendant(tmp_path):
         + "time.sleep(30)\n"
     )
     parent_code = (
-        "import subprocess,sys,time\n"
+        "import pathlib,subprocess,sys,time\n"
         f"child=subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"record=pathlib.Path({str(child_record)!r})\n"
+        "deadline=time.monotonic()+4\n"
+        "while not record.exists() and time.monotonic()<deadline: time.sleep(.01)\n"
         "time.sleep(30)\n"
     )
     processes = _FixtureProcesses(child_record)
     try:
+        # The timeout leaves room for the descendant to start and record itself.
         completed, timed_out, reason = RUNNER._run_bounded_process(
-            [sys.executable, "-c", parent_code], 2
+            [sys.executable, "-c", parent_code], 5
         )
         assert timed_out
         assert reason == "timeout"
