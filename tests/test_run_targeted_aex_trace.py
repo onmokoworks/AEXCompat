@@ -92,6 +92,138 @@ def _wait_for_process_exit(pid: int, timeout_seconds: float = 5) -> bool:
     return _process_has_exited(pid)
 
 
+# Fixture processes record themselves with this snippet. On Windows a PID is
+# not an identity: once the last handle to an exited process closes, the PID
+# can name an unrelated process, and checking or killing "pid" then observes or
+# terminates that process instead (issue #1763). So each fixture process
+# duplicates a handle to itself into the test process while it is certainly
+# alive, and the test waits on and terminates only through that handle. POSIX
+# keeps the PID-based checks; CI runs this module only on Windows.
+_RECORD_SELF = """
+def _record_self(path, owner_pid):
+    import json, os
+    record = {"pid": os.getpid()}
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k.GetCurrentProcess.restype = wintypes.HANDLE
+        k.DuplicateHandle.restype = wintypes.BOOL
+        k.DuplicateHandle.argtypes = [
+            wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE,
+            ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
+        ]
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        owner = k.OpenProcess(0x40, False, owner_pid)  # PROCESS_DUP_HANDLE
+        if not owner:
+            raise ctypes.WinError(ctypes.get_last_error())
+        duplicated = wintypes.HANDLE()
+        # SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
+        if not k.DuplicateHandle(
+            k.GetCurrentProcess(), k.GetCurrentProcess(), owner,
+            ctypes.byref(duplicated), 0x00100000 | 0x1 | 0x1000, False, 0,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        k.CloseHandle(owner)
+        record["handle"] = duplicated.value
+    staged = path + ".tmp"
+    with open(staged, "w", encoding="ascii") as stream:
+        json.dump(record, stream)
+    os.replace(staged, path)
+"""
+
+
+def _record_self_call(path) -> str:
+    """Fixture source that records the running process for this test process."""
+    return f"_record_self({str(path)!r}, {os.getpid()})\n"
+
+
+class _FixtureProcess:
+    """A fixture process the test observes and stops by identity, not by PID."""
+
+    def __init__(self, path: Path):
+        record = json.loads(path.read_text(encoding="ascii"))
+        self.pid = int(record["pid"])
+        self._handle = None
+        if os.name == "nt":
+            self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            self._kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+            self._kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            self._kernel32.TerminateProcess.restype = ctypes.c_int
+            self._kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            self._kernel32.GetProcessId.restype = ctypes.c_uint32
+            self._kernel32.GetProcessId.argtypes = [ctypes.c_void_p]
+            self._kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            self._handle = int(record["handle"])
+            # The handle value came from a file; make sure it is the recorded process.
+            if self._kernel32.GetProcessId(self._handle) != self.pid:
+                raise OSError(ctypes.get_last_error(), f"handle does not name PID {self.pid}")
+
+    def __repr__(self) -> str:
+        return f"fixture process {self.pid}"
+
+    def wait_exit(self, timeout_seconds: float = 5) -> bool:
+        if self._handle is None:
+            return _wait_for_process_exit(self.pid, timeout_seconds)
+        result = self._kernel32.WaitForSingleObject(self._handle, int(timeout_seconds * 1000))
+        if result == 0:  # WAIT_OBJECT_0
+            return True
+        if result == 258:  # WAIT_TIMEOUT
+            return False
+        raise OSError(ctypes.get_last_error(), f"WaitForSingleObject({self.pid}) failed")
+
+    def stop(self) -> None:
+        """Terminate this fixture process if it is still running, then close it."""
+        try:
+            if self.wait_exit(0):
+                return
+            if self._handle is None:
+                os.kill(self.pid, 9)
+            elif not self._kernel32.TerminateProcess(self._handle, 9):
+                error = ctypes.get_last_error()
+                # TerminateProcess reports ACCESS_DENIED for a process that is
+                # already exiting; anything else, or no exit, is a real failure.
+                if not (error == 5 and self.wait_exit(5)):
+                    raise OSError(error, f"TerminateProcess({self.pid}) failed")
+            assert self.wait_exit(), f"{self!r} did not stop"
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+
+class _FixtureProcesses:
+    """Load each record once, so each duplicated handle has exactly one owner."""
+
+    def __init__(self, *paths: Path):
+        self._paths = paths
+        self._loaded: dict[Path, _FixtureProcess] = {}
+
+    def get(self, path: Path) -> _FixtureProcess:
+        if path not in self._loaded:
+            assert path.exists(), f"fixture process did not record itself in {path.name}"
+            self._loaded[path] = _FixtureProcess(path)
+        return self._loaded[path]
+
+    def stop_all(self) -> None:
+        """Stop every fixture process that recorded itself, even after a failure."""
+        errors = []
+        for path in self._paths:
+            if path not in self._loaded and not path.exists():
+                continue
+            try:
+                self.get(path).stop()
+            except Exception as error:  # keep stopping the others
+                errors.append(error)
+        if errors:
+            raise errors[0]
+
+
 def _fixture(tmp_path):
     worker = tmp_path / "worker"
     plugin = tmp_path / "plugin.aex"
@@ -414,50 +546,56 @@ def test_bounded_capture_enforces_combined_limit(monkeypatch):
 
 
 def test_bounded_capture_timeout_cleans_up_descendant(tmp_path):
-    child_pid_path = tmp_path / "descendant.pid"
+    child_record = tmp_path / "descendant.json"
     child_code = (
-        "import time\n"
-        "time.sleep(30)\n"
+        _RECORD_SELF
+        + "import time\n"
+        + _record_self_call(child_record)
+        + "time.sleep(30)\n"
     )
     parent_code = (
-        "import pathlib,subprocess,sys,time\n"
+        "import subprocess,sys,time\n"
         f"child=subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
-        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
         "time.sleep(30)\n"
     )
-    completed, timed_out, reason = RUNNER._run_bounded_process(
-        [sys.executable, "-c", parent_code], 2
-    )
-    assert timed_out
-    assert reason == "timeout"
-    assert completed.returncode is not None
-    assert child_pid_path.exists(), "parent did not report the descendant PID"
-    child_pid = int(child_pid_path.read_text())
-    assert _wait_for_process_exit(child_pid), f"descendant PID {child_pid} survived"
+    processes = _FixtureProcesses(child_record)
+    try:
+        completed, timed_out, reason = RUNNER._run_bounded_process(
+            [sys.executable, "-c", parent_code], 2
+        )
+        assert timed_out
+        assert reason == "timeout"
+        assert completed.returncode is not None
+        child = processes.get(child_record)
+        assert child.wait_exit(), f"descendant {child!r} survived"
+    finally:
+        processes.stop_all()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job descendant containment")
 @pytest.mark.parametrize("inherit_pipes", [False, True])
 @pytest.mark.parametrize("finish", ["exit", "timeout", "capture_limit"])
 def test_bounded_capture_cleans_descendants(tmp_path, monkeypatch, inherit_pipes, finish):
-    ready = tmp_path / "ready.json"
-    grandchild_ready = tmp_path / "grandchild.pid"
+    ready = tmp_path / "child.json"
+    grandchild_ready = tmp_path / "grandchild.json"
     marker = tmp_path / "escaped.txt"
     grandchild_code = (
-        "import os,pathlib,time\n"
-        f"pathlib.Path({str(grandchild_ready)!r}).write_text(str(os.getpid()))\n"
-        "time.sleep(10)\n"
-        f"pathlib.Path({str(marker)!r}).write_text('escaped')\n"
+        _RECORD_SELF
+        + "import pathlib,time\n"
+        + _record_self_call(grandchild_ready)
+        + "time.sleep(10)\n"
+        + f"pathlib.Path({str(marker)!r}).write_text('escaped')\n"
     )
     child_code = (
-        "import json,os,pathlib,subprocess,sys,time\n"
-        f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}])\n"
-        f"ready=pathlib.Path({str(grandchild_ready)!r})\n"
-        "deadline=time.monotonic()+5\n"
-        "while not ready.exists() and time.monotonic()<deadline: time.sleep(.01)\n"
-        "assert ready.exists()\n"
-        f"pathlib.Path({str(ready)!r}).write_text(json.dumps([os.getpid(),child.pid]))\n"
-        "time.sleep(30)\n"
+        _RECORD_SELF
+        + "import pathlib,subprocess,sys,time\n"
+        + f"child=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}])\n"
+        + f"ready=pathlib.Path({str(grandchild_ready)!r})\n"
+        + "deadline=time.monotonic()+5\n"
+        + "while not ready.exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+        + "assert ready.exists()\n"
+        + _record_self_call(ready)
+        + "time.sleep(30)\n"
     )
     streams = "" if inherit_pipes else ", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
     ending = {
@@ -476,6 +614,8 @@ def test_bounded_capture_cleans_descendants(tmp_path, monkeypatch, inherit_pipes
     )
     monkeypatch.setattr(RUNNER, "MAX_CAPTURE_BYTES", 1024)
     monkeypatch.setattr(RUNNER, "MAX_COMBINED_CAPTURE_BYTES", 1024)
+    # A failing baseline must not leave either fixture descendant running.
+    processes = _FixtureProcesses(ready, grandchild_ready)
     started = time.monotonic()
     try:
         completed, timed_out, reason = RUNNER._run_bounded_process(
@@ -489,19 +629,12 @@ def test_bounded_capture_cleans_descendants(tmp_path, monkeypatch, inherit_pipes
             assert completed.stdout == b"parent done"
         assert len(completed.stdout) + len(completed.stderr) <= 1024
         assert time.monotonic() - started < 5, "inherited pipe delayed cleanup"
-        assert ready.exists()
-        for pid in json.loads(ready.read_text()):
-            assert _wait_for_process_exit(pid, 2), f"descendant PID {pid} survived"
+        for path in (ready, grandchild_ready):
+            descendant = processes.get(path)
+            assert descendant.wait_exit(2), f"descendant {descendant!r} survived"
         assert not marker.exists()
     finally:
-        # A failing baseline must not leave either fixture descendant running.
-        pids = json.loads(ready.read_text()) if ready.exists() else []
-        if grandchild_ready.exists():
-            pids.append(int(grandchild_ready.read_text()))
-        for pid in set(pids):
-            if not _process_has_exited(pid):
-                os.kill(pid, 9)
-                assert _wait_for_process_exit(pid)
+        processes.stop_all()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows suspended launch failure")
@@ -537,17 +670,22 @@ def test_bounded_capture_launch_failure_cleans_owned_process(tmp_path, monkeypat
 
 @pytest.mark.skipif(os.name not in {"nt", "posix"}, reason="process tree cleanup")
 def test_bounded_capture_partial_reader_start_failure_after_parent_exit(tmp_path, monkeypatch):
-    pid_file = tmp_path / "descendant.pid"
+    record = tmp_path / "descendant.json"
     marker = tmp_path / "escaped.txt"
     child_code = (
-        "import pathlib,time\n"
-        "time.sleep(10)\n"
-        f"pathlib.Path({str(marker)!r}).write_text('escaped')\n"
+        _RECORD_SELF
+        + "import pathlib,time\n"
+        + _record_self_call(record)
+        + "time.sleep(10)\n"
+        + f"pathlib.Path({str(marker)!r}).write_text('escaped')\n"
     )
     parent_code = (
-        "import pathlib,subprocess,sys\n"
+        "import pathlib,subprocess,sys,time\n"
         f"child=subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
-        f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+        f"record=pathlib.Path({str(record)!r})\n"
+        "deadline=time.monotonic()+5\n"
+        "while not record.exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+        "assert record.exists()\n"
     )
     launched = []
     popen = subprocess.Popen
@@ -569,22 +707,18 @@ def test_bounded_capture_partial_reader_start_failure_after_parent_exit(tmp_path
 
     monkeypatch.setattr(RUNNER.subprocess, "Popen", record_popen)
     monkeypatch.setattr(RUNNER.threading.Thread, "start", fail_second_start)
+    processes = _FixtureProcesses(record)
     started = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt, match="second reader"):
             RUNNER._run_bounded_process([sys.executable, "-c", parent_code], 15)
         assert time.monotonic() - started < 5
         assert launched[0].stdout.closed and launched[0].stderr.closed
-        assert pid_file.exists()
-        pid = int(pid_file.read_text())
-        assert _wait_for_process_exit(pid, 2), f"descendant PID {pid} survived"
+        descendant = processes.get(record)
+        assert descendant.wait_exit(2), f"descendant {descendant!r} survived"
         assert not marker.exists()
     finally:
-        if pid_file.exists():
-            pid = int(pid_file.read_text())
-            if not _process_has_exited(pid):
-                os.kill(pid, 9)
-                assert _wait_for_process_exit(pid)
+        processes.stop_all()
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
