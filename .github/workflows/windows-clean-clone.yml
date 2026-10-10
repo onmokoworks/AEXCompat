@@ -179,7 +179,10 @@ jobs:
 
       - name: Build the shared Rust test archive
         working-directory: broker
-        run: cargo nextest archive --workspace --locked --archive-file target/nextest-archive.tar.zst
+        # Full locked metadata selects offline only for a populated dependency
+        # cache. Cold cache retains the original online archive command; actual
+        # build failures stay fatal, and no archive is reused across revisions.
+        run: python ../tools/build-broker-test-archive.py
 
       - name: Validate shared archive partition coverage
         run: python tools/run-broker-rust-tests.py validate
