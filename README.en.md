@@ -77,6 +77,8 @@ The AEX and input image are not included in the DMG. The normal path uses only t
 
 Supported image inputs are PNG, JPEG, BMP, TIFF, and WebP; output is PNG. The host also models multiple Layer inputs, time/FPS, downsampling, pixel aspect, sequence state, and mono float32 audio.
 
+On Windows each frame is cut off after 30 s by default. Set `AEXCOMPAT_FRAME_DEADLINE_MS` (milliseconds, 1000 to 600000) before launching the GUI or CLI for an effect whose frames take longer; `render-video-batch` uses it when the request has no `frame_deadline_ms`. `--render-differential`, `--render-performance-diagnostics` and `--render-memory-diagnostics` keep their fixed 30 s.
+
 ## Architecture
 
 ```text

@@ -1335,6 +1335,14 @@ impl InteractiveRenderSession {
         self.session.invalidation().is_some()
     }
 
+    /// The structured reason the session refused further frames (for
+    /// example `frame_deadline`), or `None` while it still renders.
+    pub fn invalidation_reason(&self) -> Option<&'static str> {
+        self.session
+            .invalidation()
+            .map(|invalidation| invalidation.reason)
+    }
+
     /// Renders one frame at `current_time`. `parameters` carries the values
     /// for exactly this frame (protocol §4.2.1); `None` reuses the launch
     /// values. On success the output PNG (8-bit preview, matching the

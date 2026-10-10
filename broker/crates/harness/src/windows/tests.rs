@@ -3,6 +3,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frame_deadline_check_covers_exactly_the_commands_that_read_the_override() {
+        for command in [
+            "--render-experimental",
+            "--render-experimental-smart-32-gpu-auto-policy",
+            "--render-experimental-session-param",
+            "--render-experimental-request",
+            "--render-raw",
+            "--render-exr",
+            "--render-fixture",
+            "--probe-experimental-nop-render",
+            "--probe-experimental-expand-buffer",
+        ] {
+            assert!(uses_interactive_frame_deadline(command), "{command}");
+        }
+        for command in [
+            "--probe-experimental-options-dialog",
+            "--probe-experimental-automatic-options-dialog",
+            "--render-differential",
+            "--render-performance-diagnostics",
+            "--render-memory-diagnostics",
+            "--render-scattermap-fixture",
+            "--inspect-experimental",
+            "--compare-images",
+            "--trigger-experimental-button",
+            "--dispatch-experimental-aegp-idle",
+            "--initialize-experimental-aegp",
+        ] {
+            assert!(!uses_interactive_frame_deadline(command), "{command}");
+        }
+    }
+
+    #[test]
     #[cfg(windows)]
     fn live_still_primary_reopens_on_same_size_source_change() {
         use aexcompat_broker::image_render::{

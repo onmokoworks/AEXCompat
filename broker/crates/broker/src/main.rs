@@ -31,6 +31,13 @@ fn main() {
         std::process::exit(if accepted { 0 } else { 3 });
     }
     if args.len() == 4 && args[1] == "render-video-batch" {
+        // The batch takes its default deadline from AEXCOMPAT_FRAME_DEADLINE_MS
+        // (issue #1769); a malformed value is a configuration error, reported
+        // here because the batch failure below is deliberately opaque.
+        if let Err(error) = aexcompat_broker::image_render::interactive_frame_deadline_ms() {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
         let passed = match aexcompat_broker::render_session::run_video_batch(
             repository,
             &PathBuf::from(&args[2]),

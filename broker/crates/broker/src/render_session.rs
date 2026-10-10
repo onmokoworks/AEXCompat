@@ -4216,11 +4216,18 @@ pub fn run_video_batch(
         .and_then(|count| count.checked_mul(request.time_step))
         .filter(|total| *total > 0)
         .ok_or_else(|| invalid("batch total time overflows"))?;
+    // A request without its own deadline takes the process-wide interactive
+    // one, so AEXCOMPAT_FRAME_DEADLINE_MS widens a batch the same way it
+    // widens the harness (issue #1769).
     let frame_deadline = Duration::from_millis(
-        request
-            .frame_deadline_ms
-            .unwrap_or(INTERACTIVE_RENDER_TIMEOUT_MS)
-            .clamp(1_000, 600_000),
+        match request.frame_deadline_ms {
+            Some(ms) => ms,
+            None => crate::image_render::interactive_frame_deadline_ms()?,
+        }
+        .clamp(
+            crate::image_render::MIN_FRAME_DEADLINE_MS,
+            crate::image_render::MAX_FRAME_DEADLINE_MS,
+        ),
     );
 
     let plugin_path = PathBuf::from(&request.plugin);

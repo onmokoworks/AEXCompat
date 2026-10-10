@@ -95,6 +95,9 @@ bool parse_mask_context_payload(const wchar_t* text) {
   const std::wstring payload = encoded.substr(3);
   if (payload.empty()) {
     g_mask_scene.clear();
+    // Mask handles point into this storage, so it must never reallocate once
+    // the plug-in can create masks (the populated branch below reserves too).
+    g_mask_scene.reserve(kMaxHostMasks);
     g_mask_lifetime = {};
     aexcompat::mask_runtime::set_mask_scene_id("request_v4");
     return true;

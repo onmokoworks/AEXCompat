@@ -94,6 +94,10 @@ function Invoke-Harness([string[]]$Arguments) {
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    # The hang case relies on the default 30 s frame deadline fitting inside
+    # the 45 s wait below; a user-level override (issue #1769) must not reach
+    # the replay.
+    [void]$start.Environment.Remove('AEXCOMPAT_FRAME_DEADLINE_MS')
     $start.Arguments = (($Arguments | ForEach-Object {
         ConvertTo-WindowsCommandLineArgument $_
     }) -join ' ')
