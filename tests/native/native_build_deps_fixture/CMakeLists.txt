@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.20)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+project(native_build_deps_fixture LANGUAGES CXX)
+add_executable(native_build_deps_fixture main.cpp peer.cpp)
+target_compile_features(native_build_deps_fixture PRIVATE cxx_std_17)
