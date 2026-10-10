@@ -16,6 +16,9 @@
 #include "Param_Utils.h"
 #include "SPBasic.h"
 
+#include <cstdlib>
+#include <cstring>
+
 namespace {
 
 constexpr int kCatalogParameter = 1;
@@ -44,6 +47,13 @@ PF_Err params_setup(PF_InData* in_data, PF_OutData* out_data) {
   else
     PF_ADD_CHECKBOXX("Catalog", FALSE, 0, kCatalogParameter);
   out_data->num_params = 2;
+  // Owned-fixture failure controls for session launch diagnostics. These do
+  // not alter the host's validation or run any installed plug-in.
+  const char* failure = std::getenv("AEXCOMPAT_CATALOG_PROBE_FAILURE");
+  if (failure && std::strcmp(failure, "params_setup") == 0)
+    return PF_Err_BAD_CALLBACK_PARAM;
+  if (failure && std::strcmp(failure, "parameter_count") == 0)
+    out_data->num_params = 3;
   return PF_Err_NONE;
 }
 

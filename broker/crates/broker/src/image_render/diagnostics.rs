@@ -703,6 +703,7 @@ fn worker_diagnostics(
         // contract names for them. It aborts immediately after, so without this
         // the abort reads as an unattributed 0xC0000409 crash (issue #777).
         "utility_table_mismatch",
+        "session_launch_validation",
     ];
     let mut events = Vec::new();
     let mut active_stages: Vec<String> = Vec::new();
@@ -767,6 +768,14 @@ fn worker_diagnostics(
                     // because a truncated path is still a path.
                     "reason"
                         if !value.is_empty()
+                            && (stage != "session_launch_validation"
+                                || [
+                                    "params_setup",
+                                    "parameter_count",
+                                    "requested_assignment",
+                                    "external_aux",
+                                ]
+                                .contains(&value))
                             && value.len() <= 32
                             && value
                                 .bytes()
@@ -860,8 +869,77 @@ fn worker_diagnostics(
         "plugin_kind": plugin_kind,
         "minidump": minidump,
         "load_failure": load_failure,
+        "launch_validation_failure": launch_validation_failure(stderr),
         "unhandled_exception": unhandled_exception,
     })
+}
+
+/// Worker stderr is shared with plug-ins. Admit only the exact bounded host
+/// vocabulary/numeric shapes, not truncated free text from a forged marker.
+/// This is an advisory diagnostic hint, not authenticated provenance.
+fn launch_validation_failure(stderr: &str) -> Value {
+    stderr
+        .lines()
+        .find_map(|line| {
+            let detail = line
+                .trim()
+                .strip_prefix("stage:session_launch_validation_end ")?;
+            if detail.len() > 256 {
+                return None;
+            }
+            let mut fields = std::collections::BTreeMap::new();
+            for item in detail.split_whitespace() {
+                let (key, value) = item.split_once('=')?;
+                if fields.insert(key, value).is_some() {
+                    return None;
+                }
+            }
+            if fields.get("error") != Some(&"3") {
+                return None;
+            }
+            let reason = *fields.get("reason")?;
+            match reason {
+                "params_setup" | "parameter_count" | "external_aux" if fields.len() == 2 => {
+                    Some(json!({"reason": reason}))
+                }
+                "requested_assignment" if fields.len() == 6 => {
+                    let slot = fields.get("slot")?.parse::<u32>().ok()?;
+                    if !(1..=1024).contains(&slot) {
+                        return None;
+                    }
+                    let param_type = fields.get("param_type")?.parse::<i32>().ok()?;
+                    let kind = *fields.get("kind")?;
+                    if ![
+                        "integer",
+                        "float",
+                        "color",
+                        "angle",
+                        "point",
+                        "point3d",
+                        "arbitrary_text",
+                    ]
+                    .contains(&kind)
+                    {
+                        return None;
+                    }
+                    let assignment_reason = *fields.get("assignment_reason")?;
+                    if ![
+                        "slot_out_of_range",
+                        "kind_mismatch",
+                        "mask_range",
+                        "numeric_range",
+                    ]
+                    .contains(&assignment_reason)
+                    {
+                        return None;
+                    }
+                    Some(json!({"reason": reason, "slot": slot, "kind": kind,
+                    "param_type": param_type, "assignment_reason": assignment_reason}))
+                }
+                _ => None,
+            }
+        })
+        .unwrap_or(Value::Null)
 }
 
 /// Accept only the bounded, path-free last-chance marker from a worker that

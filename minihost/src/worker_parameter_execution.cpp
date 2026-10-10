@@ -621,9 +621,33 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
 
 
 
+const char* requested_kind_name(parameters::RequestedKind kind) noexcept {
+  switch (kind) {
+    case RequestedKind::Integer: return "integer";
+    case RequestedKind::Float: return "float";
+    case RequestedKind::Color: return "color";
+    case RequestedKind::Angle: return "angle";
+    case RequestedKind::Point: return "point";
+    case RequestedKind::Point3D: return "point3d";
+    case RequestedKind::ArbitraryText: return "arbitrary_text";
+  }
+  return "unknown";
+}
+
 bool validate_requested_assignments(const parameters::RequestedAssignments& requested) {
+  return validate_requested_assignments(requested, nullptr);
+}
+
+bool validate_requested_assignments(const parameters::RequestedAssignments& requested,
+                                    AssignmentValidationFailure* failure) {
+  if (failure) *failure = {};
   for (const auto& assignment : requested) {
-    if (assignment.index < 1 || static_cast<std::size_t>(assignment.index) > runtime().records.size()) return false;
+    const auto reject = [&](const char* reason, int32_t type = -1) {
+      if (failure) *failure = {assignment.index, type, assignment.kind, reason};
+      return false;
+    };
+    if (assignment.index < 1 || static_cast<std::size_t>(assignment.index) > runtime().records.size())
+      return reject("slot_out_of_range");
     const auto& descriptor = runtime().records[static_cast<std::size_t>(assignment.index - 1)];
     const bool integer_compatible = descriptor.type == 1 || descriptor.type == 4 ||
         descriptor.type == 7 || descriptor.type == 12;
@@ -639,12 +663,15 @@ bool validate_requested_assignments(const parameters::RequestedAssignments& requ
         (assignment.kind == parameters::RequestedKind::Angle && !angle_compatible) ||
         (assignment.kind == parameters::RequestedKind::Point && !point_compatible) ||
         (assignment.kind == parameters::RequestedKind::Point3D && !point3d_compatible) ||
-        (assignment.kind == parameters::RequestedKind::ArbitraryText && !arbitrary_compatible) ||
-        (descriptor.type == 12 && (assignment.value < 0 ||
+        (assignment.kind == parameters::RequestedKind::ArbitraryText && !arbitrary_compatible))
+      return reject("kind_mismatch", descriptor.type);
+    if (descriptor.type == 12 && (assignment.value < 0 ||
          assignment.value > static_cast<double>(hooks().active_mask_count()) ||
-         std::trunc(assignment.value) != assignment.value)) ||
-        ((assignment.kind == parameters::RequestedKind::Integer || assignment.kind == parameters::RequestedKind::Float) && descriptor.type != 12 && (!descriptor.has_numeric ||
-         assignment.value < descriptor.valid_min || assignment.value > descriptor.valid_max))) return false;
+         std::trunc(assignment.value) != assignment.value))
+      return reject("mask_range", descriptor.type);
+    if ((assignment.kind == parameters::RequestedKind::Integer || assignment.kind == parameters::RequestedKind::Float) && descriptor.type != 12 && (!descriptor.has_numeric ||
+         assignment.value < descriptor.valid_min || assignment.value > descriptor.valid_max))
+      return reject("numeric_range", descriptor.type);
   }
   return true;
 }
