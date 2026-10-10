@@ -8,6 +8,11 @@ on:
     # 03:00 UTC = 12:00 JST。
     - cron: '0 3 * * *'
   workflow_dispatch:
+    inputs:
+      seed_workspace_qualification:
+        description: 'Temporary owner-only feature-branch workspace-cache qualification seed'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -168,11 +173,14 @@ jobs:
         with:
           rust-workspaces: broker
           cache-key: broker-nextest-archive
+          cache-workspace-crates: 'true'
           python-environment: 'false'
           # PRs only restore; trusted main pushes seed this job's isolated target cache.
           # Do not reuse the nextest archive itself across revisions: broker/build.rs
           # embeds the current Git revision in the test binaries.
-          save-cache: ${{ github.event_name == 'push' }}
+          # Qualification writes stay in the owner's feature-branch cache
+          # scope. Normal PRs still only restore; never seed main via dispatch.
+          save-cache: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.seed_workspace_qualification && github.actor == github.repository_owner && github.ref == 'refs/heads/codex/issue1783-source-keyed-rust-cache') }}
       - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
         with:
           tool: cargo-nextest@0.9.143
