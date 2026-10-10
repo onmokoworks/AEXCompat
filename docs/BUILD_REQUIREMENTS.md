@@ -184,9 +184,21 @@ Ninja + MSVC では、ヘッダ依存は cl の `/showIncludes` 出力を config
 
 実際にこれが起き、全 AEX が GLOBAL_SETUP で access violation を起こす worker が
 できて AviUtl2 のフィルタ登録が 0 件になった (#651)。`minihost/CMakeLists.txt` は
-configure と build の双方に `VSLANG` を固定してこの食い違いを防ぐが、
-**それ以前に作られたビルドディレクトリは壊れたまま**なので、上の検証で落ちたら
-ディレクトリごと削除して configure し直すこと。増分ビルドは復旧しない。
+configure と build の双方に `VSLANG` を固定する。英語のcompiler資源がない環境でも
+文字化けしないよう、`tools/build-native.ps1`は同じbatch内でコンソールをUTF-8に揃える。
+workerをビルドする経路では上の依存追跡検証も実行し、不合格をビルド成功として返さない。
+
+既存cacheの依存追跡が壊れていたら、対象のbuildディレクトリを指定して修復する:
+
+```powershell
+pwsh -File tools\build-native.ps1 -BuildDir target\minihost-build -RepairHeaderDependencies
+```
+
+この操作は生成済みのcompiler probe/dependency情報だけを作り直し、`CMakeCache.txt`の
+カスタムflagsやlauncher設定を残して全体をclean rebuildする。古いABIのobjectを残さないため
+`-Target`との併用は拒否される。修復後の通常ビルドは増分ビルドへ戻る。cacheのsource treeや
+generatorが指定と違う場合や、build pathにjunction等のreparse pointがある場合は、metadataを
+変更せず終了する。修復にはリンク先の実体のbuild pathを指定する。
 
 broker / harness と gate スクリプト (`tools/refresh-sdk-grabba-evidence.ps1` 等)
 はこのパス直下の exe を前提にしているため、multi-config generator

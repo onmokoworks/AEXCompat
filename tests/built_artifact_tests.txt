@@ -4,6 +4,8 @@
 # machine-bound evidence, so a fresh build on any machine (including CI)
 # satisfies them. Run with --run-built-artifact-tests after building the
 # artifacts; see docs/BUILD_REQUIREMENTS.md.
+tests/test_native_build_header_dependencies.py::test_native_build_tracks_shared_abi_header[fresh]
+tests/test_native_build_header_dependencies.py::test_native_build_tracks_shared_abi_header[retained-cache]
 tests/test_aegp_apply_effect.py::test_native_self_test_passes_all_three_workers
 tests/test_active_plugin_context.py::test_spawned_render_threads_activate_and_restore_plugin_context
 tests/test_active_plugin_context.py::test_threaded_default_dispatch_activates_plugin_context
