@@ -2494,6 +2494,95 @@ mod tests {
     }
 
     #[test]
+    fn launch_validation_diagnostics_are_bounded_typed_and_path_free() {
+        let prefix = "stage:session_launch_validation_end ";
+        for reason in ["params_setup", "parameter_count", "external_aux"] {
+            let diag = worker_diagnostics(
+                &format!("{prefix}error=3 reason={reason}\n"),
+                false,
+                "nonzero_exit",
+                3,
+                1,
+            );
+            assert_eq!(diag["launch_validation_failure"], json!({"reason": reason}));
+            assert_eq!(diag["failure_stage"], "session_launch_validation");
+        }
+        for kind in [
+            "integer",
+            "float",
+            "color",
+            "angle",
+            "point",
+            "point3d",
+            "arbitrary_text",
+        ] {
+            for reason in [
+                "slot_out_of_range",
+                "kind_mismatch",
+                "mask_range",
+                "numeric_range",
+            ] {
+                let diag = worker_diagnostics(
+                    &format!(
+                        "{prefix}error=3 reason=requested_assignment slot=1 kind={kind} param_type=15 assignment_reason={reason}\n"
+                    ),
+                    false,
+                    "nonzero_exit",
+                    3,
+                    1,
+                );
+                assert_eq!(
+                    diag["launch_validation_failure"],
+                    json!({
+                        "reason": "requested_assignment", "slot": 1, "kind": kind,
+                        "param_type": 15, "assignment_reason": reason
+                    })
+                );
+            }
+        }
+        for fields in [
+            "error=3 reason=C:\\private\\file",
+            "error=3 reason=private_secret",
+            "error=3 reason=params_setup path=C:\\private\\file",
+            "error=3 reason=params_setup reason=external_aux",
+            "error=0 reason=params_setup",
+            "error=3 reason=requested_assignment slot=1 kind=integer param_type=15",
+            "error=3 reason=requested_assignment slot=0 kind=integer param_type=15 assignment_reason=kind_mismatch",
+            "error=3 reason=requested_assignment slot=1025 kind=integer param_type=15 assignment_reason=kind_mismatch",
+            "error=3 reason=requested_assignment slot=1 kind=C:\\private\\file param_type=15 assignment_reason=kind_mismatch",
+            "error=3 reason=requested_assignment slot=1 kind=integer param_type=C:\\private\\file assignment_reason=kind_mismatch",
+            "error=3 reason=requested_assignment slot=1 kind=integer param_type=2147483648 assignment_reason=kind_mismatch",
+            "error=3 reason=requested_assignment slot=1 kind=integer param_type=15 assignment_reason=C:\\private\\file",
+            "error=3 reason=requested_assignment slot=1 kind=integer param_type=15 assignment_reason=kind_mismatch value=1234567",
+        ] {
+            let diag =
+                worker_diagnostics(&format!("{prefix}{fields}\n"), false, "nonzero_exit", 3, 1);
+            assert!(
+                diag["launch_validation_failure"].is_null(),
+                "{fields}: {diag}"
+            );
+            for secret in ["private", "1234567"] {
+                assert!(!diag.to_string().contains(secret), "{diag}");
+            }
+        }
+        let oversized = format!("{prefix}error=3 reason=params_setup {}\n", "x".repeat(300));
+        assert!(worker_diagnostics(&oversized, false, "nonzero_exit", 3, 1)["launch_validation_failure"].is_null());
+        let recovered = worker_diagnostics(
+            &format!(
+                "{prefix}error=3 reason=params_setup path=secret\n{prefix}error=3 reason=external_aux\n"
+            ),
+            false,
+            "nonzero_exit",
+            3,
+            1,
+        );
+        assert_eq!(
+            recovered["launch_validation_failure"]["reason"],
+            "external_aux"
+        );
+    }
+
+    #[test]
     fn worker_stage_diagnostics_identify_active_and_failed_selectors() {
         let diagnostics = worker_diagnostics(
             "untrusted C:\\private\\plugin\nstage:global_setup_begin\nstage:global_setup_end error=0\nstage:render_begin\n",

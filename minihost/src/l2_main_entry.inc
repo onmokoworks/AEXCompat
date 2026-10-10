@@ -3355,10 +3355,28 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          requested_parameters_json(invocation.ui_event_assignments)});
     return session.finish(ui_event_passed ? 0 : 20);
   }
-  if (is_rendering_worker() && invocation.request_mode &&
-      (params_error != 0 || !parameter_count_contract_valid ||
-                       !validate_requested_assignments(invocation.requested_parameters) ||
-                       !validate_external_aux_parameters())) {
+  const char* launch_validation_reason = nullptr;
+  aexcompat::worker_runtime::parameter_execution::AssignmentValidationFailure assignment_failure;
+  if (is_rendering_worker() && invocation.request_mode) {
+    // Preserve the original short-circuit order: record the first rejecting
+    // check without evaluating a later contract against an invalid table.
+    if (params_error != 0) launch_validation_reason = "params_setup";
+    else if (!parameter_count_contract_valid) launch_validation_reason = "parameter_count";
+    else if (!validate_requested_assignments(invocation.requested_parameters, &assignment_failure))
+      launch_validation_reason = "requested_assignment";
+    else if (!validate_external_aux_parameters()) launch_validation_reason = "external_aux";
+  }
+  if (launch_validation_reason) {
+    // Flush before plug-in teardown, which may itself fault. Only host-owned
+    // enum names and integers are emitted; never ids, paths, names or values.
+    std::cerr << "stage:session_launch_validation_end error=3 reason=" << launch_validation_reason;
+    if (assignment_failure.reason) {
+      std::cerr << " slot=" << assignment_failure.slot
+                << " kind=" << aexcompat::worker_runtime::parameter_execution::requested_kind_name(assignment_failure.kind)
+                << " param_type=" << assignment_failure.param_type
+                << " assignment_reason=" << assignment_failure.reason;
+    }
+    std::cerr << '\n' << std::flush;
     dispose_arbitrary_defaults(entry, input, output);
     if (global_error == 0)
       invoke_global_setdown(entry, input.data(), output.data());

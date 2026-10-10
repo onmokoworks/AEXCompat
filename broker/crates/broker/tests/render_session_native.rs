@@ -6,8 +6,8 @@
 mod windows_e2e {
     use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
     use aexcompat_broker::render_session::{
-        ClusterRenderPlugins, DiscoverySession, InPlaceDiscoverySessionOpenRequest, InspectOutcome,
-        RenderSession, SessionOpenRequest, SwapOutcome,
+        ClusterRenderPlugins, DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest,
+        InspectOutcome, RenderSession, SessionOpenRequest, SwapOutcome,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use aexcompat_broker::secure_launch::LaunchEnvironment;
@@ -53,6 +53,146 @@ mod windows_e2e {
         (0..WIDTH * HEIGHT * 4)
             .map(|index| seed.wrapping_add(index as u8))
             .collect()
+    }
+
+    #[test]
+    fn native_launch_validation_failure_reaches_broker_without_values_or_paths() {
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let worker = source_root.join("target/minihost-build/aex_worker.exe");
+        let probe = source_root.join(
+            "target/pf-host-catalog-param-probe-build/Release/pf_host_catalog_param_probe.aex",
+        );
+        assert!(
+            worker.is_file() && probe.is_file(),
+            "Release worker and catalog probe required"
+        );
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-launch-validation-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        let repository = TempRepository(root);
+        write_freshness_source_marker(&repository.0);
+        let worker_dir = repository.0.join("target/minihost-build");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::copy(worker, worker_dir.join("aex_worker.exe")).unwrap();
+        let plugin = repository.0.join("catalog.aex");
+        std::fs::copy(probe, &plugin).unwrap();
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&plugin).unwrap()));
+        let payload = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+        let sidecar = repository.0.join("private-aux.f32le");
+        std::fs::write(&sidecar, &payload).unwrap();
+        let aux = repository.0.join("aux.json");
+        std::fs::write(
+            &aux,
+            serde_json::json!({
+                "schema": "aux-manifest-v1", "nonce": "1", "channels": [{
+                    "param_index": 1, "type": 0x4450_5448, "name": "Depth",
+                    "data_type": "f32le", "dimension": 1, "width": WIDTH, "height": HEIGHT,
+                    "samples": [{"time": 0, "time_scale": 30, "path": sidecar,
+                        "sampling": "hold", "interpretation": "depth",
+                        "expected_byte_length": payload.len(),
+                        "sha256": format!("{:x}", Sha256::digest(&payload))}]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for (mode, assignment, auxiliary, expected_reason, expected_detail) in [
+            ("none", "v2|", false, "", None),
+            ("params_setup", "v2|", false, "params_setup", None),
+            ("parameter_count", "v2|", false, "parameter_count", None),
+            (
+                "none",
+                "v2|private_id@1:i32=1234567",
+                false,
+                "requested_assignment",
+                Some((1, 15, "kind_mismatch")),
+            ),
+            (
+                "none",
+                "v2|private_id@2:i32=1234567",
+                false,
+                "requested_assignment",
+                Some((2, -1, "slot_out_of_range")),
+            ),
+            ("none", "v2|", true, "external_aux", None),
+        ] {
+            let mut session = RenderSession::open(SessionOpenRequest {
+                companions: Vec::new(),
+                repository: &repository.0,
+                plugin_path: &plugin,
+                plugin_sha256: &sha,
+                parameters: None,
+                payload_override: Some(assignment),
+                parameter_animation: None,
+                aux_manifest: auxiliary.then_some(aux.as_path()),
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                camera_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                dependency_search_dirs: vec![repository.0.clone()],
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default()
+                    .with_child_var("AEXCOMPAT_CATALOG_PROBE_FAILURE", mode),
+            })
+            .expect("contained session launch");
+            let frame = session.render_frame(0, 0, &input_pattern(3));
+            if expected_reason.is_empty() {
+                assert!(matches!(
+                    frame.unwrap().status,
+                    FrameStatus::Rendered { .. }
+                ));
+                let close = session.close();
+                assert_eq!(close["session_clean"], true, "{close}");
+                assert_eq!(close["frames_ok"], 1);
+                assert!(close["worker"]["diagnostics"]["launch_validation_failure"].is_null());
+                continue;
+            }
+            assert!(frame.is_err(), "{expected_reason}");
+            let close = session.close();
+            assert_eq!(close["frames_ok"], 0, "{close}");
+            assert_eq!(close["worker"]["exit_code"], 3, "{close}");
+            let diag = &close["worker"]["diagnostics"];
+            let failure = &diag["launch_validation_failure"];
+            assert_eq!(failure["reason"], expected_reason, "{close}");
+            assert_eq!(
+                diag["last_completed_stage"], "session_launch_validation",
+                "{close}"
+            );
+            if let Some((slot, param_type, reason)) = expected_detail {
+                assert_eq!(failure["slot"], slot);
+                assert_eq!(failure["param_type"], param_type);
+                assert_eq!(failure["kind"], "integer");
+                assert_eq!(failure["assignment_reason"], reason);
+            }
+            let shareable = diag.to_string();
+            for secret in ["private_id", "1234567", "private-aux", "catalog.aex"] {
+                assert!(
+                    !shareable.contains(secret),
+                    "diagnostic leaked {secret}: {diag}"
+                );
+            }
+        }
     }
 
     #[test]
