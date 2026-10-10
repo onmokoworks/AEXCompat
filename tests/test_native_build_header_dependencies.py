@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -64,12 +65,24 @@ def set_header(source, version, wide):
     )
 
 
+@pytest.fixture
+def native_source():
+    # Source is repository-relative by the build entry point's contract. CI's
+    # pytest temp directory can be on another volume, so keep only this tiny
+    # generated source copy beside the repository; output may be on any drive.
+    parent = ROOT / "target"
+    parent.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="native-header-deps-", dir=parent) as scratch:
+        source = Path(scratch) / "source with spaces"
+        shutil.copytree(FIXTURE, source)
+        yield source
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows MSVC build entry point")
 @pytest.mark.parametrize("repair", [False, True], ids=["fresh", "retained-cache"])
-def test_native_build_tracks_shared_abi_header(tmp_path, repair):
-    source = tmp_path / "source with spaces"
+def test_native_build_tracks_shared_abi_header(tmp_path, repair, native_source):
+    source = native_source
     output = tmp_path / "build with spaces"
-    shutil.copytree(FIXTURE, source)
     env = os.environ.copy()
     env.update(TEMP=str(tmp_path), TMP=str(tmp_path), VSLANG="1041")
     build(source, output, env)
