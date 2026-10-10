@@ -26,7 +26,10 @@ int main() {
          +[]() -> const char* { return "argb8"; },
          +[](const char*) -> bool { return true; },
          &aexcompat::world_safety::bounded_argb8_world,
-         world_pixels_owned},
+         world_pixels_owned,
+         +[](const void*, aexcompat::world_registry::AegpWorldSnapshot&) {
+           return aexcompat::world_safety::OwnedWorldResolution::not_owned;
+         }},
         {&calls, &last_x, &last_y, &last_opacity}});
   };
   // This harness has no ownership registry: every world is either

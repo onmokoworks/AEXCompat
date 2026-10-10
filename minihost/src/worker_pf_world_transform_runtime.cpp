@@ -165,7 +165,8 @@ void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
 void configure(const Context& context) {
   g_context = context;
   g_configured = context.hooks.resolve_world &&
-      context.hooks.resolve_dispatch_world_format && context.hooks.pixel_format &&
+      context.hooks.resolve_dispatch_world_format &&
+      context.hooks.snapshot_owned_aegp_pf_world && context.hooks.pixel_format &&
       context.hooks.set_pixel_format && context.hooks.bounded_argb8_world &&
       context.telemetry.calls &&
       context.telemetry.last_x && context.telemetry.last_y &&
@@ -252,14 +253,62 @@ void convert_argb_color(int32_t from_bytes, int32_t to_bytes, const void* in, vo
       static_cast<float*>(out)[channel] = static_cast<float>(normalized);
   }
 }
+
+// Snapshot first under the ownership registry; wait for pixel access only after
+// its lock has been released. The pin outlives the callback's pixel locks, even
+// if AEGP_DisposeWorld removes the handle while a callback waits or runs.
+struct MatteWorldAccess {
+  world_registry::AegpWorldSnapshot owned;
+  unsigned char* pixels{};
+  int32_t rowbytes{}, width{}, height{}, pixel_bytes{};
+
+  bool prepare(void* world, int32_t legacy_bytes = 0) {
+    if (!g_configured || !world) return false;
+    DispatchWorldFormat registered{};
+    if (world_safety::dispatch_world_reference_known(world) &&
+        !resolve_dispatch_world_format(world, registered)) return false;
+    auto resolution = world_safety::OwnedWorldResolution::not_owned;
+    if (g_context.hooks.snapshot_owned_aegp_pf_world)
+      resolution = g_context.hooks.snapshot_owned_aegp_pf_world(world, owned);
+    if (resolution == world_safety::OwnedWorldResolution::rejected) return false;
+    if (resolution == world_safety::OwnedWorldResolution::resolved) {
+      if (!owned.backing_pin) return false;
+      pixel_bytes = owned.pixel_format == kPixelFormatArgb32 ? 4 :
+          (owned.pixel_format == kPixelFormatArgb64 ? 8 :
+           (owned.pixel_format == kPixelFormatArgb128 ? 16 : 0));
+      if (!pixel_bytes) return false;
+      pixels = static_cast<unsigned char*>(owned.world.data);
+      rowbytes = owned.world.rowbytes;
+      width = owned.world.width;
+      height = owned.world.height;
+      return true;
+    }
+    pixel_bytes = legacy_bytes ? legacy_bytes : world_pixel_bytes(world);
+    return resolve_world(world, pixel_bytes, pixels, rowbytes, width, height);
+  }
+};
+
+struct MattePixelLocks {
+  std::unique_lock<std::mutex> first, second;
+  explicit MattePixelLocks(const MatteWorldAccess& a,
+                           const MatteWorldAccess* b = nullptr) {
+    auto* first_backing = a.owned.backing_pin.get();
+    auto* second_backing = b ? b->owned.backing_pin.get() : nullptr;
+    if (first_backing)
+      first = std::unique_lock<std::mutex>(first_backing->pixels_mutex, std::defer_lock);
+    if (second_backing && second_backing != first_backing)
+      second = std::unique_lock<std::mutex>(second_backing->pixels_mutex, std::defer_lock);
+    if (first.mutex() && second.mutex()) std::lock(first, second);
+    else if (first.mutex()) first.lock();
+    else if (second.mutex()) second.lock();
+  }
+};
 }  // namespace
 
 int32_t fill_world_typed(int32_t pixel_bytes, const void* color,
-                         const LegacyRect* requested, void* world) {
-  unsigned char* pixels{};
-  int32_t rowbytes{}, width{}, height{};
-  if (!resolve_world(world, pixel_bytes, pixels, rowbytes, width, height))
-    return fill_matte_denied("fill", "unresolved_world");
+                         const LegacyRect* requested, const MatteWorldAccess& access) {
+  auto* pixels = access.pixels;
+  const auto rowbytes = access.rowbytes, width = access.width, height = access.height;
   const std::array<unsigned char, 16> transparent_black{};
   if (!color) color = transparent_black.data();
   LegacyRect bounds{};
@@ -277,11 +326,14 @@ int32_t fill_world_typed(int32_t pixel_bytes, const void* color,
 // fills the world at the world's own depth, converting the colour into it.
 int32_t fill_matte_fill(int32_t color_bytes, const void* color,
                         const LegacyRect* area, void* world) {
-  const int32_t world_bytes = world_pixel_bytes(world);
-  if (!color) return fill_world_typed(world_bytes, nullptr, area, world);
+  MatteWorldAccess access;
+  if (!access.prepare(world)) return fill_matte_denied("fill", "unresolved_world");
+  MattePixelLocks locks(access);
+  const int32_t world_bytes = access.pixel_bytes;
+  if (!color) return fill_world_typed(world_bytes, nullptr, area, access);
   std::array<unsigned char, 16> converted{};
   convert_argb_color(color_bytes, world_bytes, color, converted.data());
-  return fill_world_typed(world_bytes, converted.data(), area, world);
+  return fill_world_typed(world_bytes, converted.data(), area, access);
 }
 int32_t __cdecl fill_world8(void*, const void* color, const LegacyRect* area, void* world) {
   return fill_matte_fill(4, color, area, world);
@@ -293,18 +345,16 @@ int32_t __cdecl fill_world_float(void*, const void* color, const LegacyRect* are
   return fill_matte_fill(16, color, area, world);
 }
 
-int32_t premultiply_color_typed(int32_t pixel_bytes, void* source_world, const void* matte,
-                                int32_t forward, void* destination_world) {
-  if (!source_world || !destination_world || !matte)
-    return fill_matte_denied("premultiply_color", "null_argument");
-  unsigned char *source{}, *destination{};
-  int32_t source_rowbytes{}, source_width{}, source_height{};
-  int32_t destination_rowbytes{}, destination_width{}, destination_height{};
-  if (!resolve_world(source_world, pixel_bytes, source, source_rowbytes,
-                           source_width, source_height) ||
-      !resolve_world(destination_world, pixel_bytes, destination, destination_rowbytes,
-                           destination_width, destination_height) ||
-      source_width != destination_width || source_height != destination_height)
+int32_t premultiply_color_typed(int32_t pixel_bytes, const MatteWorldAccess& src,
+                                const void* matte, int32_t forward,
+                                const MatteWorldAccess& dst) {
+  auto* source = src.pixels;
+  auto* destination = dst.pixels;
+  const auto source_rowbytes = src.rowbytes, source_width = src.width,
+             source_height = src.height;
+  const auto destination_rowbytes = dst.rowbytes;
+  if (src.pixel_bytes != pixel_bytes || dst.pixel_bytes != pixel_bytes ||
+      source_width != dst.width || source_height != dst.height)
     return fill_matte_denied("premultiply_color", "unresolved_or_size_mismatch");
   const std::size_t packed_row = static_cast<std::size_t>(source_width) * pixel_bytes;
   if (packed_row > SIZE_MAX / static_cast<std::size_t>(source_height))
@@ -359,22 +409,28 @@ int32_t premultiply_color_typed(int32_t pixel_bytes, void* source_world, const v
   return 0;
 }
 
-int32_t __cdecl premultiply_world8(void*, int32_t forward, void* world) {
-  // The matte is black; a 16-byte zero buffer reads as zero in every depth, so
-  // premultiply_color_typed at the world's own depth needs no per-format array.
-  const std::array<unsigned char, 16> black{};
-  return premultiply_color_typed(world_pixel_bytes(world), world, black.data(), forward, world);
-}
 // premultiply_color / _color16 / _color_float name the matte colour's precision;
 // the source and destination worlds carry their own depth (issue #1086).
 int32_t premultiply_color_dispatch(int32_t matte_bytes, void* source, const void* matte,
                                    int32_t forward, void* destination) {
   if (!source || !destination || !matte)
     return fill_matte_denied("premultiply_color", "null_argument");
-  const int32_t world_bytes = world_pixel_bytes(destination);
+  MatteWorldAccess src, dst;
+  // Preserve the old destination-typed legacy route when neither operand has
+  // new owned authority. An owned operand always retains its actual depth;
+  // with an owned destination, independently qualify the source depth too.
+  if (!dst.prepare(destination) ||
+      !src.prepare(source, dst.owned.backing_pin ? 0 : dst.pixel_bytes))
+    return fill_matte_denied("premultiply_color", "unresolved_world");
+  MattePixelLocks locks(src, &dst);
+  const int32_t world_bytes = dst.pixel_bytes;
   std::array<unsigned char, 16> converted{};
   convert_argb_color(matte_bytes, world_bytes, matte, converted.data());
-  return premultiply_color_typed(world_bytes, source, converted.data(), forward, destination);
+  return premultiply_color_typed(world_bytes, src, converted.data(), forward, dst);
+}
+int32_t __cdecl premultiply_world8(void*, int32_t forward, void* world) {
+  const std::array<unsigned char, 16> black{};
+  return premultiply_color_dispatch(16, world, black.data(), forward, world);
 }
 int32_t __cdecl premultiply_color8(void*, void* source, const void* color,
                                    int32_t forward, void* destination) {
