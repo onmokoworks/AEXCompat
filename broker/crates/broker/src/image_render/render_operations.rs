@@ -131,6 +131,12 @@ fn render_audio_via_length_one_session(
         return outcome;
     }
     const SAMPLE_RATE: u32 = 44_100;
+    let frame_deadline_ms = match interactive_frame_deadline_ms() {
+        Ok(ms) => ms,
+        // A malformed override is the caller's configuration error, final
+        // rather than an infrastructure fault.
+        Err(error) => return AudioWrapperOutcome::Failure(error),
+    };
     let samples: Vec<f32> = input
         .chunks_exact(4)
         .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
@@ -152,7 +158,7 @@ fn render_audio_via_length_one_session(
         max_samples: samples.len() as u32,
         channels: 1,
         time_scale: SAMPLE_RATE,
-        frame_deadline: Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        frame_deadline: Duration::from_millis(frame_deadline_ms),
         launch_environment: Default::default(),
     }) {
         Ok(session) => session,
@@ -669,7 +675,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
         "experimental",
         plugin_path,
         &actual,
-        INTERACTIVE_RENDER_TIMEOUT_MS,
+        interactive_frame_deadline_ms()?,
         input_path,
         output_path,
         Some(encode_interactive_payload(parameters)?),
@@ -736,7 +742,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
         "experimental",
         plugin_path,
         &actual,
-        INTERACTIVE_RENDER_TIMEOUT_MS,
+        interactive_frame_deadline_ms()?,
         input_path,
         output_path,
         Some(encode_interactive_payload(parameters)?),
@@ -777,7 +783,7 @@ pub fn render_experimental_image_with_timed_layers(
         "experimental-timed-layers",
         plugin_path,
         &actual,
-        INTERACTIVE_RENDER_TIMEOUT_MS,
+        interactive_frame_deadline_ms()?,
         input_path,
         output_path,
         Some(encode_interactive_payload(parameters)?),
@@ -831,7 +837,7 @@ pub fn render_experimental_image_with_parameter_animation(
         "experimental-parameter-animation",
         plugin_path,
         &actual,
-        INTERACTIVE_RENDER_TIMEOUT_MS,
+        interactive_frame_deadline_ms()?,
         input_path,
         output_path,
         Some(encode_interactive_payload(parameters)?),
@@ -870,7 +876,7 @@ pub fn render_experimental_image_with_audio_sidecar(
         "experimental-audio-sidecar",
         plugin_path,
         &actual,
-        INTERACTIVE_RENDER_TIMEOUT_MS,
+        interactive_frame_deadline_ms()?,
         input_path,
         output_path,
         Some(encode_interactive_payload(parameters)?),
@@ -915,7 +921,7 @@ pub fn render_experimental_artifact_at_time(
         "experimental",
         plugin_path,
         &actual,
-        INTERACTIVE_RENDER_TIMEOUT_MS,
+        interactive_frame_deadline_ms()?,
         input_path,
         output_directory,
         Some(encode_interactive_payload(parameters)?),
@@ -1164,7 +1170,7 @@ pub fn probe_experimental_nop_render(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
+        Some(Duration::from_millis(interactive_frame_deadline_ms()?)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -1211,7 +1217,7 @@ pub fn probe_experimental_smart_nop_render(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
+        Some(Duration::from_millis(interactive_frame_deadline_ms()?)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -1262,7 +1268,7 @@ pub fn probe_experimental_input_buffer_write(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
+        Some(Duration::from_millis(interactive_frame_deadline_ms()?)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -1309,7 +1315,7 @@ pub fn probe_experimental_smart_input_buffer_write(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
+        Some(Duration::from_millis(interactive_frame_deadline_ms()?)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -1367,7 +1373,7 @@ fn probe_experimental_frame_resize(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
+        Some(Duration::from_millis(interactive_frame_deadline_ms()?)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -1455,7 +1461,7 @@ pub fn probe_experimental_persistent_sequence(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
+        Some(Duration::from_millis(interactive_frame_deadline_ms()?)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -1503,7 +1509,7 @@ pub fn probe_experimental_flattened_sequence(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
+        Some(Duration::from_millis(interactive_frame_deadline_ms()?)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -1552,7 +1558,7 @@ pub fn probe_experimental_copied_flattened_sequence(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
+        Some(Duration::from_millis(interactive_frame_deadline_ms()?)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
