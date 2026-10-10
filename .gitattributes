@@ -7,3 +7,8 @@ imports/**/*.aepx -text
 # hygiene rather than a gate: the point is that a clone cannot silently hold a
 # different LICENSE than the one that was licensed.
 LICENSE -text
+
+# Executed #279 packet: its evidence digests bind the generated JSON bytes.
+# Preserve them across Windows checkout instead of rewriting line endings.
+corpus/issue279-20261005/*.json -text
+corpus/issue279-20261005/evidence/*.json -text

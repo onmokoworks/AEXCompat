@@ -1,0 +1,483 @@
+{
+  "bundle_producer": {
+    "sha256": "71e21f43f6e7dacd3a4e5443464791cd73558b58fe0d3abcb5446b696a631ea7",
+    "size_bytes": 52210
+  },
+  "cell_count": 120,
+  "classifications": {
+    "host_validation_error": 48,
+    "nonzero_exit": 14,
+    "ok": 35,
+    "selector_error": 23
+  },
+  "converted_deep_outputs": [
+    {
+      "dispatch_pixel_bytes": 4,
+      "occurrence_count": 2,
+      "plugin_id": "rowbyte-dataglitch",
+      "render_path": "classic",
+      "requested_depth": "argb16"
+    },
+    {
+      "dispatch_pixel_bytes": 4,
+      "occurrence_count": 2,
+      "plugin_id": "rowbyte-dataglitch",
+      "render_path": "classic",
+      "requested_depth": "argb32f"
+    }
+  ],
+  "host_identities": {
+    "input": {
+      "role": "input",
+      "sha256": "59dbddbbae1e3d3266f9a85a57f3d593bec2c7f8f7f12ea3a6a0c409bdebd753",
+      "size_bytes": 3903
+    },
+    "runner": {
+      "role": "runner",
+      "sha256": "bab2b22f0568bd61b48ca690ee64eb0922b41a4fd4b6496a918d72a8832c599e",
+      "size_bytes": 14017536
+    },
+    "workers": [
+      {
+        "role": "worker-000",
+        "sha256": "1731b555aa869a3cfc4b97a3b7bf93d85e71f15def418fd7687a772cef3df16a",
+        "size_bytes": 2430464
+      }
+    ]
+  },
+  "inventory_sha256": "54a71cc5ef6e9509fab08a6bc9838d1e258dd830506ec4070312c93bcfa90aa3",
+  "matrix_sha256": "4d16150649527eb5f28b7022e731586d45dc6839ea5507255273ca8c78a24ac3",
+  "pipl_discovery": [
+    {
+      "aex_sha256": "6d3718868c6c876c3bb370b19cb2bb3c4f89a3a479c29f03ae0d032a5d043b86",
+      "classification": "effect",
+      "entrypoint_win64": "entryPointFunc",
+      "kind_code": "eFKT",
+      "kind_label": "AEEffect",
+      "native_parameter_count": 101,
+      "native_stage_events": [
+        {
+          "errors": {},
+          "stage": "global_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "global_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "params_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "params_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "render",
+          "state": "begin"
+        },
+        {
+          "errors": {},
+          "stage": "frame_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "frame_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "classic_render",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "classic_render",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "frame_setdown",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "frame_setdown",
+          "state": "end"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "render",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "global_setdown",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "global_setdown",
+          "state": "end"
+        }
+      ],
+      "plugin_id": "olm-colorkeep",
+      "size_bytes": 27648,
+      "static_ae_invoked": false,
+      "static_native_load_performed": false
+    },
+    {
+      "aex_sha256": "f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b",
+      "classification": "effect",
+      "entrypoint_win64": "entryPointFunc",
+      "kind_code": "eFKT",
+      "kind_label": "AEEffect",
+      "native_parameter_count": 5,
+      "native_stage_events": [
+        {
+          "errors": {},
+          "stage": "global_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "global_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "params_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "params_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "render",
+          "state": "begin"
+        },
+        {
+          "errors": {},
+          "stage": "frame_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "frame_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "classic_render",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "classic_render",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "frame_setdown",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "frame_setdown",
+          "state": "end"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "render",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "global_setdown",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "global_setdown",
+          "state": "end"
+        }
+      ],
+      "plugin_id": "olm-blur",
+      "size_bytes": 63488,
+      "static_ae_invoked": false,
+      "static_native_load_performed": false
+    },
+    {
+      "aex_sha256": "b1a3f1a701bbef337cb1db32fce64c8bae3929b5737a1f77dfff808bcd5adf80",
+      "classification": "effect",
+      "entrypoint_win64": "EntryPointFunc",
+      "kind_code": "eFKT",
+      "kind_label": "AEEffect",
+      "native_parameter_count": 38,
+      "native_stage_events": [
+        {
+          "errors": {},
+          "stage": "global_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "global_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "params_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "params_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "render",
+          "state": "begin"
+        },
+        {
+          "errors": {},
+          "stage": "frame_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "frame_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "classic_render",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "classic_render",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "frame_setdown",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "frame_setdown",
+          "state": "end"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "render",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "global_setdown",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "global_setdown",
+          "state": "end"
+        }
+      ],
+      "plugin_id": "rowbyte-dataglitch",
+      "size_bytes": 2455552,
+      "static_ae_invoked": false,
+      "static_native_load_performed": false
+    },
+    {
+      "aex_sha256": "56ecf83510cca0d29b295d2a9950d0a394088ba8a3eba5877572f010307809a8",
+      "classification": "effect",
+      "entrypoint_win64": "EntryPointFunc",
+      "kind_code": "eFKT",
+      "kind_label": "AEEffect",
+      "native_parameter_count": 39,
+      "native_stage_events": [
+        {
+          "errors": {},
+          "stage": "global_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "global_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "params_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "params_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "render",
+          "state": "begin"
+        },
+        {
+          "errors": {},
+          "stage": "frame_setup",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "frame_setup",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "classic_render",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "classic_render",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "frame_setdown",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "frame_setdown",
+          "state": "end"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "render",
+          "state": "end"
+        },
+        {
+          "errors": {},
+          "stage": "global_setdown",
+          "state": "begin"
+        },
+        {
+          "errors": {
+            "error": 0
+          },
+          "stage": "global_setdown",
+          "state": "end"
+        }
+      ],
+      "plugin_id": "rowbyte-fastbokeh",
+      "size_bytes": 2127360,
+      "static_ae_invoked": false,
+      "static_native_load_performed": false
+    }
+  ],
+  "plugin_classifications": {
+    "ntsc-rs": {
+      "host_validation_error": 12,
+      "nonzero_exit": 6,
+      "ok": 6
+    },
+    "olm-blur": {
+      "host_validation_error": 12,
+      "ok": 12
+    },
+    "olm-colorkeep": {
+      "host_validation_error": 12,
+      "ok": 7,
+      "selector_error": 5
+    },
+    "rowbyte-dataglitch": {
+      "host_validation_error": 12,
+      "ok": 6,
+      "selector_error": 6
+    },
+    "rowbyte-fastbokeh": {
+      "nonzero_exit": 8,
+      "ok": 4,
+      "selector_error": 12
+    }
+  },
+  "private_triage_sha256": "1ca1546f4d4bffdf361e5aabec6c7be10b2202ac260608f088832b9dc3cee820",
+  "public_gaps_sha256": "1abec3b3600d9903d8833ed04915a6e3541bc1d14c57c1ba62f0c4acf7ca4697",
+  "record_kind": "issue279-matrix-qualification",
+  "schema_version": 1,
+  "source_base_sha": "2b5aef399aadff5d24dfb3eadaa71e31357489ed",
+  "triage_classifications": {
+    "host_validation_error": 62,
+    "ok": 35,
+    "selector_error": 23
+  },
+  "worker_freshness_warning_counts": {
+    "worker_revision_mismatch": 35
+  }
+}

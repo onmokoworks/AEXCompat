@@ -62,6 +62,19 @@ existing size limit in `diagnostics/run.json`; its truncation flag must be check
 Positive worlds are retained; other malformed layouts and zero-size successful outputs
 still fail the existing report validator.
 
+Raw checkpoint selection uses the requested transport's `.rgba8`, `.rgba16le`, or
+`.rgba32f-le` suffix, with untyped `.raw` retained for legacy adapters only when no
+matching typed checkpoint exists. A different-depth checkpoint is never relabeled.
+Without an input checkpoint the known input is converted to the declared transport;
+deep output uses the harness's preserved raw sidecar, never the PNG preview. Missing
+deep output remains `invalid_output`, and malformed matching checkpoints still fail
+strict layout validation. All original checkpoints remain under `outputs/<depth>-worlds`.
+
+The result depth describes the host transport, not necessarily the plug-in's dispatch
+depth. The original native stdout's `depth_provenance` records advertised support and
+planned/actual dispatch pixel bytes; a successful converted transport is not evidence
+of native deep support. Check the existing stdout truncation flag before using it.
+
 ## Agent-facing harness contract
 
 The native harness exposes its existing CLI surface without requiring an agent to parse

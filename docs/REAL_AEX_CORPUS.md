@@ -60,3 +60,8 @@ Each grouped public replay uses `--case-list <PRIVATE_CASE_LIST>`. Create that
 private JSON array from the matching `gap-map.json` `case_ids` entry; the runner
 then selects every occurrence in the group and rejects empty, duplicate,
 malformed, or unknown case ids. The exact case list remains private-local.
+
+An executed five-AEX/120-cell packet for Issue #279, including discovery
+qualification and explicit nonempty-output/failure counts, is available at
+[corpus/issue279-20261005](../corpus/issue279-20261005/README.md).
+It is a dated observation, not an all-cells-success or AE-equivalence claim.
