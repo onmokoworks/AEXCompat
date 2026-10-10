@@ -32,6 +32,23 @@ def _metadata_ids(items: object, label: str) -> set[str]:
     return set(ids)
 
 
+def _cache_miss_kind(stderr: str) -> str:
+    # Report only stable categories: Cargo errors can contain paths, URLs, or
+    # credentials. Do not copy the raw diagnostic into hosted CI logs.
+    message = stderr.lower()
+    if 'no matching package named' in message:
+        return 'missing_index_entry'
+    if 'failed to download' in message and '--offline' in message:
+        return 'missing_crate_archive'
+    if ('unable to update' in message or "can't checkout" in message) and 'offline' in message:
+        return 'missing_git_checkout'
+    if 'lock file' in message and ('needs to be updated' in message or '--locked' in message):
+        return 'locked_input_change'
+    if 'failed to parse manifest' in message or 'failed to load manifest' in message:
+        return 'manifest_error'
+    return 'other'
+
+
 def cached_dependencies_ready(manifest: Path) -> bool:
     # --no-deps would only prove the manifest can be read, not that the locked
     # dependency sources are available. A cache miss keeps the old online path.
@@ -42,6 +59,7 @@ def cached_dependencies_ready(manifest: Path) -> bool:
     )
     if result.returncode:
         print(f'offline_dependency_cache=unavailable metadata_exit={result.returncode}', flush=True)
+        print(f'offline_dependency_cache_kind={_cache_miss_kind(result.stderr)}', flush=True)
         return False
     try:
         metadata = json.loads(result.stdout, object_pairs_hook=_unique_object)

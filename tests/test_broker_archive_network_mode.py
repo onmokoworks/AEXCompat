@@ -66,6 +66,26 @@ def test_cache_miss_keeps_exact_original_online_archive(builder, monkeypatch, tm
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize(('reason', 'kind'), [
+    ('', 'other'),
+    ('error: no matching package named `object` found\nregistry: crates-io', 'missing_index_entry'),
+    ('error: failed to download `object v1.2.3`\n--offline was specified', 'missing_crate_archive'),
+    ('error: unable to update repository in offline mode', 'missing_git_checkout'),
+    ("error: can't checkout git dependency in offline mode", 'missing_git_checkout'),
+    ('the lock file needs to be updated but --locked was passed', 'locked_input_change'),
+    ('failed to parse manifest at C:/private/Cargo.toml', 'manifest_error'),
+    ('failed to load manifest for workspace member', 'manifest_error'),
+    ('unrecognized error: é' * 4096, 'other'),
+], ids=['empty', 'index', 'archive', 'git_update', 'git_checkout', 'lock', 'parse', 'load', 'unknown_unicode'])
+def test_cache_miss_kind_does_not_leak_diagnostic_values(builder, monkeypatch, tmp_path, capsys, reason, kind):
+    reason += '\nprivate C:/Users/secret/project https://user:token@example.invalid/private'
+    monkeypatch.setattr(builder.subprocess, 'run', lambda argv, **kwargs: subprocess.CompletedProcess(argv, 101, '', reason))
+    assert builder.cached_dependencies_ready(tmp_path / 'Cargo.toml') is False
+    output = capsys.readouterr()
+    assert output.out == f'offline_dependency_cache=unavailable metadata_exit=101\noffline_dependency_cache_kind={kind}\n'
+    assert output.err == ''
+
+
 @pytest.mark.parametrize('warm', [True, False])
 def test_actual_archive_failure_is_not_hidden_or_retried(builder, monkeypatch, tmp_path, warm):
     calls = []
