@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,15 @@ def source(tmp_path):
         write(root / name, "fixture input\n")
     shutil.copyfile(SCRIPT, root / "tools" / SCRIPT.name)
     return root
+
+
+@pytest.fixture
+def compiled_targets():
+    # MSVC link.exe cannot create a >MAX_PATH build-script output. pytest's
+    # long node-id directory plus a full SHA256 key exceeds that on hosted CI.
+    # Keep the full key and use a private, short TEMP child (D: locally).
+    with tempfile.TemporaryDirectory(prefix="aex-cache-") as directory:
+        yield Path(directory)
 
 
 def digest(root):
@@ -169,7 +179,7 @@ def build(source, target, revision="one"):
 
 
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="actual Cargo fixture")
-def test_content_key_prevents_stale_cargo_result_and_preserves_revision(source, tmp_path):
+def test_content_key_prevents_stale_cargo_result_and_preserves_revision(source, compiled_targets):
     write(source / "broker" / "Cargo.toml",
           '[workspace]\nresolver="2"\nmembers=["core", "app"]\n')
     write(source / "broker" / "core" / "Cargo.toml",
@@ -190,7 +200,7 @@ def test_content_key_prevents_stale_cargo_result_and_preserves_revision(source, 
     write(source / "broker" / "app" / "src" / "main.rs",
           'fn main(){println!("{},{},{}",cache_fixture_core::answer(),'
           'cache_fixture_core::external(),env!("AEXCOMPAT_BUILD_REVISION"));}\n')
-    targets = tmp_path / "compiled artifacts"
+    targets = compiled_targets
     cargo(["generate-lockfile"], source, targets / "lock-only")
     first = digest(source)
     original_target = targets / first
