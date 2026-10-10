@@ -42,3 +42,31 @@ foreach ($name in $exported.Keys) {
     "$name=$($exported[$name])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     Write-Host "exported $name ($($exported[$name].Length) chars) from $vcvars"
 }
+
+# SDK tests may omit their repeated vcvars call only while this exact exported
+# compiler/include/library environment still agrees. PATH itself can acquire
+# unrelated Actions tools; consumers compare the cl/link it actually resolves.
+function Resolve-ExportedToolPath([string]$tool) {
+    foreach ($entry in $exported['PATH'].Split(';')) {
+        if (-not $entry) { continue }
+        $candidate = Join-Path $entry.Trim('"') $tool
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+    return $null
+}
+$compiler = Resolve-ExportedToolPath 'cl.exe'
+$linker = Resolve-ExportedToolPath 'link.exe'
+$state = ''
+if ($compiler -and $linker) {
+    $state = [ordered]@{
+        installation = $installation
+        compiler = $compiler
+        linker = $linker
+        include = $exported['INCLUDE']
+        lib = $exported['LIB']
+        libpath = $(if ($exported.ContainsKey('LIBPATH')) { $exported['LIBPATH'] } else { '' })
+    } | ConvertTo-Json -Compress
+}
+"AEXCOMPAT_MSVC_ENV_STATE=$state" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

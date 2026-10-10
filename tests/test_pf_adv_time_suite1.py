@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import _msvc_compile
-from _msvc_compile import compile_driver
+from _msvc_compile import compile_driver, msvc_setup_prefix
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
@@ -59,7 +59,7 @@ def run_in_vs_environment(command, *, cwd=None, timeout=420):
     with tempfile.TemporaryDirectory() as directory:
         script = Path(directory) / "run.bat"
         script.write_text(
-            f'@call "{vs_root}\\VC\\Auxiliary\\Build\\vcvars64.bat" >nul\n{command}\n',
+            msvc_setup_prefix(vs_root) + f'{command}\n',
             encoding="ascii",
         )
         subprocess.run([str(script)], cwd=cwd, check=True, timeout=timeout)
@@ -90,6 +90,8 @@ int main() { return 0; }
         probe.write_text(source, encoding="ascii")
         command = _compile_command(probe, Path(directory), SDK_HEADERS)
         run_in_vs_environment(command, timeout=120)
+        obj = (Path(directory) / 'probe.obj').read_bytes()
+        assert len(obj) > 20 and int.from_bytes(obj[:2], 'little') == 0x8664
 
 
 def test_sdk_compile_command_honors_the_configured_cache(monkeypatch):

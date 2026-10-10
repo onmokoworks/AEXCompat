@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from _msvc_compile import msvc_setup_prefix
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
@@ -68,7 +70,6 @@ int main() {
 }
 '''
     installation = _visual_studio_installation()
-    vcvars = installation / "VC/Auxiliary/Build/vcvars64.bat"
     temporary_directory = tempfile.TemporaryDirectory(prefix="pf-adv-app-suite1-")
     try:
         directory = Path(temporary_directory.name)
@@ -77,7 +78,7 @@ int main() {
         build_script = directory / "build-probe.bat"
         probe.write_text(source, encoding="ascii")
         build_script.write_text(
-            f'@call "{vcvars}" >nul\n@cl /nologo /EHsc /std:c++17 '
+            msvc_setup_prefix(installation) + '@cl /nologo /EHsc /std:c++17 '
             f'/DWIN32 /D_WINDOWS /I"{SDK_HEADERS}" /I"{SDK_HEADERS / "SP"}" '
             f'/I"{SDK_HEADERS.parent / "Util"}" '
             f'"{probe}" /Fe:"{executable}"\n',
@@ -87,6 +88,10 @@ int main() {
                        cwd=directory, timeout=180)
         result = subprocess.run([str(executable)], check=True, capture_output=True,
                                 text=True, timeout=30)
+        image = executable.read_bytes()
+        pe = int.from_bytes(image[0x3c:0x40], 'little')
+        assert image[pe:pe + 4] == b'PE\0\0'
+        assert int.from_bytes(image[pe + 4:pe + 6], 'little') == 0x8664
     finally:
         _cleanup_with_windows_lock_retry(temporary_directory.cleanup)
     payload = json.loads(result.stdout)
