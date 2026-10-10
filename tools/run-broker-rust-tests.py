@@ -26,6 +26,7 @@ NATIVE_BROKER_TARGETS = {
     "parameter_animation",
     "render_differential_real_aex",
     "render_session_wrapper",
+    "render_session_native",
     "resident_session_live",
     "smart_cpu_sealed_render",
 }
@@ -55,6 +56,8 @@ SILENT_SKIP_PREREQUISITES = (
     # One binary serves every route since #1495, so naming it once covers what
     # the discovery and classic executables used to cover separately.
     "target/minihost-build/aex_worker.exe",
+    "target/minihost-build/worker_session_detach_fixture.dll",
+    "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
     "target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex",
     "target/pf-param-utils-animation-probe-build/Release/pf_param_utils_animation_probe.aex",
     "target/instruments-build/pf-wide-time-probe/pf_automatic_wide_time_allowed_probe.aex",
