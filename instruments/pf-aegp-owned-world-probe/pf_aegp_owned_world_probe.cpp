@@ -1,6 +1,7 @@
 #include "AEConfig.h"
 #include "entry.h"
 #include "AE_Effect.h"
+#include "AE_EffectCBSuites.h"
 #include "AE_GeneralPlug.h"
 
 #include <cstddef>
@@ -37,7 +38,8 @@ PF_Err global_setup(PF_InData* in_data, PF_OutData* out_data) {
   return err;
 }
 
-PF_Err exercise_depth(const AEGP_WorldSuite3* worlds, AEGP_WorldType expected,
+PF_Err exercise_depth(const AEGP_WorldSuite3* worlds, const PF_FillMatteSuite2* matte,
+                      PF_ProgPtr effect_ref, AEGP_WorldType expected,
                       A_long width, A_long height) {
   AEGP_WorldH world = nullptr;
   PF_Err err = static_cast<PF_Err>(worlds->AEGP_New(
@@ -72,6 +74,27 @@ PF_Err exercise_depth(const AEGP_WorldSuite3* worlds, AEGP_WorldType expected,
        expected == AEGP_WorldType_16 ? (!base8 || !base32) : (!base8 || !base16))))
     err = PF_Err_BAD_CALLBACK_PARAM;
 
+  // The colour's precision does not determine the owned world's storage.
+  // Exercise all backing depths from this ordinary 8bpc render session and
+  // verify every component, including float HDR that cannot fit in 16bpc.
+  const PF_PixelFloat colour{1.0f, 0.125f, 0.5f, 1.75f};
+  const PF_Pixel8 expected8{255, 32, 128, 255};
+  const PF_Pixel16 expected16{32768, 4096, 16384, 32768};
+  const void* expected_pixel = expected == AEGP_WorldType_8 ? static_cast<const void*>(&expected8) :
+      expected == AEGP_WorldType_16 ? static_cast<const void*>(&expected16) : static_cast<const void*>(&colour);
+  if (!err) err = matte->fill_float(effect_ref, &colour, nullptr, &projection);
+  if (!err) {
+    for (A_long y = 0; y < height && !err; ++y) {
+      const auto* row = static_cast<const unsigned char*>(selected) + static_cast<size_t>(y) * rowbytes;
+      for (A_long x = 0; x < width; ++x) {
+        if (std::memcmp(row + static_cast<size_t>(x) * pixel_size, expected_pixel, pixel_size)) {
+          err = PF_Err_BAD_CALLBACK_PARAM;
+          break;
+        }
+      }
+    }
+  }
+
   if (world) {
     AEGP_WorldH stale = world;
     keep_first(err, worlds->AEGP_Dispose(world));
@@ -87,6 +110,7 @@ PF_Err render(PF_InData* in_data, PF_LayerDef* output) {
   if (!in_data || !in_data->pica_basicP || !output || !output->data || !g_plugin_id)
     return PF_Err_BAD_CALLBACK_PARAM;
   const AEGP_WorldSuite3* worlds = nullptr;
+  const PF_FillMatteSuite2* matte = nullptr;
   PF_Err err = static_cast<PF_Err>(in_data->pica_basicP->AcquireSuite(
       kAEGPWorldSuite, kAEGPWorldSuiteVersion3,
       reinterpret_cast<const void**>(&worlds)));
@@ -95,6 +119,10 @@ PF_Err render(PF_InData* in_data, PF_LayerDef* output) {
       !worlds->AEGP_GetBaseAddr8 || !worlds->AEGP_GetBaseAddr16 ||
       !worlds->AEGP_GetBaseAddr32 || !worlds->AEGP_FillOutPFEffectWorld))
     err = PF_Err_INVALID_CALLBACK;
+  if (!err) err = static_cast<PF_Err>(in_data->pica_basicP->AcquireSuite(
+      kPFFillMatteSuite, kPFFillMatteSuiteVersion2,
+      reinterpret_cast<const void**>(&matte)));
+  if (!err && (!matte || !matte->fill_float)) err = PF_Err_INVALID_CALLBACK;
 
   AEGP_WorldH invalid = nullptr;
   if (!err && (worlds->AEGP_New(g_plugin_id, AEGP_WorldType_8, 4, 3, nullptr) == A_Err_NONE ||
@@ -108,10 +136,18 @@ PF_Err render(PF_InData* in_data, PF_LayerDef* output) {
     err = PF_Err_BAD_CALLBACK_PARAM;
 
   const AEGP_WorldType depths[] = {AEGP_WorldType_8, AEGP_WorldType_16, AEGP_WorldType_32};
-  for (AEGP_WorldType depth : depths) if (!err) err = exercise_depth(worlds, depth, 11, 7);
+  for (AEGP_WorldType depth : depths) if (!err) err = exercise_depth(worlds, matte, in_data->effect_ref, depth, 11, 7);
+  if (matte) keep_first(err, in_data->pica_basicP->ReleaseSuite(
+      kPFFillMatteSuite, kPFFillMatteSuiteVersion2));
   if (worlds) keep_first(err, in_data->pica_basicP->ReleaseSuite(
       kAEGPWorldSuite, kAEGPWorldSuiteVersion3));
-  if (!err) std::memset(output->data, 0, static_cast<size_t>(output->rowbytes) * output->height);
+  if (!err) {
+    const PF_Pixel8 colour{255, 32, 128, 255};
+    for (A_long y = 0; y < output->height; ++y) {
+      auto* row = reinterpret_cast<unsigned char*>(output->data) + static_cast<size_t>(y) * output->rowbytes;
+      for (A_long x = 0; x < output->width; ++x) std::memcpy(row + static_cast<size_t>(x) * sizeof(colour), &colour, sizeof(colour));
+    }
+  }
   return err;
 }
 }  // namespace

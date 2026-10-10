@@ -52,6 +52,12 @@ from _native_selftest import ROOT, locate, run
             id="worker-pf-bad-callback-param",
         ),
         pytest.param(
+            "worker_aegp_pf_matte_selftest.exe",
+            "aegp_pf_matte",
+            {},
+            id="worker-aegp-pf-matte",
+        ),
+        pytest.param(
             "worker_aegp_scene_model_selftest.exe",
             "scene_model",
             {
@@ -80,6 +86,17 @@ from _native_selftest import ROOT, locate, run
 def test_json_standalone_selftest(executable, report_key, expected):
     report = run(executable, report_key)
     assert {key: report[key] for key in expected} == expected
+
+
+def test_aegp_pf_matte_rejects_missing_owned_authority():
+    completed = subprocess.run(
+        [str(locate("worker_aegp_pf_matte_selftest.exe")), "--without-owned-resolution"],
+        cwd=ROOT, capture_output=True, text=True, timeout=30,
+    )
+    # Removing the required ownership hook must fail configuration and the
+    # matrix, rather than permit a wrong-depth fallback or print success.
+    assert completed.returncode == 1, (completed.stdout, completed.stderr)
+    assert not completed.stdout
 
 
 @pytest.mark.parametrize(

@@ -201,6 +201,8 @@ tests/test_standalone_native_selftests.py::test_json_standalone_selftest[aex-str
 tests/test_standalone_native_selftests.py::test_json_standalone_selftest[extended-inter-memory]
 tests/test_standalone_native_selftests.py::test_json_standalone_selftest[worker-report-json]
 tests/test_standalone_native_selftests.py::test_json_standalone_selftest[worker-pf-bad-callback-param]
+tests/test_standalone_native_selftests.py::test_json_standalone_selftest[worker-aegp-pf-matte]
+tests/test_standalone_native_selftests.py::test_aegp_pf_matte_rejects_missing_owned_authority
 tests/test_standalone_native_selftests.py::test_json_standalone_selftest[worker-aegp-scene-model]
 tests/test_standalone_native_selftests.py::test_json_standalone_selftest[worker-suite-registry]
 tests/test_standalone_native_selftests.py::test_exit_only_standalone_selftest[l2-mode-execution]

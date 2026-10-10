@@ -96,6 +96,11 @@ enum class UnregisterBorrowedViewResult {
 };
 UnregisterBorrowedViewResult unregister_borrowed_view(void** handle);
 bool snapshot_aegp_world(void** handle, AegpWorldSnapshot& snapshot);
+// Callback-local authority for exact PF projections of live AEGP_New worlds.
+// A resolved snapshot pins storage, but callers must lock pixels_mutex before
+// accessing pixels. A known base with altered geometry is rejected, not legacy.
+world_safety::OwnedWorldResolution snapshot_owned_aegp_pf_world(
+    const void* world, AegpWorldSnapshot& snapshot);
 bool snapshot_platform_world(void* handle,
                              std::shared_ptr<PlatformWorldBacking>& backing);
 bool adopt_platform_world(void* handle,

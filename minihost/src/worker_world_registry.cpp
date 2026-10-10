@@ -340,6 +340,44 @@ bool hosts_world_pixels(void* world) {
   return false;
 }
 
+world_safety::OwnedWorldResolution snapshot_owned_aegp_pf_world(
+    const void* world, AegpWorldSnapshot& snapshot) {
+  using world_safety::OwnedWorldResolution;
+  snapshot = {};
+  if (!world) return OwnedWorldResolution::not_owned;
+  world_safety::LocalEffectWorld descriptor{};
+  std::memcpy(&descriptor, world, sizeof(descriptor));
+  RegistryLock lock;
+  for (const auto& [handle, view] : g_aegp_views) {
+    (void)handle;
+    if (!view.owned_aegp || !view.platform_backing) continue;
+    const auto& backing = view.platform_backing;
+    const auto& canonical = backing->world;
+    const auto candidate = reinterpret_cast<uintptr_t>(descriptor.data);
+    const auto base = reinterpret_cast<uintptr_t>(canonical.data);
+    // A copied descriptor pointing inside (or one past) this known allocation
+    // is not a foreign world. Refuse it before the declared-stride fallback;
+    // only exact canonical projections have backing authority in this API.
+    if (candidate < base || candidate - base > backing->pixels.size()) continue;
+    if (candidate != base) return OwnedWorldResolution::rejected;
+    const int32_t pixel_bytes = bytes_per_pixel(backing->pixel_format);
+    if (!pixel_bytes || canonical.data != backing->pixels.data() ||
+        canonical.width <= 0 || canonical.height <= 0 ||
+        canonical.rowbytes < static_cast<int64_t>(canonical.width) * pixel_bytes ||
+        static_cast<uint64_t>(canonical.rowbytes) * canonical.height >
+            backing->pixels.size() ||
+        descriptor.rowbytes != canonical.rowbytes ||
+        descriptor.width != canonical.width || descriptor.height != canonical.height)
+      return OwnedWorldResolution::rejected;
+    snapshot.world = canonical;
+    snapshot.pixel_format = backing->pixel_format;
+    snapshot.backing_pin = backing;
+    snapshot.disposable = true;
+    return OwnedWorldResolution::resolved;
+  }
+  return OwnedWorldResolution::not_owned;
+}
+
 bool owned_world_matches(void* world, int32_t pixel_format) {
   RegistryLock lock;
   const auto found = g_worlds.find(world_pixels(world));

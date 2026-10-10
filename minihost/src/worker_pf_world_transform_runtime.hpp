@@ -1,6 +1,7 @@
 #pragma once
 
 #include "worker_world_safety.hpp"
+#include "worker_world_registry.hpp"
 
 #include <cstdint>
 
@@ -26,6 +27,8 @@ struct Hooks {
   // (`world_safety::dispatch_world_reference_known`). Null disables the
   // fallback outright.
   bool (*world_pixels_owned)(void*){};
+  world_safety::OwnedWorldResolution (*snapshot_owned_aegp_pf_world)(
+      const void*, world_registry::AegpWorldSnapshot&){};
 };
 
 struct Telemetry {
