@@ -248,6 +248,38 @@ issue #1495 で worker は `aex_worker.exe` 1 本 (discovery/classic/smart を
 件数と内訳を明記し、CI を権威にする。fail が上の表に無い、または diff に接触する
 なら環境要因扱いにしない。
 
+### 6.1 Windows trace fixture と実行エイリアスの境界
+
+`test_run_targeted_aex_trace.py` の偽プロセスは、Windowsでは
+`QueryFullProcessImageNameW(GetCurrentProcess())` で得た実行中interpreterの
+実体exeを起動する。`sys.executable` がvenv redirector／Windows Storeの
+実行エイリアスを指す場合、割り当てたleaderと、実際にPythonコードを実行する
+プロセスが別になることがある (#1771)。これをJob継承の試験と混同しない。
+子fixtureが使うのは標準ライブラリだけで、venvのsite-packagesには依存しない。
+
+#1771 の同一Codex・Python 3.11.9環境で、capture Jobは`0x2000`
+(kill-on-close)、callerのJobは`0x3000`だった。redirector経由ではleaderだけが
+capture Job内、held handleで照会したchild/grandchildはJob外で生存した。
+実体exeに切り替えると同じ外側Jobのまま全員がcapture Jobに所属し、終了した。
+この対照試験は「外側Jobのsilent-breakawayだけが原因」という推定を支持しない。
+`python.exe`と`python3.11.exe`は同じバイト列でも別の起動identityなので、
+SHA一致だけではなく、それぞれの実行で所属・終了を確認した。
+
+既存6ケース (leader先行exit／timeout／capture overflow × pipe継承有無) は、
+終了前にleaderのJob所属と、child/grandchildのheld handleによるJob所属・
+実行画像identityを確認し、終了後のsurvivor、marker、capture上限、時間上限も
+検証する。観察のためにJob handleを複製・保持するとkill-on-closeを変えて
+しまうため、所属照会は元のhandleを閉じる直前に行う。
+
+これはfixtureの修正と検証範囲の明確化であり、trace runnerを任意のactivation
+alias対応にしたものではない。Windowsのtrace captureで検証済みのworker起動は、
+直接`CreateProcess`で実行され、子孫がcapture Jobを継承する実体exeの経路。
+Job外のサービス／app activationへ処理を委譲する起動は、この子孫終了保証に
+含まれない。`tools/run_targeted_aex_trace.py`のruntime admission、Job limit、
+cleanupは変更しておらず、新しい許可ゲートやskipも追加していない。
+APIの契約は[QueryFullProcessImageNameW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew)と
+[IsProcessInJob](https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob)を参照。
+
 ---
 
 この文書は実装状態と運用の記述で、方針の正本は `CLAUDE.md`。

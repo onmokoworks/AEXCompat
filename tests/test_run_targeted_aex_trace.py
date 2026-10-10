@@ -25,6 +25,39 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
+def _fixture_interpreter_executable() -> str:
+    """Launch the running interpreter image, not a Store activation redirector.
+
+    These fixtures test descendants created inside the assigned process. On
+    Windows, sys.executable can instead name a venv/Store redirector whose
+    activated interpreter is not that process (issue #1771). Query our own
+    process image without changing the outer Job or admitting new worker routes.
+    The child fixtures use only the interpreter's standard library.
+    """
+    if os.name != "nt":
+        return sys.executable
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    image = ctypes.create_unicode_buffer(32768)
+    size = wintypes.DWORD(len(image))
+    if not kernel32.QueryFullProcessImageNameW(
+        kernel32.GetCurrentProcess(), 0, image, ctypes.byref(size)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    assert 0 < size.value < len(image), "fixture interpreter image is not bounded"
+    return image.value
+
+
+_FIXTURE_PYTHON = _fixture_interpreter_executable()
+
+
 def _sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -157,6 +190,15 @@ class _FixtureProcess:
             self._kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
             self._kernel32.GetProcessId.restype = ctypes.c_uint32
             self._kernel32.GetProcessId.argtypes = [ctypes.c_void_p]
+            self._kernel32.IsProcessInJob.restype = ctypes.c_int
+            self._kernel32.IsProcessInJob.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)
+            ]
+            self._kernel32.QueryFullProcessImageNameW.restype = ctypes.c_int
+            self._kernel32.QueryFullProcessImageNameW.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_uint32),
+            ]
             self._kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
             self._handle = int(record["handle"])
             # The handle value came from a file; make sure it is the recorded process.
@@ -168,6 +210,24 @@ class _FixtureProcess:
 
     def __repr__(self) -> str:
         return f"fixture process {self.pid}"
+
+    def in_job(self, job_handle: int) -> bool:
+        assert self._handle is not None, "Job query requires the owned process handle"
+        result = ctypes.c_int()
+        if not self._kernel32.IsProcessInJob(self._handle, job_handle, ctypes.byref(result)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return bool(result.value)
+
+    def image_matches_fixture(self) -> bool:
+        assert self._handle is not None, "image query requires the owned process handle"
+        image = ctypes.create_unicode_buffer(32768)
+        size = ctypes.c_uint32(len(image))
+        if not self._kernel32.QueryFullProcessImageNameW(
+            self._handle, 0, image, ctypes.byref(size)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        assert 0 < size.value < len(image), "fixture process image is not bounded"
+        return Path(image.value).samefile(_FIXTURE_PYTHON)
 
     def wait_exit(self, timeout_seconds: float = 5) -> bool:
         if self._exited:
@@ -527,7 +587,7 @@ def test_bounded_capture_stops_oversized_stream(stream_name, monkeypatch):
         " os.write(fd, b'x' * 4096)\n"
     )
     completed, timed_out, reason = RUNNER._run_bounded_process(
-        [sys.executable, "-c", code], 5
+        [_FIXTURE_PYTHON, "-c", code], 5
     )
     assert not timed_out
     assert reason == "capture_limit"
@@ -545,7 +605,7 @@ def test_bounded_capture_enforces_combined_limit(monkeypatch):
         "os.write(2, b'e' * 700)\n"
     )
     completed, timed_out, reason = RUNNER._run_bounded_process(
-        [sys.executable, "-c", code], 5
+        [_FIXTURE_PYTHON, "-c", code], 5
     )
     assert not timed_out
     assert reason == "capture_limit"
@@ -574,7 +634,7 @@ def test_bounded_capture_timeout_cleans_up_descendant(tmp_path):
     try:
         # The timeout leaves room for the descendant to start and record itself.
         completed, timed_out, reason = RUNNER._run_bounded_process(
-            [sys.executable, "-c", parent_code], 5
+            [_FIXTURE_PYTHON, "-c", parent_code], 5
         )
         assert timed_out
         assert reason == "timeout"
@@ -629,10 +689,42 @@ def test_bounded_capture_cleans_descendants(tmp_path, monkeypatch, inherit_pipes
     monkeypatch.setattr(RUNNER, "MAX_COMBINED_CAPTURE_BYTES", 1024)
     # A failing baseline must not leave either fixture descendant running.
     processes = _FixtureProcesses(ready, grandchild_ready)
+    before_close_membership = {}
+    leader_membership = []
+    original_assign = RUNNER._WindowsCaptureJob.assign_and_resume
+    original_close = RUNNER._WindowsCaptureJob.close
+
+    def record_leader_assignment(job, process):
+        original_assign(job, process)
+        query = job._kernel32.IsProcessInJob
+        query.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+        query.restype = ctypes.c_int
+        result = ctypes.c_int()
+        if not query(int(process._handle), job._job, ctypes.byref(result)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        leader_membership.append(bool(result.value))
+
+    def record_membership_then_close(job):
+        try:
+            if job._job:
+                for path in (ready, grandchild_ready):
+                    if path.exists():
+                        descendant = processes.get(path)
+                        before_close_membership[path.name] = {
+                            "in_capture_job": descendant.in_job(job._job),
+                            "image_matches_fixture": descendant.image_matches_fixture(),
+                        }
+        finally:
+            # Never retain/duplicate a Job handle for observation: that would
+            # prevent last-handle kill-on-close and change what the test proves.
+            original_close(job)
+
+    monkeypatch.setattr(RUNNER._WindowsCaptureJob, "close", record_membership_then_close)
+    monkeypatch.setattr(RUNNER._WindowsCaptureJob, "assign_and_resume", record_leader_assignment)
     started = time.monotonic()
     try:
         completed, timed_out, reason = RUNNER._run_bounded_process(
-            [sys.executable, "-c", parent_code], 2 if finish == "timeout" else 15
+            [_FIXTURE_PYTHON, "-c", parent_code], 2 if finish == "timeout" else 15
         )
         assert completed.returncode is not None
         assert timed_out == (finish == "timeout")
@@ -642,6 +734,11 @@ def test_bounded_capture_cleans_descendants(tmp_path, monkeypatch, inherit_pipes
             assert completed.stdout == b"parent done"
         assert len(completed.stdout) + len(completed.stderr) <= 1024
         assert time.monotonic() - started < 5, "inherited pipe delayed cleanup"
+        assert leader_membership == [True]
+        assert before_close_membership == {
+            path.name: {"in_capture_job": True, "image_matches_fixture": True}
+            for path in (ready, grandchild_ready)
+        }
         for path in (ready, grandchild_ready):
             descendant = processes.get(path)
             assert descendant.wait_exit(2), f"descendant {descendant!r} survived"
@@ -674,7 +771,7 @@ def test_bounded_capture_launch_failure_cleans_owned_process(tmp_path, monkeypat
         monkeypatch.setattr(RUNNER.threading.Thread, "start", fail)
     code = f"from pathlib import Path; import time; time.sleep(2); Path({str(marker)!r}).write_text('executed')"
     with pytest.raises(KeyboardInterrupt, match="injected startup"):
-        RUNNER._run_bounded_process([sys.executable, "-c", code], 5)
+        RUNNER._run_bounded_process([_FIXTURE_PYTHON, "-c", code], 5)
     assert len(launched) == 1
     assert launched[0].poll() is not None
     assert launched[0].stdout.closed and launched[0].stderr.closed
@@ -724,7 +821,7 @@ def test_bounded_capture_partial_reader_start_failure_after_parent_exit(tmp_path
     started = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt, match="second reader"):
-            RUNNER._run_bounded_process([sys.executable, "-c", parent_code], 15)
+            RUNNER._run_bounded_process([_FIXTURE_PYTHON, "-c", parent_code], 15)
         assert time.monotonic() - started < 5
         assert launched[0].stdout.closed and launched[0].stderr.closed
         descendant = processes.get(record)
@@ -743,7 +840,7 @@ def test_bounded_capture_preserves_normal_success_and_failure(exit_code):
         f"raise SystemExit({exit_code})\n"
     )
     completed, timed_out, reason = RUNNER._run_bounded_process(
-        [sys.executable, "-c", code], 5
+        [_FIXTURE_PYTHON, "-c", code], 5
     )
     assert completed.returncode == exit_code
     assert completed.stdout == b'{"execution_traces":[{}]}'
