@@ -33,12 +33,6 @@ inputs:
       job 分割ではその費用を job 数だけ払うことになるため。
     required: false
     default: 'false'
-  cache-workspace-crates:
-    description: >
-      Opt-in for the broker test archive only. A content-keyed restore prefix
-      is mandatory because older changed sources can pass Cargo's mtime check.
-    required: false
-    default: 'false'
   compile-cache:
     description: >
       cmake の C++ ビルドを sccache に通す job だけ 'true'。rust: 'false' の
@@ -82,28 +76,11 @@ runs:
       with:
         version: v0.17.0
 
-    - name: Key workspace artifacts by source content
-      id: workspace-source
-      if: inputs.rust == 'true' && inputs.cache-workspace-crates == 'true'
-      shell: pwsh
-      env:
-        CACHE_WORKSPACES: ${{ inputs.rust-workspaces }}
-        PYTHONUTF8: '1'
-      run: |
-        if ($env:CACHE_WORKSPACES -ne 'broker') {
-          throw 'content-keyed workspace artifacts are qualified only for broker'
-        }
-        python tools/rust-workspace-cache-key.py --root "$env:GITHUB_WORKSPACE" --github-output "$env:GITHUB_OUTPUT"
-        if ($LASTEXITCODE -ne 0) { throw 'workspace source key failed' }
-
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       if: inputs.rust == 'true'
       with:
         workspaces: ${{ inputs.rust-workspaces }}
-        # `key` is part of this pinned provider's RESTORE prefix, not its lock
-        # suffix. Never fall back to a target built from different source bytes.
-        key: ${{ inputs.cache-workspace-crates == 'true' && format('{0}-workspace-v1-{1}', inputs.cache-key, steps.workspace-source.outputs.digest) || inputs.cache-key }}
-        cache-workspace-crates: ${{ inputs.cache-workspace-crates }}
+        key: ${{ inputs.cache-key }}
         save-if: ${{ inputs.save-cache == 'true' }}
 
     # Python 版は .python-version (3.12) に従う。
@@ -124,28 +101,6 @@ runs:
       if: inputs.rust == 'true'
       shell: pwsh
       run: python tools/restore-mtime.py
-
-    - name: Refresh broker revision for restored workspace artifacts
-      if: inputs.rust == 'true' && inputs.cache-workspace-crates == 'true'
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = 'Stop'
-        function Assert-CheckoutRoot {
-          $root = git rev-parse --show-toplevel
-          if ($LASTEXITCODE -ne 0 -or
-              [IO.Path]::GetFullPath($root.Trim()) -ne [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)) {
-            throw 'unexpected Git root for broker revision'
-          }
-        }
-        Assert-CheckoutRoot
-        $revision = git rev-parse --short=12 HEAD
-        if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{12,40}$') {
-          throw 'current broker revision unavailable'
-        }
-        # An env change reruns broker/build.rs even if the cloned Git metadata
-        # has an older mtime than the restored target. Dirtiness stays build.rs's
-        # actual Git observation; no provenance value is synthesized here.
-        "AEXCOMPAT_BUILD_REVISION=$revision" >> $env:GITHUB_ENV
 
     # guest workspace の bindgen が libclang.dll をロードする。runner image の
     # LLVM の位置をハードコードすると、image 更新で黙って別物を掴んだり
