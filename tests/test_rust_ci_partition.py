@@ -91,6 +91,8 @@ def test_all_native_artifact_skips_are_rejected() -> None:
 @pytest.mark.parametrize("missing", [
     "target/pf-visual-audio-probe-build/pf-visual-audio-probe/Release/pf_visual_audio_layer_sidecar_probe.aex",
     "target/pf-smart-timed-multilayer-probe-build/Release/pf_smart_timed_multilayer_probe.aex",
+    "target/minihost-build/worker_session_detach_fixture.dll",
+    "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
 ])
 def test_native_preflight_refuses_missing_remaining_probe(tmp_path, missing) -> None:
     runner = load_runner()
@@ -106,6 +108,31 @@ def test_native_preflight_refuses_missing_remaining_probe(tmp_path, missing) -> 
         runner.run_native({runner.BROKER: runner.NATIVE_BROKER_TARGETS,
                            runner.HARNESS: runner.NATIVE_HARNESS_TARGETS})
     assert calls == []
+
+
+def test_real_worker_session_cases_run_only_with_native_artifact_checks(tmp_path):
+    runner = load_runner()
+    runner.ROOT = tmp_path
+    for relative in runner.SILENT_SKIP_PREREQUISITES:
+        artifact = tmp_path / relative
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"fixture")
+    independent, native = runner.partitions(
+        metadata(runner, extra_broker_target="render_session_native")
+    )
+    calls = []
+    runner.nextest_run = lambda *args, **options: calls.append((args, options))
+    runner.run_independent(independent)
+    runner.run_native(native)
+
+    independent_plan, independent_options = calls[0]
+    native_plan, native_options = calls[1]
+    assert "binary(=render_session)" in independent_plan[0]
+    assert "binary(=render_session_native)" not in independent_plan[0]
+    assert independent_options == {}
+    assert "binary(=render_session_native)" in native_plan[0]
+    assert "binary(=render_session)" not in native_plan[0]
+    assert native_options == {"reject_skip": True}
 
 
 @pytest.mark.parametrize("skip", [
