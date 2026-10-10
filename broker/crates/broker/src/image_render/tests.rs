@@ -3,6 +3,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frame_deadline_override_accepts_the_range_and_rejects_everything_else() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            parse_frame_deadline_ms(None).unwrap(),
+            INTERACTIVE_RENDER_TIMEOUT_MS
+        );
+        for (text, expected) in [
+            ("1000", 1_000),
+            ("120000", 120_000),
+            ("600000", 600_000),
+            // `u64::from_str` accepts a leading plus sign.
+            ("+5000", 5_000),
+        ] {
+            assert_eq!(
+                parse_frame_deadline_ms(Some(OsStr::new(text))).unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+        for text in [
+            "", "999", "600001", "0", "-5000", "1.5", "60s", " 5000", "abc",
+        ] {
+            let error = parse_frame_deadline_ms(Some(OsStr::new(text))).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{text:?}");
+            assert!(error.to_string().contains(FRAME_DEADLINE_ENV), "{text:?}");
+        }
+    }
+
+    #[test]
     fn default_inspection_search_roots_include_the_owning_ae_support_files() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-inspection-support-roots-{}-{}",

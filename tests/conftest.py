@@ -32,6 +32,15 @@ TEST_CLASSES = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_frame_deadline(monkeypatch):
+    # Tests that drive interactive renders assume the 30 s default frame
+    # deadline; a shell or user-level AEXCOMPAT_FRAME_DEADLINE_MS (issue
+    # #1769) must not change their verdicts. A test that needs an override
+    # passes it to its own subprocess.
+    monkeypatch.delenv("AEXCOMPAT_FRAME_DEADLINE_MS", raising=False)
+
+
 @pytest.fixture(scope="session")
 def canonical_release_worker(tmp_path_factory, request):
     if os.name != "nt":

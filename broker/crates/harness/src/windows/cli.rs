@@ -283,6 +283,7 @@ fn cli_contract() -> serde_json::Value {
         "headless_mode": {
             "prefix": "--headless",
             "unknown_or_malformed_arguments": "structured_stderr_exit_64",
+            "invalid_frame_deadline_env": "structured_stderr_exit_64",
             "gui_launch": false
         },
         "commands": [
@@ -662,6 +663,19 @@ fn print_cli_help() {
     );
 }
 
+/// The CLI commands whose renders run under the interactive frame deadline
+/// (`AEXCOMPAT_FRAME_DEADLINE_MS`, issue #1769). `--render-differential`,
+/// `--render-performance-diagnostics` and `--render-memory-diagnostics` keep
+/// a fixed 30 s, and the options-dialog probes their own short timeouts.
+fn uses_interactive_frame_deadline(command: &str) -> bool {
+    command.starts_with("--render-experimental")
+        || (command.starts_with("--probe-experimental") && !command.ends_with("options-dialog"))
+        || matches!(
+            command,
+            "--render-raw" | "--render-exr" | "--render-fixture"
+        )
+}
+
 fn main() -> eframe::Result {
     aexcompat_broker::observability::init();
     let mut args: Vec<_> = std::env::args_os().collect();
@@ -676,6 +690,39 @@ fn main() -> eframe::Result {
     if args.len() == 2 && args[1] == "--print-cli-contract" {
         println!("{}", serde_json::to_string_pretty(&cli_contract()).unwrap());
         return Ok(());
+    }
+    // A render command checks the frame deadline override before any worker
+    // runs, so a malformed value is reported as the configuration error it is
+    // rather than surfacing later as a render failure blamed on the AEX
+    // (issue #1769). Commands that never read the override (inspection,
+    // comparison, the fixed-deadline diagnostics) are left alone, and so is the
+    // GUI fallback for arguments that match no render command prefix; a render
+    // prefix with the wrong argument count still exits here. The GUI reports
+    // the error per render.
+    if args
+        .get(1)
+        .and_then(|command| command.to_str())
+        .is_some_and(uses_interactive_frame_deadline)
+    {
+        if let Err(error) = aexcompat_broker::image_render::interactive_frame_deadline_ms() {
+            if headless {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": CLI_CONTRACT_SCHEMA,
+                        "version": CLI_CONTRACT_VERSION,
+                        "success": false,
+                        "classification": "configuration_error",
+                        "failure_stage": "environment_validation",
+                        "message": error.to_string(),
+                        "gui_launched": false
+                    })
+                );
+            } else {
+                eprintln!("{error}");
+            }
+            std::process::exit(64);
+        }
     }
     let repository = repository_root(&args);
     if args.len() == 5 && args[1] == "--render-fixture" {

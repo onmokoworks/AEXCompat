@@ -75,6 +75,8 @@ AEXと入力画像はDMGに収録されません。通常はarm64 Unicornのみ�
 
 入力画像はPNG、JPEG、BMP、TIFF、WebPに対応し、出力形式はPNGです。複数レイヤー、時間/FPS、ダウンサンプル、ピクセルアスペクト比、シーケンス状態、モノラルのfloat32音声も扱えます。
 
+Windowsでは、1フレームの描画は既定で30秒を超えると打ち切られます。それより時間のかかるエフェクトでは、GUIやCLIを起動する前に`AEXCOMPAT_FRAME_DEADLINE_MS`（ミリ秒、1000〜600000）を設定してください。`render-video-batch`も、リクエストに`frame_deadline_ms`が無い場合はこの値を使います。`--render-differential`、`--render-performance-diagnostics`、`--render-memory-diagnostics`は30秒固定のままです。
+
 ## アーキテクチャ
 
 ```text

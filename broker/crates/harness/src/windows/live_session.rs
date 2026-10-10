@@ -1,7 +1,3 @@
-/// Per-frame watchdog deadline for resident-session renders, matching the
-/// broker's interactive one-shot timeout.
-const LIVE_RENDER_FRAME_DEADLINE_MS: u64 = 30_000;
-
 const INTERACTIVE_CAPABILITY_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -328,6 +324,12 @@ fn live_render(
         Ok((body, Some(request.output.clone())))
     };
     if state.open.is_none() {
+        // Per-frame watchdog deadline for resident-session renders: the same
+        // AEXCOMPAT_FRAME_DEADLINE_MS-resolved value the broker's interactive
+        // one-shot path uses (issue #1769). A malformed value fails the render
+        // instead of falling back to the default.
+        let timeout_ms = aexcompat_broker::image_render::interactive_frame_deadline_ms()
+            .map_err(|error| error.to_string())?;
         let opened = InteractiveRenderSession::open_still(
             InteractiveSessionOpen {
                 repository: &request.repository,
@@ -345,7 +347,7 @@ fn live_render(
                 time_step: request.timing.time_step,
                 total_time: request.timing.total_time,
                 time_scale: request.timing.time_scale,
-                timeout_ms: LIVE_RENDER_FRAME_DEADLINE_MS,
+                timeout_ms,
             },
             &rgba,
         );
@@ -382,11 +384,20 @@ fn live_render(
             }
         }
         Err(error) => {
-            let invalidated = state
+            let invalidation = state
                 .open
                 .as_ref()
-                .is_some_and(|(_, session)| session.invalidated());
-            if invalidated {
+                .and_then(|(_, session)| session.invalidation_reason());
+            if invalidation == Some("frame_deadline") {
+                // The one-shot route runs the same frame under the same
+                // deadline, so retrying there would only wait it out a second
+                // time (issue #1769).
+                state.close_current();
+                Err(interactive_selection_failure(
+                    request.selection,
+                    format!("session invalidated: {error}"),
+                ))
+            } else if invalidation.is_some() {
                 state.close_current();
                 one_shot(format!("session invalidated: {error}"))
             } else {

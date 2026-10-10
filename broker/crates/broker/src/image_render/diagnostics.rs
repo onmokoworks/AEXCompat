@@ -23,6 +23,42 @@ pub(crate) const MAX_PIXELS: u64 = 16_777_216;
 pub(crate) const MAX_RGBA_TRANSPORT_BYTES: u64 = MAX_PIXELS * 4;
 const MAX_PARAMETERS: u32 = 1024;
 pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
+/// Overrides the interactive frame deadline for one process (issue #1769):
+/// a plug-in whose first frame legitimately outlasts 30 s otherwise has no
+/// interactive route at all. The deadline is not part of the execution
+/// floor, so widening it leaves crash containment unchanged.
+pub const FRAME_DEADLINE_ENV: &str = "AEXCOMPAT_FRAME_DEADLINE_MS";
+/// The accepted override range. The batch request's own `frame_deadline_ms`
+/// is clamped into the same range rather than rejected.
+pub const MIN_FRAME_DEADLINE_MS: u64 = 1_000;
+pub const MAX_FRAME_DEADLINE_MS: u64 = 600_000;
+
+/// The interactive frame deadline in milliseconds: [`FRAME_DEADLINE_ENV`]
+/// when it is set, otherwise the 30 s default. A value that is not a whole
+/// number of milliseconds inside the accepted range is an error rather than a
+/// silent fallback, so a typo cannot quietly reinstate the default.
+pub fn interactive_frame_deadline_ms() -> io::Result<u64> {
+    parse_frame_deadline_ms(std::env::var_os(FRAME_DEADLINE_ENV).as_deref())
+}
+
+fn parse_frame_deadline_ms(value: Option<&std::ffi::OsStr>) -> io::Result<u64> {
+    let Some(value) = value else {
+        return Ok(INTERACTIVE_RENDER_TIMEOUT_MS);
+    };
+    value
+        .to_str()
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|ms| (MIN_FRAME_DEADLINE_MS..=MAX_FRAME_DEADLINE_MS).contains(ms))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{FRAME_DEADLINE_ENV} must be a whole number of milliseconds from \
+                     {MIN_FRAME_DEADLINE_MS} to {MAX_FRAME_DEADLINE_MS}"
+                ),
+            )
+        })
+}
 const MAX_STAGE_EVENTS: usize = 32;
 const MAX_ACTIVE_STAGES: usize = MAX_STAGE_EVENTS;
 const MAX_MISSING_SUITES: usize = 16;
