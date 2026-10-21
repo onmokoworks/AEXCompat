@@ -33,6 +33,7 @@ fn decode_sha256(value: &str) -> Result<[u8; 32], String> {
     Ok(digest)
 }
 
+#[derive(Clone)]
 struct Selection {
     path: PathBuf,
     size: u64,

@@ -214,6 +214,9 @@ struct HarnessApp {
     licenses: crate::licenses::LicenseWindow,
     repository: PathBuf,
     selection: Option<Selection>,
+    effect_chain: Vec<EffectChainSlot>,
+    active_effect: usize,
+    chain_render_fingerprint: Option<String>,
     session_approved: bool,
     dependencies: Vec<SessionDependency>,
     approved_dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
@@ -294,6 +297,9 @@ impl HarnessApp {
             licenses: crate::licenses::LicenseWindow::default(),
             repository,
             selection: None,
+            effect_chain: Vec::new(),
+            active_effect: 0,
+            chain_render_fingerprint: None,
             session_approved: false,
             dependencies: Vec::new(),
             approved_dependencies: Vec::new(),
@@ -929,6 +935,10 @@ impl HarnessApp {
         else {
             return;
         };
+        self.choose_aex_path(path);
+    }
+
+    fn choose_aex_path(&mut self, path: PathBuf) {
         self.status = "Computing AEX identity...".into();
         self.spawn(move || {
             let bytes = read_bounded_pe(&path)?;
@@ -1093,17 +1103,7 @@ impl HarnessApp {
     }
 
     fn start_live_render_if_ready(&mut self) {
-        if self.live_render
-            && !self.audio_effect_only
-            && render_action_enabled(
-                self.busy,
-                self.selection.is_some(),
-                self.input_image.is_some(),
-                self.session_approved,
-                self.selection_stale,
-                self.smart_render_capability.is_some(),
-            )
-        {
+        if self.live_render && self.current_image_render_ready() {
             self.quick_render();
             self.viewer_mode = 1;
         }
@@ -1855,6 +1855,14 @@ impl HarnessApp {
     }
 
     fn render_to(&mut self, output: PathBuf) {
+        if !self.chain_edit_ready() {
+            return;
+        }
+        self.save_active_effect();
+        if self.uses_chain_renderer() {
+            self.render_chain_to(output);
+            return;
+        }
         if !self.session_approved || self.selection_stale {
             self.status =
                 "Render blocked: the selected AEX session is not approved or is stale.".into();
@@ -2439,6 +2447,7 @@ impl HarnessApp {
             }
         });
         ui.separator();
+        self.show_effect_chain(ui);
         if self.busy && self.task_kind == TaskKind::InspectParameters {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -2587,6 +2596,29 @@ impl HarnessApp {
             }
             return;
         };
+        if self.task_kind == TaskKind::RenderChain {
+            result.operation = Some("render_image".into());
+            if self
+                .chain_render_fingerprint
+                .take()
+                .is_some_and(|expected| expected != self.current_render_input_fingerprint())
+            {
+                let cleanup_error = result
+                    .output
+                    .take()
+                    .and_then(|path| fs::remove_file(path).err());
+                result.success = false;
+                result.body = report_ui_output_failure(
+                    &result.body,
+                    &format!(
+                        "Render settings changed while the chain was running; render again.{}",
+                        cleanup_error.map_or_else(String::new, |error| format!(
+                            " Output cleanup failed: {error}"
+                        )),
+                    ),
+                );
+            }
+        }
         let prepared_preview = match prepare_render_preview(
             result.success,
             result.operation.as_deref(),
@@ -2868,23 +2900,24 @@ impl eframe::App for HarnessApp {
                     .ui_kit
                     .compact_button(
                         ui,
-                        self.ui_kit.text("Choose AEX...", "AEXを選択..."),
-                        !self.busy,
+                        self.ui_kit.text("Add AEX...", "AEXを追加..."),
+                        self.chain_edit_ready()
+                            && self.effect_chain.len() < MAX_EFFECT_CHAIN_STAGES,
                     )
                     .clicked()
                 {
-                    self.reset_and_choose_aex();
+                    self.add_chain_effect();
                 }
                 if self
                     .ui_kit
                     .compact_button(
                         ui,
                         self.ui_kit.text("Close", "閉じる"),
-                        aex_ready && !self.busy,
+                        aex_ready && self.chain_edit_ready(),
                     )
                     .clicked()
                 {
-                    self.close_selected_aex();
+                    self.remove_chain_effect();
                 }
                 ui.separator();
                 let image_label = if image_ready {
@@ -2928,14 +2961,7 @@ impl eframe::App for HarnessApp {
                         self.ui_kit.muted_foreground()
                     },
                 );
-                let can_render = render_action_enabled(
-                    self.busy,
-                    self.selection.is_some(),
-                    self.input_image.is_some(),
-                    self.session_approved,
-                    self.selection_stale,
-                    self.smart_render_capability.is_some(),
-                );
+                let can_render = self.current_image_render_ready();
                 if ui
                     .scope(|ui| {
                         self.ui_kit.compact_primary_button(
@@ -2948,6 +2974,17 @@ impl eframe::App for HarnessApp {
                     .clicked()
                 {
                     self.quick_render();
+                }
+                if self
+                    .ui_kit
+                    .compact_button(
+                        ui,
+                        self.ui_kit.text("Save PNG...", "PNG保存..."),
+                        can_render,
+                    )
+                    .clicked()
+                {
+                    self.render_and_save();
                 }
                 ui.separator();
                 let live_render_changed = self
@@ -3868,7 +3905,7 @@ impl eframe::App for HarnessApp {
                             ui.horizontal(|ui| {
                                 if ui
                                     .add_enabled(
-                                        native_actions_ready,
+                                        self.current_image_render_ready(),
                                         egui::Button::new(self.ui_kit.text(
                                             "Render current frame",
                                             "現在のフレームをレンダー",
@@ -3880,7 +3917,7 @@ impl eframe::App for HarnessApp {
                                 }
                                 if ui
                                     .add_enabled(
-                                        native_actions_ready,
+                                        self.current_image_render_ready(),
                                         egui::Button::new(self.ui_kit.text(
                                             "Render and save PNG...",
                                             "レンダーしてPNG保存...",

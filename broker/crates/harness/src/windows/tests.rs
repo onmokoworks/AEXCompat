@@ -2,6 +2,496 @@
 mod tests {
     use super::*;
 
+    fn chain_test_app(root: &Path) -> HarnessApp {
+        let mut app = HarnessApp::new(root.to_path_buf());
+        app.live_render = false;
+        for (index, name) in ["first.aex", "second.aex"].iter().enumerate() {
+            app.close_selected_aex();
+            app.selection = Some(Selection {
+                path: root.join(name),
+                size: 1,
+                sha256: "11".repeat(32),
+                modified: None,
+            });
+            app.session_approved = true;
+            app.parameter_inspection_state = ParameterInspectionState::Ready;
+            app.smart_render_capability = Some(InspectedRenderCapability {
+                smart_render_advertised: false,
+                out_flags2: 0,
+            });
+            let mut value = parameter(1, "float");
+            value.value = (index + 1) as f64;
+            app.parameters = vec![value.clone()];
+            app.parameter_defaults = vec![value];
+            app.effect_chain.push(EffectChainSlot {
+                enabled: true,
+                editor: app.capture_effect(),
+            });
+        }
+        app.active_effect = 1;
+        app
+    }
+
+    #[test]
+    fn effect_chain_editor_preserves_independent_controls_and_order() {
+        let root = temporary_directory("chain-editor");
+        let mut app = chain_test_app(&root);
+        app.select_chain_effect(0);
+        assert_eq!(app.parameters[0].value, 1.0);
+        app.parameters[0].value = 7.0;
+        app.host_context =
+            Some(serde_json::from_value(serde_json::json!({"mask_scene":{"masks":[]}})).unwrap());
+        app.runtime_dependency_roots.push(root.join("runtime-a"));
+        app.custom_ui_click_point = [83, 17];
+        app.apply_custom_ui_draw_to_render = true;
+        app.select_chain_effect(1);
+        assert_eq!(app.parameters[0].value, 2.0);
+        assert!(app.host_context.is_none());
+        assert!(app.runtime_dependency_roots.is_empty());
+        assert!(!app.apply_custom_ui_draw_to_render);
+        app.select_chain_effect(0);
+        assert_eq!(app.parameters[0].value, 7.0);
+        assert!(app.host_context.is_some());
+        assert_eq!(app.custom_ui_click_point, [83, 17]);
+        assert_eq!(app.runtime_dependency_roots, [root.join("runtime-a")]);
+        app.move_chain_effect(1);
+        app.save_active_effect();
+        let plan = app.chain_render_plan().unwrap();
+        assert_eq!(
+            plan.iter()
+                .map(|s| s.parameters[0].value)
+                .collect::<Vec<_>>(),
+            [2.0, 7.0]
+        );
+        assert_eq!(plan[1].plugin, root.join("first.aex"));
+        app.effect_chain[0].enabled = false;
+        let plan = app.chain_render_plan().unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].ordinal, 2);
+        app.remove_chain_effect();
+        assert_eq!(app.effect_chain.len(), 1);
+        assert_eq!(app.parameters[0].value, 2.0);
+        assert!(!app.effect_chain[0].enabled);
+        app.remove_chain_effect();
+        assert!(app.selection.is_none());
+        assert!(app.effect_chain.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_rejects_deep_and_missing_or_audio_stages_without_launch() {
+        use aexcompat_broker::image_render::RenderPixelFormat;
+        let root = temporary_directory("chain-validation");
+        let mut app = chain_test_app(&root);
+        for format in [RenderPixelFormat::Argb16, RenderPixelFormat::Argb32f] {
+            app.pixel_format = format;
+            app.render_to(root.join("forbidden.png"));
+            assert!(app.status.contains("ARGB8"));
+            assert!(!app.busy);
+            assert!(app.receiver.is_none());
+        }
+        app.pixel_format = RenderPixelFormat::Argb8;
+        app.effect_chain[0].editor.smart_render_capability = None;
+        assert!(app.chain_render_plan().err().unwrap().contains("Effect 1"));
+        app.effect_chain[0].enabled = false;
+        assert_eq!(app.chain_render_plan().unwrap().len(), 1);
+        app.audio_effect_only = true;
+        app.save_active_effect();
+        assert!(app.chain_render_plan().err().unwrap().contains("audio"));
+        app.effect_chain[1].enabled = false;
+        assert!(app.chain_render_plan().err().unwrap().contains("Enable"));
+        assert!(!root.join("forbidden.png").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_bypassed_failed_selected_stage_does_not_disable_final_render() {
+        let root = temporary_directory("chain-bypass-readiness");
+        let mut app = chain_test_app(&root);
+        app.input_image = Some(root.join("input.png"));
+        app.select_chain_effect(0);
+        app.smart_render_capability = None;
+        app.session_approved = false;
+        app.audio_effect_only = true;
+        assert!(!app.current_image_render_ready());
+        app.effect_chain[0].enabled = false;
+        assert!(app.current_image_render_ready());
+        assert_eq!(app.chain_render_plan().unwrap()[0].ordinal, 2);
+        app.effect_chain[1].enabled = false;
+        assert!(!app.current_image_render_ready());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_keeps_pending_supervised_update_on_its_source_stage() {
+        let root = temporary_directory("chain-supervised");
+        let mut app = chain_test_app(&root);
+        app.pending_parameter_slot = Some(1);
+        app.live_render_due = Some(Instant::now() + Duration::from_millis(500));
+        let due = app.live_render_due;
+        app.select_chain_effect(0);
+        app.move_chain_effect(0);
+        app.remove_chain_effect();
+        app.add_chain_effect_path(root.join("third.aex"));
+        app.render_to(root.join("pending.png"));
+        assert_eq!(app.active_effect, 1);
+        assert_eq!(app.effect_chain.len(), 2);
+        assert_eq!(app.pending_parameter_slot, Some(1));
+        assert_eq!(app.live_render_due, due);
+        assert!(app.receiver.is_none());
+        // Once the native callback has completed, stage selection is available.
+        app.pending_parameter_slot = None;
+        app.select_chain_effect(0);
+        assert_eq!(app.active_effect, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_gui_buttons_select_reorder_remove_and_respect_busy_state() {
+        fn draw(
+            app: &mut HarnessApp,
+            context: &egui::Context,
+            events: Vec<egui::Event>,
+        ) -> egui::FullOutput {
+            context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(420.0, 800.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| app.show_effect_chain(ui));
+                },
+            )
+        }
+        fn text_rect(shape: &egui::Shape, label: &str) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(shape.visual_bounding_rect())
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| text_rect(shape, label)),
+                _ => None,
+            }
+        }
+        fn click(app: &mut HarnessApp, context: &egui::Context, label: &str) {
+            let frame = draw(app, context, Vec::new());
+            let rect = frame
+                .shapes
+                .iter()
+                .find_map(|shape| text_rect(&shape.shape, label))
+                .unwrap_or_else(|| panic!("missing GUI control {label}"));
+            draw(
+                app,
+                context,
+                vec![
+                    egui::Event::PointerMoved(rect.center()),
+                    egui::Event::PointerButton {
+                        pos: rect.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: rect.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let root = temporary_directory("chain-ui-buttons");
+        let mut app = chain_test_app(&root);
+        let context = egui::Context::default();
+        click(&mut app, &context, "1  first");
+        assert_eq!(app.active_effect, 0);
+        assert_eq!(app.parameters[0].value, 1.0);
+        click(&mut app, &context, "Down");
+        assert_eq!(app.active_effect, 1);
+        assert!(
+            app.effect_chain[0]
+                .editor
+                .selection
+                .as_ref()
+                .unwrap()
+                .path
+                .ends_with("second.aex")
+        );
+        app.busy = true;
+        click(&mut app, &context, "Remove");
+        assert_eq!(app.effect_chain.len(), 2);
+        app.busy = false;
+        click(&mut app, &context, "Remove");
+        assert_eq!(app.effect_chain.len(), 1);
+        assert_eq!(app.parameters[0].value, 2.0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_pixels_are_serial_order_sensitive_and_cleanup_is_complete() {
+        let root = temporary_directory("chain-pixels");
+        let app = chain_test_app(&root);
+        let mut plan = app.chain_render_plan().unwrap();
+        let input = root.join("input.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&input)
+            .unwrap();
+        let mut observed = Vec::new();
+        let mut transform = |stage: &ChainRenderStage, from: &Path, to: &Path| {
+            observed.push(stage.plugin.clone());
+            let mut image = image::open(from).unwrap().into_rgba8();
+            for pixel in image.pixels_mut() {
+                if stage.plugin.ends_with("first.aex") {
+                    pixel[0] += 5;
+                } else {
+                    pixel[0] *= 2;
+                }
+            }
+            image.save(to).unwrap();
+            Ok(serde_json::json!({"passed": true, "plugin_sha256": "22".repeat(32)}))
+        };
+        let output = root.join("forward.png");
+        let report = run_effect_chain(&root, &input, &output, &plan, &mut transform);
+        assert_eq!(report["passed"], true, "{report}");
+        assert_eq!(
+            report["stages"][0]["inspection_plugin_sha256"],
+            "11".repeat(32)
+        );
+        assert_eq!(report["stages"][0]["plugin_sha256"], "22".repeat(32));
+        assert_eq!(
+            image::open(&output).unwrap().into_rgba8().get_pixel(0, 0)[0],
+            30
+        );
+        plan.reverse();
+        let output = root.join("reverse.png");
+        assert_eq!(
+            run_effect_chain(&root, &input, &output, &plan, &mut transform)["passed"],
+            true
+        );
+        assert_eq!(
+            image::open(output).unwrap().into_rgba8().get_pixel(0, 0)[0],
+            25
+        );
+        assert_eq!(
+            observed,
+            [
+                root.join("first.aex"),
+                root.join("second.aex"),
+                root.join("second.aex"),
+                root.join("first.aex")
+            ]
+        );
+        assert_eq!(
+            fs::read_dir(root.join("target/chain-transport"))
+                .unwrap()
+                .count(),
+            0
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_stops_on_error_or_invalid_image_never_publishes_partial_output() {
+        let root = temporary_directory("chain-failure");
+        let app = chain_test_app(&root);
+        let plan = app.chain_render_plan().unwrap();
+        let input = root.join("input.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(&input)
+            .unwrap();
+        for mode in [
+            "native-false",
+            "exception",
+            "missing",
+            "corrupt",
+            "second-fails",
+        ] {
+            let mut calls = 0;
+            let output = root.join(format!("{mode}.png"));
+            let report = run_effect_chain(&root, &input, &output, &plan, |_, from, to| {
+                calls += 1;
+                match mode {
+                    "native-false" => Ok(serde_json::json!({"passed": false, "render_error": -1})),
+                    "exception" => Err("worker exited".into()),
+                    "missing" => Ok(serde_json::json!({"passed": true})),
+                    "corrupt" => {
+                        fs::write(to, b"not an image").unwrap();
+                        Ok(serde_json::json!({"passed": true}))
+                    }
+                    _ if calls == 2 => Err("second effect failed".into()),
+                    _ => {
+                        fs::copy(from, to).unwrap();
+                        Ok(serde_json::json!({"passed": true}))
+                    }
+                }
+            });
+            assert_eq!(report["passed"], false, "{mode}: {report}");
+            assert_eq!(calls, if mode == "second-fails" { 2 } else { 1 });
+            assert_eq!(report["failed_stage"], calls);
+            assert!(!output.exists());
+            assert_eq!(
+                fs::read_dir(root.join("target/chain-transport"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+        let mut calls = 0;
+        let report = run_effect_chain(&root, &input, &input, &plan, |_, _, _| {
+            calls += 1;
+            unreachable!()
+        });
+        assert_eq!(report["passed"], false);
+        assert_eq!(calls, 0);
+        assert_eq!(
+            image::open(&input).unwrap().into_rgba8().get_pixel(0, 0).0,
+            [1, 2, 3, 255]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_poll_displays_final_image_and_failure_clears_preview() {
+        let root = temporary_directory("chain-poll");
+        let mut app = chain_test_app(&root);
+        let output = root.join("final.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([30, 20, 10, 255]))
+            .save(&output)
+            .unwrap();
+        let context = egui::Context::default();
+        for success in [true, false] {
+            let (send, receive) = mpsc::channel();
+            app.receiver = Some(receive);
+            app.busy = true;
+            app.rendering = true;
+            app.task_kind = TaskKind::RenderChain;
+            send.send(TaskResult {
+                success,
+                body: serde_json::json!({"passed":success,"stage":"effect_chain_render"})
+                    .to_string(),
+                output: success.then(|| output.clone()),
+                operation: None,
+                identity: None,
+                diagnostic_eligible: false,
+            })
+            .unwrap();
+            app.poll(&context);
+            assert_eq!(app.preview.is_some(), success);
+            assert_eq!(app.output_image.is_some(), success);
+            assert!(!app.busy);
+            assert!(!app.rendering);
+            assert!(app.receiver.is_none());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_poll_discards_a_result_for_changed_render_settings() {
+        let root = temporary_directory("chain-stale-result");
+        let mut app = chain_test_app(&root);
+        let output = root.join("old-settings.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(&output)
+            .unwrap();
+        app.chain_render_fingerprint = Some(app.current_render_input_fingerprint());
+        app.frame += 1;
+        let (send, receive) = mpsc::channel();
+        app.receiver = Some(receive);
+        app.busy = true;
+        app.task_kind = TaskKind::RenderChain;
+        send.send(TaskResult {
+            success: true,
+            body: serde_json::json!({"passed":true}).to_string(),
+            output: Some(output.clone()),
+            operation: None,
+            identity: None,
+            diagnostic_eligible: false,
+        })
+        .unwrap();
+        app.poll(&egui::Context::default());
+        assert!(app.preview.is_none());
+        assert!(app.output_image.is_none());
+        assert!(!output.exists());
+        assert!(app.report.contains("settings changed"));
+        assert!(app.chain_render_fingerprint.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires Release worker and built performance / still-primary SDK probes"]
+    fn effect_chain_native_gui_preview_applies_both_aex_stages() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let scratch = temporary_directory("chain-native");
+        let input = scratch.join("input.png");
+        let output = scratch.join("output.png");
+        image::RgbaImage::from_pixel(8, 5, image::Rgba([73, 19, 41, 255]))
+            .save(&input)
+            .unwrap();
+        let plugins = [
+            repository.join("target/instruments-build/pf-performance-probe/pf_performance_probe.aex"),
+            repository.join("target/instruments-build/pf-wide-time-probe/pf_automatic_wide_time_allowed_probe.aex"),
+        ];
+        let mut app = HarnessApp::new(repository.clone());
+        app.live_render = false;
+        let context = egui::Context::default();
+        for plugin in plugins {
+            assert!(plugin.is_file(), "build {} first", plugin.display());
+            app.add_chain_effect_path(plugin);
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while app.busy && Instant::now() < deadline {
+                app.poll(&context);
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!app.busy, "inspection timeout: {}", app.report);
+            assert!(app.smart_render_capability.is_some(), "{}", app.report);
+        }
+        app.input_image = Some(input);
+        // A stale inspection identity must be reported separately, not copied
+        // into the identity observed by the actual native render.
+        app.effect_chain[0]
+            .editor
+            .selection
+            .as_mut()
+            .unwrap()
+            .sha256 = "00".repeat(32);
+        app.render_to(output.clone());
+        assert!(app.task_kind == TaskKind::RenderChain);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while app.busy && Instant::now() < deadline {
+            app.poll(&context);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!app.busy, "render timeout");
+        let report: serde_json::Value = serde_json::from_str(&app.report).unwrap();
+        assert_eq!(report["passed"], true, "{report}");
+        assert_eq!(report["stages"].as_array().unwrap().len(), 2);
+        let first = &report["stages"][0];
+        assert_eq!(first["inspection_plugin_sha256"], "00".repeat(32));
+        let actual = format!(
+            "{:x}",
+            Sha256::digest(
+                fs::read(&app.effect_chain[0].editor.selection.as_ref().unwrap().path).unwrap()
+            )
+        );
+        assert_eq!(first["plugin_sha256"], actual);
+        assert_eq!(first["render"]["plugin_sha256"], actual);
+        assert!(app.preview.is_some());
+        let pixels = image::open(&output).unwrap().into_rgba8();
+        assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(2, 1).0, [3, 3, 0, 255]);
+        println!("{report}");
+        assert_eq!(
+            fs::read_dir(repository.join("target/chain-transport"))
+                .unwrap()
+                .count(),
+            0
+        );
+        fs::remove_dir_all(scratch).unwrap();
+    }
+
     #[test]
     fn frame_deadline_check_covers_exactly_the_commands_that_read_the_override() {
         for command in [
