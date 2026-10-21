@@ -1109,6 +1109,9 @@ fn render_classic_via_length_one_session(
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut report = build_interactive_image_report(&final_report, facts);
+    // Record the identity observed by this render's session, not a GUI's
+    // possibly older inspection snapshot. This does not add a launch gate.
+    report["plugin_sha256"] = close["plugin_sha256"].clone();
     report["primary_input_temporal_model"] =
         json!(if request.layers.iter().any(|layer| layer.slot == 0) {
             "static"

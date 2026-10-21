@@ -9,6 +9,7 @@ a local run as a project-wide status.
 | Topic | Document |
 |---|---|
 | Build, SDK, and CI requirements | [Build Requirements](BUILD_REQUIREMENTS.md) |
+| Using multiple AEX effects in the Windows GUI | [Windows GUI Effect Chains](WINDOWS_GUI_EFFECT_CHAIN.md) |
 | Current compatibility and its limits | [Compatibility Status](COMPATIBILITY_STATUS_2026-07-16.md) |
 | Project direction | [Project Direction](PROJECT_DIRECTION.md) |
 | Mac Unicorn corpus method and dated local results | [macOS Unicorn Corpus Metrics](MACOS_UNICORN_CORPUS_METRICS.md) |

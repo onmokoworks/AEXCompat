@@ -5,5 +5,6 @@ include!("windows/preflight.rs");
 include!("windows/render_contract.rs");
 include!("windows/live_session.rs");
 include!("windows/app.rs");
+include!("windows/effect_chain.rs");
 include!("windows/cli.rs");
 include!("windows/tests.rs");

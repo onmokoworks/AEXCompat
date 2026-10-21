@@ -4,6 +4,7 @@ enum TaskKind {
     Generic,
     IdentifyAex,
     InspectParameters,
+    RenderChain,
 }
 
 fn prepare_render_preview(
