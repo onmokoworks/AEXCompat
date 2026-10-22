@@ -79,14 +79,13 @@ mod tests {
     }
 
     #[test]
-    fn effect_chain_rejects_deep_and_missing_or_audio_stages_without_launch() {
+    fn effect_chain_accepts_deep_and_rejects_missing_or_audio_stages_without_launch() {
         use aexcompat_broker::image_render::RenderPixelFormat;
         let root = temporary_directory("chain-validation");
         let mut app = chain_test_app(&root);
         for format in [RenderPixelFormat::Argb16, RenderPixelFormat::Argb32f] {
             app.pixel_format = format;
-            app.render_to(root.join("forbidden.png"));
-            assert!(app.status.contains("ARGB8"));
+            assert_eq!(app.chain_render_plan().unwrap().len(), 2);
             assert!(!app.busy);
             assert!(app.receiver.is_none());
         }
@@ -240,19 +239,23 @@ mod tests {
             .save(&input)
             .unwrap();
         let mut observed = Vec::new();
-        let mut transform = |stage: &ChainRenderStage, from: &Path, to: &Path| {
-            observed.push(stage.plugin.clone());
-            let mut image = image::open(from).unwrap().into_rgba8();
-            for pixel in image.pixels_mut() {
-                if stage.plugin.ends_with("first.aex") {
-                    pixel[0] += 5;
-                } else {
-                    pixel[0] *= 2;
+        let mut transform =
+            |stage: &ChainRenderStage,
+             from: &Path,
+             to: &Path,
+             _: Option<&aexcompat_broker::image_render::NativeImageInput>| {
+                observed.push(stage.plugin.clone());
+                let mut image = image::open(from).unwrap().into_rgba8();
+                for pixel in image.pixels_mut() {
+                    if stage.plugin.ends_with("first.aex") {
+                        pixel[0] += 5;
+                    } else {
+                        pixel[0] *= 2;
+                    }
                 }
-            }
-            image.save(to).unwrap();
-            Ok(serde_json::json!({"passed": true, "plugin_sha256": "22".repeat(32)}))
-        };
+                image.save(to).unwrap();
+                Ok(serde_json::json!({"passed": true, "plugin_sha256": "22".repeat(32)}))
+            };
         let output = root.join("forward.png");
         let report = run_effect_chain(&root, &input, &output, &plan, &mut transform);
         assert_eq!(report["passed"], true, "{report}");
@@ -311,7 +314,7 @@ mod tests {
         ] {
             let mut calls = 0;
             let output = root.join(format!("{mode}.png"));
-            let report = run_effect_chain(&root, &input, &output, &plan, |_, from, to| {
+            let report = run_effect_chain(&root, &input, &output, &plan, |_, from, to, _| {
                 calls += 1;
                 match mode {
                     "native-false" => Ok(serde_json::json!({"passed": false, "render_error": -1})),
@@ -340,7 +343,7 @@ mod tests {
             );
         }
         let mut calls = 0;
-        let report = run_effect_chain(&root, &input, &input, &plan, |_, _, _| {
+        let report = run_effect_chain(&root, &input, &input, &plan, |_, _, _, _| {
             calls += 1;
             unreachable!()
         });
@@ -397,6 +400,7 @@ mod tests {
             .save(&output)
             .unwrap();
         app.chain_render_fingerprint = Some(app.current_render_input_fingerprint());
+        fs::write(output.with_extension("rgba32f-le"), [0u8; 16]).unwrap();
         app.frame += 1;
         let (send, receive) = mpsc::channel();
         app.receiver = Some(receive);
@@ -404,7 +408,7 @@ mod tests {
         app.task_kind = TaskKind::RenderChain;
         send.send(TaskResult {
             success: true,
-            body: serde_json::json!({"passed":true}).to_string(),
+            body: serde_json::json!({"passed":true,"pixel_format":"argb32f"}).to_string(),
             output: Some(output.clone()),
             operation: None,
             identity: None,
@@ -415,6 +419,7 @@ mod tests {
         assert!(app.preview.is_none());
         assert!(app.output_image.is_none());
         assert!(!output.exists());
+        assert!(!output.with_extension("rgba32f-le").exists());
         assert!(app.report.contains("settings changed"));
         assert!(app.chain_render_fingerprint.is_none());
         fs::remove_dir_all(root).unwrap();
@@ -490,6 +495,291 @@ mod tests {
             0
         );
         fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires Release worker and built deep-copy / still-primary SDK probes"]
+    fn effect_chain_native_gui_preserves_deep_precision_in_both_orders() {
+        use aexcompat_broker::image_render::{NativeImageInput, RenderPixelFormat};
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let scratch = temporary_directory("chain-native-deep");
+        for format in [RenderPixelFormat::Argb16, RenderPixelFormat::Argb32f] {
+            let input = scratch.join(format!("{}.tiff", format.report_name()));
+            if format == RenderPixelFormat::Argb16 {
+                image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_pixel(
+                    7,
+                    3,
+                    image::Rgba([20001, 7, 40001, 32769]),
+                )
+                .save(&input)
+                .unwrap();
+            } else {
+                image::ImageBuffer::<image::Rgba<f32>, Vec<f32>>::from_pixel(
+                    7,
+                    3,
+                    image::Rgba([1.25, -0.125, 0.1001, 0.5]),
+                )
+                .save(&input)
+                .unwrap();
+            }
+            let secondary = scratch.join(format!("{}-secondary.tiff", format.report_name()));
+            if format == RenderPixelFormat::Argb16 {
+                image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_pixel(
+                    7,
+                    3,
+                    image::Rgba([10003, 22223, 40001, 32769]),
+                )
+                .save(&secondary)
+                .unwrap();
+            } else {
+                image::ImageBuffer::<image::Rgba<f32>, Vec<f32>>::from_pixel(
+                    7,
+                    3,
+                    image::Rgba([2.25, -0.25, 0.3001, 0.5]),
+                )
+                .save(&secondary)
+                .unwrap();
+            }
+            for reverse in [false, true] {
+                for use_secondary in [false, true] {
+                    let expected = NativeImageInput::decode(
+                        if use_secondary { &secondary } else { &input },
+                        format,
+                    )
+                    .unwrap();
+                    let mut plugins = [
+                    repository.join("target/instruments-build/pf-wide-time-probe/pf_deep_copy_probe.aex"),
+                    repository.join("target/instruments-build/pf-wide-time-probe/pf_automatic_wide_time_allowed_probe.aex"),
+                ];
+                    if reverse {
+                        plugins.reverse();
+                    }
+                    let mut app = HarnessApp::new(repository.clone());
+                    app.live_render = false;
+                    let context = egui::Context::default();
+                    for plugin in plugins {
+                        assert!(plugin.is_file(), "build {} first", plugin.display());
+                        app.add_chain_effect_path(plugin);
+                        let deadline = Instant::now() + Duration::from_secs(30);
+                        while app.busy && Instant::now() < deadline {
+                            app.poll(&context);
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        assert!(
+                            !app.busy && app.smart_render_capability.is_some(),
+                            "{}",
+                            app.report
+                        );
+                    }
+                    app.input_image = Some(input.clone());
+                    app.pixel_format = format;
+                    if use_secondary {
+                        app.select_chain_effect(if reverse { 1 } else { 0 });
+                        let layer = app
+                            .parameters
+                            .iter_mut()
+                            .find(|p| p.kind == "layer" && p.slot == 1)
+                            .expect("probe layer");
+                        layer.layer_path = Some(secondary.clone());
+                    }
+                    let output = scratch.join(format!(
+                        "{}-{reverse}-{use_secondary}.png",
+                        format.report_name()
+                    ));
+                    app.render_to(output.clone());
+                    assert!(app.task_kind == TaskKind::RenderChain);
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    while app.busy && Instant::now() < deadline {
+                        app.poll(&context);
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    assert!(!app.busy, "render timeout");
+                    let report: serde_json::Value = serde_json::from_str(&app.report).unwrap();
+                    assert_eq!(report["passed"], true, "{report}");
+                    assert_eq!(report["pixel_format"], format.report_name());
+                    assert_eq!(report["stages"].as_array().unwrap().len(), 2);
+                    assert!(app.preview.is_some());
+                    let raw = NativeImageInput::read_raw(
+                        &output.with_extension(chain_raw_extension(format).unwrap()),
+                        7,
+                        3,
+                        format,
+                    )
+                    .unwrap();
+                    assert_eq!(raw.rgba, expected.rgba, "{format:?} reverse={reverse}");
+                    if format == RenderPixelFormat::Argb16 {
+                        assert_eq!(
+                            image::open(&output).unwrap().color(),
+                            image::ColorType::Rgba16
+                        );
+                        assert_eq!(
+                            NativeImageInput::decode(&output, format).unwrap().rgba,
+                            expected.rgba
+                        );
+                    }
+                    println!(
+                        "deep chain {format:?} reverse={reverse} secondary={use_secondary}: exact native pixels preserved"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            fs::read_dir(repository.join("target/chain-transport"))
+                .unwrap()
+                .count(),
+            0
+        );
+        fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_deep_rejects_missing_truncated_nonfinite_and_mixed_depth_output() {
+        use aexcompat_broker::image_render::RenderPixelFormat;
+        let root = temporary_directory("chain-deep-failure");
+        let mut app = chain_test_app(&root);
+        app.pixel_format = RenderPixelFormat::Argb32f;
+        let mut plan = app.chain_render_plan().unwrap();
+        let input = root.join("input.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(&input)
+            .unwrap();
+        for mode in ["missing", "truncated", "nonfinite", "second-error"] {
+            let output = root.join(format!("{mode}.png"));
+            let mut calls = 0;
+            let report = run_effect_chain(&root, &input, &output, &plan, |_, from, to, native| {
+                calls += 1;
+                if calls == 2 {
+                    return Err("second failed".into());
+                }
+                fs::copy(from, to).unwrap();
+                let mut rgba = native.unwrap().rgba.clone();
+                if mode == "truncated" {
+                    rgba.pop();
+                }
+                if mode == "nonfinite" {
+                    rgba[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+                }
+                if mode != "missing" {
+                    fs::write(to.with_extension("rgba32f-le"), rgba).unwrap();
+                }
+                Ok(serde_json::json!({"passed":true}))
+            });
+            assert_eq!(report["passed"], false, "{report}");
+            assert_eq!(calls, if mode == "second-error" { 2 } else { 1 });
+            assert!(!output.exists());
+            assert!(!output.with_extension("rgba32f-le").exists());
+            assert_eq!(
+                fs::read_dir(root.join("target/chain-transport"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+        plan[0].pixel_format = RenderPixelFormat::Argb16;
+        let report = run_effect_chain(
+            &root,
+            &input,
+            &root.join("mixed.png"),
+            &plan,
+            |_, _, _, _| unreachable!(),
+        );
+        assert_eq!(report["passed"], false);
+        assert!(report["error"].as_str().unwrap().contains("selected depth"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effect_chain_deep_uses_native_intermediates_and_publishes_atomically() {
+        use aexcompat_broker::image_render::{NativeImageInput, RenderPixelFormat};
+        let root = temporary_directory("chain-deep-values");
+        let input = root.join("input.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(&input)
+            .unwrap();
+        let mut app = chain_test_app(&root);
+        for format in [RenderPixelFormat::Argb16, RenderPixelFormat::Argb32f] {
+            app.pixel_format = format;
+            let plan = app.chain_render_plan().unwrap();
+            for collision in [false, true] {
+                let output = root.join(format!("{}-{collision}.png", format.report_name()));
+                let raw_path = output.with_extension(chain_raw_extension(format).unwrap());
+                let report =
+                    run_effect_chain(&root, &input, &output, &plan, |stage, _, to, native| {
+                        let native = native.unwrap();
+                        let rgba = if format == RenderPixelFormat::Argb16 {
+                            let red = if stage.ordinal == 1 {
+                                10001u16
+                            } else {
+                                u16::from_le_bytes(native.rgba[..2].try_into().unwrap()) + 1
+                            };
+                            [red, 3, 20001, 16385]
+                                .into_iter()
+                                .flat_map(u16::to_le_bytes)
+                                .collect::<Vec<_>>()
+                        } else {
+                            if stage.ordinal == 1 {
+                                [1.25f32, -0.125, 0.1001, 0.5]
+                                    .into_iter()
+                                    .flat_map(f32::to_le_bytes)
+                                    .collect()
+                            } else {
+                                let first =
+                                    f32::from_le_bytes(native.rgba[..4].try_into().unwrap());
+                                assert_eq!(first, 1.25);
+                                assert_eq!(
+                                    f32::from_le_bytes(native.rgba[4..8].try_into().unwrap()),
+                                    -0.125
+                                );
+                                [(first - 1.0) * 2.0, 0.75, 0.1001, 0.5]
+                                    .into_iter()
+                                    .flat_map(f32::to_le_bytes)
+                                    .collect()
+                            }
+                        };
+                        // Deliberately unrelated preview: the second stage must use raw.
+                        fs::copy(&input, to).unwrap();
+                        fs::write(
+                            to.with_extension(chain_raw_extension(format).unwrap()),
+                            rgba,
+                        )
+                        .unwrap();
+                        if collision && stage.ordinal == 2 {
+                            fs::write(&output, b"foreign output").unwrap();
+                        }
+                        Ok(serde_json::json!({"passed":true}))
+                    });
+                assert_eq!(report["passed"], !collision, "{report}");
+                if collision {
+                    assert!(!raw_path.exists());
+                    assert_eq!(fs::read(&output).unwrap(), b"foreign output");
+                } else {
+                    let raw = NativeImageInput::read_raw(&raw_path, 1, 1, format).unwrap();
+                    if format == RenderPixelFormat::Argb16 {
+                        assert_eq!(u16::from_le_bytes(raw.rgba[..2].try_into().unwrap()), 10002);
+                    } else {
+                        assert_eq!(f32::from_le_bytes(raw.rgba[..4].try_into().unwrap()), 0.5);
+                    }
+                    let protected = root.join(format!("{}-protected.png", format.report_name()));
+                    let protected_raw =
+                        protected.with_extension(chain_raw_extension(format).unwrap());
+                    fs::write(&protected_raw, b"foreign raw").unwrap();
+                    let report =
+                        run_effect_chain(&root, &input, &protected, &plan, |_, _, _, _| {
+                            panic!("existing raw must reject before launch")
+                        });
+                    assert_eq!(report["passed"], false);
+                    assert_eq!(fs::read(protected_raw).unwrap(), b"foreign raw");
+                    assert!(!protected.exists());
+                }
+                assert_eq!(
+                    fs::read_dir(root.join("target/chain-transport"))
+                        .unwrap()
+                        .count(),
+                    0
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

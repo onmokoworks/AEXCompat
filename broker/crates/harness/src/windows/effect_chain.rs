@@ -61,6 +61,7 @@ struct ChainRenderStage {
     ordinal: usize,
     plugin: PathBuf,
     hash: String,
+    pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     selection: aexcompat_broker::image_render::InteractiveSessionSelection,
     dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
@@ -301,8 +302,8 @@ impl HarnessApp {
         });
         if self.effect_chain.len() > 1 {
             ui.small(self.ui_kit.text(
-                "Chain preview/export: ARGB8. Each stage keeps its own controls.",
-                "チェーンのプレビュー／書き出しはARGB8です。各段の設定は個別に保持されます。",
+                "8/16/32-bit chain. 16-bit: PNG + raw; 32-bit: raw + preview PNG.",
+                "8/16/32bit対応。16bitはPNG＋raw、32bitはraw＋プレビューPNGを保存します。",
             ));
         }
         ui.separator();
@@ -315,15 +316,12 @@ impl HarnessApp {
     }
 
     fn chain_render_plan(&self) -> Result<Vec<ChainRenderStage>, String> {
-        use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat, RenderUiAction};
-        if self.pixel_format != RenderPixelFormat::Argb8 {
-            return Err("Effect chains currently require ARGB8. Deep single-effect rendering remains available; no 16/32-bit intermediate will be converted to 8-bit.".into());
-        }
+        use aexcompat_broker::image_render::{RenderGpuBackend, RenderUiAction};
         if !matches!(
             self.gpu_backend,
             RenderGpuBackend::Auto | RenderGpuBackend::Cpu
         ) {
-            return Err("ARGB8 effect chains require Auto or CPU backend.".into());
+            return Err("Effect chains require Auto or CPU backend.".into());
         }
         let mut plan = Vec::new();
         let active = self.capture_effect();
@@ -382,6 +380,7 @@ impl HarnessApp {
                 ordinal: stage,
                 plugin: selection.path.clone(),
                 hash: selection.sha256.clone(),
+                pixel_format: self.pixel_format,
                 parameters: parameters_for_native_action(
                     &editor.parameters,
                     &editor.parameter_defaults,
@@ -443,13 +442,20 @@ impl HarnessApp {
         // A chain report describes all stage identities. Do not attribute it to
         // whichever stage happens to be selected in the editor.
         self.spawn(move || {
-            let report = run_effect_chain(&repository, &input, &output, &plan, |stage, input, output| {
-                let mut report = aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
+            let report = run_effect_chain(&repository, &input, &output, &plan, |stage, input, output, native| {
+                let mut report = if let Some(native) = native {
+                    aexcompat_broker::image_render::render_native_image_with_dependencies(
+                        &repository, &stage.plugin, &stage.hash, native, output, &stage.parameters,
+                        timing, stage.selection.path.is_smart(), stage.host_context.as_ref(),
+                        stage.custom_ui_action.clone(), gpu_backend, stage.dependencies.clone(),
+                        stage.search_dirs.clone(),
+                    )
+                } else { aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
                     &repository, &stage.plugin, &stage.hash, input, output, &stage.parameters, timing,
-                    stage.selection.path.is_smart(), aexcompat_broker::image_render::RenderPixelFormat::Argb8,
+                    stage.selection.path.is_smart(), stage.pixel_format,
                     stage.host_context.as_ref(), stage.custom_ui_action.clone(), gpu_backend,
                     stage.dependencies.clone(), stage.search_dirs.clone(),
-                ).map_err(|error| error.to_string())?;
+                ) }.map_err(|error| error.to_string())?;
                 aexcompat_broker::image_render::annotate_interactive_selection(&mut report, stage.selection);
                 Ok(report)
             });
@@ -468,7 +474,11 @@ struct ChainScratch {
 }
 
 impl ChainScratch {
-    fn new(repository: &Path, stages: usize) -> std::io::Result<Self> {
+    fn new(
+        repository: &Path,
+        stages: usize,
+        format: aexcompat_broker::image_render::RenderPixelFormat,
+    ) -> std::io::Result<Self> {
         let parent = repository.join("target/chain-transport");
         fs::create_dir_all(&parent)?;
         let nonce = SystemTime::now()
@@ -477,9 +487,13 @@ impl ChainScratch {
             .as_nanos();
         let root = parent.join(format!("chain-{}-{nonce}", std::process::id()));
         fs::create_dir(&root)?;
-        let outputs = (0..stages)
+        let mut outputs: Vec<_> = (0..stages)
             .map(|index| root.join(format!("stage-{index}.png")))
             .collect();
+        if let Some(extension) = chain_raw_extension(format) {
+            outputs
+                .extend((0..stages).map(|index| root.join(format!("stage-{index}.{extension}"))));
+        }
         Ok(Self { root, outputs })
     }
 
@@ -512,35 +526,70 @@ fn run_effect_chain(
     input: &Path,
     output: &Path,
     plan: &[ChainRenderStage],
-    mut render: impl FnMut(&ChainRenderStage, &Path, &Path) -> Result<serde_json::Value, String>,
+    mut render: impl FnMut(
+        &ChainRenderStage,
+        &Path,
+        &Path,
+        Option<&aexcompat_broker::image_render::NativeImageInput>,
+    ) -> Result<serde_json::Value, String>,
 ) -> serde_json::Value {
+    use aexcompat_broker::image_render::{NativeImageInput, RenderPixelFormat};
+    let format = plan
+        .first()
+        .map_or(RenderPixelFormat::Argb8, |stage| stage.pixel_format);
     let mut report = serde_json::json!({
-        "schema_version": 1, "stage": "effect_chain_render", "pixel_format": "argb8",
+        "schema_version": 1, "stage": "effect_chain_render", "pixel_format": format.report_name(),
         "passed": false, "stages": [],
     });
     let result = (|| -> Result<(), String> {
         if plan.is_empty() || plan.len() > MAX_EFFECT_CHAIN_STAGES {
             return Err("Invalid enabled effect count.".into());
         }
+        if plan.iter().any(|stage| stage.pixel_format != format) {
+            return Err("All chain stages must use the selected depth.".into());
+        }
+        let raw_output =
+            chain_raw_extension(format).map(|extension| output.with_extension(extension));
+        if raw_output.as_ref().is_some_and(|path| path.exists()) {
+            return Err("Depth-preserving output already exists.".into());
+        }
         if output.exists() {
             return Err("Output image already exists.".into());
         }
         let scratch =
-            ChainScratch::new(repository, plan.len()).map_err(|error| error.to_string())?;
+            ChainScratch::new(repository, plan.len(), format).map_err(|error| error.to_string())?;
         let mut current = input.to_path_buf();
+        let mut native_input = if format != RenderPixelFormat::Argb8 {
+            Some(NativeImageInput::decode(input, format).map_err(|error| error.to_string())?)
+        } else {
+            None
+        };
         for (index, stage) in plan.iter().enumerate() {
             report["failed_stage"] = serde_json::json!(stage.ordinal);
-            let rendered = render(stage, &current, &scratch.outputs[index]);
+            let rendered = render(
+                stage,
+                &current,
+                &scratch.outputs[index],
+                native_input.as_ref(),
+            );
             let mut evidence = serde_json::json!({ "stage": stage.ordinal, "plugin_path": stage.plugin, "inspection_plugin_sha256": stage.hash, "plugin_sha256": null });
             match rendered {
                 Ok(native) => {
                     let passed = native["passed"] == true;
+                    let lost_depth = format != RenderPixelFormat::Argb8
+                        && native["depth_provenance"]["advertised_depth_supported"] == false;
                     evidence["plugin_sha256"] = native
                         .get("plugin_sha256")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
                     evidence["render"] = native;
                     report["stages"].as_array_mut().unwrap().push(evidence);
+                    if lost_depth {
+                        return Err(format!(
+                            "Effect {} does not support the selected depth; chain stopped before publishing a quantized image.",
+                            stage.ordinal
+                        ));
+                    }
                     if !passed {
                         return Err(format!(
                             "Effect {} failed; later effects were not rendered.",
@@ -554,9 +603,10 @@ fn run_effect_chain(
                     return Err(format!("Effect {}: {error}", stage.ordinal));
                 }
             }
-            let image = aexcompat_broker::image_render::decode_bounded_image(
+            let image = aexcompat_broker::image_render::decode_bounded_image_for_format(
                 &scratch.outputs[index],
                 "chain stage",
+                format,
             )
             .map_err(|error| {
                 format!(
@@ -567,6 +617,17 @@ fn run_effect_chain(
             if image.width() == 0 || image.height() == 0 {
                 return Err(format!("Effect {} output is empty.", stage.ordinal));
             }
+            if let Some(extension) = chain_raw_extension(format) {
+                native_input = Some(
+                    NativeImageInput::read_raw(
+                        &scratch.outputs[index].with_extension(extension),
+                        image.width(),
+                        image.height(),
+                        format,
+                    )
+                    .map_err(|error| format!("Effect {} native output: {error}", stage.ordinal))?,
+                );
+            }
             current = scratch.outputs[index].clone();
         }
         let final_png = fs::read(&current).map_err(|error| error.to_string())?;
@@ -576,16 +637,15 @@ fn run_effect_chain(
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(output)
-            .map_err(|error| error.to_string())?;
-        if let Err(error) = file.write_all(&final_png).and_then(|_| file.sync_all()) {
-            drop(file);
-            let _ = fs::remove_file(output);
-            return Err(format!("Final chain output save failed: {error}"));
+        let mut published = ChainPublished::default();
+        if let (Some(path), Some(native)) = (&raw_output, &native_input) {
+            published.write(path, &native.rgba)?;
+            report["output_raw"] = serde_json::json!(path);
+            report["width"] = serde_json::json!(native.width);
+            report["height"] = serde_json::json!(native.height);
         }
+        published.write(output, &final_png)?;
+        published.0.clear();
         report["failed_stage"] = serde_json::Value::Null;
         report["output_png"] = serde_json::json!(output);
         Ok(())
@@ -595,4 +655,38 @@ fn run_effect_chain(
         Err(error) => report["error"] = serde_json::json!(error),
     }
     report
+}
+
+fn chain_raw_extension(
+    format: aexcompat_broker::image_render::RenderPixelFormat,
+) -> Option<&'static str> {
+    use aexcompat_broker::image_render::RenderPixelFormat;
+    match format {
+        RenderPixelFormat::Argb8 => None,
+        RenderPixelFormat::Argb16 => Some("rgba16le"),
+        RenderPixelFormat::Argb32f => Some("rgba32f-le"),
+    }
+}
+
+#[derive(Default)]
+struct ChainPublished(Vec<PathBuf>);
+impl ChainPublished {
+    fn write(&mut self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| error.to_string())?;
+        self.0.push(path.to_path_buf());
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| error.to_string())
+    }
+}
+impl Drop for ChainPublished {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
 }

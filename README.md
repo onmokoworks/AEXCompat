@@ -10,7 +10,7 @@ After Effects用の`.aex`プラグインを、After Effects本体の外で読み
 
 Rust/egui製のGUIで、AEXの選択、Effect Controls、入力・出力の比較、診断ログの確認ができます。WindowsとApple Silicon MacでGUIの共通化を進めています。
 
-Windows GUIでは、複数のAEXを順番に適用する[エフェクトチェーン](docs/WINDOWS_GUI_EFFECT_CHAIN.md)も利用できます（ARGB8）。
+Windows GUIでは、複数のAEXを順番に適用する[エフェクトチェーン](docs/WINDOWS_GUI_EFFECT_CHAIN.md)も利用できます（ARGB8 / ARGB16 / ARGB32f、Auto・CPU）。
 
 ## AEXCompatとは
 

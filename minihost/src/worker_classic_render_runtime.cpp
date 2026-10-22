@@ -780,16 +780,19 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (external_layers) for (std::size_t layer_index = 0; layer_index < external_layers->size(); ++layer_index) {
     const auto& layer = (*external_layers)[layer_index];
     if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
-        g_params[layer.slot - 1].type != 0 || layer.rgba.size() !=
-            static_cast<std::size_t>(layer.width) * layer.height * 4) return -3;
+        g_params[layer.slot - 1].type != 0 || layer.width <= 0 || layer.height <= 0 ||
+        aexcompat::render_pixel_transport::rgba_stride(layer.rgba.size(),
+            static_cast<std::size_t>(layer.width) * layer.height) != layer.rgba_pixel_bytes ||
+        layer.rgba_pixel_bytes == 0) return -3;
     const int32_t layer_pixel_bytes = layer.pixel_bytes != 0
         ? layer.pixel_bytes : pixel_bytes;
     if (layer.has_world_layout && layer.row_padding % layer_pixel_bytes != 0) return -3;
     auto& pixels = hosted_pixels[layer_index];
     pixels.resize(static_cast<std::size_t>(layer.width) * layer.height * layer_pixel_bytes);
-    for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4) {
-      rgba8_to_argb(pixels.data() + (offset / 4) * layer_pixel_bytes,
-                    layer.rgba.data() + offset, layer_pixel_bytes);
+    for (std::size_t offset = 0; offset < layer.rgba.size(); offset += layer.rgba_pixel_bytes) {
+      aexcompat::render_pixel_transport::rgba_to_argb(
+          pixels.data() + (offset / layer.rgba_pixel_bytes) * layer_pixel_bytes,
+          layer.rgba.data() + offset, layer.rgba_pixel_bytes, layer_pixel_bytes);
     }
     dump_world_snapshot("classic-layer-slot" + std::to_string(layer.slot),
                         pixels.data(), layer.width, layer.height, layer_pixel_bytes);

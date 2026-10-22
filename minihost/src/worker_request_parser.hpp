@@ -20,9 +20,10 @@ struct LayerInput {
   int32_t width{};
   int32_t height{};
   std::vector<unsigned char> rgba;
+  int32_t rgba_pixel_bytes{4};  // v5 transport depth; independent of world layout
   // Session transport only (#268): the inherited read HANDLE value carrying this
-  // layer's RGBA8 file. Zero for the one-shot layered path, which loads `rgba`
-  // directly from a file path. The session frame loop reads w*h*4 bytes from
+  // layer's packed RGBA file. Zero for the one-shot layered path, which loads `rgba`
+  // directly from a file path. The session frame loop reads w*h*rgba_pixel_bytes from
   // this handle into `rgba` once at open - or before every frame when the layer
   // is `dynamic`.
   uint64_t rgba_handle{};
@@ -77,5 +78,6 @@ struct ParseResult {
 };
 
 ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks);
+bool verify_native_session_layers();
 
 }  // namespace aexcompat::worker_runtime::request_parser

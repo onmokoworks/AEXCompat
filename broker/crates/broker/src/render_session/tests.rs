@@ -163,6 +163,7 @@ fn session_geometry_slot_layout_matches_the_protocol() {
         output_capacity_height: 17,
         pixel_format: RenderPixelFormat::Argb16,
         layer_slot_count: 0,
+        native_input: false,
     };
     assert_eq!(geometry.input_slot_bytes(), 33 * 17 * 4); // 2244
     assert_eq!(geometry.output_slot_bytes(), 33 * 17 * 8); // 4488
@@ -172,6 +173,14 @@ fn session_geometry_slot_layout_matches_the_protocol() {
     // The section holds only header + input + output (#268); layers travel
     // as inherited file handles, so layer_slot_count no longer sizes it.
     assert_eq!(geometry.section_bytes(), 4096 + 4096 + 8192);
+    let native = SessionGeometry {
+        native_input: true,
+        ..geometry
+    };
+    assert_eq!(native.input_slot_bytes(), 33 * 17 * 8);
+    assert_eq!(native.output_slot_offset(), 4096 + 8192);
+    assert_eq!(native.header_version(), 4);
+    assert_eq!(geometry.header_version(), 3);
 }
 
 #[test]
@@ -185,6 +194,7 @@ fn section_bytes_ignore_layer_count() {
         output_capacity_height: 8,
         pixel_format: RenderPixelFormat::Argb8,
         layer_slot_count: 0,
+        native_input: false,
     };
     let with_layers = SessionGeometry {
         layer_slot_count: 64,
@@ -208,6 +218,7 @@ fn worst_case_expanded_section_stays_under_the_cap() {
         output_capacity_height: MAX_RESIZE_DIMENSION,
         pixel_format: RenderPixelFormat::Argb32f,
         layer_slot_count: 64,
+        native_input: false,
     };
     assert!(geometry.section_bytes() as u64 <= SECTION_HARD_CAP_BYTES);
 }

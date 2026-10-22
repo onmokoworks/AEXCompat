@@ -586,19 +586,24 @@ publish_effect_sequence) →
 
 ```
 offset 0        : SessionHeader (1 ページ 4096B)
-offset 4096     : 入力スロット   (max_width * max_height * 4)
+offset 4096     : 入力スロット   (max_width * max_height * input_bpp)
 align 4096      : 出力スロット   (max_width * max_height * bpp、grow で拡大 #262)
 ```
 
 （レイヤーは #268 で section から外れ、継承ファイル HANDLE 経由で転送される。
 section は header + input + output のみ。）
 
-- 入力スロットは RGBA8 (4B/px) 固定。one-shot の入力 raw
-  transport と同一 (`load_rgba` は深度によらず w*h*4 を要求し、深度昇格は
-  worker 内部の `rgba8_to_argb` が行う。深い入力転送は #57 系の既存課題で、
-  セッションで新設しない)。レイヤーも RGBA8 (4B/px) で、per-layer の一時
-  ファイルとして継承 HANDLE で運ぶ (#268)。出力スロットのみ深度で bpp が決まる
-  (8bpc=4B/px、16bpc=8B/px、32f=16B/px。one-shot の出力 raw と同一)。
+- header v3 の入力は従来どおり RGBA8 (`input_bpp=4`)。opt-in の header v4
+  では選択深度の密詰め RGBA を転送する (`input_bpp=bpp`: 8bpc=4B/px、
+  16bpc=8B/px、32f=16B/px)。16-bit は AE の 32768 白点、32f は有限値の
+  HDR/負値を保持する。worker は同深度なら量子化せず RGBA→ARGB に並べ替える。
+  Windows GUI の deep chain が v4 を使用し、従来のクライアントは v3 のまま。
+- レイヤーは per-layer ファイルを継承 HANDLE で運ぶ。native-input session の
+  trailer は `session-layers:v5|slot,w,h,rgba_pixel_bytes,time,scale,dynamic,handle;...`。
+  `rgba_pixel_bytes` は 4/8/16、`dynamic` は 0/1。static は time=scale=0、
+  timed は scale>0 かつ dynamic=0。slot 0 は同寸法の static SmartFX primary のみ。
+  v2/v3/v4 layer trailer の RGBA8 転送と診断用 world layout は変更しない。
+  出力スロットは両 header 版とも選択深度の bpp を使用する。
 - rowbytes = width * bpp の密詰め (one-shot raw ファイルと同じ)。
 - **スロットは転送専用で、plugin にスロットへのポインタは渡らない**:
   worker は入力スロットを worker 私有バッファへコピーしてから
@@ -613,7 +618,7 @@ section は header + input + output のみ。）
 - 上限: `max_width`/`max_height` は one-shot と同じ
   `validate_image_buffer_layout` の上限 (`MAX_DIMENSION=4096`,
   `MAX_PIXELS=16M`) に従う。layer が section を離れた (#268) ため section 全体は
-  header + input (<= 64 MiB) + 出力 worst-case-expand (32f で <= 256 MiB) ≈ 320 MiB
+  header + input (v3 <= 64 MiB、v4 <= 256 MiB) + 出力 worst-case-expand (32f で <= 256 MiB) ≈ 512 MiB
   で、layer 枚数・サイズに依らず常に 1 GiB hard cap 未満。broker 側で section 合計
   1 GiB を hard cap とするのは異常構成の fail-closed の defense in depth として残す
   (適格構成では発火しない)。
@@ -622,7 +627,8 @@ SessionHeader (すべて u32 LE、予約領域は 0 埋め):
 
 ```
 magic            "AEXS"        (0x53584541)
-version          3   (レイアウト版。layer slot が per-layer サイズ化 #264 で 1→2、
+version          3 | 4 (4 は native-depth input。それ以外の field layout は共通。
+                     layer slot が per-layer サイズ化 #264 で 1→2、
                      layer が section を離れ継承ファイル HANDLE 転送になり #268 で
                      2→3。制御メッセージの `v` とは別軸で、mismatch build を両方向で
                      fail-closed にする。audio session は layout 不変で 1 のまま)

@@ -23,6 +23,7 @@ inline constexpr uint32_t kProtocolVersion = 1;
 // broker/worker pair whose layouts disagree fails closed on the header check
 // (both directions) instead of reading the wrong bytes.
 inline constexpr uint32_t kSessionHeaderVersion = 3;
+inline constexpr uint32_t kNativeInputHeaderVersion = 4;
 // render_frame v:2 carries a per-frame `parameters` payload replacing the
 // launch assignments for that frame only (protocol §4.2.1, issue #107). Every
 // other message, the frame_done schema, and the header layout stay v1.
@@ -97,10 +98,11 @@ struct SessionGeometry {
   // Layer PIXELS no longer occupy the section (#268): they travel as inherited
   // per-layer file HANDLEs, so this count does not size the section.
   int32_t layer_slot_count{};
+  bool native_input{};
 };
 
-// The input slot is RGBA8 transport (4 bytes per pixel, matching the one-shot
-// raw input contract); only the output slot scales with depth. Layer pixels
+// Header v3 inputs are RGBA8; opt-in v4 inputs use the session's native depth.
+// Output slots always scale with depth. Layer pixels
 // travel as inherited file HANDLEs (#268), not section slots.
 std::size_t input_slot_bytes(const SessionGeometry& geometry);
 std::size_t output_slot_bytes(const SessionGeometry& geometry);
@@ -124,7 +126,7 @@ class SessionChannels {
   // Parses the three AEXCOMPAT_RENDER_SESSION_*_HANDLE variables, validates
   // handle types, maps the section, and checks the mapped size covers the
   // geometry. Returns false (leaving the object unopened) on any mismatch.
-  bool open_from_environment(const SessionGeometry& geometry);
+  bool open_from_environment(SessionGeometry& geometry);
   bool opened() const { return view_ != nullptr; }
   unsigned char* view() const { return view_; }
 

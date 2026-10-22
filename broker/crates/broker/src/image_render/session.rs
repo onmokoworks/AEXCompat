@@ -22,6 +22,7 @@ fn render_with_artifact(
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
     deep_png_output: bool,
     artifact_kind: Option<RenderArtifactKind>,
+    native_input: Option<&NativeImageInput>,
 ) -> io::Result<Value> {
     if !smart && host_context.is_some_and(|context| context.smart_output_request_rect.is_some()) {
         return Err(invalid(
@@ -142,8 +143,25 @@ fn render_with_artifact(
     let conformance_premultiplication = conformance_render_settings
         .as_deref()
         .map(|settings| settings.split('|').nth(1).expect("validated settings mode"));
-    let decoded = decode_bounded_image(input_path, "input")?;
-    let (width, height) = (decoded.width(), decoded.height());
+    let (width, height, mut rgba) = if let Some(native) = native_input {
+        native.validate()?;
+        if native.format != pixel_format {
+            return Err(invalid("native input depth differs from session depth"));
+        }
+        (native.width, native.height, native.rgba.clone())
+    } else {
+        let decoded = decode_bounded_image(input_path, "input")?;
+        (
+            decoded.width(),
+            decoded.height(),
+            decoded.into_rgba8().into_raw(),
+        )
+    };
+    let input_bpp = if native_input.is_some() {
+        pixel_format.bytes_per_pixel()
+    } else {
+        4
+    };
     if width == 0
         || height == 0
         || width > MAX_DIMENSION
@@ -152,19 +170,23 @@ fn render_with_artifact(
     {
         return Err(invalid("input dimensions exceed the ARGB8 harness limit"));
     }
-    let mut rgba = decoded.into_rgba8().into_raw();
     if let Some(mode) = conformance_premultiplication {
+        if native_input.is_some() {
+            return Err(invalid(
+                "native chain input does not accept conformance pixel transforms",
+            ));
+        }
         apply_conformance_premultiplication(&mut rgba, mode);
     }
     crate::render_request::validate_image_buffer_layout(
         u64::from(width),
         u64::from(height),
-        u64::from(width) * 4,
-        4,
+        u64::from(width) * input_bpp,
+        input_bpp,
         Some(rgba.len() as u64),
         u64::from(MAX_DIMENSION),
         MAX_PIXELS,
-        MAX_RGBA_TRANSPORT_BYTES,
+        MAX_PIXELS * input_bpp,
     )?;
 
     let selected_layers = interactive_parameters
@@ -185,7 +207,15 @@ fn render_with_artifact(
     let mut secondaries = Vec::with_capacity(selected_layers.len());
     for layer in selected_layers {
         let path = layer.layer_path.as_ref().expect("filtered layer path");
-        let decoded = decode_bounded_image(path, "secondary")?;
+        let decoded = decode_bounded_image_for_format(
+            path,
+            "secondary",
+            if native_input.is_some() {
+                pixel_format
+            } else {
+                RenderPixelFormat::Argb8
+            },
+        )?;
         let (layer_width, layer_height) = (decoded.width(), decoded.height());
         if layer.slot == 0
             || layer.slot > MAX_PARAMETERS
@@ -197,19 +227,23 @@ fn render_with_artifact(
         {
             return Err(invalid("secondary image exceeds the layer transport limit"));
         }
-        let mut layer_rgba = decoded.into_rgba8().into_raw();
+        let mut layer_rgba = if native_input.is_some() {
+            NativeImageInput::from_decoded(decoded, pixel_format)?.rgba
+        } else {
+            decoded.into_rgba8().into_raw()
+        };
         if let Some(mode) = conformance_premultiplication {
             apply_conformance_premultiplication(&mut layer_rgba, mode);
         }
         crate::render_request::validate_image_buffer_layout(
             u64::from(layer_width),
             u64::from(layer_height),
-            u64::from(layer_width) * 4,
-            4,
+            u64::from(layer_width) * input_bpp,
+            input_bpp,
             Some(layer_rgba.len() as u64),
             u64::from(MAX_DIMENSION),
             MAX_PIXELS,
-            MAX_RGBA_TRANSPORT_BYTES,
+            MAX_PIXELS * input_bpp,
         )?;
         secondaries.push((layer.slot, layer_width, layer_height, layer_rgba));
     }
@@ -228,21 +262,33 @@ fn render_with_artifact(
     validate_timed_layer_identities(timed_layers, &layer_slots)?;
     let mut timed_secondaries = Vec::with_capacity(timed_layers.len());
     for layer in timed_layers {
-        let decoded = decode_bounded_image(&layer.image_path, "timed secondary")?;
+        let decoded = decode_bounded_image_for_format(
+            &layer.image_path,
+            "timed secondary",
+            if native_input.is_some() {
+                pixel_format
+            } else {
+                RenderPixelFormat::Argb8
+            },
+        )?;
         let (layer_width, layer_height) = (decoded.width(), decoded.height());
-        let mut rgba = decoded.into_rgba8().into_raw();
+        let mut rgba = if native_input.is_some() {
+            NativeImageInput::from_decoded(decoded, pixel_format)?.rgba
+        } else {
+            decoded.into_rgba8().into_raw()
+        };
         if let Some(mode) = conformance_premultiplication {
             apply_conformance_premultiplication(&mut rgba, mode);
         }
         crate::render_request::validate_image_buffer_layout(
             u64::from(layer_width),
             u64::from(layer_height),
-            u64::from(layer_width) * 4,
-            4,
+            u64::from(layer_width) * input_bpp,
+            input_bpp,
             Some(rgba.len() as u64),
             u64::from(MAX_DIMENSION),
             MAX_PIXELS,
-            MAX_RGBA_TRANSPORT_BYTES,
+            MAX_PIXELS * input_bpp,
         )?;
         timed_secondaries.push((layer.slot, layer.time, layer_width, layer_height, rgba));
     }
@@ -455,6 +501,7 @@ fn render_with_artifact(
             dependencies: &dependencies,
             explicit_dependency_search_dirs: &explicit_dependency_search_dirs,
             rgba: &rgba,
+            native_input: native_input.is_some(),
             width,
             height,
             spatial,
@@ -596,6 +643,7 @@ struct SessionWrapperRequest<'a> {
     /// identities: selecting a directory never manufactures a DLL approval.
     explicit_dependency_search_dirs: &'a [PathBuf],
     rgba: &'a [u8],
+    native_input: bool,
     width: u32,
     height: u32,
     spatial: crate::render_request::SpatialContext,
@@ -764,7 +812,17 @@ fn render_classic_via_length_one_session(
     // A custom UI action is the explicit interactive harness route (#107/#238)
     // and must retain the caller's desktop. Plain discovery/render workers stay
     // on the private desktop boundary from RenderSession::open.
-    let mut session = match if request.custom_ui_action.is_some() {
+    let mut session = match if request.native_input {
+        if fixture_world_layout_override().is_some()
+            || fixture_secondary_layouts_override().is_some()
+            || !captures.is_empty()
+        {
+            return SessionWrapperOutcome::Failure(invalid(
+                "native chain input does not accept fixture world overrides",
+            ));
+        }
+        RenderSession::open_native_input(session_request, request.custom_ui_action.is_some())
+    } else if request.custom_ui_action.is_some() {
         if fixture_world_layout_override().is_some()
             || fixture_secondary_layouts_override().is_some()
             || !captures.is_empty()
@@ -1119,8 +1177,17 @@ fn render_classic_via_length_one_session(
             "streamed_history_only"
         });
     report["depth_provenance"] = json!(frame_depth_provenance);
+    report["input_pixel_format"] = json!(if request.native_input {
+        request.pixel_format.report_name()
+    } else {
+        "argb8"
+    });
     report["visual_diagnostics"] = visual_diagnostics::inspect(
-        Some(request.rgba),
+        if request.native_input {
+            None
+        } else {
+            Some(request.rgba)
+        },
         (request.width, request.height),
         &pixels,
         (rendered_width, rendered_height),

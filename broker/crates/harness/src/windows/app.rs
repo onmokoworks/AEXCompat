@@ -2603,10 +2603,19 @@ impl HarnessApp {
                 .take()
                 .is_some_and(|expected| expected != self.current_render_input_fingerprint())
             {
-                let cleanup_error = result
-                    .output
-                    .take()
-                    .and_then(|path| fs::remove_file(path).err());
+                let cleanup_error = result.output.take().and_then(|path| {
+                    // Only paths derived from this operation's owned output,
+                    // never an arbitrary native report path.
+                    let format = serde_json::from_str::<serde_json::Value>(&result.body)
+                        .ok()
+                        .and_then(|report| {
+                            serde_json::from_value(report["pixel_format"].clone()).ok()
+                        });
+                    let raw_error = format.and_then(chain_raw_extension).and_then(|extension| {
+                        fs::remove_file(path.with_extension(extension)).err()
+                    });
+                    fs::remove_file(path).err().or(raw_error)
+                });
                 result.success = false;
                 result.body = report_ui_output_failure(
                     &result.body,

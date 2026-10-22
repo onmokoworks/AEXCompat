@@ -153,7 +153,8 @@ WorkerMode classify_worker_mode(
       mode.session_layers = mode.image_argc >= 11 &&
           (starts_with(argv[mode.image_argc - 1], L"session-layers:v2|") ||
            starts_with(argv[mode.image_argc - 1], L"session-layers:v3|") ||
-           starts_with(argv[mode.image_argc - 1], L"session-layers:v4|"));
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v4|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v5|"));
       const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);
       mode.render_session_mode = session_core_argc == 10;
       if (mode.render_session_mode) {
@@ -223,7 +224,8 @@ WorkerMode classify_worker_mode(
       mode.session_layers = mode.image_argc >= 11 &&
           (starts_with(argv[mode.image_argc - 1], L"session-layers:v2|") ||
            starts_with(argv[mode.image_argc - 1], L"session-layers:v3|") ||
-           starts_with(argv[mode.image_argc - 1], L"session-layers:v4|"));
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v4|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v5|"));
       const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);
       mode.render_session_mode = session_core_argc == 10;
       if (mode.render_session_mode) {

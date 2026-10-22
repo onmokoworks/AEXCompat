@@ -1,6 +1,11 @@
 #include "AEConfig.h"
 #include "entry.h"
 #include "AE_Effect.h"
+#if AEXCOMPAT_DEEP_COPY_TEST
+#include "AE_EffectCB.h"
+#include "AE_Macros.h"
+#include "Param_Utils.h"
+#endif
 
 #include <cstring>
 #include <algorithm>
@@ -12,6 +17,10 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
     case PF_Cmd_GLOBAL_SETUP:
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
       out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT;
+#if AEXCOMPAT_DEEP_COPY_TEST
+      out_data->out_flags |= PF_OutFlag_DEEP_COLOR_AWARE;
+      out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE;
+#endif
 #if AEXCOMPAT_SMART_WIDE_TEST
       out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER;
 #endif
@@ -24,10 +33,36 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       out_data->out_flags |= PF_OutFlag_WIDE_TIME_INPUT;
 #endif
       return PF_Err_NONE;
-    case PF_Cmd_PARAMS_SETUP:
+    case PF_Cmd_PARAMS_SETUP: {
+#if AEXCOMPAT_DEEP_COPY_TEST
+      PF_Err err = PF_Err_NONE;
+      PF_ParamDef def{};
+      PF_ADD_LAYER("Optional Map", PF_LayerDefault_NONE, 1);
+      out_data->num_params = 2;
+      return err;
+#else
       out_data->num_params = 1;
       return PF_Err_NONE;
+#endif
+    }
     case PF_Cmd_RENDER: {
+#if AEXCOMPAT_DEEP_COPY_TEST
+      // A bounded identity transform at the offered world depth. The caller's
+      // tests use non-8-bit and HDR inputs, so quantization cannot pass unnoticed.
+      const auto* source = params ? &params[0]->u.ld : nullptr;
+      if (params && params[1] && params[1]->u.ld.data) source = &params[1]->u.ld;
+      if (!source || !source->data || !output || !output->data ||
+          source->width != output->width || source->height != output->height ||
+          source->width <= 0 || source->rowbytes != output->rowbytes ||
+          (source->rowbytes != source->width * 4 &&
+           source->rowbytes != source->width * 8 && source->rowbytes != source->width * 16))
+        return PF_Err_BAD_CALLBACK_PARAM;
+      for (A_long y = 0; y < output->height; ++y)
+        std::memcpy(reinterpret_cast<A_u_char*>(output->data) + y * output->rowbytes,
+                    reinterpret_cast<const A_u_char*>(source->data) + y * source->rowbytes,
+                    static_cast<std::size_t>(output->rowbytes));
+      return PF_Err_NONE;
+#else
       PF_ParamDef checkout{};
       const PF_Err checkout_err = PF_CHECKOUT_PARAM(
           in_data, 0, in_data->current_time + in_data->time_step,
@@ -48,6 +83,7 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
         std::memset(reinterpret_cast<A_u_char*>(output->data) + y * output->rowbytes,
                     0x4d, static_cast<std::size_t>(output->width) * 4);
       return PF_Err_NONE;
+#endif
     }
 #if AEXCOMPAT_SMART_WIDE_TEST
     case PF_Cmd_SMART_PRE_RENDER: {

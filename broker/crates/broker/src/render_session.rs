@@ -14,8 +14,8 @@
 
 use crate::image_render::{
     GpuRuntimePolicyInput, INTERACTIVE_RENDER_TIMEOUT_MS, InteractiveParameter, MAX_DIMENSION,
-    MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
-    RenderUiAction, decode_bounded_image, decode_sha256_hex, encode_default_interactive_payload,
+    MAX_PIXELS, ParameterAnimation, RenderGpuBackend, RenderPixelFormat, RenderUiAction,
+    decode_bounded_image, decode_sha256_hex, encode_default_interactive_payload,
     encode_interactive_payload, isolated_worker_diagnostics, native_rgba_to_preview,
     parameter_animation_sidecar_json, propagate_bee_facade, runtime_backend,
     validate_animation_bindings,
@@ -67,6 +67,7 @@ const PROTOCOL_VERSION: u32 = 1;
 /// output only. A stale broker/worker pair whose layouts disagree fails closed on
 /// the header check (in both directions) instead of reading the wrong bytes.
 const SESSION_HEADER_VERSION: u32 = 3;
+const NATIVE_INPUT_HEADER_VERSION: u32 = 4;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// A discovery session's `inspect_done` carries the full parameter report, so
 /// its reader allows 4 MiB frames (design §4); every other session flavor
@@ -442,7 +443,7 @@ fn write_header_u32_raw(view: *mut u8, offset: usize, value: u32) {
 /// pending frame; `generation` seeds them consistently in the meantime.
 fn init_section_header(view: *mut u8, geometry: &SessionGeometry, generation: u32) {
     write_header_u32_raw(view, MAGIC_OFFSET, HEADER_MAGIC);
-    write_header_u32_raw(view, VERSION_OFFSET, SESSION_HEADER_VERSION);
+    write_header_u32_raw(view, VERSION_OFFSET, geometry.header_version());
     write_header_u32_raw(view, DEPTH_CODE_OFFSET, depth_code(geometry.pixel_format));
     write_header_u32_raw(view, MAX_WIDTH_OFFSET, geometry.width);
     write_header_u32_raw(view, MAX_HEIGHT_OFFSET, geometry.height);
@@ -483,6 +484,7 @@ struct SessionGeometry {
     output_capacity_width: u32,
     output_capacity_height: u32,
     pixel_format: RenderPixelFormat,
+    native_input: bool,
     /// Number of layers, retained only for the header `LAYER_SLOT_COUNT_OFFSET`
     /// field so the worker can cross-check it against the `session-layers`
     /// trailer count. Layer PIXELS no longer occupy the section (#268): they
@@ -492,8 +494,22 @@ struct SessionGeometry {
 }
 
 impl SessionGeometry {
+    fn header_version(&self) -> u32 {
+        if self.native_input {
+            NATIVE_INPUT_HEADER_VERSION
+        } else {
+            SESSION_HEADER_VERSION
+        }
+    }
+    fn input_pixel_bytes(&self) -> usize {
+        if self.native_input {
+            self.pixel_format.bytes_per_pixel() as usize
+        } else {
+            4
+        }
+    }
     fn input_slot_bytes(&self) -> usize {
-        self.width as usize * self.height as usize * 4
+        self.width as usize * self.height as usize * self.input_pixel_bytes()
     }
     fn output_slot_bytes(&self) -> usize {
         self.output_capacity_width as usize
@@ -1273,6 +1289,29 @@ impl RenderSession {
             None,
             &[],
             None,
+            false,
+        )
+    }
+
+    /// Native RGBA input at the requested session depth, including every layer.
+    /// Existing callers keep the RGBA8 v3 transport through `open`.
+    pub(crate) fn open_native_input(
+        request: SessionOpenRequest<'_>,
+        interactive: bool,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(
+            request,
+            if interactive {
+                WorkerDesktopPolicy::Current
+            } else {
+                WorkerDesktopPolicy::Dedicated
+            },
+            None,
+            None,
+            None,
+            &[],
+            None,
+            true,
         )
     }
 
@@ -1290,6 +1329,7 @@ impl RenderSession {
             Some(layout),
             &[],
             None,
+            false,
         )
     }
 
@@ -1307,6 +1347,7 @@ impl RenderSession {
             Some(layout),
             layer_layouts,
             Some(captures),
+            false,
         )
     }
 
@@ -1322,6 +1363,7 @@ impl RenderSession {
             None,
             &[],
             None,
+            false,
         )
     }
 
@@ -1339,6 +1381,7 @@ impl RenderSession {
             None,
             &[],
             None,
+            false,
         )
     }
 
@@ -1350,6 +1393,7 @@ impl RenderSession {
         diagnostic_layout: Option<DiagnosticWorldLayout>,
         layer_layouts: &[SessionLayerLayout],
         captures: Option<&[SessionWorldCapture<'_>]>,
+        native_input: bool,
     ) -> io::Result<RenderSession> {
         let diagnostic_layout = diagnostic_layout
             .map(|layout| {
@@ -1399,15 +1443,20 @@ impl RenderSession {
                 ));
             }
         }
+        let input_pixel_bytes = if native_input {
+            request.pixel_format.bytes_per_pixel()
+        } else {
+            4
+        };
         crate::render_request::validate_image_buffer_layout(
             u64::from(request.width),
             u64::from(request.height),
-            u64::from(request.width) * 4,
-            4,
+            u64::from(request.width) * input_pixel_bytes,
+            input_pixel_bytes,
             None,
             u64::from(MAX_DIMENSION),
             MAX_PIXELS,
-            MAX_RGBA_TRANSPORT_BYTES,
+            MAX_PIXELS * input_pixel_bytes,
         )?;
         if request.layers.len() > 64 {
             return Err(invalid("render session layer count exceeds 64"));
@@ -1487,7 +1536,8 @@ impl RenderSession {
             }
             // The transported RGBA must match the declared per-layer dimensions
             // exactly; each layer occupies its own primary-independent slot.
-            let expected = layer.width as usize * layer.height as usize * 4;
+            let expected =
+                layer.width as usize * layer.height as usize * input_pixel_bytes as usize;
             if layer.rgba.len() != expected {
                 return Err(invalid(
                     "render session layer pixels do not match dimensions",
@@ -1503,6 +1553,7 @@ impl RenderSession {
             output_capacity_width,
             output_capacity_height,
             pixel_format: request.pixel_format,
+            native_input,
             layer_slot_count: request.layers.len() as u32,
         };
         if geometry.section_bytes() as u64 > SECTION_HARD_CAP_BYTES {
@@ -1620,7 +1671,7 @@ impl RenderSession {
             section_bytes,
         };
         transport.write_header_u32(MAGIC_OFFSET, HEADER_MAGIC);
-        transport.write_header_u32(VERSION_OFFSET, SESSION_HEADER_VERSION);
+        transport.write_header_u32(VERSION_OFFSET, geometry.header_version());
         transport.write_header_u32(DEPTH_CODE_OFFSET, depth_code(request.pixel_format));
         transport.write_header_u32(MAX_WIDTH_OFFSET, request.width);
         transport.write_header_u32(MAX_HEIGHT_OFFSET, request.height);
@@ -1719,7 +1770,9 @@ impl RenderSession {
             let mixed_depth = layer_layouts
                 .iter()
                 .any(|shape| shape.pixel_format != request.pixel_format);
-            let mut encoded = String::from(if layer_layouts.is_empty() {
+            let mut encoded = String::from(if native_input {
+                "session-layers:v5|"
+            } else if layer_layouts.is_empty() {
                 "session-layers:v2|"
             } else if mixed_depth {
                 "session-layers:v4|"
@@ -1731,7 +1784,21 @@ impl RenderSession {
                     encoded.push(';');
                 }
                 let handle = layer_handles[index] as usize;
-                if !layer_layouts.is_empty() {
+                if native_input {
+                    let (time, scale) = layer.timed.unwrap_or((0, 0));
+                    encoded.push_str(&format!(
+                        "{},{},{},{},{},{},{},{}",
+                        layer.slot,
+                        layer.width,
+                        layer.height,
+                        input_pixel_bytes,
+                        time,
+                        scale,
+                        u8::from(layer.dynamic),
+                        handle
+                    ));
+                    continue;
+                } else if !layer_layouts.is_empty() {
                     if layer.timed.is_some() || layer.dynamic {
                         return Err(invalid("world layouts require static secondary layers"));
                     }
@@ -2221,6 +2288,7 @@ impl RenderSession {
             None,
             &[],
             None,
+            false,
         )
     }
 
@@ -3482,7 +3550,7 @@ impl RenderSession {
 
     fn validate_static_header(&self) -> Result<(), String> {
         if self.transport.read_header_u32(MAGIC_OFFSET) != HEADER_MAGIC
-            || self.transport.read_header_u32(VERSION_OFFSET) != SESSION_HEADER_VERSION
+            || self.transport.read_header_u32(VERSION_OFFSET) != self.geometry.header_version()
             || self.transport.read_header_u32(DEPTH_CODE_OFFSET)
                 != depth_code(self.geometry.pixel_format)
             || self.transport.read_header_u32(MAX_WIDTH_OFFSET) != self.geometry.width

@@ -1,4 +1,5 @@
 #include "render_subsystem.h"
+#include "render_pixel_transport.hpp"
 
 #include "worker_pf_world_facade.hpp"
 
@@ -580,7 +581,9 @@ bool build_argb_input(const ImageRequest& request,
                       unsigned char* strided_destination) {
   if (!strided_destination) return false;
   const std::size_t pixels = static_cast<std::size_t>(request.width) * request.height;
-  if (external_rgba && external_rgba->size() != pixels * 4) return false;
+  const int32_t source_bytes = external_rgba
+      ? render_pixel_transport::rgba_stride(external_rgba->size(), pixels) : 4;
+  if (!source_bytes) return false;
   logical_argb.assign(pixels * request.pixel_bytes, 0);
   for (int32_t y = 0; y < request.height; ++y) {
     for (int32_t x = 0; x < request.width; ++x) {
@@ -588,20 +591,8 @@ bool build_argb_input(const ImageRequest& request,
           (static_cast<std::size_t>(y) * request.width + x) * request.pixel_bytes;
       if (external_rgba) {
         const auto* rgba = external_rgba->data() +
-            (static_cast<std::size_t>(y) * request.width + x) * 4;
-        if (request.pixel_bytes == 4) {
-          argb[0] = rgba[3]; argb[1] = rgba[0]; argb[2] = rgba[1]; argb[3] = rgba[2];
-        } else if (request.pixel_bytes == 8) {
-          auto* value = reinterpret_cast<uint16_t*>(argb);
-          value[0] = static_cast<uint16_t>((static_cast<uint32_t>(rgba[3]) * 32768u + 127u) / 255u);
-          value[1] = static_cast<uint16_t>((static_cast<uint32_t>(rgba[0]) * 32768u + 127u) / 255u);
-          value[2] = static_cast<uint16_t>((static_cast<uint32_t>(rgba[1]) * 32768u + 127u) / 255u);
-          value[3] = static_cast<uint16_t>((static_cast<uint32_t>(rgba[2]) * 32768u + 127u) / 255u);
-        } else {
-          auto* value = reinterpret_cast<float*>(argb);
-          value[0] = rgba[3] / 255.0f; value[1] = rgba[0] / 255.0f;
-          value[2] = rgba[1] / 255.0f; value[3] = rgba[2] / 255.0f;
-        }
+            (static_cast<std::size_t>(y) * request.width + x) * source_bytes;
+        render_pixel_transport::rgba_to_argb(argb, rgba, source_bytes, request.pixel_bytes);
       } else {
         // The remaining bytes stay zero for the 16/32-bit default gradient,
         // exactly as the legacy request construction did.
