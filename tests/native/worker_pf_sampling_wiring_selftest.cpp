@@ -26,9 +26,12 @@
 #include "worker_suite_registry.hpp"
 
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string_view>
 #include <vector>
 
@@ -493,6 +496,99 @@ void unwired_installed_slots_are_named_by_their_generated_offset() {
         "a null effect_ref is named in the in_data block");
 }
 
+struct NumericWorld {
+  std::vector<unsigned char> storage;
+  int32_t width{}, height{}, rowbytes{}, pixel_bytes{};
+  std::size_t offset{1};
+};
+
+bool resolve_numeric_world(void* world, int32_t pixel_bytes, unsigned char*& pixels,
+                           int32_t& rowbytes, int32_t& width, int32_t& height) {
+  const auto* value = static_cast<NumericWorld*>(world);
+  if (!value || value->pixel_bytes != pixel_bytes) return false;
+  pixels = const_cast<unsigned char*>(value->storage.data()) + value->offset;
+  rowbytes = value->rowbytes;
+  width = value->width;
+  height = value->height;
+  return true;
+}
+
+// The original double algorithm is the independent numeric oracle. Deliberately
+// retain floor, per-channel neighbor traversal, lround and the depth clamp.
+template <typename Component, int Maximum>
+void reference_subpixel(NumericWorld& world, int32_t fixed_x, int32_t fixed_y,
+                        std::size_t destination) {
+  const double x = fixed_x / 65536.0, y = fixed_y / 65536.0;
+  const int32_t x0 = static_cast<int32_t>(std::floor(x));
+  const int32_t y0 = static_cast<int32_t>(std::floor(y));
+  const double fx = x - x0, fy = y - y0;
+  for (int channel = 0; channel < 4; ++channel) {
+    double value = 0;
+    for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+      const int32_t sx = x0 + dx, sy = y0 + dy;
+      if (sx < 0 || sy < 0 || sx >= world.width || sy >= world.height) continue;
+      Component sample{};
+      std::memcpy(&sample, world.storage.data() + world.offset + sy * world.rowbytes +
+          sx * world.pixel_bytes + channel * sizeof(Component), sizeof(sample));
+      value += sample * ((dx ? fx : 1.0 - fx) * (dy ? fy : 1.0 - fy));
+    }
+    const Component result = static_cast<Component>(std::clamp(std::lround(value), 0l,
+                                                               static_cast<long>(Maximum)));
+    std::memcpy(world.storage.data() + destination + channel * sizeof(Component),
+                &result, sizeof(result));
+  }
+}
+
+template <typename Component, int Maximum>
+void integer_subpixel_matches_double(SampleFn callback) {
+  PfSamplingHostHooks hooks{};
+  hooks.resolve_world = &resolve_numeric_world;
+  configure_pf_sampling_runtime(hooks);
+  uint32_t random = 0x1787u;
+  const auto next = [&] { random = random * 1664525u + 1013904223u; return random; };
+  const int32_t boundaries[]{std::numeric_limits<int32_t>::min(), -131073, -65536,
+      -65535, -32768, -1, 0, 1, 32767, 32768, 32769, 65535, 65536,
+      65537, 98304, 131071, 131072, 196607, 327679, 327680,
+      std::numeric_limits<int32_t>::max()};
+  for (int test = 0; test < 1600; ++test) {
+    NumericWorld actual;
+    actual.width = test % 5 == 0 ? 1 : 5;
+    actual.height = test % 7 == 0 ? 1 : 3;
+    actual.pixel_bytes = 4 * sizeof(Component);
+    actual.rowbytes = actual.width * actual.pixel_bytes + 3;
+    actual.storage.resize(actual.offset + actual.height * actual.rowbytes + 32);
+    for (auto& byte : actual.storage) byte = static_cast<unsigned char>(next() >> 24);
+    // Regular exact ties, zero, white and raw16 super-white are interleaved
+    // with random inputs instead of relying on random rounding-boundary hits.
+    if (test % 4 == 0) {
+      for (int y = 0; y < actual.height; ++y) for (int x = 0; x < actual.width; ++x)
+        for (int channel = 0; channel < 4; ++channel) {
+          const Component values[]{0, 1, static_cast<Component>(Maximum),
+                                    std::numeric_limits<Component>::max()};
+          const auto value = values[(x + y + channel) % 4];
+          std::memcpy(actual.storage.data() + actual.offset + y * actual.rowbytes +
+              x * actual.pixel_bytes + channel * sizeof(Component), &value, sizeof(value));
+        }
+    }
+    const int32_t x = test < 441 ? boundaries[test % 21] :
+        static_cast<int32_t>(next() % (8 * 65536)) - 2 * 65536;
+    const int32_t y = test < 441 ? boundaries[test / 21] :
+        static_cast<int32_t>(next() % (6 * 65536)) - 2 * 65536;
+    // External destination, same pixel, and forward/backward channel shifts.
+    // Byte-for-byte whole-storage equality also checks row padding and guards.
+    const std::size_t destinations[]{actual.storage.size() - 16, actual.offset,
+        actual.offset + sizeof(Component), actual.offset + actual.pixel_bytes - sizeof(Component)};
+    const auto destination = destinations[test % 4];
+    auto expected = actual;
+    reference_subpixel<Component, Maximum>(expected, x, y, destination);
+    auto params = sampling_params(&actual);
+    check(callback(nullptr, x, y, params.data(), actual.storage.data() + destination) == 0,
+          "integer subpixel accepts a bounded numeric world");
+    check(actual.storage == expected.storage,
+          "integer subpixel exactly matches double including aliasing and padding");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -503,6 +599,8 @@ int main() {
   get_callback_addr_is_typed_bounded_and_clears_failures();
   production_utility_builder_is_offset_indexed();
   unwired_installed_slots_are_named_by_their_generated_offset();
+  integer_subpixel_matches_double<uint8_t, 255>(&subpixel_sample8);
+  integer_subpixel_matches_double<uint16_t, 32768>(&subpixel_sample16);
   if (failures == 0)
     std::cout << "{\"pf_sampling_wiring_selftest\":\"passed\",\"callback_diagnostics\":"
               << aexcompat::callback_diagnostics::snapshot_json() << "}\n";
