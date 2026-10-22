@@ -9,6 +9,33 @@
 
 namespace aexcompat::render_pixel_transport {
 
+int32_t rgba_stride(std::size_t bytes, std::size_t pixels) {
+  if (pixels == 0) return 0;
+  for (int32_t stride : {4, 8, 16})
+    if (pixels <= std::numeric_limits<std::size_t>::max() / stride &&
+        bytes == pixels * stride) return stride;
+  return 0;
+}
+
+void rgba_to_argb(void* destination, const unsigned char* rgba,
+                  int32_t source_bytes, int32_t destination_bytes) {
+  if ((source_bytes != 4 && source_bytes != 8 && source_bytes != 16) ||
+      (destination_bytes != 4 && destination_bytes != 8 && destination_bytes != 16)) return;
+  alignas(float) unsigned char argb[16]{};
+  const int32_t channel = source_bytes / 4;
+  std::memcpy(argb, rgba + 3 * channel, channel);
+  std::memcpy(argb + channel, rgba, 3 * channel);
+  if (source_bytes == destination_bytes) {
+    std::memcpy(destination, argb, source_bytes);
+  } else if (source_bytes == 4) {
+    rgba8_to_argb(destination, rgba, destination_bytes);
+  } else {
+    float wide[4]{};
+    argb_to_argb32f(wide, argb, source_bytes);
+    argb32f_to_argb(destination, wide, destination_bytes);
+  }
+}
+
 void rgba8_to_argb(void* destination, const unsigned char* rgba,
                    int32_t pixel_bytes) {
   if (pixel_bytes == 4) {
@@ -106,6 +133,24 @@ void argb32f_to_argb(void* destination, const float* source,
 }
 
 bool verify_argb32f_depth_conversion() {
+  // Native chain input is a channel permutation, not a conversion through 8-bit.
+  for (uint32_t value = 0; value <= 65535; ++value) {
+    const uint16_t rgba[4] = {static_cast<uint16_t>(value), 3, 10001, 32768};
+    uint16_t argb[4]{}, back[4]{};
+    rgba_to_argb(argb, reinterpret_cast<const unsigned char*>(rgba), 8, 8);
+    argb_to_rgba_native(back, argb, 8);
+    if (std::memcmp(rgba, back, sizeof(rgba)) != 0) return false;
+  }
+  {
+    const float rgba[4] = {1.25f, -0.125f, 0.1001f, -0.0f};
+    float argb[4]{}, back[4]{};
+    rgba_to_argb(argb, reinterpret_cast<const unsigned char*>(rgba), 16, 16);
+    argb_to_rgba_native(back, argb, 16);
+    if (std::memcmp(rgba, back, sizeof(rgba)) != 0 ||
+        rgba_stride(16, 1) != 16 || rgba_stride(8, 1) != 8 ||
+        rgba_stride(4, 1) != 4 || rgba_stride(15, 1) != 0 ||
+        rgba_stride(0, 0) != 0 || rgba_stride(8, 3) != 0) return false;
+  }
   // Every 8-bit value round-trips exactly (v / 255 * 255 rounds back to v).
   for (uint32_t value = 0; value <= 255; ++value) {
     const unsigned char in[4] = {static_cast<unsigned char>(value),

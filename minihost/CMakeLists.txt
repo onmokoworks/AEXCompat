@@ -633,6 +633,7 @@ add_executable(host_audio_runtime_selftest
   ../tests/native/host_audio_runtime_selftest.cpp
   src/host_audio_runtime.cpp
   src/render_subsystem.cpp
+  src/render_pixel_transport.cpp
   # render_subsystem's prepare_world_layout embeds the PF_World facade (#1276).
   src/worker_pf_world_facade.cpp
   src/worker_effect_bootstrap.cpp
@@ -655,6 +656,7 @@ add_executable(worker_render_lifecycle_selftest
   ../tests/native/worker_render_lifecycle_selftest.cpp
   src/render_lifecycle.cpp
   src/render_subsystem.cpp
+  src/render_pixel_transport.cpp
   src/worker_pf_world_facade.cpp
 )
 target_compile_features(worker_render_lifecycle_selftest PRIVATE cxx_std_17)

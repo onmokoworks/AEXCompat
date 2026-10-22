@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iostream>
 #include <string>
 
 namespace aexcompat::worker_runtime::request_parser {
@@ -118,6 +119,7 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
         const std::wstring trailer(argv[mode.image_argc - 1]);
         const bool layout_v3 = trailer.rfind(L"session-layers:v3|", 0) == 0;
         const bool layout_v4 = trailer.rfind(L"session-layers:v4|", 0) == 0;
+        const bool native_v5 = trailer.rfind(L"session-layers:v5|", 0) == 0;
         const std::wstring body = trailer.substr(std::wcslen(L"session-layers:v2|"));
         std::size_t offset = 0;
         while (offset < body.size()) {
@@ -132,7 +134,20 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           // and `slot,w,h,handle` (4) the static secondary (W1-4). The handle
           // is the last field of the static forms and of the timed one (#268).
           const auto commas = std::count(field.begin(), field.end(), L',');
-          if (layout_v3 || layout_v4) {
+          if (native_v5) {
+            int32_t dynamic = 0;
+            if (commas != 7 || swscanf_s(field.c_str(), L"%d,%d,%d,%d,%d,%u,%d,%llu%n",
+                    &layer.slot, &layer.width, &layer.height, &layer.rgba_pixel_bytes,
+                    &layer.time, &layer.time_scale, &dynamic, &layer.rgba_handle,
+                    &consumed) != 8 ||
+                (layer.rgba_pixel_bytes != 4 && layer.rgba_pixel_bytes != 8 &&
+                 layer.rgba_pixel_bytes != 16) || (dynamic != 0 && dynamic != 1) ||
+                (layer.time_scale == 0 && layer.time != 0)) throw 1;
+            layer.timed = layer.time_scale != 0;
+            layer.dynamic = dynamic != 0;
+            if (layer.timed && layer.dynamic) throw 1;
+            if (!layer.timed) layer.time_scale = 1;
+          } else if (layout_v3 || layout_v4) {
             int32_t padding_fill = -1;
             const bool parsed = layout_v4
                 ? commas == 12 &&
@@ -233,6 +248,64 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
     }
   } catch (...) { result.error = 3; }
   return result;
+}
+
+bool verify_native_session_layers() {
+  Hooks hooks;
+  const auto auxiliary = [](void*, const wchar_t*) { return true; };
+  hooks.auxiliary.set_dump_worlds_dir = auxiliary;
+  hooks.auxiliary.enable_checksum_detail = [](void*) { return true; };
+  hooks.auxiliary.load_aux_manifest = auxiliary;
+  hooks.auxiliary.parse_alpha_coverage = auxiliary;
+  hooks.auxiliary.load_parameter_animation = auxiliary;
+  hooks.auxiliary.parse_conformance_render_settings = auxiliary;
+  hooks.parse_parameters = [](const wchar_t*, void*) { return true; };
+  for (const auto kind : {Kind::Classic, Kind::Smart}) {
+    const auto run = [&](const std::wstring& trailer) {
+      std::vector<std::wstring> args{L"worker",
+          kind == Kind::Classic ? L"--render-session16-v1" : L"--smart-session16-v1",
+          L"unused.aex", L"unused-sha", L"payload", L"7", L"3", L"1", L"2", L"24", trailer};
+      std::vector<wchar_t*> argv;
+      for (auto& arg : args) argv.push_back(arg.data());
+      return parse(kind, static_cast<int>(argv.size()), argv.data(), hooks);
+    };
+    for (const int bytes : {4, 8, 16}) {
+      const auto stride = std::to_wstring(bytes);
+      const auto parsed = run(L"session-layers:v5|1,7,3," + stride + L",0,0,0,12;2,7,3," + stride + L",0,0,1,13;1,7,3," + stride + L",1,24,0,14");
+      if (parsed.error || parsed.invocation.layers.size() != 3) {
+        std::cerr << "native layer admission failed: kind=" << static_cast<int>(kind)
+                  << " stride=" << bytes << " error=" << parsed.error << '\n';
+        return false;
+      }
+      const auto& layers = parsed.invocation.layers;
+      if (layers[0].rgba_pixel_bytes != bytes || layers[0].timed || layers[0].dynamic ||
+          layers[0].rgba_handle != 12 || !layers[1].dynamic || layers[1].timed ||
+          !layers[2].timed || layers[2].dynamic || layers[2].time != 1 || layers[2].time_scale != 24) {
+        std::cerr << "native layer parsed fields mismatch\n";
+        return false;
+      }
+    }
+    for (const auto* invalid : {
+        L"1,7,3,12,0,0,0,12", L"1,7,3,8,1,0,0,12", L"1,7,3,8,0,0,2,12",
+        L"1,7,3,8,1,24,1,12", L"1,7,3,8,0,0,0,0", L"1,0,3,8,0,0,0,12",
+        L"1,7,3,8,0,0,0,12junk", L"1,7,3,8,0,0,12", L"1,7,3,8,0,0,0,12,0",
+        L"1,7,3,8,0,0,0,12;1,7,3,8,0,0,0,13",
+        L"1,7,3,8,1,24,0,12;1,7,3,8,2,48,0,13"}) {
+      if (run(std::wstring(L"session-layers:v5|") + invalid).error != 3) {
+        std::wcerr << L"native layer malformed input admitted: " << invalid << L'\n';
+        return false;
+      }
+    }
+    const auto primary = run(L"session-layers:v5|0,7,3,8,0,0,0,12");
+    if ((primary.error == 0) != (kind == Kind::Smart)) {
+      std::cerr << "native primary admission mismatch\n"; return false;
+    }
+    const auto legacy = run(L"session-layers:v2|1,7,3,12");
+    if (legacy.error || legacy.invocation.layers[0].rgba_pixel_bytes != 4) {
+      std::cerr << "legacy layer admission mismatch\n"; return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace aexcompat::worker_runtime::request_parser

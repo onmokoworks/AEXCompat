@@ -73,6 +73,7 @@ pub fn render_scattermap_fixture(
         None,
         false,
         None,
+        None,
     )
 }
 
@@ -694,6 +695,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
         gpu_runtime_policy,
         false,
         None,
+        None,
     )
 }
 
@@ -761,6 +763,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
         None,
         true,
         None,
+        None,
     )
 }
 
@@ -801,6 +804,7 @@ pub fn render_experimental_image_with_timed_layers(
         Vec::new(),
         None,
         false,
+        None,
         None,
     )
 }
@@ -856,6 +860,7 @@ pub fn render_experimental_image_with_parameter_animation(
         None,
         false,
         None,
+        None,
     )
 }
 
@@ -894,6 +899,7 @@ pub fn render_experimental_image_with_audio_sidecar(
         Vec::new(),
         None,
         false,
+        None,
         None,
     )
 }
@@ -940,6 +946,7 @@ pub fn render_experimental_artifact_at_time(
         None,
         false,
         Some(artifact_kind),
+        None,
     )
 }
 

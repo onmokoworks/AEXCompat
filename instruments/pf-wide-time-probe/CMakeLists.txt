@@ -1,6 +1,6 @@
 foreach(target pf_wide_time_allowed_probe pf_wide_time_denied_probe
     pf_automatic_wide_time_allowed_probe pf_automatic_wide_time_denied_probe
-    pf_smart_past_input_probe)
+    pf_smart_past_input_probe pf_deep_copy_probe)
   add_library(${target} MODULE pf_wide_time_probe.cpp)
   target_include_directories(${target} PRIVATE
     "$ENV{AE_SDK_ROOT}/Examples/Headers"
@@ -9,6 +9,8 @@ foreach(target pf_wide_time_allowed_probe pf_wide_time_denied_probe
   )
   set_target_properties(${target} PROPERTIES PREFIX "" SUFFIX ".aex")
 endforeach()
+target_compile_definitions(pf_deep_copy_probe PRIVATE AEXCOMPAT_DEEP_COPY_TEST=1)
+target_sources(pf_deep_copy_probe PRIVATE pf_deep_copy_probe.rc)
 target_compile_definitions(pf_wide_time_allowed_probe PRIVATE AEXCOMPAT_ADVERTISE_WIDE_TIME=1)
 target_compile_definitions(pf_automatic_wide_time_allowed_probe PRIVATE
   AEXCOMPAT_SMART_WIDE_TEST=1 AEXCOMPAT_ADVERTISE_AUTOMATIC_WIDE_TIME=1)

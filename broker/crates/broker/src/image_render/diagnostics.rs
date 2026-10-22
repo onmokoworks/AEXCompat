@@ -20,7 +20,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) const MAX_DIMENSION: u32 = 4096;
 pub(crate) const MAX_PIXELS: u64 = 16_777_216;
-pub(crate) const MAX_RGBA_TRANSPORT_BYTES: u64 = MAX_PIXELS * 4;
 const MAX_PARAMETERS: u32 = 1024;
 pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 /// Overrides the interactive frame deadline for one process (issue #1769):
@@ -502,6 +501,16 @@ fn cleanup_stale_image_transport(root: &Path, now: SystemTime) -> io::Result<()>
 /// harness's resident-session adapter can decode its cached input through the
 /// same fail-closed limits every render entry applies.
 pub fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicImage> {
+    decode_bounded_image_for_format(path, role, RenderPixelFormat::Argb8)
+}
+
+/// Native chains keep the same dimension/pixel limits, with a bounded decode
+/// budget matching their selected depth. Legacy RGBA8 callers keep 64 MiB.
+pub fn decode_bounded_image_for_format(
+    path: &Path,
+    role: &str,
+    format: RenderPixelFormat,
+) -> io::Result<image::DynamicImage> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|error| invalid(format!("{role} image open failed: {error}")))?
         .with_guessed_format()
@@ -509,7 +518,7 @@ pub fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::Dynami
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_DIMENSION);
     limits.max_image_height = Some(MAX_DIMENSION);
-    limits.max_alloc = Some(MAX_RGBA_TRANSPORT_BYTES);
+    limits.max_alloc = Some(MAX_PIXELS * format.bytes_per_pixel());
     reader.limits(limits);
     reader
         .decode()

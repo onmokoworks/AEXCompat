@@ -192,16 +192,17 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
   auto& source = *buffers.source;
   std::memset(source.data(), render::diagnostic_world_layout().input_padding_byte,
               static_cast<std::size_t>(plan.rowbytes) * plan.height);
-  if (external_rgba && external_rgba->size() !=
-      static_cast<std::size_t>(plan.width) * plan.height * 4) return false;
+  const int32_t source_bytes = external_rgba ? render_pixel_transport::rgba_stride(
+      external_rgba->size(), static_cast<std::size_t>(plan.width) * plan.height) : 4;
+  if (!source_bytes) return false;
   for (int32_t y = 0; y < plan.height; ++y) {
     for (int32_t x = 0; x < plan.width; ++x) {
       auto* pixel = &source[static_cast<std::size_t>(y) * plan.rowbytes +
                             static_cast<std::size_t>(x) * plan.input_pixel_bytes];
       if (external_rgba) {
         const auto* rgba = &(*external_rgba)[
-            (static_cast<std::size_t>(y) * plan.width + x) * 4];
-        render_pixel_transport::rgba8_to_argb(pixel, rgba, plan.input_pixel_bytes);
+            (static_cast<std::size_t>(y) * plan.width + x) * source_bytes];
+        render_pixel_transport::rgba_to_argb(pixel, rgba, source_bytes, plan.input_pixel_bytes);
       } else if (plan.float32) {
         const float values[4] = {1.0f,
             static_cast<float>(x) / static_cast<float>(plan.width - 1),
@@ -338,8 +339,10 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
           (layer.slot <= 0 ||
            static_cast<std::size_t>(layer.slot) >= definitions.size() ||
            runtime.records[layer.slot - 1].type != 0)) return false;
-      if (layer.width <= 0 || layer.height <= 0 || layer.rgba.size() !=
-          static_cast<std::size_t>(layer.width) * layer.height * 4) return false;
+      if (layer.width <= 0 || layer.height <= 0 ||
+          render_pixel_transport::rgba_stride(layer.rgba.size(),
+              static_cast<std::size_t>(layer.width) * layer.height) != layer.rgba_pixel_bytes ||
+          layer.rgba_pixel_bytes == 0) return false;
       const int32_t layer_pixel_bytes = layer.slot == 0 ? plan.input_pixel_bytes :
           (layer.pixel_bytes != 0 ? layer.pixel_bytes : plan.pixel_bytes);
       if (layer_pixel_bytes != 4 && layer_pixel_bytes != 8 && layer_pixel_bytes != 16)
@@ -349,10 +352,10 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
       auto& pixels = prepared.hosted_pixels[layer_index];
       pixels.resize(static_cast<std::size_t>(layer.width) * layer.height *
                     layer_pixel_bytes);
-      for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4)
-        render_pixel_transport::rgba8_to_argb(
-            pixels.data() + (offset / 4) * layer_pixel_bytes,
-            layer.rgba.data() + offset, layer_pixel_bytes);
+      for (std::size_t offset = 0; offset < layer.rgba.size(); offset += layer.rgba_pixel_bytes)
+        render_pixel_transport::rgba_to_argb(
+            pixels.data() + (offset / layer.rgba_pixel_bytes) * layer_pixel_bytes,
+            layer.rgba.data() + offset, layer.rgba_pixel_bytes, layer_pixel_bytes);
       hooks.dump_world("smart-layer-slot" + std::to_string(layer.slot),
                        pixels.data(), layer.width, layer.height, layer_pixel_bytes);
       const int32_t packed_rowbytes = layer.width * layer_pixel_bytes;

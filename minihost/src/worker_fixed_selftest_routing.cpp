@@ -1,6 +1,7 @@
 #include "worker_fixed_selftest_routing.hpp"
 
 #include "l2_cli_dispatch.h"
+#include "worker_request_parser.hpp"
 #include "worker_smart_dispatch.hpp"
 #include "worker_smart_setup.hpp"
 #include "worker_aegp_scene_runtime.hpp"
@@ -214,7 +215,8 @@ int selftest_smart_diagnostic_auxiliary_admission(int, wchar_t**) {
       aexcompat::worker_runtime::smart_setup::verify_fixed_image_case_admission();
   const bool gpu_snapshot =
       aexcompat::worker_runtime::smart_setup::verify_gpu_advertisement_snapshot();
-  const bool passed = auxiliary && fixed_case && gpu_snapshot;
+  const bool native_layers = request_parser::verify_native_session_layers();
+  const bool passed = auxiliary && fixed_case && gpu_snapshot && native_layers;
   std::cout << "{\"smart_diagnostic_auxiliary_admission\":\""
             << (passed ? "passed" : "failed")
             << "\",\"uses_effective_argc\":"
@@ -223,6 +225,7 @@ int selftest_smart_diagnostic_auxiliary_admission(int, wchar_t**) {
             << (fixed_case ? "true" : "false")
             << ",\"gpu_advertisement_snapshot\":"
             << (gpu_snapshot ? "true" : "false")
+            << ",\"native_session_layers\":" << (native_layers ? "true" : "false")
             << ",\"commands_checked\":20}\n";
   return passed ? 0 : 1;
 }

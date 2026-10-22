@@ -104,7 +104,8 @@ bool write_exact(HANDLE pipe, const unsigned char* source, std::size_t bytes) {
 }  // namespace
 
 std::size_t input_slot_bytes(const SessionGeometry& geometry) {
-  return static_cast<std::size_t>(geometry.max_width) * geometry.max_height * 4;
+  return static_cast<std::size_t>(geometry.max_width) * geometry.max_height *
+      (geometry.native_input ? geometry.output_pixel_bytes : 4);
 }
 
 std::size_t output_slot_bytes(const SessionGeometry& geometry) {
@@ -149,7 +150,7 @@ void SessionChannels::close() {
   response_pipe_ = nullptr;
 }
 
-bool SessionChannels::open_from_environment(const SessionGeometry& geometry) {
+bool SessionChannels::open_from_environment(SessionGeometry& geometry) {
   if (opened()) return false;
   if (geometry.max_width <= 0 || geometry.max_height <= 0 ||
       geometry.layer_slot_count < 0)
@@ -162,6 +163,14 @@ bool SessionChannels::open_from_environment(const SessionGeometry& geometry) {
   if (!view) return false;
   MEMORY_BASIC_INFORMATION region{};
   if (VirtualQuery(view, &region, sizeof(region)) != sizeof(region) ||
+      region.RegionSize < kHeaderBytes) {
+    UnmapViewOfFile(view);
+    return false;
+  }
+  uint32_t version = 0;
+  std::memcpy(&version, static_cast<unsigned char*>(view) + kHeaderVersionOffset, 4);
+  geometry.native_input = version == kNativeInputHeaderVersion;
+  if ((version != kSessionHeaderVersion && version != kNativeInputHeaderVersion) ||
       region.RegionSize < expected_section_bytes(geometry)) {
     UnmapViewOfFile(view);
     return false;
@@ -251,7 +260,8 @@ bool SessionChannels::static_header_matches(const SessionGeometry& geometry) con
                                   ? 32
                                   : (geometry.output_pixel_bytes == 8 ? 16 : 8);
   return opened() && read_header_u32(kHeaderMagicOffset) == kHeaderMagic &&
-         read_header_u32(kHeaderVersionOffset) == kSessionHeaderVersion &&
+         read_header_u32(kHeaderVersionOffset) ==
+             (geometry.native_input ? kNativeInputHeaderVersion : kSessionHeaderVersion) &&
          read_header_u32(kHeaderDepthCodeOffset) == depth_code &&
          read_header_u32(kHeaderMaxWidthOffset) ==
              static_cast<uint32_t>(geometry.max_width) &&
@@ -616,7 +626,7 @@ void run_session_frame_loop(
     for (int32_t index = 0; index < layer_slot_count; ++index) {
       auto& layer = session_layers[index];
       const std::size_t bytes =
-          static_cast<std::size_t>(layer.width) * layer.height * 4;
+          static_cast<std::size_t>(layer.width) * layer.height * layer.rgba_pixel_bytes;
       const HANDLE handle =
           reinterpret_cast<HANDLE>(static_cast<uintptr_t>(layer.rgba_handle));
       DWORD flags = 0;
@@ -1212,7 +1222,7 @@ void run_session_frame_loop(
       unsigned char* slot = channels.view() + output_offset;
       const std::size_t channel_count =
           static_cast<std::size_t>(max_width) * max_height * 4;
-      if (pixel_bytes == 4) {
+      if (geometry.native_input || pixel_bytes == 4) {
         std::memcpy(slot, frame_rgba.data(), frame_rgba.size());
       } else if (pixel_bytes == 8) {
         auto* deep = reinterpret_cast<uint16_t*>(slot);
@@ -1757,6 +1767,8 @@ SmartRenderSessionOutcome run_smart_render_session(
           prior.width = max_width;
           prior.height = max_height;
           prior.rgba = frame_rgba;
+          prior.rgba_pixel_bytes = static_cast<int32_t>(frame_rgba.size() /
+              (static_cast<std::size_t>(max_width) * max_height));
           temporal_bytes += prior.rgba.size();
           temporal_layers.push_back(std::move(prior));
           trim_temporal_history();
