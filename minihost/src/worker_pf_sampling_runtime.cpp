@@ -136,6 +136,48 @@ int32_t __cdecl get_callback_addr(void*, int32_t quality, uint32_t mode_flags, i
 // abuse, and on a correct plug-in its only effect was turning a valid sample
 // into a refusal reported as PF_Err_OUT_OF_MEMORY (which is itself the wrong
 // code for an argument rejection - issue #813).
+template <typename Component, uint32_t Maximum>
+void subpixel_sample_integer(const unsigned char* source, int32_t rowbytes,
+                             int32_t width, int32_t height, int32_t fixed_x,
+                             int32_t fixed_y, void* destination) {
+  constexpr uint64_t unit = uint64_t{1} << 16;
+  const uint64_t fx = static_cast<uint32_t>(fixed_x) & 0xffffu;
+  const uint64_t fy = static_cast<uint32_t>(fixed_y) & 0xffffu;
+  // Subtract the unsigned fractional part before division: C++ signed division
+  // alone truncates negative coordinates, whereas the sampler requires floor.
+  const int32_t x0 = static_cast<int32_t>((static_cast<int64_t>(fixed_x) -
+                                         static_cast<int64_t>(fx)) / 65536);
+  const int32_t y0 = static_cast<int32_t>((static_cast<int64_t>(fixed_y) -
+                                         static_cast<int64_t>(fy)) / 65536);
+  const uint64_t weights[4]{(unit - fx) * (unit - fy), fx * (unit - fy),
+                            (unit - fx) * fy, fx * fy};
+  const unsigned char* neighbors[4]{};
+  for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+    const int32_t x = x0 + dx, y = y0 + dy;
+    if (x >= 0 && x < width && y >= 0 && y < height)
+      neighbors[dy * 2 + dx] = source + static_cast<std::size_t>(y) * rowbytes +
+          static_cast<std::size_t>(x) * (4 * sizeof(Component));
+  }
+  // The denominator is 2^32. Even raw uint16_t values produce a numerator
+  // below 2^48, so every original double product/sum was exact. Adding half
+  // the denominator reproduces positive lround, without an approximation.
+  for (int channel = 0; channel < 4; ++channel) {
+    uint64_t sum = 0;
+    for (int neighbor = 0; neighbor < 4; ++neighbor) {
+      if (!neighbors[neighbor]) continue;
+      Component sample{};
+      std::memcpy(&sample, neighbors[neighbor] + channel * sizeof(Component), sizeof(sample));
+      sum += static_cast<uint64_t>(sample) * weights[neighbor];
+    }
+    const Component value = static_cast<Component>(
+        std::min<uint64_t>((sum + (uint64_t{1} << 31)) >> 32, Maximum));
+    // Keep the original channel-read/store order even when destination aliases
+    // a shifted portion of the source. memcpy also permits unaligned worlds.
+    std::memcpy(static_cast<unsigned char*>(destination) + channel * sizeof(Component),
+                &value, sizeof(value));
+  }
+}
+
 int32_t subpixel_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x,
                               int32_t fixed_y, const void* sampling_params,
                               void* destination_pixel) {
@@ -151,6 +193,15 @@ int32_t subpixel_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fix
   int32_t rowbytes{}, width{}, height{};
   if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height))
     return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::MissingWorld);
+  if (pixel_bytes == 4 || pixel_bytes == 8) {
+    if (pixel_bytes == 4)
+      subpixel_sample_integer<uint8_t, 255>(source, rowbytes, width, height,
+                                           fixed_x, fixed_y, destination_pixel);
+    else
+      subpixel_sample_integer<uint16_t, 32768>(source, rowbytes, width, height,
+                                              fixed_x, fixed_y, destination_pixel);
+    return finish_callback(Callback::Sampling, 0);
+  }
   const double x = fixed_x / 65536.0;
   const double y = fixed_y / 65536.0;
   const int32_t x0 = static_cast<int32_t>(std::floor(x));
