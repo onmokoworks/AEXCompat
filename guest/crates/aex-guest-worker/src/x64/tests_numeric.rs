@@ -50,3 +50,24 @@ fn x87_nan_still_selects_larger_significand() {
         .unwrap();
     assert_eq!(uc.mem_read_as_vec(code + 160, 10).unwrap(), b);
 }
+
+#[test]
+fn legacy_deep_world_allocates_clears_and_disposes_pf16() {
+    for flags in [2, 3] {
+        let mut engine = test_engine(&[]);
+        let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        assert_eq!(engine.call_win64(HOST_NEW_WORLD8, [1, 3, 2, flags, world, 0]).unwrap(), 0);
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        engine.read(world, &mut definition).unwrap();
+        let rowbytes = i32::from_le_bytes(definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET+4].try_into().unwrap());
+        assert_eq!(rowbytes, 24);
+        let record = &engine.unicorn.get_data().worlds[&world];
+        assert_eq!(record.pixel_format as u32, 0x3631_6561);
+        assert_eq!(record.size, 48);
+        let data = u64::from_le_bytes(definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET+8].try_into().unwrap());
+        assert_eq!(engine.unicorn.mem_read_as_vec(data, 48).unwrap(), vec![if flags & 1 != 0 {0} else {0xcd};48]);
+        assert_eq!(engine.call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0]).unwrap(), 0);
+        assert!(engine.unicorn.get_data().worlds.is_empty());
+        assert!(engine.unicorn.mem_read_as_vec(data, 1).is_err());
+    }
+}
