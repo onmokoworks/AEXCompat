@@ -1,0 +1,52 @@
+// Execute instructions, rather than testing the implementation's source text.
+#[test]
+fn sse_nan_operand_order_survives_mxcsr_write() {
+    let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()).unwrap();
+    let code = 0x1000_0000;
+    uc.mem_map(code, PAGE_SIZE, Prot::ALL).unwrap();
+    // ADDSS, SUBSS, MULSS, DIVSS; quiet/signaling payloads in both orders.
+    for opcode in [0x58, 0x5c, 0x59, 0x5e] {
+        let code = code + (opcode as u64) * 16;
+        uc.mem_write(code, &[0xf3, 0x0f, opcode, 0xc1]).unwrap();
+        for mxcsr in [None, Some(0x1f80)] {
+            if let Some(value) = mxcsr {
+                uc.reg_write(RegisterX86::MXCSR, value).unwrap();
+            }
+            for (a, b) in [
+                (0x7fc12345u32, 0xffc12346u32),
+                (0xffc12346, 0x7fc12345),
+                (0x7f812345, 0xffc12346),
+                (0x3f800000, 0xff812346),
+            ] {
+                uc.reg_write(RegisterX86::XMM0, a as u64).unwrap();
+                uc.reg_write(RegisterX86::XMM1, b as u64).unwrap();
+                uc.emu_start(code, code + 4, 0, 1).unwrap();
+                let first_nan = if a & 0x7f800000 == 0x7f800000 { a } else { b };
+                assert_eq!(
+                    uc.reg_read(RegisterX86::XMM0).unwrap() as u32,
+                    first_nan | 0x00400000
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn x87_nan_still_selects_larger_significand() {
+    let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()).unwrap();
+    let code = 0x1000_0000;
+    uc.mem_map(code, PAGE_SIZE, Prot::ALL).unwrap();
+    // FNINIT; FLD tbyte [rdi]; FLD tbyte [rsi]; FADDP; FSTP tbyte [rdx].
+    let instructions = [0xdb, 0xe3, 0xdb, 0x2f, 0xdb, 0x2e, 0xde, 0xc1, 0xdb, 0x3a];
+    uc.mem_write(code, &instructions).unwrap();
+    let a = [0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0, 0xc0, 0xff, 0x7f];
+    let b = [0xbd, 0x9a, 0x78, 0x56, 0x34, 0x12, 0, 0xc0, 0xff, 0xff];
+    uc.mem_write(code + 128, &a).unwrap();
+    uc.mem_write(code + 144, &b).unwrap();
+    uc.reg_write(RegisterX86::RDI, code + 128).unwrap();
+    uc.reg_write(RegisterX86::RSI, code + 144).unwrap();
+    uc.reg_write(RegisterX86::RDX, code + 160).unwrap();
+    uc.emu_start(code, code + instructions.len() as u64, 0, 5)
+        .unwrap();
+    assert_eq!(uc.mem_read_as_vec(code + 160, 10).unwrap(), b);
+}

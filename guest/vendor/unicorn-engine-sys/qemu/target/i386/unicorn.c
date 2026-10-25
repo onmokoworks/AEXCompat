@@ -107,6 +107,7 @@ static void reg_reset(struct uc_struct *uc)
     memset(env->fptags, 0, sizeof(env->fptags)); /* 0 = valid, 1 = empty */
 
     env->mxcsr = 0;
+    env->sse_status.x86_sse_nan_order = 1;
     memset(env->xmm_regs, 0, sizeof(env->xmm_regs));
     env->aex_avx_defined_mask = 0;
     memset(&env->xmm_t0, 0, sizeof(env->xmm_t0));

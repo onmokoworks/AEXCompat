@@ -543,6 +543,7 @@ mod tests {
     include!("x64/tests_cases.rs");
     include!("x64/tests_issue1077.rs");
     include!("x64/tests_gpu.rs");
+    include!("x64/tests_numeric.rs");
 }
 
 include!("x64/lockit.rs");
