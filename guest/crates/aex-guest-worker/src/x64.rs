@@ -293,14 +293,10 @@ const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
 const MAX_WORLD_DIMENSION: i32 = 32_768;
 const MAX_ITERATE_PIXELS: i64 = 16_777_216;
-// A nonzero Unicorn instruction limit enables instruction counting across the
-// whole run, which is prohibitively expensive for image kernels. The wall-clock
-// timeout and return-sentinel check still bound and validate guest execution.
-const MAX_INSTRUCTIONS: usize = 0;
-// A plug-in call that cannot finish inside an interactive frame budget must
-// fail with a bounded crash snapshot instead of stalling the host or a corpus
-// sweep for minutes. This covers loader callbacks and effect selectors alike.
-const TIMEOUT_MICROSECONDS: u64 = 20_000_000;
+// F50: deterministic finite budget per scheduler slice. The engine permits at
+// most 257 slices per call; no wall-clock cutoff is used by production calls.
+const MAX_INSTRUCTIONS: usize = 2_000_000_000;
+const TIMEOUT_MICROSECONDS: u64 = 0;
 const MAX_TRACE_EVENTS: usize = 50_000;
 const MAX_TRACE_BASIC_BLOCKS: usize = 50_000;
 const MAX_TRACE_BRANCH_EDGES: usize = 100_000;

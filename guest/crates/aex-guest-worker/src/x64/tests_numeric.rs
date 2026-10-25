@@ -71,3 +71,11 @@ fn legacy_deep_world_allocates_clears_and_disposes_pf16() {
         assert!(engine.unicorn.mem_read_as_vec(data, 1).is_err());
     }
 }
+
+#[test]
+fn zero_wall_timeout_still_executes_and_explicit_timeout_still_bounds() {
+    let mut engine = test_engine(&[0xb8, 42, 0, 0, 0, 0xc3]);
+    assert_eq!(engine.call_win64_with_timeout(TEST_CODE, &[], 0).unwrap(), 42);
+    let mut engine = test_engine(&[0xeb, 0xfe]); // infinite loop
+    assert!(engine.call_win64_with_timeout(TEST_CODE, &[], 1000).is_err());
+}

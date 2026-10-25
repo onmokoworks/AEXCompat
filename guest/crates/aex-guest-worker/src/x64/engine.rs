@@ -1837,14 +1837,18 @@ impl GuestEngine<'static> {
             self.unicorn.get_data_mut().scheduler_switches_remaining =
                 (MAX_SCHEDULER_SWITCHES - scheduler_switch) as u64;
             let elapsed = started.elapsed();
-            if elapsed >= timeout {
+            if timeout_microseconds != 0 && elapsed >= timeout {
                 return Err(self.execution_crash(format!(
                     "execution exceeded the total timeout of {timeout_microseconds} microseconds"
                 )));
             }
-            let remaining_timeout_microseconds = u64::try_from((timeout - elapsed).as_micros())
-                .unwrap_or(u64::MAX)
-                .max(1);
+            let remaining_timeout_microseconds = if timeout_microseconds == 0 {
+                0
+            } else {
+                u64::try_from((timeout - elapsed).as_micros())
+                    .unwrap_or(u64::MAX)
+                    .max(1)
+            };
             if let Err(error) = self.unicorn.emu_start(
                 begin,
                 RETURN_ADDRESS,
@@ -2380,7 +2384,7 @@ impl GuestEngine<'static> {
         }
         if rip != RETURN_ADDRESS {
             return Err(self.execution_crash(format!(
-                "execution stopped before the guest returned (RIP={rip:#x})"
+                "execution stopped before the guest returned (instruction budget {MAX_INSTRUCTIONS} per scheduler slice; RIP={rip:#x})"
             )));
         }
         uc("read return value", self.unicorn.reg_read(RegisterX86::RAX))
