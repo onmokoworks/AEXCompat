@@ -1,3 +1,4 @@
+#include "wide_integer.h"
 /* OLM-internal interoperability implementation. See README.md. */
 #include "ucrtmath.h"
 #include <stdint.h>
@@ -50,7 +51,7 @@ static double take_fraction(uint64_t w[3], int point) {
     int limb=2;
     while (limb>=0 && !w[limb]) --limb;
     if (limb<0) return 0;
-    int top=64*limb+63-__builtin_clzll(w[limb]);
+    int top=64*limb+63-ucrt_clz64(w[limb]);
     int shift=top-52;
     uint64_t sig;
     if (shift<0) { sig=w[0]<<(-shift); w[0]=0; }
@@ -70,8 +71,7 @@ static double large_reduce(double x, int *quadrant, int compensated) {
     uint64_t w[3], carry=0;
     for (int i=0;i<3;i++) {
         uint64_t digit; memcpy(&digit,invpio2+offset+8*i,8);
-        __uint128_t p=(__uint128_t)digit*mantissa+carry;
-        w[i]=(uint64_t)p; carry=(uint64_t)(p>>64);
+        w[i]=ucrt_muladd64(digit,mantissa,carry,&carry);
     }
     int fraction_bits=54-e%8;
     unsigned up=(unsigned)((w[2]>>(fraction_bits-1))&1);

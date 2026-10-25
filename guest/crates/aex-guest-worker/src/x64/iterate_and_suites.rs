@@ -2918,7 +2918,11 @@ fn emulate_new_world_common(unicorn: &mut Unicorn<'_, GuestState>, legacy_argb8:
         };
         let (pixel_format, world) = if legacy_argb8 {
             (
-                if flags & 0x2 != 0 { 0x3631_6561u32 } else { 0x6267_7261u32 } as i32,
+                if flags & 0x2 != 0 {
+                    0x3631_6561u32
+                } else {
+                    0x6267_7261u32
+                } as i32,
                 aegp_stack_arg(unicorn, 0x28)?,
             )
         } else {

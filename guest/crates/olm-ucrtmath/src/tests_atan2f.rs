@@ -57,6 +57,10 @@ fn atan2f_retained_ucrt_bits() {
     ];
     for &(mode, a, b, expected) in rows {
         let _ = b;
-        assert_eq!(unsafe { ucrt_atan2f(f32::from_bits(a), f32::from_bits(b), mode) }.to_bits(), expected, "mode={mode} a={a:x} b={b:x}");
+        assert_eq!(
+            unsafe { ucrt_atan2f(f32::from_bits(a), f32::from_bits(b), mode) }.to_bits(),
+            expected,
+            "mode={mode} a={a:x} b={b:x}"
+        );
     }
 }

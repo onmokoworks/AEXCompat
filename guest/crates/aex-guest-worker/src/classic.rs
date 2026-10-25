@@ -3033,12 +3033,13 @@ impl ClassicHost {
     ) -> Result<(u64, Option<ExecutionTrace>), ClassicError> {
         // F49's resident watch capability, with caller-supplied RVA rather
         // than a plugin-specific address. Unset means no tracing work.
-        let trace_path = std::env::var_os("AEXCOMPAT_SMART_TRACE")
-            .filter(|_| selector_name == "SMART_RENDER");
+        let trace_path =
+            std::env::var_os("AEXCOMPAT_SMART_TRACE").filter(|_| selector_name == "SMART_RENDER");
         let trace_enabled = trace_enabled || trace_path.is_some();
         if trace_path.is_some() {
-            let config = std::env::var("AEXCOMPAT_SMART_TRACE_WATCH")
-                .map_err(|_| ClassicError::Input("SMART_TRACE_WATCH requires rva,bytes,first|all".into()))?;
+            let config = std::env::var("AEXCOMPAT_SMART_TRACE_WATCH").map_err(|_| {
+                ClassicError::Input("SMART_TRACE_WATCH requires rva,bytes,first|all".into())
+            })?;
             self.configure_trace(smart_trace_watches(&config)?, None);
         }
         let before = trace_enabled
@@ -5132,21 +5133,43 @@ mod tests {
     }
 }
 
-
 // Resident Smart input/output pointer watches. The caller owns the RVA and path.
 fn smart_trace_watches(config: &str) -> Result<Vec<TraceWatchSpec>, ClassicError> {
-    let invalid = || ClassicError::Input("SMART_TRACE_WATCH requires hex-rva,bytes,first|all (1..=1048576 bytes)".into());
+    let invalid = || {
+        ClassicError::Input(
+            "SMART_TRACE_WATCH requires hex-rva,bytes,first|all (1..=1048576 bytes)".into(),
+        )
+    };
     let fields: Vec<_> = config.split(',').collect();
-    if fields.len() != 3 { return Err(invalid()); }
+    if fields.len() != 3 {
+        return Err(invalid());
+    }
     let rva = u64::from_str_radix(fields[0].trim_start_matches("0x"), 16).map_err(|_| invalid())?;
     let size: usize = fields[1].parse().map_err(|_| invalid())?;
-    if size == 0 || size > 1048576 { return Err(invalid()); }
-    let occurrence = match fields[2] { "first" => Some(1), "all" => None, _ => return Err(invalid()) };
-    Ok([("input", "rcx"), ("output", "rdx")].into_iter().map(|(id, register)| TraceWatchSpec {
-        id: id.into(), function_rva: Some(rva), instruction_rva: None,
-        absolute_address: None, register, dereference_offset: None, size, occurrence,
-        image_coordinate: None, image_row_offset: None, image_format: None,
-    }).collect())
+    if size == 0 || size > 1048576 {
+        return Err(invalid());
+    }
+    let occurrence = match fields[2] {
+        "first" => Some(1),
+        "all" => None,
+        _ => return Err(invalid()),
+    };
+    Ok([("input", "rcx"), ("output", "rdx")]
+        .into_iter()
+        .map(|(id, register)| TraceWatchSpec {
+            id: id.into(),
+            function_rva: Some(rva),
+            instruction_rva: None,
+            absolute_address: None,
+            register,
+            dereference_offset: None,
+            size,
+            occurrence,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        })
+        .collect())
 }
 
 #[test]
@@ -5158,8 +5181,17 @@ fn resident_smart_watch_config_preserves_occurrence_and_bounds() {
     assert_eq!(all[0].register, "rcx");
     assert_eq!(all[1].register, "rdx");
     assert_eq!(all[1].occurrence, None);
-    assert_eq!(smart_trace_watches("1ec0,16,first").unwrap()[0].occurrence, Some(1));
-    for bad in ["1ec0,0,all", "1ec0,1048577,all", "no,16,all", "1ec0,16,other", "1ec0,16"] {
+    assert_eq!(
+        smart_trace_watches("1ec0,16,first").unwrap()[0].occurrence,
+        Some(1)
+    );
+    for bad in [
+        "1ec0,0,all",
+        "1ec0,1048577,all",
+        "no,16,all",
+        "1ec0,16,other",
+        "1ec0,16",
+    ] {
         assert!(smart_trace_watches(bad).is_err(), "{bad}");
     }
 }

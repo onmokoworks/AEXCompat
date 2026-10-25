@@ -1,3 +1,4 @@
+#include "wide_integer.h"
 /* OLM-internal interoperability implementation; see README-double.md.
  * Round-to-nearest, gradual underflow, contraction off, explicit FMA only. */
 #include "ucrtmath.h"
@@ -42,7 +43,7 @@ static double fraction(uint64_t w[3], int point) {
     int limb=2;
     while (limb>=0 && !w[limb]) --limb;
     if (limb<0) return 0.0;
-    int top=64*limb+63-__builtin_clzll(w[limb]), shift=top-52;
+    int top=64*limb+63-ucrt_clz64(w[limb]), shift=top-52;
     uint64_t sig;
     if (shift<0) {sig=w[0]<<(-shift);w[0]=0;}
     else {
@@ -61,8 +62,7 @@ static reduced large_reduce(double x,int fused) {
     uint64_t w[3],carry=0;
     for(int i=0;i<3;i++) {
         uint64_t digit;memcpy(&digit,double_invpio2+offset+8*i,8);
-        __uint128_t p=(__uint128_t)digit*m+carry;
-        w[i]=(uint64_t)p;carry=p>>64;
+        w[i]=ucrt_muladd64(digit,m,carry,&carry);
     }
     unsigned up=(w[2]>>(point-1))&1;
     int n=((w[2]>>point)+up)&3;

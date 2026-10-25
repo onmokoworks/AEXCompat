@@ -39,6 +39,10 @@ fn expf_retained_ucrt_bits() {
     ];
     for &(mode, a, b, expected) in rows {
         let _ = b;
-        assert_eq!(unsafe { ucrt_expf(f32::from_bits(a), mode) }.to_bits(), expected, "mode={mode} a={a:x} b={b:x}");
+        assert_eq!(
+            unsafe { ucrt_expf(f32::from_bits(a), mode) }.to_bits(),
+            expected,
+            "mode={mode} a={a:x} b={b:x}"
+        );
     }
 }

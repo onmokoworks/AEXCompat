@@ -4,8 +4,13 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#ifdef _MSC_VER
+#define ALIGN(n) __declspec(align(n))
+#define unlikely(x) (!!(x))
+#else
 #define ALIGN(n) __attribute__((aligned(n)))
 #define unlikely(x) __builtin_expect(!!(x), 0)
+#endif
 typedef union { float f; uint32_t u; } flt32_t;
 typedef union { double d; uint64_t u; } flt64_t;
 static inline uint32_t asuint32(float x) { uint32_t u; memcpy(&u,&x,4); return u; }

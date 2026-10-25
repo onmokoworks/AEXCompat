@@ -369,7 +369,6 @@ pub(super) unsafe extern "win64" fn native_atan2f(y: f32, x: f32) -> f32 {
     olm_ucrtmath::atan2f(y, x)
 }
 
-
 pub(super) unsafe extern "win64" fn native_sinf(value: f32) -> f32 {
     olm_ucrtmath::sinf(value)
 }

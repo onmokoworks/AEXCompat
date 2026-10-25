@@ -14842,12 +14842,21 @@ fn pf_world_suite_v2_owns_formats_and_fails_closed() {
         4
     );
     assert!(engine.unicorn.get_data().worlds.is_empty());
-    let error = engine
-        .call_win64(HOST_NEW_WORLD8, [1, 3, 2, 0x2, world, 0])
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("unsupported DEEP_PIXELS"),
-        "{error}"
+    assert_eq!(
+        engine
+            .call_win64(HOST_NEW_WORLD8, [1, 3, 2, 0x2, world, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().worlds[&world].pixel_format as u32,
+        0x3631_6561
+    );
+    assert_eq!(
+        engine
+            .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
+            .unwrap(),
+        0
     );
     assert!(engine.unicorn.get_data().worlds.is_empty());
 }

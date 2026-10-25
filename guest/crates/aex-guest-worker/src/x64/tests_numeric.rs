@@ -56,17 +56,38 @@ fn legacy_deep_world_allocates_clears_and_disposes_pf16() {
     for flags in [2, 3] {
         let mut engine = test_engine(&[]);
         let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
-        assert_eq!(engine.call_win64(HOST_NEW_WORLD8, [1, 3, 2, flags, world, 0]).unwrap(), 0);
+        assert_eq!(
+            engine
+                .call_win64(HOST_NEW_WORLD8, [1, 3, 2, flags, world, 0])
+                .unwrap(),
+            0
+        );
         let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
         engine.read(world, &mut definition).unwrap();
-        let rowbytes = i32::from_le_bytes(definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET+4].try_into().unwrap());
+        let rowbytes = i32::from_le_bytes(
+            definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        );
         assert_eq!(rowbytes, 24);
         let record = &engine.unicorn.get_data().worlds[&world];
         assert_eq!(record.pixel_format as u32, 0x3631_6561);
         assert_eq!(record.size, 48);
-        let data = u64::from_le_bytes(definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET+8].try_into().unwrap());
-        assert_eq!(engine.unicorn.mem_read_as_vec(data, 48).unwrap(), vec![if flags & 1 != 0 {0} else {0xcd};48]);
-        assert_eq!(engine.call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0]).unwrap(), 0);
+        let data = u64::from_le_bytes(
+            definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(data, 48).unwrap(),
+            vec![if flags & 1 != 0 { 0 } else { 0xcd }; 48]
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
         assert!(engine.unicorn.get_data().worlds.is_empty());
         assert!(engine.unicorn.mem_read_as_vec(data, 1).is_err());
     }
@@ -75,7 +96,76 @@ fn legacy_deep_world_allocates_clears_and_disposes_pf16() {
 #[test]
 fn zero_wall_timeout_still_executes_and_explicit_timeout_still_bounds() {
     let mut engine = test_engine(&[0xb8, 42, 0, 0, 0, 0xc3]);
-    assert_eq!(engine.call_win64_with_timeout(TEST_CODE, &[], 0).unwrap(), 42);
+    assert_eq!(
+        engine.call_win64_with_timeout(TEST_CODE, &[], 0).unwrap(),
+        42
+    );
     let mut engine = test_engine(&[0xeb, 0xfe]); // infinite loop
-    assert!(engine.call_win64_with_timeout(TEST_CODE, &[], 1000).is_err());
+    assert!(
+        engine
+            .call_win64_with_timeout(TEST_CODE, &[], 1000)
+            .is_err()
+    );
+}
+
+#[test]
+fn ucrt_imports_execute_through_production_library_dispatch() {
+    for library in ["ucrtbase.dll", "api-ms-win-crt-math-l1-1-0.dll"] {
+        for name in [
+            "expf", "atan2f", "powf", "sinf", "cosf", "log2f", "sin", "cos", "exp", "pow",
+        ] {
+            let mut engine = test_engine(&[]);
+            let stub = TEST_CODE + 0x800;
+            install_win64_import(&mut engine.unicorn, stub, library, name).unwrap();
+            for (a, b) in [(0.37f64, 2.4f64), (-0.125, 3.0), (1.25, 0.75)] {
+                let double = matches!(name, "sin" | "cos" | "exp" | "pow");
+                let expected = match name {
+                    "expf" => olm_ucrtmath::expf(a as f32).to_bits() as u64,
+                    "atan2f" => olm_ucrtmath::atan2f(a as f32, b as f32).to_bits() as u64,
+                    "powf" => olm_ucrtmath::powf(a as f32, b as f32).to_bits() as u64,
+                    "sinf" => olm_ucrtmath::sinf(a as f32).to_bits() as u64,
+                    "cosf" => olm_ucrtmath::cosf(a as f32).to_bits() as u64,
+                    "log2f" => olm_ucrtmath::log2f(a as f32).to_bits() as u64,
+                    "sin" => olm_ucrtmath::sin(a).to_bits(),
+                    "cos" => olm_ucrtmath::cos(a).to_bits(),
+                    "exp" => olm_ucrtmath::exp(a).to_bits(),
+                    "pow" => olm_ucrtmath::pow(a, b).to_bits(),
+                    _ => unreachable!(),
+                };
+                engine
+                    .unicorn
+                    .reg_write(
+                        RegisterX86::XMM0,
+                        if double {
+                            a.to_bits()
+                        } else {
+                            (a as f32).to_bits() as u64
+                        },
+                    )
+                    .unwrap();
+                engine
+                    .unicorn
+                    .reg_write(
+                        RegisterX86::XMM1,
+                        if double {
+                            b.to_bits()
+                        } else {
+                            (b as f32).to_bits() as u64
+                        },
+                    )
+                    .unwrap();
+                engine.call_win64(stub, [0; 6]).unwrap();
+                let actual = engine.unicorn.reg_read(RegisterX86::XMM0).unwrap();
+                assert_eq!(
+                    if double { actual } else { actual as u32 as u64 },
+                    expected,
+                    "{library} {name}"
+                );
+            }
+            assert_eq!(
+                dispatch_win64_import("fixture.dll", name),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            );
+        }
+    }
 }
