@@ -116,6 +116,7 @@ fn ucrt_imports_execute_through_production_library_dispatch() {
         ] {
             let mut engine = test_engine(&[]);
             let stub = TEST_CODE + 0x800;
+            engine.write(stub, &[0xc3]).unwrap();
             install_win64_import(&mut engine.unicorn, stub, library, name).unwrap();
             for (a, b) in [(0.37f64, 2.4f64), (-0.125, 3.0), (1.25, 0.75)] {
                 let double = matches!(name, "sin" | "cos" | "exp" | "pow");
