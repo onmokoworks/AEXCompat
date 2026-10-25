@@ -26275,7 +26275,7 @@ fn cropped_world_preserves_depth_stride_and_scope_ownership() {
             let source = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
             let output = engine.allocate(4, 4).unwrap();
             let pixels = engine.allocate(1024, 8).unwrap();
-            let stride = 8 * pixel_bytes + pad;
+            let stride: i32 = 8 * pixel_bytes + pad;
             let mut header = vec![0u8; abi::PF_LAYER_DEF_SIZE];
             header[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
                 .copy_from_slice(&pixels.to_le_bytes());
