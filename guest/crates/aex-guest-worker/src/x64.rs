@@ -293,10 +293,10 @@ const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
 const MAX_WORLD_DIMENSION: i32 = 32_768;
 const MAX_ITERATE_PIXELS: i64 = 16_777_216;
-// F50: deterministic finite budget per scheduler slice. The engine permits at
-// most 257 slices per call; no wall-clock cutoff is used by production calls.
-const MAX_INSTRUCTIONS: usize = 2_000_000_000;
-const TIMEOUT_MICROSECONDS: u64 = 0;
+// Default matches F53. F50 deterministic budgets are an explicit opt-in;
+// counting every instruction is substantially slower for image kernels.
+const MAX_INSTRUCTIONS: usize = 0;
+const TIMEOUT_MICROSECONDS: u64 = 20_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
 const MAX_TRACE_BASIC_BLOCKS: usize = 50_000;
 const MAX_TRACE_BRANCH_EDGES: usize = 100_000;

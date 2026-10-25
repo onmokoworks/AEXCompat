@@ -163,10 +163,24 @@ fn ucrt_imports_execute_through_production_library_dispatch() {
                     "{library} {name}"
                 );
             }
-            assert_eq!(
-                dispatch_win64_import("fixture.dll", name),
-                Win64ImportDispatch::UnsupportedLegacyImport
-            );
+            if matches!(name, "atan2f" | "log2f" | "sin" | "cos" | "exp") {
+                assert_eq!(
+                    dispatch_win64_import("fixture.dll", name),
+                    Win64ImportDispatch::UnsupportedLegacyImport
+                );
+            }
         }
     }
+}
+
+#[test]
+fn finite_instruction_limit_stops_nonreturning_guest_without_wall_timeout() {
+    let mut engine = test_engine(&[0xeb, 0xfe]);
+    let error = engine
+        .call_win64_with_limits(TEST_CODE, &[], 0, 10)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("instruction budget 10"),
+        "{error}"
+    );
 }

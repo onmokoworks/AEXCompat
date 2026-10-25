@@ -11,7 +11,7 @@ Local draft stacked on F54; OLM's default oracle is unchanged.
 | F45 | UCRT double sin, cos, exp imports |
 | F46 | UCRT double pow import |
 | F49 | Optional resident Smart pointer watches with caller-selected RVA |
-| F50 | Finite instruction budget per scheduler slice; no production wall deadline |
+| F50 | Opt-in finite instruction budget per scheduler slice |
 
 F47/F47b/c/d and F51 are OLM native-plugin bridges/standalone hosts, not guest
 AEX emulation patches, and are not copied into the guest worker. F52/F52c/F53
@@ -60,3 +60,9 @@ against F53. Successful raw bytes/rectangles, matching non-success statuses,
 byte differences and status differences are distinct categories. Matching
 rejections are not successful numerical equivalence. The OLM ticket report
 records actual counts and remaining differences.
+
+F53 does not inherit the F50 experiment: its default has no instruction counting
+and a 20-second wall timeout. Preserve that default here. Set
+AEXCOMPAT_INSTRUCTION_BUDGET=2000000000 (or any positive smaller count) for F50
+behavior: zero wall timeout and a finite instruction cap per scheduler slice,
+with at most 257 slices. Explicit diagnostic timeout calls retain their timeout.

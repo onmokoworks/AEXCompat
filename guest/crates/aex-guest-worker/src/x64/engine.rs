@@ -1718,7 +1718,8 @@ impl GuestEngine<'static> {
     /// callers that need to pass a raw `f32` word can place `value.to_bits()` in
     /// the low 32 bits without a host-side numeric conversion.
     pub fn call_win64_args(&mut self, address: u64, args: &[u64]) -> Result<u64, GuestError> {
-        self.call_win64_with_timeout(address, args, TIMEOUT_MICROSECONDS)
+        let (timeout, count) = default_execution_limits()?;
+        self.call_win64_with_limits(address, args, timeout, count)
     }
 
     pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
@@ -1728,7 +1729,9 @@ impl GuestEngine<'static> {
             state.pending_unsupported_suite = None;
             state.selector_abort = None;
         }
-        let result = self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS);
+        let result = default_execution_limits().and_then(|(timeout, count)| {
+            self.call_win64_with_limits(address, &args, timeout, count)
+        });
         {
             let state = self.unicorn.get_data_mut();
             state.selector_dispatch_active = false;
@@ -1743,6 +1746,16 @@ impl GuestEngine<'static> {
         address: u64,
         args: &[u64],
         timeout_microseconds: u64,
+    ) -> Result<u64, GuestError> {
+        self.call_win64_with_limits(address, args, timeout_microseconds, MAX_INSTRUCTIONS)
+    }
+
+    fn call_win64_with_limits(
+        &mut self,
+        address: u64,
+        args: &[u64],
+        timeout_microseconds: u64,
+        instruction_limit: usize,
     ) -> Result<u64, GuestError> {
         const WIN64_HOME_SPACE_BYTES: u64 = 0x20;
         const RETURN_ADDRESS_BYTES: u64 = 8;
@@ -1853,7 +1866,7 @@ impl GuestEngine<'static> {
                 begin,
                 RETURN_ADDRESS,
                 remaining_timeout_microseconds,
-                MAX_INSTRUCTIONS,
+                instruction_limit,
             ) {
                 return Err(self.execution_crash(format!("emulation error: {error}")));
             }
@@ -2384,7 +2397,7 @@ impl GuestEngine<'static> {
         }
         if rip != RETURN_ADDRESS {
             return Err(self.execution_crash(format!(
-                "execution stopped before the guest returned (instruction budget {MAX_INSTRUCTIONS} per scheduler slice; RIP={rip:#x})"
+                "execution stopped before the guest returned (instruction budget {instruction_limit} per scheduler slice; RIP={rip:#x})"
             )));
         }
         uc("read return value", self.unicorn.reg_read(RegisterX86::RAX))
@@ -2955,4 +2968,19 @@ fn initialize_windows_command_line_w(engine: &mut GuestEngine<'static>) -> Resul
     engine.write(command_line, &bytes)?;
     engine.unicorn.get_data_mut().windows_command_line_w = command_line;
     Ok(())
+}
+
+fn default_execution_limits() -> Result<(u64, usize), GuestError> {
+    match std::env::var("AEXCOMPAT_INSTRUCTION_BUDGET") {
+        Err(std::env::VarError::NotPresent) => Ok((TIMEOUT_MICROSECONDS, MAX_INSTRUCTIONS)),
+        Ok(value) => match value.parse::<usize>() {
+            Ok(count) if count > 0 && count <= 2_000_000_000 => Ok((0, count)),
+            _ => Err(GuestError::Callback(
+                "AEXCOMPAT_INSTRUCTION_BUDGET must be 1..=2000000000".into(),
+            )),
+        },
+        Err(_) => Err(GuestError::Callback(
+            "AEXCOMPAT_INSTRUCTION_BUDGET must be UTF-8".into(),
+        )),
+    }
 }
