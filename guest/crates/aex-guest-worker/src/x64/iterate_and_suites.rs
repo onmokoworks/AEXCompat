@@ -1728,6 +1728,14 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     if output != 0 {
         let _ = unicorn.mem_write(output, &0u64.to_le_bytes());
     }
+    if unicorn.get_data().ui_session.enabled && output != 0 {
+        if let Some(address) = ui_suite_address(&name, version) {
+            if unicorn.mem_write(output, &address.to_le_bytes()).is_ok() {
+                finish_acquire_suite_success(unicorn);
+                return;
+            }
+        }
+    }
     if name == "PF Handle Suite"
         && version == 2
         && output != 0
@@ -1861,6 +1869,12 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .is_ok()
     {
         finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if unicorn.get_data().ui_session.enabled {
+        unicorn.get_data_mut().callback_error =
+            Some(format!("unsupported UI session suite {name} v{version}"));
+        let _ = unicorn.emu_stop();
         return;
     }
     if unicorn.get_data().selector_dispatch_active {

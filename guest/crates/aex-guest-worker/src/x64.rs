@@ -558,3 +558,7 @@ include!("x64/network.rs");
 
 include!("x64/printf.rs");
 include!("x64/windows_files.rs");
+
+include!("x64/ui_session.rs");
+
+include!("x64/ui_draw.rs");
