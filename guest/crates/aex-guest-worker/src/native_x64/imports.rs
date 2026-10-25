@@ -28,6 +28,9 @@ pub(super) fn native_import_is_implemented(name: &str) -> bool {
             | "_callnewh"
             | "strncpy"
             | "memset"
+            | "sin"
+            | "cos"
+            | "exp"
             | "expf"
             | "atan2f"
             | "sinf"
@@ -49,6 +52,9 @@ pub(super) fn native_import_callback(name: &str) -> u64 {
         "_callnewh" => callback_address!(noop_import),
         "strncpy" => callback_address!(native_strncpy),
         "memset" => callback_address!(native_memset),
+        "sin" => callback_address!(native_sin),
+        "cos" => callback_address!(native_cos),
+        "exp" => callback_address!(native_exp),
         "expf" => callback_address!(native_expf),
         "atan2f" => callback_address!(native_atan2f),
         "sinf" => callback_address!(native_sinf),
@@ -374,4 +380,16 @@ pub(super) unsafe extern "win64" fn native_cosf(value: f32) -> f32 {
 
 pub(super) unsafe extern "win64" fn native_log2f(value: f32) -> f32 {
     olm_ucrtmath::log2f(value)
+}
+
+pub(super) unsafe extern "win64" fn native_sin(value: f64) -> f64 {
+    olm_ucrtmath::sin(value)
+}
+
+pub(super) unsafe extern "win64" fn native_cos(value: f64) -> f64 {
+    olm_ucrtmath::cos(value)
+}
+
+pub(super) unsafe extern "win64" fn native_exp(value: f64) -> f64 {
+    olm_ucrtmath::exp(value)
 }

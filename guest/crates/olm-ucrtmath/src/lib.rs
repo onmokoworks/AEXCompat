@@ -10,6 +10,10 @@ fn mode() -> i32 {
     })
 }
 unsafe extern "C" {
+    fn ucrt_sin(x: f64, mode: i32) -> f64;
+    fn ucrt_cos(x: f64, mode: i32) -> f64;
+    fn ucrt_exp(x: f64, mode: i32) -> f64;
+
     fn ucrt_sinf(x: f32, mode: i32) -> f32;
     fn ucrt_cosf(x: f32, mode: i32) -> f32;
     fn ucrt_log2f(x: f32, mode: i32) -> f32;
@@ -50,3 +54,22 @@ fn log2f_ieee_boundaries() {
 pub fn sinf(x: f32) -> f32 { unsafe { ucrt_sinf(x, mode()) } }
 pub fn cosf(x: f32) -> f32 { unsafe { ucrt_cosf(x, mode()) } }
 pub fn log2f(x: f32) -> f32 { unsafe { ucrt_log2f(x, mode()) } }
+pub fn sin(x: f64) -> f64 { unsafe { ucrt_sin(x, mode()) } }
+pub fn cos(x: f64) -> f64 { unsafe { ucrt_cos(x, mode()) } }
+pub fn exp(x: f64) -> f64 { unsafe { ucrt_exp(x, mode()) } }
+
+#[test]
+fn double_ieee_boundaries() {
+    for mode in [0, 1] {
+        unsafe {
+            assert_eq!(ucrt_sin(-0.0,mode).to_bits(), (-0.0f64).to_bits());
+            assert_eq!(ucrt_cos(-0.0,mode).to_bits(), 1.0f64.to_bits());
+            assert_eq!(ucrt_exp(0.0,mode).to_bits(), 1.0f64.to_bits());
+            assert_eq!(ucrt_exp(f64::NEG_INFINITY,mode).to_bits(), 0);
+            assert_eq!(ucrt_exp(f64::INFINITY,mode).to_bits(), f64::INFINITY.to_bits());
+            for function in [ucrt_sin, ucrt_cos, ucrt_exp] {
+                assert_eq!(function(f64::from_bits(0xfff0123456789abc),mode).to_bits(), 0xfff8123456789abc);
+            }
+        }
+    }
+}

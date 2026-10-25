@@ -7,6 +7,7 @@ fn main() {
         build.file(format!("ucrtmath/src/{name}.c"));
     }
     build.file("ucrtmath/ms/float.c");
+    build.file("ucrtmath/ms/double.c");
     build.compile("ucrtmath");
     println!("cargo:rerun-if-changed=ucrtmath");
 }

@@ -211,6 +211,7 @@ enum LegacyWin64Import {
     CosF,
     Ceil,
     CeilF,
+    Exp,
     ExpF,
     Floor,
     FloorF,
@@ -1095,7 +1096,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_copysign" | "copysign") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "atan2f") => LegacyWin64Import::Atan2F,
         (_, "atan2f") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "cos") => LegacyWin64Import::Cos,
         (_, "cos") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceil") => LegacyWin64Import::Ceil,
         (_, "ceil") => return Win64ImportDispatch::UnsupportedLegacyImport,
@@ -1125,7 +1126,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "round") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "roundf") => LegacyWin64Import::RoundF,
         (_, "roundf") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("api-ms-win-crt-math-l1-1-0.dll", "sin") => LegacyWin64Import::Sin,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "sin") => LegacyWin64Import::Sin,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "exp") => LegacyWin64Import::Exp,
+        (_, "exp") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "sin") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm") => LegacyWin64Import::CrtInitterm,
         ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e") => LegacyWin64Import::CrtInittermE,
@@ -2622,7 +2625,7 @@ fn install_win64_import(
                     install_atan2f_import(unicorn, stub)?;
                 }
                 LegacyWin64Import::Cos => {
-                    install_double_import(unicorn, stub, "cos", f64::cos)?;
+                    install_double_import(unicorn, stub, "cos", olm_ucrtmath::cos)?;
                 }
                 LegacyWin64Import::CosF => {
                     install_float_import(unicorn, stub, "cosf", olm_ucrtmath::cosf)?;
@@ -2632,6 +2635,9 @@ fn install_win64_import(
                 }
                 LegacyWin64Import::CeilF => {
                     install_float_import(unicorn, stub, "ceilf", f32::ceil)?;
+                }
+                LegacyWin64Import::Exp => {
+                    install_double_import(unicorn, stub, "exp", olm_ucrtmath::exp)?;
                 }
                 LegacyWin64Import::ExpF => {
                     install_float_import(unicorn, stub, "expf", olm_ucrtmath::expf)?;
@@ -2688,7 +2694,7 @@ fn install_win64_import(
                     install_double_binary_import(unicorn, stub, "pow", f64::powf)?;
                 }
                 LegacyWin64Import::Sin => {
-                    install_double_import(unicorn, stub, "sin", f64::sin)?;
+                    install_double_import(unicorn, stub, "sin", olm_ucrtmath::sin)?;
                 }
                 LegacyWin64Import::SinF => {
                     install_float_import(unicorn, stub, "sinf", olm_ucrtmath::sinf)?;
