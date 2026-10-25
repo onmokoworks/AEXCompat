@@ -8,6 +8,7 @@ fn main() {
     }
     build.file("ucrtmath/ms/float.c");
     build.file("ucrtmath/ms/double.c");
+    build.file("ucrtmath/ms/pow.c");
     build.compile("ucrtmath");
     println!("cargo:rerun-if-changed=ucrtmath");
 }

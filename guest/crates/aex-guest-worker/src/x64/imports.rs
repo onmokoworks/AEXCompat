@@ -2691,7 +2691,7 @@ fn install_win64_import(
                     install_float_binary_import(unicorn, stub, "powf", olm_ucrtmath::powf)?;
                 }
                 LegacyWin64Import::Pow => {
-                    install_double_binary_import(unicorn, stub, "pow", f64::powf)?;
+                    install_double_binary_import(unicorn, stub, "pow", olm_ucrtmath::pow)?;
                 }
                 LegacyWin64Import::Sin => {
                     install_double_import(unicorn, stub, "sin", olm_ucrtmath::sin)?;

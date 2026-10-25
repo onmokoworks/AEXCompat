@@ -10,6 +10,7 @@ fn mode() -> i32 {
     })
 }
 unsafe extern "C" {
+    fn ucrt_pow(x: f64, y: f64, mode: i32) -> f64;
     fn ucrt_sin(x: f64, mode: i32) -> f64;
     fn ucrt_cos(x: f64, mode: i32) -> f64;
     fn ucrt_exp(x: f64, mode: i32) -> f64;
@@ -31,6 +32,8 @@ include!("tests_expf.rs");
 
 #[cfg(test)]
 include!("tests_atan2f.rs");
+
+pub fn pow(x: f64, y: f64) -> f64 { unsafe { ucrt_pow(x, y, mode()) } }
 
 #[cfg(test)]
 include!("tests_powf.rs");
@@ -71,5 +74,18 @@ fn double_ieee_boundaries() {
                 assert_eq!(function(f64::from_bits(0xfff0123456789abc),mode).to_bits(), 0xfff8123456789abc);
             }
         }
+    }
+}
+
+#[test]
+fn pow_ieee_boundaries_and_identity() {
+    for mode in [0, 1] {
+        for (x,y,expected) in [(2.0,3.0,8.0f64), (-2.0,3.0,-8.0),
+                               (-2.0,4.0,16.0), (0.5,-2.0,4.0),
+                               (f64::NAN,0.0,1.0), (1.0,f64::NAN,1.0)] {
+            assert_eq!(unsafe { ucrt_pow(x,y,mode) }.to_bits(), expected.to_bits());
+        }
+        assert_eq!(unsafe { ucrt_pow(-0.0,3.0,mode) }.to_bits(), (-0.0f64).to_bits());
+        assert_eq!(unsafe { ucrt_pow(-2.0,0.5,mode) }.to_bits(), 0xfff8000000000000);
     }
 }

@@ -301,7 +301,7 @@ pub(super) unsafe extern "win64" fn native_powf(left: f32, right: f32) -> f32 {
     olm_ucrtmath::powf(left, right)
 }
 pub(super) unsafe extern "win64" fn native_pow(left: f64, right: f64) -> f64 {
-    left.powf(right)
+    olm_ucrtmath::pow(left, right)
 }
 
 pub(super) unsafe extern "win64" fn add_param(
