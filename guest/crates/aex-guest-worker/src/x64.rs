@@ -526,6 +526,7 @@ include!("x64/gpu_runtime.rs");
 include!("x64/gpu_suite.rs");
 include!("x64/types.rs");
 include!("x64/imports.rs");
+include!("x64/f30_import_probe.rs");
 include!("x64/opencl_imports.rs");
 include!("x64/engine.rs");
 include!("x64/libraries.rs");

@@ -13,6 +13,7 @@ wgpu-metal-experimental = [
 ]
 
 [dependencies]
+olm-ucrtmath = { path = "../olm-ucrtmath" }
 aex-abi = { path = "../aex-abi" }
 aex-apple-opencl = { path = "../aex-apple-opencl" }
 aex-clspv = { path = "../aex-clspv", optional = true }

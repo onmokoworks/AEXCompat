@@ -1,0 +1,8 @@
+[package]
+name = "olm-ucrtmath"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+
+[build-dependencies]
+cc = "1"

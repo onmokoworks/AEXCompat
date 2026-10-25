@@ -29,6 +29,7 @@ pub(super) fn native_import_is_implemented(name: &str) -> bool {
             | "strncpy"
             | "memset"
             | "expf"
+            | "atan2f"
             | "floorf"
             | "lround"
             | "powf"
@@ -46,6 +47,7 @@ pub(super) fn native_import_callback(name: &str) -> u64 {
         "strncpy" => callback_address!(native_strncpy),
         "memset" => callback_address!(native_memset),
         "expf" => callback_address!(native_expf),
+        "atan2f" => callback_address!(native_atan2f),
         "floorf" => callback_address!(native_floorf),
         "lround" => callback_address!(native_lround),
         "powf" => callback_address!(native_powf),
@@ -269,7 +271,7 @@ pub(super) unsafe extern "win64" fn native_ansi_sprintf(
 }
 
 pub(super) unsafe extern "win64" fn native_expf(value: f32) -> f32 {
-    value.exp()
+    olm_ucrtmath::expf(value)
 }
 pub(super) unsafe extern "win64" fn native_floorf(value: f32) -> f32 {
     value.floor()
@@ -283,7 +285,7 @@ pub(super) unsafe extern "win64" fn native_lround(value: f64) -> i32 {
     }
 }
 pub(super) unsafe extern "win64" fn native_powf(left: f32, right: f32) -> f32 {
-    left.powf(right)
+    olm_ucrtmath::powf(left, right)
 }
 pub(super) unsafe extern "win64" fn native_pow(left: f64, right: f64) -> f64 {
     left.powf(right)
@@ -348,4 +350,8 @@ pub(super) unsafe extern "win64" fn copy_world(
         }
     }
     0
+}
+
+pub(super) unsafe extern "win64" fn native_atan2f(y: f32, x: f32) -> f32 {
+    olm_ucrtmath::atan2f(y, x)
 }

@@ -614,7 +614,7 @@ fn install_atan2f_import(
             ) {
                 let y = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
                 let x = f32::from_le_bytes(xmm1[..4].try_into().unwrap());
-                let output = y.atan2(x);
+                let output = olm_ucrtmath::atan2f(y, x);
                 if unicorn.get_data().math_calls.len() < 32 {
                     unicorn
                         .get_data_mut()

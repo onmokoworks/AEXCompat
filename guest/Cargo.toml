@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/olm-ucrtmath",
     "crates/aex-abi",
     "crates/aex-apple-opencl",
     "crates/aex-clspv",

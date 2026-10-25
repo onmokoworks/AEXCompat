@@ -1,0 +1,21 @@
+ucrtmath contains modified portions of AMD AOCL-LibM, BSD-3-Clause:
+https://github.com/amd/aocl-libm-ose
+Commit: 29fd054f383e6c5e2dec2fce781d5220059f1836
+
+Original copyright notices, redistribution conditions, and disclaimers are
+retained in each derived source file. upstream.json records original file hashes.
+
+Sources: src/optimized/expf.c, src/optimized/powf.c, src/ref/atan2f.c,
+src/optimized/expf_data.h, and only the referenced arrays from
+src/optimized/data/_exp_j_by_64.c and src/optimized/log_tables.c.
+
+Local modifications (F28, 2026-10-23): standalone scalar portability helpers,
+explicit mode/API names and fused operations, bit-preserving table access,
+expf signaling-NaN quieting, powf rounded log index/underflow threshold/NaN sign
+handling (including identity paths and operand priority), and atan2f NaN
+priority, exponent classification after widening and unsigned-index conversion.
+No Microsoft implementation or binary is included. Compatibility observations
+are recorded separately from the AMD-derived implementation.
+
+Validation scope and remaining import work are described in README.md and the
+F28 report.

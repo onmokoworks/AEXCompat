@@ -2634,7 +2634,7 @@ fn install_win64_import(
                     install_float_import(unicorn, stub, "ceilf", f32::ceil)?;
                 }
                 LegacyWin64Import::ExpF => {
-                    install_float_import(unicorn, stub, "expf", f32::exp)?;
+                    install_float_import(unicorn, stub, "expf", olm_ucrtmath::expf)?;
                 }
                 LegacyWin64Import::Floor => {
                     install_double_import(unicorn, stub, "floor", f64::floor)?;
@@ -2682,7 +2682,7 @@ fn install_win64_import(
                     install_roundf_import(unicorn, stub)?;
                 }
                 LegacyWin64Import::PowF => {
-                    install_float_binary_import(unicorn, stub, "powf", f32::powf)?;
+                    install_float_binary_import(unicorn, stub, "powf", olm_ucrtmath::powf)?;
                 }
                 LegacyWin64Import::Pow => {
                     install_double_binary_import(unicorn, stub, "pow", f64::powf)?;
