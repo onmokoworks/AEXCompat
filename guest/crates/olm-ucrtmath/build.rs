@@ -6,6 +6,7 @@ fn main() {
     for name in ["expf", "atan2f", "powf", "tables"] {
         build.file(format!("ucrtmath/src/{name}.c"));
     }
+    build.file("ucrtmath/ms/float.c");
     build.compile("ucrtmath");
     println!("cargo:rerun-if-changed=ucrtmath");
 }

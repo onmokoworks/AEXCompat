@@ -10,11 +10,14 @@ pub fn f30_import_probe(name: &str, library: &str, count: u64) {
         ("expf", Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::ExpF)) => install_float_import(&mut uc, CODE, "expf", olm_ucrtmath::expf).unwrap(),
         ("powf", Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::PowF)) => install_float_binary_import(&mut uc, CODE, "powf", olm_ucrtmath::powf).unwrap(),
         ("atan2f", Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Atan2F)) => install_atan2f_import(&mut uc, CODE).unwrap(),
+        ("sinf", Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::SinF)) => install_float_import(&mut uc, CODE, "sinf", olm_ucrtmath::sinf).unwrap(),
+("cosf", Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CosF)) => install_float_import(&mut uc, CODE, "cosf", olm_ucrtmath::cosf).unwrap(),
+("log2f", Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Log2F)) => install_log2f_import(&mut uc, CODE).unwrap(),
         _ => panic!("wrong import dispatch"),
     }
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     for i in 0..count {
-        let mut z = (i ^ 0xf30).wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = (i ^ 0xf44).wrapping_add(0x9e3779b97f4a7c15);
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
         z ^= z >> 31;

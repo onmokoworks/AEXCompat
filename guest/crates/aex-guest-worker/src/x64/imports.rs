@@ -2625,7 +2625,7 @@ fn install_win64_import(
                     install_double_import(unicorn, stub, "cos", f64::cos)?;
                 }
                 LegacyWin64Import::CosF => {
-                    install_float_import(unicorn, stub, "cosf", f32::cos)?;
+                    install_float_import(unicorn, stub, "cosf", olm_ucrtmath::cosf)?;
                 }
                 LegacyWin64Import::Ceil => {
                     install_double_import(unicorn, stub, "ceil", f64::ceil)?;
@@ -2691,7 +2691,7 @@ fn install_win64_import(
                     install_double_import(unicorn, stub, "sin", f64::sin)?;
                 }
                 LegacyWin64Import::SinF => {
-                    install_float_import(unicorn, stub, "sinf", f32::sin)?;
+                    install_float_import(unicorn, stub, "sinf", olm_ucrtmath::sinf)?;
                 }
                 LegacyWin64Import::OmpGetMaxThreads => {
                     let value = deterministic_import_i32("omp_get_max_threads")

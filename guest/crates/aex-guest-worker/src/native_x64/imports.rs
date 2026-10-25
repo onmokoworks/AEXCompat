@@ -30,6 +30,9 @@ pub(super) fn native_import_is_implemented(name: &str) -> bool {
             | "memset"
             | "expf"
             | "atan2f"
+            | "sinf"
+            | "cosf"
+            | "log2f"
             | "floorf"
             | "lround"
             | "powf"
@@ -48,6 +51,10 @@ pub(super) fn native_import_callback(name: &str) -> u64 {
         "memset" => callback_address!(native_memset),
         "expf" => callback_address!(native_expf),
         "atan2f" => callback_address!(native_atan2f),
+        "sinf" => callback_address!(native_sinf),
+        "cosf" => callback_address!(native_cosf),
+        "log2f" => callback_address!(native_log2f),
+
         "floorf" => callback_address!(native_floorf),
         "lround" => callback_address!(native_lround),
         "powf" => callback_address!(native_powf),
@@ -354,4 +361,17 @@ pub(super) unsafe extern "win64" fn copy_world(
 
 pub(super) unsafe extern "win64" fn native_atan2f(y: f32, x: f32) -> f32 {
     olm_ucrtmath::atan2f(y, x)
+}
+
+
+pub(super) unsafe extern "win64" fn native_sinf(value: f32) -> f32 {
+    olm_ucrtmath::sinf(value)
+}
+
+pub(super) unsafe extern "win64" fn native_cosf(value: f32) -> f32 {
+    olm_ucrtmath::cosf(value)
+}
+
+pub(super) unsafe extern "win64" fn native_log2f(value: f32) -> f32 {
+    olm_ucrtmath::log2f(value)
 }

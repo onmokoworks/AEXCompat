@@ -444,7 +444,7 @@ fn install_log2f_import(
         unicorn.add_code_hook(address, address, move |unicorn, _, _| {
             if let Ok(mut xmm0) = unicorn.reg_read_long(RegisterX86::XMM0) {
                 let value = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
-                let output = value.log2();
+                let output = olm_ucrtmath::log2f(value);
                 if unicorn.get_data().math_calls.len() < 32 {
                     unicorn
                         .get_data_mut()
