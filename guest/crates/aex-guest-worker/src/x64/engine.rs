@@ -2396,9 +2396,12 @@ impl GuestEngine<'static> {
             return Err(GuestError::Callback(error));
         }
         if rip != RETURN_ADDRESS {
-            return Err(self.execution_crash(format!(
-                "execution stopped before the guest returned (instruction budget {instruction_limit} per scheduler slice; RIP={rip:#x})"
-            )));
+            let reason = if instruction_limit == 0 {
+                format!("execution stopped before the guest returned (RIP={rip:#x})")
+            } else {
+                format!("execution stopped before the guest returned (instruction budget {instruction_limit} per scheduler slice; RIP={rip:#x})")
+            };
+            return Err(self.execution_crash(reason));
         }
         uc("read return value", self.unicorn.reg_read(RegisterX86::RAX))
     }
