@@ -565,9 +565,6 @@ fn parse_render_frame(
             input.len()
         )));
     }
-    let rowbytes = pixel_format
-        .rowbytes(width)
-        .map_err(|error| SessionError::Protocol(error.to_string()))?;
     let borrowed_layers = fixture_layers
         .iter()
         .map(|layer| ResidentLayer {

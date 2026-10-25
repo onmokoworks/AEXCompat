@@ -2913,6 +2913,10 @@ impl GuestEngine<'static> {
         state.smart_checkout_ids.clear();
         for world in state.cropped_worlds.drain(..) {
             state.resident_world_formats.remove(&world);
+            if let Err(error) = state.crt_heap.remove(world) {
+                state.callback_error = Some(format!("cropped world cleanup: {error}"));
+                return false;
+            }
         }
         balanced
     }

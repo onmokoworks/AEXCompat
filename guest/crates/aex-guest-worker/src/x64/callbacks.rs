@@ -4167,54 +4167,7 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
             }
             *crate::geometry::CHECKOUT_ORIGIN.lock().unwrap() = [request_rect[0], request_rect[1]];
             if g.checkout.is_none() {
-                let mut header = vec![0; abi::PF_LAYER_DEF_SIZE];
-                unicorn
-                    .mem_read(world, &mut header)
-                    .map_err(|e| e.to_string())?;
-                let stride = i32::from_le_bytes(
-                    header[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
-                        .try_into()
-                        .unwrap(),
-                );
-                let data = u64::from_le_bytes(
-                    header[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
-                        .try_into()
-                        .unwrap(),
-                );
-                let pixel = match unicorn.get_data().smart_pixel_format {
-                    crate::pixel::PF_PIXEL_FORMAT_ARGB32 => 4,
-                    crate::pixel::PF_PIXEL_FORMAT_ARGB64 => 8,
-                    _ => 16,
-                };
-                let offset =
-                    request_rect[1] as u64 * stride as u64 + request_rect[0] as u64 * pixel;
-                header[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
-                    .copy_from_slice(&(data + offset).to_le_bytes());
-                let w = request_rect[2] - request_rect[0];
-                let h = request_rect[3] - request_rect[1];
-                for (at, v) in [
-                    (abi::LAYER_WIDTH_OFFSET, w),
-                    (abi::LAYER_HEIGHT_OFFSET, h),
-                    (104, request_rect[0]),
-                    (108, request_rect[1]),
-                    (abi::LAYER_EXTENT_HINT_OFFSET, 0),
-                    (abi::LAYER_EXTENT_HINT_OFFSET + 4, 0),
-                    (abi::LAYER_EXTENT_HINT_OFFSET + 8, w),
-                    (abi::LAYER_EXTENT_HINT_OFFSET + 12, h),
-                ] {
-                    header[at..at + 4].copy_from_slice(&v.to_le_bytes());
-                }
-                world =
-                    allocate_crt_region(unicorn, header.len() as u64).map_err(|e| e.to_string())?;
-                unicorn
-                    .mem_write(world, &header)
-                    .map_err(|e| e.to_string())?;
-                let pixel_format = unicorn.get_data().smart_pixel_format;
-                unicorn
-                    .get_data_mut()
-                    .resident_world_formats
-                    .insert(world, pixel_format);
-                unicorn.get_data_mut().cropped_worlds.push(world);
+                world = cropped_checkout_world(unicorn, world, request_rect)?;
             }
             eprintln!(
                 "F53_CHECKOUT request={observed_request:?} result={request_rect:?} max=[0, 0, {}, {}]",
@@ -4277,6 +4230,65 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
         Ok(())
     })();
     finish_callback(unicorn, result);
+}
+
+fn cropped_checkout_world(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    world: u64,
+    request_rect: [i32; 4],
+) -> Result<u64, String> {
+    let mut header = vec![0; abi::PF_LAYER_DEF_SIZE];
+    unicorn
+        .mem_read(world, &mut header)
+        .map_err(|e| e.to_string())?;
+    let stride = i32::from_le_bytes(
+        header[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let data = u64::from_le_bytes(
+        header[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let pixel_format = unicorn
+        .get_data()
+        .resident_world_formats
+        .get(&world)
+        .copied()
+        .unwrap_or(unicorn.get_data().smart_pixel_format);
+    let pixel = match pixel_format {
+        crate::pixel::PF_PIXEL_FORMAT_ARGB32 => 4,
+        crate::pixel::PF_PIXEL_FORMAT_ARGB64 => 8,
+        _ => 16,
+    };
+    let offset = request_rect[1] as u64 * stride as u64 + request_rect[0] as u64 * pixel;
+    header[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+        .copy_from_slice(&(data + offset).to_le_bytes());
+    let w = request_rect[2] - request_rect[0];
+    let h = request_rect[3] - request_rect[1];
+    for (at, v) in [
+        (abi::LAYER_WIDTH_OFFSET, w),
+        (abi::LAYER_HEIGHT_OFFSET, h),
+        (104, request_rect[0]),
+        (108, request_rect[1]),
+        (abi::LAYER_EXTENT_HINT_OFFSET, 0),
+        (abi::LAYER_EXTENT_HINT_OFFSET + 4, 0),
+        (abi::LAYER_EXTENT_HINT_OFFSET + 8, w),
+        (abi::LAYER_EXTENT_HINT_OFFSET + 12, h),
+    ] {
+        header[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let world = allocate_crt_region(unicorn, header.len() as u64).map_err(|e| e.to_string())?;
+    unicorn
+        .mem_write(world, &header)
+        .map_err(|e| e.to_string())?;
+    unicorn
+        .get_data_mut()
+        .resident_world_formats
+        .insert(world, pixel_format);
+    unicorn.get_data_mut().cropped_worlds.push(world);
+    Ok(world)
 }
 
 fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
