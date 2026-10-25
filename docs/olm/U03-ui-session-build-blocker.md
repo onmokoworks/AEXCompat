@@ -1,3 +1,5 @@
+> Historical first-attempt report. The physical space-free cache build resolved this blocker; see [the implemented UI session](U03-ui-session.md).
+
 # U03 UI-session oracle: blocked before guest compilation
 
 Status: blocked. Base: `8d102ae455ecab5483a243f459c3cc529823b70c`.
