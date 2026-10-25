@@ -72,8 +72,8 @@ pub(crate) const MAX_FAILURE_SUITE_REQUEST_BYTES: usize = 256;
 const MAX_FAILURE_SUITE_REQUESTS: usize = 64;
 const MAX_FAILURE_UNSUPPORTED_SUITE_CALLS: usize = 64;
 pub(crate) const MAX_FAILURE_CRASH_SNAPSHOT_BYTES: usize = 8 * 1024;
-pub const MAX_RENDER_WIDTH: u32 = 1920;
-pub const MAX_RENDER_HEIGHT: u32 = 1080;
+pub const MAX_RENDER_WIDTH: u32 = 3840;
+pub const MAX_RENDER_HEIGHT: u32 = 2160;
 
 #[derive(Debug, Error)]
 pub enum ClassicError {
@@ -266,7 +266,6 @@ fn resident_world_shape(
         || height > MAX_RENDER_HEIGHT
         || layout.rowbytes < packed
         || layout.rowbytes - packed > 256
-        || layout.rowbytes % format.bytes_per_pixel() as u32 != 0
         || layout.origin_x.unsigned_abs() > 4096
         || layout.origin_y.unsigned_abs() > 4096
         || layout.extent[0] < 0
@@ -432,6 +431,7 @@ pub struct RenderReport {
     pub guards_intact: bool,
     pub parameter_values: Vec<AppliedParameter>,
     pub output_request: [i32; 4],
+    pub output_rect: [i32; 4],
     pub input_requests: Vec<[i32; 4]>,
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
@@ -641,6 +641,8 @@ pub struct ClassicHost {
     resident_frames: u64,
     resident_frame_setdown_error: i32,
     last_gpu_diagnostic: GpuRenderDiagnostic,
+    expected_output_header: Option<Vec<u8>>,
+    negotiated_buffer: Option<(u64, usize)>,
 }
 
 /// A private copy of an arbitrary parameter's default, made through
@@ -744,6 +746,7 @@ impl ClassicHost {
         write_i16(&mut input_bytes, abi::IN_VERSION_OFFSET + 2, 29);
         write_u32(&mut input_bytes, abi::IN_APPL_ID_OFFSET, 0x4658_5443);
         write_i32(&mut input_bytes, abi::IN_NUM_PARAMS_OFFSET, 1);
+        crate::geometry::input(&mut input_bytes);
         engine.write(input, &input_bytes)?;
         engine.write(output, &vec![0u8; abi::PF_OUT_DATA_SIZE])?;
         Ok(Self {
@@ -761,6 +764,8 @@ impl ClassicHost {
             arbitrary_values: Vec::new(),
             resident_frames: 0,
             resident_frame_setdown_error: 0,
+            expected_output_header: None,
+            negotiated_buffer: None,
             last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
         })
     }
@@ -812,6 +817,7 @@ impl ClassicHost {
             write_i32(&mut input_bytes, offset, 1);
             write_i32(&mut input_bytes, offset + 4, 1);
         }
+        crate::geometry::input(&mut input_bytes);
         engine.write(input, &input_bytes)?;
         engine.write(output, &vec![0u8; abi::PF_OUT_DATA_SIZE])?;
         let mut pica_bytes = [0u8; 64];
@@ -836,6 +842,8 @@ impl ClassicHost {
             arbitrary_values: Vec::new(),
             resident_frames: 0,
             resident_frame_setdown_error: 0,
+            expected_output_header: None,
+            negotiated_buffer: None,
             last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
         })
     }
@@ -1981,16 +1989,44 @@ impl ClassicHost {
         compact_report: bool,
         primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        let geometry = crate::geometry::SESSION.get();
+        let output_request = geometry.and_then(|g| g.request).unwrap_or(output_request);
+        let pad = geometry.map_or(0, |g| g.pad);
+        let primary_layout = if let Some(g) = geometry {
+            if primary_layout.is_some() && (g.pad != 0 || g.extent.is_some()) {
+                return Err(ClassicError::Input(
+                    "geometry cannot override fixture layout".into(),
+                ));
+            }
+            primary_layout.or(Some(ResidentWorldLayout {
+                rowbytes: input_format
+                    .unwrap_or(format)
+                    .rowbytes(width)
+                    .map_err(|e| ClassicError::Input(e.to_string()))?
+                    + pad,
+                padding_byte: 0xa5,
+                origin_x: g.checkout.map_or(0, |r| r[0]),
+                origin_y: g.checkout.map_or(0, |r| r[1]),
+                extent: if g.crop {
+                    [0, 0, width as i32, height as i32]
+                } else {
+                    g.extent.unwrap_or([0, 0, width as i32, height as i32])
+                },
+            }))
+        } else {
+            primary_layout
+        };
         self.last_gpu_diagnostic = GpuRenderDiagnostic::pending(backend);
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
             return Err(ClassicError::Input(format!(
                 "dimensions must be within 1x1..={MAX_RENDER_WIDTH}x{MAX_RENDER_HEIGHT}, got {width}x{height}"
             )));
         }
-        if output_request[0] < 0
-            || output_request[1] < 0
-            || output_request[2] > width as i32
-            || output_request[3] > height as i32
+        if (!geometry.is_some_and(|g| g.negotiate)
+            && (output_request[0] < 0
+                || output_request[1] < 0
+                || output_request[2] > width as i32
+                || output_request[3] > height as i32))
             || output_request[0] >= output_request[2]
             || output_request[1] >= output_request[3]
         {
@@ -2002,9 +2038,8 @@ impl ClassicHost {
         let rowbytes = format
             .rowbytes(width)
             .map_err(|error| ClassicError::Input(error.to_string()))?;
-        let pixel_bytes = format
-            .byte_count(width, height)
-            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        let rowbytes = rowbytes + pad;
+        let pixel_bytes = rowbytes as usize * height as usize;
         let (input_layout, input_alloc_bytes) =
             resident_world_shape(input_format, width, height, primary_layout)?;
         input_format
@@ -2143,6 +2178,7 @@ impl ClassicHost {
         );
         write_i32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
         write_u32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
+        crate::geometry::world(&mut input_world);
         let mut input_definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         input_definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
             .copy_from_slice(&input_world);
@@ -2321,6 +2357,8 @@ impl ClassicHost {
         write_rect(&mut world, abi::LAYER_EXTENT_HINT_OFFSET, width, height);
         write_i32(&mut world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
         write_u32(&mut world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
+        crate::geometry::world(&mut world);
+        self.expected_output_header = Some(world.clone());
         self.engine.write(output_world, &world)?;
         self.engine
             .configure_resident_world_formats(&resident_world_formats);
@@ -2331,6 +2369,7 @@ impl ClassicHost {
         write_i32(&mut input_data, abi::IN_WIDTH_OFFSET, width as i32);
         write_i32(&mut input_data, abi::IN_HEIGHT_OFFSET, height as i32);
         write_rect(&mut input_data, abi::IN_EXTENT_HINT_OFFSET, width, height);
+        crate::geometry::input(&mut input_data);
         self.engine.write(self.input, &input_data)?;
         let mut traces = Vec::new();
         if !self.sequence_active {
@@ -2481,10 +2520,41 @@ impl ClassicHost {
         if let Some(error) = failure {
             return Err(error);
         }
+        let mut output_header = vec![0; abi::PF_LAYER_DEF_SIZE];
+        self.engine.read(output_world, &mut output_header)?;
+        let expected = self
+            .expected_output_header
+            .as_ref()
+            .ok_or_else(|| ClassicError::Input("missing host output allocation".into()))?;
+        for (offset, size) in [
+            (abi::LAYER_DATA_OFFSET, 8),
+            (abi::LAYER_WIDTH_OFFSET, 4),
+            (abi::LAYER_HEIGHT_OFFSET, 4),
+            (abi::LAYER_ROWBYTES_OFFSET, 4),
+            (LAYER_ORIGIN_X_OFFSET, 4),
+            (LAYER_ORIGIN_Y_OFFSET, 4),
+        ] {
+            if output_header[offset..offset + size] != expected[offset..offset + size] {
+                return Err(ClassicError::Input(
+                    "guest changed host output allocation metadata".into(),
+                ));
+            }
+        }
+        let output_pixels = read_u64(expected, abi::LAYER_DATA_OFFSET);
+        let out_width = read_i32(&output_header, abi::LAYER_WIDTH_OFFSET) as u32;
+        let out_height = read_i32(&output_header, abi::LAYER_HEIGHT_OFFSET) as u32;
+        let rowbytes = read_i32(&output_header, abi::LAYER_ROWBYTES_OFFSET) as usize;
+        let packed_rowbytes = out_width as usize * format.bytes_per_pixel();
+        let pixel_bytes = rowbytes * out_height as usize;
+        let ox = read_i32(&output_header, LAYER_ORIGIN_X_OFFSET);
+        let oy = read_i32(&output_header, LAYER_ORIGIN_Y_OFFSET);
+        let output_rect = [ox, oy, ox + out_width as i32, oy + out_height as i32];
         let mut leading_guard = vec![0u8; OUTPUT_GUARD_BYTES];
         let mut trailing_guard = vec![0u8; OUTPUT_GUARD_BYTES];
-        self.engine
-            .read(resources.output_guard_base, &mut leading_guard)?;
+        self.engine.read(
+            output_pixels - OUTPUT_GUARD_BYTES as u64,
+            &mut leading_guard,
+        )?;
         self.engine
             .read(output_pixels + pixel_bytes as u64, &mut trailing_guard)?;
         if leading_guard
@@ -2498,6 +2568,12 @@ impl ClassicHost {
         }
         let mut raw_pixels = vec![0u8; pixel_bytes];
         self.engine.read(output_pixels, &mut raw_pixels)?;
+        if pad != 0 && out_height > 0 {
+            raw_pixels = raw_pixels
+                .chunks_exact(rowbytes as usize)
+                .flat_map(|row| row[..packed_rowbytes].iter().copied())
+                .collect();
+        }
         let mut raw_input_pixels = if compact_report {
             Vec::new()
         } else {
@@ -2564,6 +2640,7 @@ impl ClassicHost {
                 guards_intact: true,
                 parameter_values: applied_values,
                 output_request,
+                output_rect,
                 input_requests: self.engine.pre_checkout_requests().to_vec(),
                 suite_requests: self.engine.suite_requests().to_vec(),
                 unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
@@ -3020,6 +3097,7 @@ impl ClassicHost {
             u32::from_le_bytes(current_time_scale),
         );
         let result = self.render_smart_configured(
+            output_world,
             params,
             width,
             height,
@@ -3038,6 +3116,7 @@ impl ClassicHost {
 
     fn render_smart_configured(
         &mut self,
+        output_world: u64,
         params: u64,
         width: u32,
         height: u32,
@@ -3047,6 +3126,7 @@ impl ClassicHost {
         trace_enabled: bool,
         backend: RenderBackendRequest,
     ) -> Result<(i32, Option<GuestCensus>, Vec<ExecutionTrace>), ClassicError> {
+        let mut empty_output = false;
         let mut traces = Vec::new();
         let pre_input = self.engine.allocate(abi::PF_PRE_RENDER_INPUT_SIZE, 8)?;
         let pre_output = self.engine.allocate(abi::PF_PRE_RENDER_OUTPUT_SIZE, 8)?;
@@ -3273,12 +3353,121 @@ impl ClassicHost {
                                 .try_into()
                                 .expect("PF_PreRenderOutput flags are two bytes"),
                         );
+                        if return_value as i32 == 0
+                            && crate::geometry::SESSION.get().is_some_and(|g| g.negotiate)
+                        {
+                            let rect = std::array::from_fn::<_, 4, _>(|i| {
+                                read_i32(
+                                    &pre_output_bytes,
+                                    abi::PRE_OUTPUT_RESULT_RECT_OFFSET + i * 4,
+                                )
+                            });
+                            let maximum = std::array::from_fn::<_, 4, _>(|i| {
+                                read_i32(
+                                    &pre_output_bytes,
+                                    abi::PRE_OUTPUT_MAX_RESULT_RECT_OFFSET + i * 4,
+                                )
+                            });
+                            let w = i64::from(rect[2]) - i64::from(rect[0]);
+                            let h = i64::from(rect[3]) - i64::from(rect[1]);
+                            // AE_Effect.h PF_PreRenderOutput: result is actual output, max is a bound.
+                            // Reject invalid bounds as a HOST limitation, never a plugin PF_Err.
+                            if w < 0
+                                || h < 0
+                                || w > i64::from(MAX_RENDER_WIDTH)
+                                || h > i64::from(MAX_RENDER_HEIGHT)
+                                || rect[0] == i32::MIN
+                                || rect[1] == i32::MIN
+                                || (w > 0
+                                    && h > 0
+                                    && (rect[0] < maximum[0]
+                                        || rect[1] < maximum[1]
+                                        || rect[2] > maximum[2]
+                                        || rect[3] > maximum[3]))
+                            {
+                                return Err(ClassicError::Input(format!(
+                                    "output bounds unsupported: result={rect:?} max={maximum:?}"
+                                )));
+                            }
+                            empty_output = w == 0 || h == 0;
+                            let w = if empty_output { 0 } else { w as u32 };
+                            let h = if empty_output { 0 } else { h as u32 };
+                            let stride = w * format.bytes_per_pixel() as u32
+                                + crate::geometry::SESSION.get().unwrap().pad;
+                            let size = stride as usize * h as usize;
+                            let needed = size + OUTPUT_GUARD_BYTES * 2;
+                            let base = match self.negotiated_buffer {
+                                Some((base, capacity)) if capacity >= needed => base,
+                                _ => {
+                                    // Geometric growth bounds cumulative retained storage while
+                                    // reusing the allocation on ordinary resident frames.
+                                    let capacity = needed.next_power_of_two();
+                                    let base = self.engine.allocate(capacity, 64)?;
+                                    self.negotiated_buffer = Some((base, capacity));
+                                    base
+                                }
+                            };
+                            self.engine
+                                .write(base, &vec![OUTPUT_GUARD_PATTERN; OUTPUT_GUARD_BYTES])?;
+                            self.engine
+                                .write(base + OUTPUT_GUARD_BYTES as u64, &vec![0; size])?;
+                            self.engine.write(
+                                base + OUTPUT_GUARD_BYTES as u64 + size as u64,
+                                &vec![OUTPUT_GUARD_PATTERN; OUTPUT_GUARD_BYTES],
+                            )?;
+                            let mut world = vec![0; abi::PF_LAYER_DEF_SIZE];
+                            self.engine.read(output_world, &mut world)?;
+                            write_u64(
+                                &mut world,
+                                abi::LAYER_DATA_OFFSET,
+                                base + OUTPUT_GUARD_BYTES as u64,
+                            );
+                            write_i32(&mut world, abi::LAYER_WIDTH_OFFSET, w as i32);
+                            write_i32(&mut world, abi::LAYER_HEIGHT_OFFSET, h as i32);
+                            write_i32(&mut world, abi::LAYER_ROWBYTES_OFFSET, stride as i32);
+                            write_rect(&mut world, abi::LAYER_EXTENT_HINT_OFFSET, w, h);
+                            write_i32(&mut world, LAYER_ORIGIN_X_OFFSET, rect[0]);
+                            write_i32(&mut world, LAYER_ORIGIN_Y_OFFSET, rect[1]);
+                            self.expected_output_header = Some(world.clone());
+                            self.engine.write(output_world, &world)?;
+                            let mut input = vec![0; abi::PF_IN_DATA_SIZE];
+                            self.engine.read(self.input, &mut input)?;
+                            let origin = if crate::geometry::SESSION.get().is_some_and(|g| g.crop) {
+                                *crate::geometry::CHECKOUT_ORIGIN.lock().unwrap()
+                            } else {
+                                [0, 0]
+                            };
+                            write_i32(
+                                &mut input,
+                                abi::IN_OUTPUT_ORIGIN_X_OFFSET,
+                                origin[0].checked_sub(rect[0]).ok_or_else(|| {
+                                    ClassicError::Input("output origin overflow".into())
+                                })?,
+                            );
+                            write_i32(
+                                &mut input,
+                                abi::IN_OUTPUT_ORIGIN_Y_OFFSET,
+                                origin[1].checked_sub(rect[1]).ok_or_else(|| {
+                                    ClassicError::Input("output origin overflow".into())
+                                })?,
+                            );
+                            self.engine.write(self.input, &input)?;
+                            eprintln!(
+                                "F52C_NEGOTIATED result={rect:?} max={maximum:?} flags={output_flags}"
+                            );
+                        }
                         Ok(LifecycleReply::PreRender {
                             error: return_value as i32,
                             output_flags,
                         })
                     }
                     LifecycleCall::RenderCpu | LifecycleCall::RenderGpu { .. } => {
+                        if empty_output {
+                            return Ok(LifecycleReply::Render {
+                                error: 0,
+                                output: None,
+                            });
+                        }
                         let context = match call {
                             LifecycleCall::RenderGpu { context } => Some(context),
                             LifecycleCall::RenderCpu => None,
@@ -4013,6 +4202,7 @@ fn populate_frame_context(
     write_i32(input, abi::IN_LOCAL_TIME_STEP_OFFSET, time_step);
     write_u32(input, abi::IN_TIME_SCALE_OFFSET, time_scale);
     write_rect(input, abi::IN_EXTENT_HINT_OFFSET, width, height);
+    crate::geometry::input(input);
 }
 
 fn cleanup_error_code(result: Result<i32, ClassicError>) -> i32 {

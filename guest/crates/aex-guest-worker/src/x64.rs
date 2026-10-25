@@ -277,6 +277,10 @@ const MAX_PF_HANDLE_SIZE: u64 = 0x8000_0000;
 const MAX_PF_HANDLE_COUNT: usize = 16_384;
 const WORLD_DATA_BASE: u64 = PF_HANDLE_DATA_END;
 const WORLD_DATA_END: u64 = WORLD_DATA_BASE + 0x2_0000_0000;
+// Spill host-owned frame allocations into a separate bounded region. Map only
+// requested pages; small sessions retain their historical addresses and footprint.
+const FRAME_DATA_BASE: u64 = 0x0000_0006_0000_0000;
+const FRAME_DATA_END: u64 = FRAME_DATA_BASE + 0x8000_0000;
 const CRT_HEAP_BASE: u64 = 0x0000_0010_0000_0000;
 const CRT_HEAP_END: u64 = CRT_HEAP_BASE + MAX_CRT_HEAP_BYTES;
 const ENVIRONMENT_STRINGS_BASE: u64 = 0x0000_0020_0000_0000;

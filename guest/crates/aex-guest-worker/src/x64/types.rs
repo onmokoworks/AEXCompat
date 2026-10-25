@@ -225,6 +225,7 @@ struct GuestState {
     handles: HashMap<u64, GuestHandle>,
     worlds: HashMap<u64, GuestWorld>,
     resident_world_formats: HashMap<u64, i32>,
+    cropped_worlds: Vec<u64>,
     aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
     aegp_memory_free: Vec<AegpMemoryBlock>,
     next_aegp_memory_handle: u64,

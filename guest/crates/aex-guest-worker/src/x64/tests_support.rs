@@ -26243,3 +26243,22 @@ fn concurrent_unicorn_initialization_does_not_expire_active_guest_calls() {
         initialize.join().unwrap();
     });
 }
+
+#[test]
+fn frame_arena_spills_on_demand_and_stays_bounded() {
+    let mut engine = test_engine(&[0xc3]);
+    let small = engine.allocate(16, 8).unwrap();
+    assert_eq!(small, DATA_BASE);
+    assert!(engine.read(FRAME_DATA_BASE, &mut [0; 1]).is_err());
+    engine.next_data = HANDLE_DATA_BASE - 8;
+    let spill = engine.allocate(16, 64).unwrap();
+    assert_eq!(spill, FRAME_DATA_BASE);
+    engine.write(spill, &[0x5a; 16]).unwrap();
+    let mut bytes = [0; 16];
+    engine.read(spill, &mut bytes).unwrap();
+    assert_eq!(bytes, [0x5a; 16]);
+    assert!(engine.read(spill + PAGE_SIZE, &mut [0; 1]).is_err());
+    assert_eq!(engine.allocate(1, 8).unwrap(), spill + PAGE_SIZE);
+    engine.next_data = FRAME_DATA_END;
+    assert!(engine.allocate(1, 8).is_err());
+}

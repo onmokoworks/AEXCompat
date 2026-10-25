@@ -433,6 +433,30 @@ fn extract_render_backend(
 }
 
 fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
+    let mut geometry = aex_guest_worker::geometry::Geometry::default();
+    let mut geometry_requested = false;
+    for option in [
+        "--checkout-rect",
+        "--negotiate-output",
+        "--downsample-x",
+        "--downsample-y",
+        "--rowbytes-pad",
+        "--extent-hint",
+        "--request-rect",
+        "--pixel-aspect",
+    ] {
+        let result = extract_single_string_option(&mut arguments, option).and_then(|v| match v {
+            Some(v) => {
+                geometry_requested = true;
+                aex_guest_worker::geometry::parse(option, &v, &mut geometry)
+            }
+            None => Ok(()),
+        });
+        if let Err(e) = result {
+            eprintln!("aex_guest_error: {option}: {e}");
+            return ExitCode::from(2);
+        }
+    }
     let effect_selector = match extract_effect_selector(&mut arguments) {
         Ok(selector) => selector,
         Err(error) => {
@@ -497,6 +521,17 @@ fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    geometry.full = [width, height];
+    let [width, height] = match geometry.world() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("aex_guest_error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if geometry_requested && aex_guest_worker::geometry::SESSION.set(geometry).is_err() {
+        return ExitCode::from(2);
+    }
     let result = fs::read(&path)
         .map_err(|error| format!("read AEX: {error}"))
         .and_then(|bytes| PeImage::parse_and_map(&bytes).map_err(|error| error.to_string()))

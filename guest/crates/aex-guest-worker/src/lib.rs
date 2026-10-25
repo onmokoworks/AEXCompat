@@ -16,6 +16,7 @@ pub mod backend {
 }
 pub mod classic;
 mod crt_heap;
+pub mod geometry;
 pub mod gpu_lifecycle;
 mod guest_registry;
 #[cfg(all(

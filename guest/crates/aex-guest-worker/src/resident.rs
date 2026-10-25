@@ -76,6 +76,7 @@ impl From<ClassicError> for SessionError {
 
 #[derive(Serialize)]
 struct FrameOutput {
+    rect: [i32; 4],
     width: u32,
     height: u32,
     rowbytes: u32,
@@ -631,9 +632,11 @@ fn parse_render_frame(
                     frame_index,
                     status: "ok",
                     output: Some(FrameOutput {
-                        width,
-                        height,
-                        rowbytes,
+                        rect: report.output_rect,
+                        width: (report.output_rect[2] - report.output_rect[0]) as u32,
+                        height: (report.output_rect[3] - report.output_rect[1]) as u32,
+                        rowbytes: (report.output_rect[2] - report.output_rect[0]) as u32
+                            * pixel_format.bytes_per_pixel() as u32,
                         pixel_format: pixel_format.name(),
                         render_path: if report.render_mode.starts_with("smart") {
                             "smartfx"

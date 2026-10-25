@@ -2531,7 +2531,26 @@ impl GuestEngine<'static> {
             .checked_add(u64::try_from(size).map_err(|_| GuestError::DataCapacity)?)
             .ok_or(GuestError::DataCapacity)?;
         if end > HANDLE_DATA_BASE {
-            return Err(GuestError::DataCapacity);
+            let alignment = alignment.max(PAGE_SIZE);
+            let start = self
+                .next_data
+                .max(FRAME_DATA_BASE)
+                .checked_add(alignment - 1)
+                .map(|value| value & !(alignment - 1))
+                .ok_or(GuestError::DataCapacity)?;
+            let end = start
+                .checked_add(size.max(1) as u64)
+                .and_then(|value| value.checked_add(PAGE_SIZE - 1))
+                .map(|value| value & !(PAGE_SIZE - 1))
+                .filter(|value| *value <= FRAME_DATA_END)
+                .ok_or(GuestError::DataCapacity)?;
+            uc(
+                "map host frame allocation",
+                self.unicorn
+                    .mem_map(start, end - start, Prot::READ | Prot::WRITE),
+            )?;
+            self.next_data = end;
+            return Ok(start);
         }
         self.next_data = end;
         Ok(start)
@@ -2892,6 +2911,9 @@ impl GuestEngine<'static> {
             .values()
             .all(|checkout| !checkout.checked_out);
         state.smart_checkout_ids.clear();
+        for world in state.cropped_worlds.drain(..) {
+            state.resident_world_formats.remove(&world);
+        }
         balanced
     }
 
