@@ -1171,8 +1171,8 @@ impl GuestEngine<'static> {
             unhookable_watches: Vec::new(),
             witnesses: Vec::new(),
             dropped_witnesses: 0,
-        reserved_watch_bytes: 0,
-        reserved_watch_count: 0,
+            reserved_watch_bytes: 0,
+            reserved_watch_count: 0,
             basic_blocks: HashMap::new(),
             branch_edges: HashMap::new(),
             dropped_basic_blocks: 0,
@@ -1350,7 +1350,8 @@ impl GuestEngine<'static> {
                     self.image_base,
                     self.image_end,
                 );
-                let (changed_ranges, changed_ranges_truncated) = trace_changed_ranges(&pending.before, &after);
+                let (changed_ranges, changed_ranges_truncated) =
+                    trace_changed_ranges(&pending.before, &after);
                 TraceMemoryWitness {
                     watch_id: pending.spec_id,
                     call_id: pending.call_id,
@@ -2403,7 +2404,9 @@ impl GuestEngine<'static> {
             let reason = if instruction_limit == 0 {
                 format!("execution stopped before the guest returned (RIP={rip:#x})")
             } else {
-                format!("execution stopped before the guest returned (instruction budget {instruction_limit} per scheduler slice; RIP={rip:#x})")
+                format!(
+                    "execution stopped before the guest returned (instruction budget {instruction_limit} per scheduler slice; RIP={rip:#x})"
+                )
             };
             return Err(self.execution_crash(reason));
         }

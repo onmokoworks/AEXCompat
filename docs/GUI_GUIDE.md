@@ -4,7 +4,7 @@
 
 Load a Windows x64 AEX, apply it to an image, and inspect its parameters and output. The GUI does not replace After Effects or edit AEP projects. Producing an image does not establish pixel equality with After Effects.
 
-This guide covers `olm/X01-platform-parity` at `97b596d1`. The Japanese guide is the primary text; this is its English translation. Button names use the English UI. In the Windows Japanese UI, select the corresponding labels.
+This guide covers `olm/X01-platform-parity` at `13bda6be`. The Japanese guide is the primary text; this is its English translation. Button names use the English UI. In the Windows Japanese UI, select the corresponding labels.
 
 ## Start the GUI
 
@@ -41,13 +41,13 @@ If you already have an arm64 worker, skip its build and set `AEXCOMPAT_GUEST_WOR
 2. Select the input with Choose image... on Windows or PNG... on Mac. You can also drag and drop an image.
 3. Click Render preview on Windows or Render on Mac. Windows also offers Render current frame in the detailed panel.
 
-Windows accepts PNG, JPEG, BMP, TIFF, and WebP. This Mac GUI version accepts PNG, with width at most 1920 and height at most 1080 pixels.
+Windows accepts PNG, JPEG, BMP, TIFF, and WebP. This Mac GUI version accepts PNG, with width at most 3840 and height at most 2160 pixels.
 
 ## Edit Effect Controls
 
 Change numbers, sliders, checkboxes, choices, colors, and coordinates. For effects with layer inputs, choose another image in that control. Available controls and ranges depend on the AEX.
 
-Use each control's Reset to restore its default. To restore all parameters, use Reset in the Effect Controls header on Windows or Reset All on Mac. In a Windows chain, these apply to the selected stage.
+Use each control's Reset to restore its default. To restore all parameters, use Reset in the Effect Controls header on Windows or Reset All on Mac. In a chain, these apply to the selected stage.
 
 Enable Auto Update to render automatically after edits. For slow effects, turn it off, make your edits, then click the render button. Some controls are disabled while work is running. Check the diagnostics for disabled or unsupported operations.
 
@@ -71,17 +71,17 @@ Choose a depth supported by the AEX. Selecting a higher depth does not add preci
 
 ## Apply effects in sequence
 
-Chains are available in the Windows GUI in this version. The Mac GUI handles one AEX at a time.
+Chains are available in both the Windows and Mac GUIs.
 
 1. Choose an input image and the first AEX.
-2. Use Effect Controls → Effect chain → Add... to add another AEX, up to eight stages.
+2. Under Effect Controls → Effect chain, use Add... on Windows or Add AEX... on Mac to add another AEX, up to eight stages.
 3. Select a row to edit that stage's parameters. Each stage retains its own settings, even when the same AEX appears more than once.
 4. Use Up / Down to reorder, clear the checkbox to bypass a stage, or use Remove to delete the selected stage.
-5. Run Render preview or PNG export. Enabled stages run from top to bottom.
+5. Run Render preview or PNG export on Windows, or Render on Mac. Enabled stages run from top to bottom.
 
-Use the Auto or CPU backend. Every enabled stage must support the selected depth. If a stage fails, later stages stop and the report identifies the failed stage.
+On Windows, use the Auto or CPU backend. Every enabled stage must support the selected depth. If a stage fails, later stages stop and the report identifies the failed stage.
 
-Chains support still images, not audio. Settings remain in the current GUI session. Debug request save/load operates on the selected stage; it does not save the entire chain. See [Windows GUI effect chains](WINDOWS_GUI_EFFECT_CHAIN.md) for details.
+Chains support still images, not audio. Settings remain in the current GUI session. Windows debug request save/load operates on the selected stage; it does not save the entire chain. See [Windows GUI effect chains](WINDOWS_GUI_EFFECT_CHAIN.md) for details.
 
 ## Export
 
@@ -107,7 +107,9 @@ Render saves under `target/harness-output`. Analysis & Logs → Output displays 
 | ARGB16 raw | `output.bin` and `output.json` inside `mac-aex-….raw-artifact/` |
 | FLOAT32 EXR | `output.exr` and `output.json` inside `mac-aex-….exr-artifact/` |
 
-Mac ARGB16 raw is little-endian ARGB. Do not read it as the Windows chain's RGBA sidecar. `output.json` records dimensions, channel order, depth, hashes, and other metadata. Keep the whole directory. The Mac GUI does not also export a 16-bit PNG or float raw sidecar.
+Single-effect Mac ARGB16 raw is little-endian ARGB. Do not read it as the Windows chain's RGBA sidecar. `output.json` records dimensions, channel order, depth, hashes, and other metadata. Keep the whole directory. The Mac GUI does not also export a 16-bit PNG or float raw sidecar.
+
+With multiple stages or a bypassed stage, output goes into `mac-chain-…/`. `chain.json` records each stage; `output.argb` holds ARGB data at the selected depth. The folder also contains `output.png` at 8 bpc, `artifact/output.bin` and `artifact/output.json` at 16 bpc, or `artifact/output.exr` and `artifact/output.json` at float depth. The chain’s `artifact/output.bin` uses RGBA order. Distinguish it from single-effect raw output and keep the whole directory with its metadata.
 
 ## Read diagnostics and reports
 
@@ -121,9 +123,9 @@ For a bug report, record the OS, AEXCompat commit, AEX version, input dimensions
 |---|---|
 | Worker not found | Build the native worker on Windows. On Mac, check that `AEXCOMPAT_GUEST_WORKER` points to an existing arm64 executable |
 | `Could not inspect AEX parameters` | Check that the AEX is Windows x64, then inspect diagnostics for missing DLLs or unsupported suites. On Windows, also check dependency DLL locations and search paths |
-| Cannot select a Mac image, or `Input exceeds the initial Full HD boundary` | Use PNG with width at most 1920 and height at most 1080 |
+| Cannot select a Mac image, or `Input exceeds the 4K UHD boundary` | Use PNG with width at most 3840 and height at most 2160 |
 | Render button disabled | Check that AEX inspection and image loading have completed and no other operation is running |
-| No Mac output view at 16/32 bpc | Check for `Completed: render artifact` and the Output destination. Deep previews are not implemented |
+| No Mac output view at 16/32 bpc | Check for `Completed: render artifact` or `Completed: effect chain artifact` and the Output destination. Deep previews are not implemented |
 | Chain fails partway through | Inspect the named stage and try it alone. Check depth support in every stage |
 | Destination exists or writing fails | Choose a new name in a writable directory. Check the raw sidecar destination too |
 | Windows render times out | The default is 30 seconds per frame. If needed, set `$env:AEXCOMPAT_FRAME_DEADLINE_MS="120000"` before launch. The allowed range is 1000–600000 ms |
@@ -131,12 +133,14 @@ For a bug report, record the OS, AEXCompat commit, AEX version, input dimensions
 
 ## Remaining Windows / Mac differences
 
-This section is scheduled for revision after X01b. See the [audit](../analysis/PLATFORM_PARITY_2026-10-26.md).
+X01b adds Mac chains and 3840×2160 4K UHD input/rendering, tested with a real AEX at 8/16/32 bpc. Large multilayer requests can still reach existing memory, file-count, or time limits. See the [audit](../analysis/PLATFORM_PARITY_2026-10-26.md).
 
 - Windows uses a native worker; Mac uses Unicorn. The Mac GUI has no GPU backend selector.
-- Windows has chains, audio/timeline workflows, debug request editing, and custom UI operations/diagnostics; the Mac GUI has no equivalent controls.
-- Mac image selection is PNG-only, up to 1920×1080. Deep previews and deep PNG export are not implemented.
-- 16-bit raw is RGBA for Windows chains and ARGB on Mac. Float GUI exports are PNG plus raw for Windows chains, and EXR plus JSON on Mac.
+- Windows has audio/timeline workflows, debug request editing, and custom UI operations/diagnostics; the Mac GUI has no equivalent controls.
+- Mac image selection is PNG-only, up to 3840×2160. Deep previews and deep PNG export are not implemented.
+- 16-bit raw is RGBA for Windows chains and Mac chain artifacts, and ARGB for single-effect Mac output. Float GUI exports are PNG plus raw for Windows chains, and EXR plus JSON on Mac.
 - Dependency DLL discovery, compatibility/GPU/performance/AEGP diagnostic UI, and UI updates after parameter changes still differ.
+- U03’s CLI records UI events and drawing calls. An interactive Mac custom-UI canvas and text rasterization remain unimplemented. Full suite versions/slots, ACE, and arbitrary stream parity are unverified.
+- RVA, pointer-chain, and full-plane watches exist in the guest. Native counterparts, paired ROI comparisons, and GUI output-region/geometry controls remain open.
 
 These instructions were checked against source. They do not establish Windows runtime verification or complete feature parity between the two operating systems.

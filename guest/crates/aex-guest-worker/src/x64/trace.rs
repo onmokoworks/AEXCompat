@@ -176,11 +176,17 @@ fn selected_watch_occurrence(capture: &mut TraceCapture, spec: &TraceWatchSpec) 
         .entry(spec.id.clone())
         .or_default();
     *count += 1;
-    if !spec.occurrence.is_none_or(|occurrence| occurrence == *count) { return false; }
+    if !spec
+        .occurrence
+        .is_none_or(|occurrence| occurrence == *count)
+    {
+        return false;
+    }
     // Reserve both snapshots before reading, including nested pending calls.
     // At most 1 GiB of hex payloads (256 MiB logical before-plane bytes).
-    if capture.reserved_watch_count >= MAX_TRACE_WITNESSES ||
-        spec.size > MAX_TRACE_WATCH_BYTES.saturating_sub(capture.reserved_watch_bytes) {
+    if capture.reserved_watch_count >= MAX_TRACE_WITNESSES
+        || spec.size > MAX_TRACE_WATCH_BYTES.saturating_sub(capture.reserved_watch_bytes)
+    {
         capture.dropped_witnesses += 1;
         return false;
     }
@@ -198,9 +204,13 @@ fn trace_watch_address(
 ) -> u64 {
     let mut base = trace_register_value(unicorn, register, stack_offset).unwrap_or(0);
     for offset in dereference_offset.iter().chain(dereference_offsets.iter()) {
-        let Some(pointer_address) = base.checked_add(*offset) else { return 0; };
+        let Some(pointer_address) = base.checked_add(*offset) else {
+            return 0;
+        };
         let mut bytes = [0u8; 8];
-        if unicorn.mem_read(pointer_address, &mut bytes).is_err() { return 0; }
+        if unicorn.mem_read(pointer_address, &mut bytes).is_err() {
+            return 0;
+        }
         base = u64::from_le_bytes(bytes);
     }
     base
@@ -370,8 +380,13 @@ fn arm_selector_entry_watches(
     let pending = entry_watches
         .into_iter()
         .map(|spec| {
-            let watch_address =
-                trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset, &spec.dereference_offsets);
+            let watch_address = trace_watch_address(
+                unicorn,
+                spec.register,
+                0x28,
+                spec.dereference_offset,
+                &spec.dereference_offsets,
+            );
             PendingTraceWatch {
                 spec_id: spec.id,
                 register: spec.register,
@@ -443,8 +458,13 @@ fn checkpoint_instruction(
     let pending = watches
         .into_iter()
         .map(|spec| {
-            let watch_address =
-                trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset, &spec.dereference_offsets);
+            let watch_address = trace_watch_address(
+                unicorn,
+                spec.register,
+                0x20,
+                spec.dereference_offset,
+                &spec.dereference_offsets,
+            );
             PendingTraceWatch {
                 spec_id: spec.id,
                 register: spec.register,
@@ -704,8 +724,13 @@ fn trace_instruction(
         let pending = matching_watches
             .into_iter()
             .map(|spec| {
-                let address =
-                    trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset, &spec.dereference_offsets);
+                let address = trace_watch_address(
+                    unicorn,
+                    spec.register,
+                    0x20,
+                    spec.dereference_offset,
+                    &spec.dereference_offsets,
+                );
                 PendingTraceWatch {
                     spec_id: spec.id,
                     register: spec.register,
@@ -804,8 +829,13 @@ fn trace_instruction(
             let pending = matching_watches
                 .into_iter()
                 .map(|spec| {
-                    let address =
-                        trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset, &spec.dereference_offsets);
+                    let address = trace_watch_address(
+                        unicorn,
+                        spec.register,
+                        0x28,
+                        spec.dereference_offset,
+                        &spec.dereference_offsets,
+                    );
                     PendingTraceWatch {
                         spec_id: spec.id,
                         register: spec.register,
@@ -1157,7 +1187,9 @@ fn trace_changed_ranges(
         {
             last.size += 1;
         } else {
-            if ranges.len() == 4096 { return (ranges, true); }
+            if ranges.len() == 4096 {
+                return (ranges, true);
+            }
             ranges.push(TraceChangedRange { offset, size: 1 });
         }
     }
@@ -1180,7 +1212,8 @@ fn complete_trace_watches(
                 image_base,
                 image_end,
             );
-            let (changed_ranges, changed_ranges_truncated) = trace_changed_ranges(&pending.before, &after);
+            let (changed_ranges, changed_ranges_truncated) =
+                trace_changed_ranges(&pending.before, &after);
             TraceMemoryWitness {
                 watch_id: pending.spec_id,
                 call_id: pending.call_id,
