@@ -635,6 +635,9 @@ pub struct ClassicHost {
     global_active: bool,
     sequence_active: bool,
     frame_resources: Option<FrameResources>,
+    ui_drags: BTreeMap<u64, (usize, [u8; 32])>,
+    ui_event_extra: Option<u64>,
+    ui_contexts: BTreeMap<u64, (u64, i32)>,
     user_changed_extra: Option<u64>,
     arbitrary_extra: Option<u64>,
     arbitrary_values: Vec<ArbitraryValue>,
@@ -759,6 +762,9 @@ impl ClassicHost {
             global_active: false,
             sequence_active: false,
             frame_resources: None,
+            ui_drags: BTreeMap::new(),
+            ui_event_extra: None,
+            ui_contexts: BTreeMap::new(),
             user_changed_extra: None,
             arbitrary_extra: None,
             arbitrary_values: Vec::new(),
@@ -837,6 +843,9 @@ impl ClassicHost {
             global_active: false,
             sequence_active: false,
             frame_resources: None,
+            ui_drags: BTreeMap::new(),
+            ui_event_extra: None,
+            ui_contexts: BTreeMap::new(),
             user_changed_extra: None,
             arbitrary_extra: None,
             arbitrary_values: Vec::new(),
@@ -5348,3 +5357,5 @@ fn resident_watch_configuration_validation() {
     );
     assert_eq!(parse(&single).unwrap()[0].dereference_offset, Some(245760));
 }
+#[cfg(any(not(feature = "native-carrier"), not(target_os = "macos")))]
+include!("classic_ui.rs");

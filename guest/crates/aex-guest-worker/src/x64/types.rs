@@ -169,6 +169,7 @@ struct WindowsInitOnceState {
 
 #[derive(Default)]
 struct GuestState {
+    ui_session: UiSessionState,
     pointer_encoding_key: Option<u64>,
     crt_wlocale_buffer: Option<u64>,
     crt_pctype_buffer: Option<u64>,

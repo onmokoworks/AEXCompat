@@ -234,3 +234,170 @@ fn classic_user_changed_param_uses_the_real_selector_slot_and_returns_dynamic_fl
     assert!(host.user_changed_parameter(0).is_err());
     assert!(host.user_changed_parameter(2).is_err());
 }
+
+#[test]
+fn ui_update_records_cosmetics_preserves_values_and_rejects_wrong_scope() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.enable_ui_session().unwrap();
+    let target = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+    let source = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+    let mut original = vec![0; abi::PF_PARAM_DEF_SIZE];
+    original[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4].copy_from_slice(&123i32.to_le_bytes());
+    engine.write(target, &original).unwrap();
+    let mut changed = original.clone();
+    changed[abi::PARAM_UI_FLAGS_OFFSET..abi::PARAM_UI_FLAGS_OFFSET + 4]
+        .copy_from_slice(&32u32.to_le_bytes());
+    changed[abi::PARAM_NAME_OFFSET..abi::PARAM_NAME_OFFSET + 4].copy_from_slice(b"new\0");
+    changed[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4].copy_from_slice(&456i32.to_le_bytes());
+    engine.write(source, &changed).unwrap();
+    engine.unicorn.get_data_mut().parameter_definitions = vec![target];
+    engine.begin_ui_dispatch();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(UI_CALLBACK_BASE, &[1, 1, source], TIMEOUT_MICROSECONDS)
+            .unwrap(),
+        0
+    );
+    let calls = engine.end_ui_dispatch();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["slot"], 1);
+    assert_eq!(calls[0]["ui_flags"], 32);
+    let mut actual = vec![0; abi::PF_PARAM_DEF_SIZE];
+    engine.read(target, &mut actual).unwrap();
+    assert_eq!(
+        &actual[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
+        &123i32.to_le_bytes()
+    );
+    assert_eq!(
+        &actual[abi::PARAM_NAME_OFFSET..abi::PARAM_NAME_OFFSET + 4],
+        b"new\0"
+    );
+    assert!(
+        engine
+            .call_win64_with_timeout(UI_CALLBACK_BASE, &[1, 1, source], TIMEOUT_MICROSECONDS)
+            .is_err()
+    );
+}
+
+#[test]
+fn ui_update_rejects_invalid_slot_and_unsupported_suite_slot() {
+    for (callback, param_slot) in [
+        (UI_CALLBACK_BASE, 0),
+        (UI_CALLBACK_BASE, 2),
+        (UI_CALLBACK_BASE + STUB_STRIDE, 1),
+    ] {
+        let mut engine = test_engine(&[0xc3]);
+        engine.enable_ui_session().unwrap();
+        engine.begin_ui_dispatch();
+        assert!(
+            engine
+                .call_win64_with_timeout(callback, &[1, param_slot, 0], TIMEOUT_MICROSECONDS)
+                .is_err()
+        );
+        assert!(engine.end_ui_dispatch().is_empty());
+    }
+}
+
+#[test]
+fn ui_drag_preserves_continuation_across_draw_and_checks_context_and_slot() {
+    // EffectMain: click returns continuation, drag copies it into param 1.
+    let code = [
+        0x48, 0x8b, 0x44, 0x24, 0x30, // rax = sixth arg
+        0x83, 0x78, 0x08, 0x02, 0x75, 0x0e, 0xc7, 0x40, 0x28, 0x78, 0x56, 0x34, 0x12, 0xc6, 0x40,
+        0x48, 0x01, 0x31, 0xc0, 0xc3, 0x83, 0x78, 0x08, 0x03, 0x75, 0x0c, 0x4c, 0x8b, 0x50, 0x28,
+        0x4d, 0x8b, 0x59, 0x08, 0x4d, 0x89, 0x53, 0x38, 0x31, 0xc0, 0xc3,
+    ];
+    let mut engine = test_engine(&code);
+    engine.enable_ui_session().unwrap();
+    let mut host = crate::classic::ClassicHost::from_test_engine(engine, TEST_CODE).unwrap();
+    let mut definition = vec![0; abi::PF_PARAM_DEF_SIZE];
+    definition[12..16].copy_from_slice(&1i32.to_le_bytes());
+    host.prepare_test_user_changed_parameters(vec![definition])
+        .unwrap();
+    let mut event = crate::classic::UiEvent {
+        event: 2,
+        slot: 1,
+        area: 2,
+        frame: [30, 40, 340, 210],
+        x: 121,
+        y: -37,
+        clicks: 1,
+        last: false,
+        context: 1,
+        window_type: 2,
+        theme: BTreeMap::new(),
+        picker_argb_bits: None,
+    };
+    assert_eq!(host.ui_event(&event).unwrap()["send_drag"], 1);
+    event.event = 4;
+    host.ui_event(&event).unwrap();
+    event.event = 3;
+    event.context = 2;
+    assert!(host.ui_event(&event).is_err());
+    event.context = 1;
+    event.last = true;
+    let report = host.ui_event(&event).unwrap();
+    assert_eq!(
+        report["after"][0]["value"]["bytes"],
+        serde_json::json!([0x78, 0x56, 0x34, 0x12])
+    );
+    assert!(host.ui_event(&event).is_err());
+}
+
+#[test]
+fn ui_layer_high_slot_cannot_alias_effect_disposal() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.enable_ui_session().unwrap();
+    engine.begin_ui_dispatch();
+    engine.unicorn.get_data_mut().ui_session.effects.insert(123);
+    let callback = UI_CALLBACK_BASE + (2 * UI_SLOTS + 40) * STUB_STRIDE;
+    assert!(
+        engine
+            .call_win64_with_timeout(callback, &[123], TIMEOUT_MICROSECONDS)
+            .is_err()
+    );
+    assert!(engine.unicorn.get_data().ui_session.effects.contains(&123));
+}
+
+#[test]
+fn ui_draw_records_all_rect_words_and_rejects_released_resources() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.enable_ui_session().unwrap();
+    engine.begin_ui_dispatch();
+    engine.configure_ui_drawing(55, BTreeMap::new(), None);
+    let buffer = engine.allocate(16, 8).unwrap();
+    let bytes: Vec<_> = [1u32, 2, 3, 4]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    engine.write(buffer, &bytes).unwrap();
+    let callback = UI_CALLBACK_BASE + (11 * UI_SLOTS + 9) * STUB_STRIDE;
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(callback, &[55, buffer], TIMEOUT_MICROSECONDS)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.end_ui_dispatch()[0]["rect_bytes_u32"],
+        serde_json::json!([1, 2, 3, 4])
+    );
+    engine.begin_ui_dispatch();
+    let output = engine.allocate(8, 8).unwrap();
+    let new_brush = UI_CALLBACK_BASE + (8 * UI_SLOTS + 1) * STUB_STRIDE;
+    engine
+        .call_win64_with_timeout(new_brush, &[2, buffer, output], TIMEOUT_MICROSECONDS)
+        .unwrap();
+    let mut id = [0u8; 8];
+    engine.read(output, &mut id).unwrap();
+    let id = u64::from_le_bytes(id);
+    let release = UI_CALLBACK_BASE + (8 * UI_SLOTS + 12) * STUB_STRIDE;
+    engine
+        .call_win64_with_timeout(release, &[id], TIMEOUT_MICROSECONDS)
+        .unwrap();
+    assert!(
+        engine
+            .call_win64_with_timeout(release, &[id], TIMEOUT_MICROSECONDS)
+            .is_err()
+    );
+}
