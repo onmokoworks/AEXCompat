@@ -2243,7 +2243,15 @@ fn classify_trace_value(raw: u64, image_base: u64, image_end: u64) -> TraceValue
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    // Full-plane watches can contain hundreds of MiB. Reserve once instead of
+    // allocating and formatting a temporary String for every input byte.
+    let mut encoded = String::with_capacity(bytes.len().checked_mul(2).expect("hex length"));
+    for &byte in bytes {
+        encoded.push(DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn discover_trace_points(image: &PeImage) -> Vec<u64> {

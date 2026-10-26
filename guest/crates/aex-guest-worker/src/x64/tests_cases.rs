@@ -3871,3 +3871,21 @@ fn resident_changed_ranges_are_bounded_without_losing_snapshot_bytes() {
     assert_eq!(ranges[4095].offset, 8190);
     assert_eq!(after.hex.unwrap().len(), size * 2);
 }
+
+#[test]
+fn trace_hex_preserves_all_byte_values_and_leading_zeroes() {
+    assert_eq!(bytes_to_hex(&[]), "");
+    assert_eq!(
+        bytes_to_hex(&[0, 1, 15, 16, 127, 128, 255]),
+        "00010f107f80ff"
+    );
+    let bytes: Vec<u8> = (0..=255).collect();
+    let encoded = bytes_to_hex(&bytes);
+    assert_eq!(encoded.len(), bytes.len() * 2);
+    let decoded: Vec<u8> = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    assert_eq!(decoded, bytes);
+}
