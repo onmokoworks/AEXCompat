@@ -108,6 +108,61 @@ fn validate_conditions(
         .comparison_identity
         .as_object()
         .ok_or_else(|| invalid("comparison identity must be an object"))?;
+    // Chains record each actually executed stage. An empty chain is an
+    // identity copy and must not invent a plug-in hash or render selector.
+    if let Some(stages) = identity.get("chain") {
+        let stages = stages
+            .as_array()
+            .filter(|stages| stages.len() <= 8)
+            .ok_or_else(|| invalid("chain identity must have at most eight stages"))?;
+        if checkpoint_expected
+            || identity.len() != 5
+            || !["input_sha256", "world_sha256", "pixel_format", "origin"]
+                .iter()
+                .all(|key| identity.contains_key(*key))
+            || !matches!(
+                identity["pixel_format"].as_str(),
+                Some("argb8" | "argb16" | "argb32f")
+            )
+            || identity["origin"] != serde_json::json!({"x":0,"y":0})
+        {
+            return Err(invalid("chain identity fields are invalid"));
+        }
+        for key in ["input_sha256", "world_sha256"] {
+            if !identity[key].as_str().is_some_and(|hash| {
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }) {
+                return Err(invalid("chain identity hash is invalid"));
+            }
+        }
+        let mut previous = &identity["input_sha256"];
+        for stage in stages {
+            if stage.get("chain").is_some()
+                || stage["input_sha256"] != *previous
+                || stage["pixel_format"] != identity["pixel_format"]
+                || stage["origin"] != identity["origin"]
+            {
+                return Err(invalid("chain identity stage linkage is invalid"));
+            }
+            validate_conditions(
+                &RenderArtifactConditions {
+                    premultiplication: conditions.premultiplication.clone(),
+                    working_space: conditions.working_space.clone(),
+                    render_mode: conditions.render_mode.clone(),
+                    comparison_identity: stage.clone(),
+                },
+                false,
+            )?;
+            previous = &stage["world_sha256"];
+        }
+        if *previous != identity["world_sha256"] {
+            return Err(invalid("chain identity final hash is invalid"));
+        }
+        return Ok(());
+    }
     for key in [
         "plugin_sha256",
         "input_sha256",
@@ -920,5 +975,35 @@ mod tests {
         let error = commit_directory(&d, &[("same", b"first"), ("same", b"second")]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert!(!d.exists());
+    }
+    #[test]
+    fn chain_artifact_identity_validates_linkage_and_bypass_without_inventing_a_plugin() {
+        let mut c = conditions();
+        let first = c.comparison_identity.clone();
+        let mut second = first.clone();
+        second["input_sha256"] = first["world_sha256"].clone();
+        second["world_sha256"] = serde_json::json!("44".repeat(32));
+        c.comparison_identity = serde_json::json!({
+            "chain": [first.clone(), second.clone()],
+            "input_sha256": first["input_sha256"], "world_sha256": second["world_sha256"],
+            "pixel_format": first["pixel_format"], "origin": {"x":0,"y":0},
+        });
+        validate_conditions(&c, false).unwrap();
+        let valid = c.comparison_identity.clone();
+        for field in ["input_sha256", "pixel_format", "origin"] {
+            c.comparison_identity = valid.clone();
+            c.comparison_identity["chain"][1][field] = serde_json::json!("bad");
+            assert!(validate_conditions(&c, false).is_err());
+        }
+        c.comparison_identity = valid.clone();
+        c.comparison_identity["world_sha256"] = serde_json::json!("55".repeat(32));
+        assert!(validate_conditions(&c, false).is_err());
+        c.comparison_identity = valid;
+        c.comparison_identity["chain"] = serde_json::json!([]);
+        c.comparison_identity["world_sha256"] = c.comparison_identity["input_sha256"].clone();
+        validate_conditions(&c, false).unwrap();
+        assert!(validate_conditions(&c, true).is_err());
+        c.comparison_identity["unexpected"] = serde_json::json!(true);
+        assert!(validate_conditions(&c, false).is_err());
     }
 }

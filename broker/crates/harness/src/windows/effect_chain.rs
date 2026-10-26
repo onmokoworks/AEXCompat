@@ -1,6 +1,6 @@
 // The active stage uses the existing Effect Controls editor. Parked stages own
 // complete editor snapshots, not just parameter values or an AEX basename.
-const MAX_EFFECT_CHAIN_STAGES: usize = 8;
+use crate::gui_state::MAX_EFFECT_CHAIN_STAGES;
 
 macro_rules! effect_editor_state {
     ($($field:ident: $ty:ty),+ $(,)?) => {
@@ -51,10 +51,7 @@ effect_editor_state! {
     custom_ui_key_modifiers: u16,
 }
 
-struct EffectChainSlot {
-    enabled: bool,
-    editor: EffectEditorState,
-}
+type EffectChainSlot = crate::gui_state::EffectChainSlot<EffectEditorState>;
 
 #[derive(Clone)]
 struct ChainRenderStage {

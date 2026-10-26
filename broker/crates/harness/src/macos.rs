@@ -33,6 +33,8 @@ use aexcompat_broker::render_fixture::{
 };
 use aexcompat_broker::render_pixel_format::RenderPixelFormat;
 
+include!("macos_chain.rs");
+
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1080;
 const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
@@ -425,6 +427,9 @@ struct MacHarnessApp {
     resident: ResidentState,
     user_changed: Option<Receiver<Result<Vec<DynamicParameterUi>, String>>>,
     pending_user_changed: Option<u32>,
+    effect_chain: Vec<crate::gui_state::EffectChainSlot<MacEffectEditor>>,
+    active_effect: usize,
+    chain_task: Option<MacChainTask>,
 }
 
 impl Drop for MacHarnessApp {
@@ -459,6 +464,9 @@ impl MacHarnessApp {
             resident: ResidentState::Idle,
             user_changed: None,
             pending_user_changed: None,
+            effect_chain: Vec::new(),
+            active_effect: 0,
+            chain_task: None,
         }
     }
 
@@ -509,6 +517,7 @@ impl MacHarnessApp {
                     self.plugin_path = None;
                 }
             }
+            self.save_active_effect();
             self.output = None;
             self.output_texture = None;
         }
@@ -572,6 +581,15 @@ impl MacHarnessApp {
     }
 
     fn render(&mut self) {
+        self.save_active_effect();
+        if self.uses_chain_renderer() {
+            self.render_chain();
+        } else {
+            self.render_single();
+        }
+    }
+
+    fn render_single(&mut self) {
         let (Some(aex), Some(input)) = (self.plugin_path.clone(), self.input.clone()) else {
             return;
         };
@@ -693,7 +711,7 @@ impl MacHarnessApp {
         }
         let ResidentState::Ready(session) = &self.resident else {
             if self.plugin_path.is_some() && self.input.is_some() {
-                self.render();
+                self.render_single();
                 if matches!(
                     self.resident,
                     ResidentState::Starting { .. } | ResidentState::Ready(_)
@@ -766,6 +784,7 @@ impl MacHarnessApp {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        self.poll_chain(ctx);
         let user_changed =
             self.user_changed
                 .as_ref()
@@ -827,6 +846,25 @@ impl MacHarnessApp {
             return;
         };
         self.busy = false;
+        // A supervised chain control may warm up its own resident session.
+        // That stage-only render is never the chain's published output.
+        if self.uses_chain_renderer() {
+            match result {
+                Ok(_) => {
+                    if let Some(slot) = self.pending_user_changed.take() {
+                        self.dispatch_user_changed(slot);
+                    }
+                }
+                Err(error) => {
+                    let cleanup = self.close_resident().err();
+                    self.status = "Supervised chain control failed.".into();
+                    self.report = cleanup
+                        .map(|cleanup| format!("{error}; cleanup: {cleanup}"))
+                        .unwrap_or(error);
+                }
+            }
+            return;
+        }
         match result {
             Ok(result) => match result.preview.as_deref() {
                 Some(preview) => match load_texture(ctx, "mac-output", preview) {
@@ -1075,6 +1113,7 @@ impl eframe::App for MacHarnessApp {
 
 impl MacHarnessApp {
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
+        self.show_chain_controls(ui);
         let mut changed = false;
         let occupied = self.occupied();
         ui.horizontal(|ui| {
@@ -1588,6 +1627,7 @@ struct MacFixtureLaunch<'a> {
     worlds: Option<&'a FixtureWorlds>,
     smart: bool,
     time_scale: u32,
+    raw_primary: Option<&'a MacChainWorld>,
 }
 
 #[derive(Serialize)]
@@ -1756,7 +1796,11 @@ fn launch_resident_candidate(
     let output_slot = session
         .root()
         .join(format!("output.{}", format.pixel_format()));
-    let (width, height) = write_resident_input_slot(input, &input_slot, primary_format)?;
+    let (width, height) = if let Some(raw) = fixture.and_then(|launch| launch.raw_primary) {
+        raw.write_slot(&input_slot, primary_format)?
+    } else {
+        write_resident_input_slot(input, &input_slot, primary_format)?
+    };
     let plugin_sha256 = format!(
         "{:x}",
         Sha256::digest(
@@ -2463,6 +2507,7 @@ fn render_single_fixture_headless(
         worlds: fixture.worlds.as_ref(),
         smart: fixture.render_path == "smart",
         time_scale: fixture.timing.time_scale,
+        raw_primary: None,
     };
     let workers = guest_worker_candidates(repository)?;
     let mut started =
@@ -2814,6 +2859,7 @@ fn start_resident_session(
         worlds: None,
         smart: false,
         time_scale: 30,
+        raw_primary: None,
     });
     let started = start_resident_worker(candidates, aex, input, format, fixture.as_ref())?;
     let plugin_sha256 = started.plugin_sha256.clone();
@@ -2822,6 +2868,7 @@ fn start_resident_session(
     let height = started.height;
     let output_slot = started.output_slot.clone();
     let session = started.session;
+    let additional_session_files = started.additional_session_files;
     let security_tier = started.security_tier;
     let fallback_reasons = started.fallback_reasons;
     let child = Arc::new(Mutex::new(Some(started.child)));
@@ -2869,7 +2916,7 @@ fn start_resident_session(
                         let render_path = response["output"]["render_path"]
                             .as_str()
                             .expect("validated resident render path");
-                        session.audit_tree()?;
+                        session.audit_tree_with_additional_files(additional_session_files)?;
                         let (observed_checksum, final_output, preview) = match format {
                             MacRenderFormat::PngArgb8 => (
                                 save_argb8_slot(
