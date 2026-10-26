@@ -86,6 +86,10 @@ impl MacRenderFormat {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResidentFrameOutput {
+    // Legacy workers omit rect. The GUI currently requests a zero-origin full frame;
+    // accept the F54 response only when its rectangle agrees with that contract.
+    #[serde(default)]
+    rect: Option<[i32; 4]>,
     width: u32,
     height: u32,
     rowbytes: u32,
@@ -151,6 +155,12 @@ fn validate_resident_frame(
         || done.generation != Some(expected_generation)
         || output.width != width
         || output.height != height
+        || output.rect.is_some_and(|rect| {
+            rect[0] != 0
+                || rect[1] != 0
+                || i64::from(rect[2]) != i64::from(width)
+                || i64::from(rect[3]) != i64::from(height)
+        })
         || output.rowbytes != width * format.bytes_per_pixel() as u32
         || output.pixel_format != format.pixel_format()
         || !matches!(output.render_path.as_str(), "classic" | "smartfx")
@@ -4360,6 +4370,15 @@ mod tests {
             }
         });
         assert!(validate_resident_frame(&valid, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
+        let mut geometry = valid.clone();
+        geometry["output"]["rect"] = json!([0, 0, 2, 1]);
+        assert!(validate_resident_frame(&geometry, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
+        for rect in [[1, 0, 3, 1], [0, -1, 2, 0], [0, 0, 1, 1], [0, 0, 2, 2]] {
+            geometry["output"]["rect"] = json!(rect);
+            assert!(
+                validate_resident_frame(&geometry, 0, 2, 1, MacRenderFormat::PngArgb8).is_err()
+            );
+        }
         let mut legacy = valid.clone();
         legacy.as_object_mut().unwrap().remove("timings_us");
         assert!(validate_resident_frame(&legacy, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
