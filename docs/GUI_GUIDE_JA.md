@@ -109,7 +109,7 @@ Render で `target/harness-output` に保存します。Analysis & Logs → Outp
 
 単一エフェクトの Mac ARGB16 raw は little-endian の ARGB です。Windows チェーンの RGBA サイドカーと取り違えないでください。`output.json` に寸法、チャンネル順、色深度、ハッシュなどが記録されます。ディレクトリごと保管してください。Mac の GUI は 16-bit PNG や float raw サイドカーを同時出力しません。
 
-複数段のチェーン、または段を無効にした場合は、`mac-chain-…/` に保存します。`chain.json` は段ごとの記録、`output.argb` は選択した色深度の ARGB データです。8 bpc は `output.png`、16 bpc は `artifact/output.bin` と `artifact/output.json`、float は `artifact/output.exr` と `artifact/output.json` も保存します。チェーンの `artifact/output.bin` は RGBA 順です。単一エフェクトの raw と区別し、メタデータとともにディレクトリごと保管してください。
+複数段のチェーン、または段を無効にした場合は、`mac-chain-…/` に保存します。`chain.json` は段ごとの記録、`output.argb` は選択した色深度の ARGB データです。8 bpc は `output.png`、16 bpc は `artifact/output.bin` と `artifact/output.json`、float は `artifact/output.exr` と `artifact/output.json` も保存します。チェーンの `artifact/output.bin` も ARGB 順です。メタデータとともにディレクトリごと保管してください。
 
 ## 診断とレポートを読む
 
@@ -138,7 +138,7 @@ X01b で Mac のチェーンと 3840×2160 の 4K UHD 入力・描画に対応�
 - 実行方式は Windows が native worker、Mac が Unicorn worker。GPU の選択は Mac GUI では未対応です。
 - 音声・タイムライン、debug request 編集、カスタム UI の操作・診断は Windows 側にあり、Mac GUI には同等の操作がありません。
 - Mac の画像選択は PNG、寸法は 3840×2160 以下。深い色深度のプレビューと PNG 保存は未対応です。
-- 16-bit raw の順序は Windows チェーンと Mac チェーンの artifact が RGBA、Mac の単一エフェクトが ARGB。float の GUI 出力は Windows チェーンが PNG＋raw、Mac が EXR＋JSON です。
+- 16-bit raw の順序は Windows チェーンが RGBA、Mac は単一エフェクトもチェーンも ARGB。float の GUI 出力は Windows チェーンが PNG＋raw、Mac が EXR＋JSON です。
 - 依存 DLL 探索、互換性・GPU・性能・AEGP の診断 UI、パラメーター変更後の UI 更新範囲には差が残ります。
 - U03 の CLI は UI イベントと描画呼び出しを記録します。Mac GUI の対話式カスタム UI や文字の描画は未実装です。Suite の全バージョン・全 slot、ACE、arbitrary stream の一致も未確認です。
 - RVA・ポインターチェーン・画面全体の監視は guest 側にあります。native worker の対応機能、両側の ROI 比較、GUI の出力領域・geometry 操作は残っています。

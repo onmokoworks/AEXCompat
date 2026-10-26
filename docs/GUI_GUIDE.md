@@ -109,7 +109,7 @@ Render saves under `target/harness-output`. Analysis & Logs → Output displays 
 
 Single-effect Mac ARGB16 raw is little-endian ARGB. Do not read it as the Windows chain's RGBA sidecar. `output.json` records dimensions, channel order, depth, hashes, and other metadata. Keep the whole directory. The Mac GUI does not also export a 16-bit PNG or float raw sidecar.
 
-With multiple stages or a bypassed stage, output goes into `mac-chain-…/`. `chain.json` records each stage; `output.argb` holds ARGB data at the selected depth. The folder also contains `output.png` at 8 bpc, `artifact/output.bin` and `artifact/output.json` at 16 bpc, or `artifact/output.exr` and `artifact/output.json` at float depth. The chain’s `artifact/output.bin` uses RGBA order. Distinguish it from single-effect raw output and keep the whole directory with its metadata.
+With multiple stages or a bypassed stage, output goes into `mac-chain-…/`. `chain.json` records each stage; `output.argb` holds ARGB data at the selected depth. The folder also contains `output.png` at 8 bpc, `artifact/output.bin` and `artifact/output.json` at 16 bpc, or `artifact/output.exr` and `artifact/output.json` at float depth. The chain’s `artifact/output.bin` also uses ARGB order. Keep the whole directory with its metadata.
 
 ## Read diagnostics and reports
 
@@ -138,7 +138,7 @@ X01b adds Mac chains and 3840×2160 4K UHD input/rendering, tested with a real A
 - Windows uses a native worker; Mac uses Unicorn. The Mac GUI has no GPU backend selector.
 - Windows has audio/timeline workflows, debug request editing, and custom UI operations/diagnostics; the Mac GUI has no equivalent controls.
 - Mac image selection is PNG-only, up to 3840×2160. Deep previews and deep PNG export are not implemented.
-- 16-bit raw is RGBA for Windows chains and Mac chain artifacts, and ARGB for single-effect Mac output. Float GUI exports are PNG plus raw for Windows chains, and EXR plus JSON on Mac.
+- 16-bit raw is RGBA for Windows chains and ARGB for both single-effect and chain output on Mac. Float GUI exports are PNG plus raw for Windows chains, and EXR plus JSON on Mac.
 - Dependency DLL discovery, compatibility/GPU/performance/AEGP diagnostic UI, and UI updates after parameter changes still differ.
 - U03’s CLI records UI events and drawing calls. An interactive Mac custom-UI canvas and text rasterization remain unimplemented. Full suite versions/slots, ACE, and arbitrary stream parity are unverified.
 - RVA, pointer-chain, and full-plane watches exist in the guest. Native counterparts, paired ROI comparisons, and GUI output-region/geometry controls remain open.
