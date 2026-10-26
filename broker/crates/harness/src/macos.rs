@@ -33,8 +33,10 @@ use aexcompat_broker::render_fixture::{
 };
 use aexcompat_broker::render_pixel_format::RenderPixelFormat;
 
-const MAX_WIDTH: u32 = 1920;
-const MAX_HEIGHT: u32 = 1080;
+include!("macos_chain.rs");
+
+const MAX_WIDTH: u32 = 3840;
+const MAX_HEIGHT: u32 = 2160;
 const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
@@ -86,6 +88,10 @@ impl MacRenderFormat {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResidentFrameOutput {
+    // Legacy workers omit rect. The GUI currently requests a zero-origin full frame;
+    // accept the F54 response only when its rectangle agrees with that contract.
+    #[serde(default)]
+    rect: Option<[i32; 4]>,
     width: u32,
     height: u32,
     rowbytes: u32,
@@ -151,6 +157,12 @@ fn validate_resident_frame(
         || done.generation != Some(expected_generation)
         || output.width != width
         || output.height != height
+        || output.rect.is_some_and(|rect| {
+            rect[0] != 0
+                || rect[1] != 0
+                || i64::from(rect[2]) != i64::from(width)
+                || i64::from(rect[3]) != i64::from(height)
+        })
         || output.rowbytes != width * format.bytes_per_pixel() as u32
         || output.pixel_format != format.pixel_format()
         || !matches!(output.render_path.as_str(), "classic" | "smartfx")
@@ -415,6 +427,9 @@ struct MacHarnessApp {
     resident: ResidentState,
     user_changed: Option<Receiver<Result<Vec<DynamicParameterUi>, String>>>,
     pending_user_changed: Option<u32>,
+    effect_chain: Vec<crate::gui_state::EffectChainSlot<MacEffectEditor>>,
+    active_effect: usize,
+    chain_task: Option<MacChainTask>,
 }
 
 impl Drop for MacHarnessApp {
@@ -449,6 +464,9 @@ impl MacHarnessApp {
             resident: ResidentState::Idle,
             user_changed: None,
             pending_user_changed: None,
+            effect_chain: Vec::new(),
+            active_effect: 0,
+            chain_task: None,
         }
     }
 
@@ -499,6 +517,7 @@ impl MacHarnessApp {
                     self.plugin_path = None;
                 }
             }
+            self.save_active_effect();
             self.output = None;
             self.output_texture = None;
         }
@@ -520,6 +539,11 @@ impl MacHarnessApp {
             self.report = error;
             return;
         }
+        if let Err(error) = validate_resident_image_dimensions(&path) {
+            self.status = "Input exceeds the supported image boundary.".into();
+            self.report = error;
+            return;
+        }
         match load_texture(ctx, "mac-input", &path) {
             Ok((texture, width, height)) if width <= MAX_WIDTH && height <= MAX_HEIGHT => {
                 self.input = Some(path);
@@ -530,7 +554,7 @@ impl MacHarnessApp {
                 self.status = format!("Input ready: {width}x{height}");
             }
             Ok((_, width, height)) => {
-                self.status = "Input exceeds the initial Full HD boundary.".into();
+                self.status = "Input exceeds the 4K UHD boundary.".into();
                 self.report = format!(
                     "PNG must be within 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
                 );
@@ -562,6 +586,15 @@ impl MacHarnessApp {
     }
 
     fn render(&mut self) {
+        self.save_active_effect();
+        if self.uses_chain_renderer() {
+            self.render_chain();
+        } else {
+            self.render_single();
+        }
+    }
+
+    fn render_single(&mut self) {
         let (Some(aex), Some(input)) = (self.plugin_path.clone(), self.input.clone()) else {
             return;
         };
@@ -683,7 +716,7 @@ impl MacHarnessApp {
         }
         let ResidentState::Ready(session) = &self.resident else {
             if self.plugin_path.is_some() && self.input.is_some() {
-                self.render();
+                self.render_single();
                 if matches!(
                     self.resident,
                     ResidentState::Starting { .. } | ResidentState::Ready(_)
@@ -756,6 +789,7 @@ impl MacHarnessApp {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        self.poll_chain(ctx);
         let user_changed =
             self.user_changed
                 .as_ref()
@@ -817,6 +851,25 @@ impl MacHarnessApp {
             return;
         };
         self.busy = false;
+        // A supervised chain control may warm up its own resident session.
+        // That stage-only render is never the chain's published output.
+        if self.uses_chain_renderer() {
+            match result {
+                Ok(_) => {
+                    if let Some(slot) = self.pending_user_changed.take() {
+                        self.dispatch_user_changed(slot);
+                    }
+                }
+                Err(error) => {
+                    let cleanup = self.close_resident().err();
+                    self.status = "Supervised chain control failed.".into();
+                    self.report = cleanup
+                        .map(|cleanup| format!("{error}; cleanup: {cleanup}"))
+                        .unwrap_or(error);
+                }
+            }
+            return;
+        }
         match result {
             Ok(result) => match result.preview.as_deref() {
                 Some(preview) => match load_texture(ctx, "mac-output", preview) {
@@ -837,7 +890,7 @@ impl MacHarnessApp {
                 None => {
                     self.output = Some(result.output);
                     self.output_texture = None;
-                    self.status = "Completed: FLOAT32 EXR artifact".into();
+                    self.status = "Completed: render artifact".into();
                     self.report = result.report;
                 }
             },
@@ -902,6 +955,11 @@ impl eframe::App for MacHarnessApp {
                                 &mut self.render_format,
                                 MacRenderFormat::PngArgb8,
                                 "ARGB8 PNG",
+                            );
+                            ui.selectable_value(
+                                &mut self.render_format,
+                                MacRenderFormat::RawArgb16,
+                                "ARGB16 raw",
                             );
                             ui.selectable_value(
                                 &mut self.render_format,
@@ -1060,6 +1118,7 @@ impl eframe::App for MacHarnessApp {
 
 impl MacHarnessApp {
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
+        self.show_chain_controls(ui);
         let mut changed = false;
         let occupied = self.occupied();
         ui.horizontal(|ui| {
@@ -1163,7 +1222,7 @@ impl MacHarnessApp {
             ui.selectable_value(&mut self.viewer_mode, ViewerMode::Output, "AEX OUTPUT");
             ui.selectable_value(&mut self.viewer_mode, ViewerMode::Compare, "COMPARE");
             ui.separator();
-            ui.weak("FHD workspace / aspect fit");
+            ui.weak("4K UHD workspace / aspect fit");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Fit").clicked() {
                     self.viewer_zoom = 1.0;
@@ -1350,10 +1409,23 @@ fn write_resident_input_slot(
     Ok((width, height))
 }
 
+fn validate_resident_image_dimensions(input: &Path) -> Result<(u32, u32), String> {
+    let (width, height) = image::image_dimensions(input)
+        .map_err(|error| format!("read input dimensions: {error}"))?;
+    if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
+        return Err(format!(
+            "resident input dimensions must be 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
+        ));
+    }
+    Ok((width, height))
+}
+
 fn encode_resident_image(
     input: &Path,
     format: MacRenderFormat,
 ) -> Result<(u32, u32, Vec<u8>), String> {
+    // Bound allocation before decoding, including all secondary layers.
+    validate_resident_image_dimensions(input)?;
     if format == MacRenderFormat::PngArgb8 {
         let rgba = image::open(input)
             .map_err(|error| format!("open resident input PNG: {error}"))?
@@ -1370,29 +1442,27 @@ fn encode_resident_image(
         }
         return Ok((width, height, argb));
     }
-    let image = image::open(input)
-        .map_err(|error| format!("open resident input PNG: {error}"))?
-        .to_rgba8();
-    let (width, height) = image.dimensions();
+    let decoded =
+        image::open(input).map_err(|error| format!("open resident input PNG: {error}"))?;
+    let (width, height) = (decoded.width(), decoded.height());
     if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
         return Err(format!(
             "resident input dimensions must be 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
         ));
     }
-    let mut argb = Vec::with_capacity(width as usize * height as usize * format.bytes_per_pixel());
-    for pixel in image.as_raw().chunks_exact(4) {
-        for sample in [pixel[3], pixel[0], pixel[1], pixel[2]] {
-            match format {
-                MacRenderFormat::RawArgb16 => {
-                    let ae_word = (u32::from(sample) * 32768 + 127) / 255;
-                    argb.extend_from_slice(&(ae_word as u16).to_le_bytes());
-                }
-                MacRenderFormat::ExrArgb32f => {
-                    argb.extend_from_slice(&(f32::from(sample) / 255.0).to_le_bytes());
-                }
-                MacRenderFormat::PngArgb8 => unreachable!(),
-            }
-        }
+    let rgba = aexcompat_broker::decoded_image::decoded_rgba(decoded, format.artifact_format());
+    if format == MacRenderFormat::ExrArgb32f
+        && rgba
+            .chunks_exact(4)
+            .any(|word| !f32::from_le_bytes(word.try_into().unwrap()).is_finite())
+    {
+        return Err("resident float input contains a non-finite sample".into());
+    }
+    let component_bytes = format.bytes_per_pixel() / 4;
+    let mut argb = Vec::with_capacity(rgba.len());
+    for pixel in rgba.chunks_exact(format.bytes_per_pixel()) {
+        argb.extend_from_slice(&pixel[3 * component_bytes..]);
+        argb.extend_from_slice(&pixel[..3 * component_bytes]);
     }
     Ok((width, height, argb))
 }
@@ -1437,6 +1507,66 @@ fn save_argb8_slot(
     image
         .save(output)
         .map_err(|error| format!("save resident output PNG: {error}"))?;
+    Ok(checksum)
+}
+
+fn save_argb16_raw_slot(
+    slot: &Path,
+    directory: &Path,
+    width: u32,
+    height: u32,
+    plugin_sha256: &str,
+    input_sha256: &str,
+    parameters: &str,
+    render_path: &str,
+    expected_checksum: &str,
+) -> Result<String, String> {
+    let expected = u64::from(width) * u64::from(height) * 8;
+    let file = std::fs::File::open(slot)
+        .map_err(|error| format!("open resident ARGB16 output slot: {error}"))?;
+    if file.metadata().map_err(|error| error.to_string())?.len() != expected {
+        return Err(format!(
+            "resident ARGB16 output size mismatch; expected {expected} bytes"
+        ));
+    }
+    let mut argb = Vec::new();
+    file.take(expected + 1)
+        .read_to_end(&mut argb)
+        .map_err(|error| format!("read resident ARGB16 output slot: {error}"))?;
+    if argb.len() as u64 != expected {
+        return Err("resident ARGB16 output changed size while reading".into());
+    }
+    let checksum = format!("{:x}", Sha256::digest(&argb));
+    if checksum != expected_checksum {
+        return Err(format!(
+            "resident output checksum mismatch: response={expected_checksum} slot={checksum}"
+        ));
+    }
+    let conditions = fixture_conditions(
+        plugin_sha256,
+        input_sha256,
+        &argb,
+        "argb16",
+        render_path,
+        &json!([parameters]),
+        "premultiplied",
+        0,
+        1,
+        1,
+        30,
+        None,
+    );
+    write_raw_world_artifact(
+        directory,
+        &argb_to_rgba_words(&argb, 2),
+        width,
+        height,
+        RenderPixelFormat::Argb16,
+        0,
+        0,
+        conditions,
+    )
+    .map_err(|error| format!("write ARGB16 raw artifact: {error}"))?;
     Ok(checksum)
 }
 
@@ -1515,6 +1645,7 @@ struct MacFixtureLaunch<'a> {
     worlds: Option<&'a FixtureWorlds>,
     smart: bool,
     time_scale: u32,
+    raw_primary: Option<&'a MacChainWorld>,
 }
 
 #[derive(Serialize)]
@@ -1683,7 +1814,11 @@ fn launch_resident_candidate(
     let output_slot = session
         .root()
         .join(format!("output.{}", format.pixel_format()));
-    let (width, height) = write_resident_input_slot(input, &input_slot, primary_format)?;
+    let (width, height) = if let Some(raw) = fixture.and_then(|launch| launch.raw_primary) {
+        raw.write_slot(&input_slot, primary_format)?
+    } else {
+        write_resident_input_slot(input, &input_slot, primary_format)?
+    };
     let plugin_sha256 = format!(
         "{:x}",
         Sha256::digest(
@@ -2390,6 +2525,7 @@ fn render_single_fixture_headless(
         worlds: fixture.worlds.as_ref(),
         smart: fixture.render_path == "smart",
         time_scale: fixture.timing.time_scale,
+        raw_primary: None,
     };
     let workers = guest_worker_candidates(repository)?;
     let mut started =
@@ -2741,6 +2877,7 @@ fn start_resident_session(
         worlds: None,
         smart: false,
         time_scale: 30,
+        raw_primary: None,
     });
     let started = start_resident_worker(candidates, aex, input, format, fixture.as_ref())?;
     let plugin_sha256 = started.plugin_sha256.clone();
@@ -2749,6 +2886,7 @@ fn start_resident_session(
     let height = started.height;
     let output_slot = started.output_slot.clone();
     let session = started.session;
+    let additional_session_files = started.additional_session_files;
     let security_tier = started.security_tier;
     let fallback_reasons = started.fallback_reasons;
     let child = Arc::new(Mutex::new(Some(started.child)));
@@ -2796,7 +2934,7 @@ fn start_resident_session(
                         let render_path = response["output"]["render_path"]
                             .as_str()
                             .expect("validated resident render path");
-                        session.audit_tree()?;
+                        session.audit_tree_with_additional_files(additional_session_files)?;
                         let (observed_checksum, final_output, preview) = match format {
                             MacRenderFormat::PngArgb8 => (
                                 save_argb8_slot(
@@ -2824,10 +2962,12 @@ fn start_resident_session(
                                 (checksum, output.join("output.exr"), None)
                             }
                             MacRenderFormat::RawArgb16 => {
-                                return Err(
-                                    "ARGB16 raw is available through --render-fixture only"
-                                        .into(),
-                                );
+                                let checksum = save_argb16_raw_slot(
+                                    &output_slot, &output, width, height,
+                                    &plugin_sha256, &input_sha256, &payload,
+                                    render_path, &expected_checksum,
+                                )?;
+                                (checksum, output.join("output.bin"), None)
                             }
                         };
                         debug_assert_eq!(observed_checksum, expected_checksum);
@@ -3493,6 +3633,76 @@ mod tests {
             argb_to_rgba_words(&argb8, 1),
             [255, 128, 0, 64],
             "artifact conversion must preserve component words"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fixture_image_encoding_preserves_sixteen_bit_png_precision() {
+        let root =
+            std::env::temp_dir().join(format!("aexcompat-deep-input-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("deep.png");
+        image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_pixel(
+            1,
+            1,
+            image::Rgba([20001, 7, 40001, 32769]),
+        )
+        .save(&path)
+        .unwrap();
+        let (_, _, argb) = encode_resident_image(&path, MacRenderFormat::RawArgb16).unwrap();
+        assert_eq!(
+            argb,
+            [16385u16, 10001, 4, 20001]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        let (_, _, argb) = encode_resident_image(&path, MacRenderFormat::ExrArgb32f).unwrap();
+        assert_eq!(
+            argb,
+            [32769.0f32, 20001.0, 7.0, 40001.0]
+                .into_iter()
+                .flat_map(|v| (v / 65535.0).to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fixture_image_encoding_rejects_nonfinite_and_keeps_finite_hdr() {
+        let root =
+            std::env::temp_dir().join(format!("aexcompat-float-input-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("float.tiff");
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            image::ImageBuffer::<image::Rgba<f32>, Vec<f32>>::from_pixel(
+                1,
+                1,
+                image::Rgba([bad, 0.0, 0.0, 1.0]),
+            )
+            .save(&path)
+            .unwrap();
+            assert!(
+                encode_resident_image(&path, MacRenderFormat::ExrArgb32f)
+                    .unwrap_err()
+                    .contains("non-finite")
+            );
+        }
+        image::ImageBuffer::<image::Rgba<f32>, Vec<f32>>::from_pixel(
+            1,
+            1,
+            image::Rgba([1.25, -0.125, -0.0, 0.5]),
+        )
+        .save(&path)
+        .unwrap();
+        let (_, _, argb) = encode_resident_image(&path, MacRenderFormat::ExrArgb32f).unwrap();
+        assert_eq!(
+            argb,
+            [0.5f32, 1.25, -0.125, -0.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>()
         );
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4225,6 +4435,15 @@ mod tests {
             }
         });
         assert!(validate_resident_frame(&valid, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
+        let mut geometry = valid.clone();
+        geometry["output"]["rect"] = json!([0, 0, 2, 1]);
+        assert!(validate_resident_frame(&geometry, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
+        for rect in [[1, 0, 3, 1], [0, -1, 2, 0], [0, 0, 1, 1], [0, 0, 2, 2]] {
+            geometry["output"]["rect"] = json!(rect);
+            assert!(
+                validate_resident_frame(&geometry, 0, 2, 1, MacRenderFormat::PngArgb8).is_err()
+            );
+        }
         let mut legacy = valid.clone();
         legacy.as_object_mut().unwrap().remove("timings_us");
         assert!(validate_resident_frame(&legacy, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
@@ -4234,6 +4453,213 @@ mod tests {
         let mut unknown = valid;
         unknown["unexpected"] = json!(true);
         assert!(validate_resident_frame(&unknown, 0, 2, 1, MacRenderFormat::PngArgb8).is_err());
+    }
+
+    #[test]
+    fn resident_argb16_raw_export_preserves_words_and_rejects_invalid_output() {
+        let root =
+            std::env::temp_dir().join(format!("aexcompat-raw16-export-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let slot = root.join("slot");
+        let artifact = root.join("artifact");
+        let bytes = [32768u16, 10001, 4, 65535]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        std::fs::write(&slot, &bytes).unwrap();
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let save = |checksum: &str| {
+            save_argb16_raw_slot(
+                &slot,
+                &artifact,
+                1,
+                1,
+                &"a".repeat(64),
+                &"b".repeat(64),
+                "[]",
+                "smartfx",
+                checksum,
+            )
+        };
+        assert!(
+            save(&"0".repeat(64))
+                .unwrap_err()
+                .contains("checksum mismatch")
+        );
+        assert!(!artifact.exists());
+        std::fs::write(&slot, &bytes[..7]).unwrap();
+        assert!(save(&hash).unwrap_err().contains("size mismatch"));
+        assert!(!artifact.exists());
+        std::fs::write(&slot, &bytes).unwrap();
+        assert_eq!(save(&hash).unwrap(), hash);
+        assert_eq!(std::fs::read(artifact.join("output.bin")).unwrap(), bytes);
+        let metadata: Value =
+            serde_json::from_slice(&std::fs::read(artifact.join("output.json")).unwrap()).unwrap();
+        assert_eq!(metadata["pixel_format"], "argb16");
+        assert_eq!(metadata["channel_order"], "ARGB");
+        assert_eq!(metadata["data_sha256"], hash);
+        assert!(save(&hash).is_err(), "must protect published output");
+        assert_eq!(std::fs::read(artifact.join("output.bin")).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gui_4k_admission_preserves_each_depth_and_rejects_one_past_boundary() {
+        let root = std::env::temp_dir().join(format!("aexcompat-gui-4k-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("4k.png");
+        image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_pixel(
+            3840,
+            2160,
+            image::Rgba([20001, 7, 40001, 65535]),
+        )
+        .save(&input)
+        .unwrap();
+        for format in [
+            MacRenderFormat::PngArgb8,
+            MacRenderFormat::RawArgb16,
+            MacRenderFormat::ExrArgb32f,
+        ] {
+            let (width, height, bytes) = encode_resident_image(&input, format).unwrap();
+            assert_eq!((width, height), (3840, 2160));
+            assert_eq!(bytes.len(), 3840 * 2160 * format.bytes_per_pixel());
+            assert!(
+                bytes
+                    .chunks_exact(format.bytes_per_pixel())
+                    .all(|pixel| pixel == &bytes[..format.bytes_per_pixel()])
+            );
+        }
+        for (width, height) in [(3841, 1), (1, 2161)] {
+            image::RgbaImage::new(width, height).save(&input).unwrap();
+            assert!(validate_resident_image_dimensions(&input).is_err());
+            assert!(encode_resident_image(&input, MacRenderFormat::PngArgb8).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_AEX and AEXCOMPAT_GUEST_WORKER; full 4K guest render"]
+    fn real_gui_4k_render_at_all_depths() {
+        let aex = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_AEX").unwrap());
+        let root = std::env::temp_dir().join(format!("aexcompat-real-4k-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("4k.png");
+        image::RgbaImage::from_pixel(3840, 2160, image::Rgba([21, 7, 40, 255]))
+            .save(&input)
+            .unwrap();
+        let workers = guest_worker_candidates(&repository_root().unwrap()).unwrap();
+        for format in [
+            MacRenderFormat::PngArgb8,
+            MacRenderFormat::RawArgb16,
+            MacRenderFormat::ExrArgb32f,
+        ] {
+            let mut session =
+                start_resident_session(&workers, &aex, &input, &root, format, Vec::new()).unwrap();
+            let output = if format == MacRenderFormat::PngArgb8 {
+                root.join("output.png")
+            } else {
+                root.join(format.pixel_format())
+            };
+            session
+                .sender
+                .send(ResidentCommand::Render {
+                    frame_index: 0,
+                    parameters: Vec::new(),
+                    output,
+                })
+                .unwrap();
+            let result = session
+                .receiver
+                .recv_timeout(RESIDENT_RENDER_DEADLINE + Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            let report: Value = serde_json::from_str(&result.report).unwrap();
+            if format == MacRenderFormat::PngArgb8 {
+                assert_eq!(
+                    image::image_dimensions(&result.output).unwrap(),
+                    (3840, 2160)
+                );
+                let (_, _, bytes) = encode_resident_image(&result.output, format).unwrap();
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(&bytes)),
+                    report["frame"]["output"]["checksum"]
+                );
+            } else {
+                let metadata: Value = serde_json::from_slice(
+                    &std::fs::read(result.output.parent().unwrap().join("output.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(metadata["width"], 3840);
+                assert_eq!(metadata["height"], 2160);
+                assert_eq!(
+                    metadata["comparison_identity"]["world_sha256"],
+                    report["frame"]["output"]["checksum"]
+                );
+                assert_eq!(
+                    metadata["data_sha256"],
+                    format!(
+                        "{:x}",
+                        Sha256::digest(std::fs::read(&result.output).unwrap())
+                    )
+                );
+            }
+            session.shutdown().unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_AEX and AEXCOMPAT_GUEST_WORKER"]
+    fn real_resident_argb16_gui_export_matches_worker_world() {
+        let aex = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_AEX").unwrap());
+        let root = std::env::temp_dir().join(format!("aexcompat-real16-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("input.png");
+        image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_pixel(
+            3,
+            2,
+            image::Rgba([20001, 7, 40001, 65535]),
+        )
+        .save(&input)
+        .unwrap();
+        let workers = guest_worker_candidates(&repository_root().unwrap()).unwrap();
+        let mut session = start_resident_session(
+            &workers,
+            &aex,
+            &input,
+            &root,
+            MacRenderFormat::RawArgb16,
+            Vec::new(),
+        )
+        .unwrap();
+        let artifact = root.join("artifact");
+        session
+            .sender
+            .send(ResidentCommand::Render {
+                frame_index: 0,
+                parameters: Vec::new(),
+                output: artifact.clone(),
+            })
+            .unwrap();
+        let result = session
+            .receiver
+            .recv_timeout(RESIDENT_RENDER_DEADLINE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.output, artifact.join("output.bin"));
+        assert!(result.preview.is_none());
+        let report: Value = serde_json::from_str(&result.report).unwrap();
+        let bytes = std::fs::read(&result.output).unwrap();
+        assert_eq!(bytes.len(), 3 * 2 * 8);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            report["frame"]["output"]["checksum"]
+        );
+        let metadata: Value =
+            serde_json::from_slice(&std::fs::read(artifact.join("output.json")).unwrap()).unwrap();
+        assert_eq!(metadata["pixel_format"], "argb16");
+        session.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

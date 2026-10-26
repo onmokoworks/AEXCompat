@@ -28,7 +28,14 @@ pub(super) fn native_import_is_implemented(name: &str) -> bool {
             | "_callnewh"
             | "strncpy"
             | "memset"
+            | "sin"
+            | "cos"
+            | "exp"
             | "expf"
+            | "atan2f"
+            | "sinf"
+            | "cosf"
+            | "log2f"
             | "floorf"
             | "lround"
             | "powf"
@@ -45,7 +52,15 @@ pub(super) fn native_import_callback(name: &str) -> u64 {
         "_callnewh" => callback_address!(noop_import),
         "strncpy" => callback_address!(native_strncpy),
         "memset" => callback_address!(native_memset),
+        "sin" => callback_address!(native_sin),
+        "cos" => callback_address!(native_cos),
+        "exp" => callback_address!(native_exp),
         "expf" => callback_address!(native_expf),
+        "atan2f" => callback_address!(native_atan2f),
+        "sinf" => callback_address!(native_sinf),
+        "cosf" => callback_address!(native_cosf),
+        "log2f" => callback_address!(native_log2f),
+
         "floorf" => callback_address!(native_floorf),
         "lround" => callback_address!(native_lround),
         "powf" => callback_address!(native_powf),
@@ -269,7 +284,7 @@ pub(super) unsafe extern "win64" fn native_ansi_sprintf(
 }
 
 pub(super) unsafe extern "win64" fn native_expf(value: f32) -> f32 {
-    value.exp()
+    olm_ucrtmath::expf(value)
 }
 pub(super) unsafe extern "win64" fn native_floorf(value: f32) -> f32 {
     value.floor()
@@ -283,10 +298,10 @@ pub(super) unsafe extern "win64" fn native_lround(value: f64) -> i32 {
     }
 }
 pub(super) unsafe extern "win64" fn native_powf(left: f32, right: f32) -> f32 {
-    left.powf(right)
+    olm_ucrtmath::powf(left, right)
 }
 pub(super) unsafe extern "win64" fn native_pow(left: f64, right: f64) -> f64 {
-    left.powf(right)
+    olm_ucrtmath::pow(left, right)
 }
 
 pub(super) unsafe extern "win64" fn add_param(
@@ -348,4 +363,32 @@ pub(super) unsafe extern "win64" fn copy_world(
         }
     }
     0
+}
+
+pub(super) unsafe extern "win64" fn native_atan2f(y: f32, x: f32) -> f32 {
+    olm_ucrtmath::atan2f(y, x)
+}
+
+pub(super) unsafe extern "win64" fn native_sinf(value: f32) -> f32 {
+    olm_ucrtmath::sinf(value)
+}
+
+pub(super) unsafe extern "win64" fn native_cosf(value: f32) -> f32 {
+    olm_ucrtmath::cosf(value)
+}
+
+pub(super) unsafe extern "win64" fn native_log2f(value: f32) -> f32 {
+    olm_ucrtmath::log2f(value)
+}
+
+pub(super) unsafe extern "win64" fn native_sin(value: f64) -> f64 {
+    olm_ucrtmath::sin(value)
+}
+
+pub(super) unsafe extern "win64" fn native_cos(value: f64) -> f64 {
+    olm_ucrtmath::cos(value)
+}
+
+pub(super) unsafe extern "win64" fn native_exp(value: f64) -> f64 {
+    olm_ucrtmath::exp(value)
 }

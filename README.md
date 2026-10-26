@@ -1,5 +1,7 @@
 # AEXCompat
 
+GUI の操作手順: [日本語（正本）](docs/GUI_GUIDE_JA.md) · [English translation](docs/GUI_GUIDE.md)
+
 After Effects用の`.aex`プラグインを、After Effects本体の外で読み込み・描画・デバッグする互換ホストです。
 
 [English](README.en.md) · [クイックスタート](#クイックスタート) · [ドキュメント](#ドキュメント) · [ライセンス](#ライセンス)

@@ -1918,6 +1918,7 @@ fn execution_trace_records_jump_to_known_function_as_tail_call() {
         absolute_address: None,
         register: "rcx",
         dereference_offset: None,
+        dereference_offsets: Vec::new(),
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -1975,6 +1976,7 @@ fn execution_trace_watch_can_dereference_pointer_field() {
         absolute_address: None,
         register: "rcx",
         dereference_offset: Some(0),
+        dereference_offsets: Vec::new(),
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -2003,6 +2005,7 @@ fn checkpoint_trace_skips_hot_basic_block_collection() {
         absolute_address: None,
         register: "rdx",
         dereference_offset: None,
+        dereference_offsets: Vec::new(),
         size: 1,
         occurrence: Some(1),
         image_coordinate: None,
@@ -2035,6 +2038,7 @@ fn checkpoint_trace_activates_function_watch_at_selector_entry() {
         absolute_address: None,
         register: "rcx",
         dereference_offset: None,
+        dereference_offsets: Vec::new(),
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -2077,6 +2081,7 @@ fn checkpoint_trace_lists_watches_it_cannot_hook() {
             absolute_address: None,
             register: "rdx",
             dereference_offset: None,
+            dereference_offsets: Vec::new(),
             size: 1,
             occurrence: None,
             image_coordinate: None,
@@ -2159,6 +2164,7 @@ fn execution_trace_treats_explicitly_watched_first_jump_as_tail_call() {
         absolute_address: None,
         register: "stack5",
         dereference_offset: None,
+        dereference_offsets: Vec::new(),
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -2199,6 +2205,7 @@ fn execution_trace_applies_watch_occurrence_to_tail_calls() {
         absolute_address: None,
         register: "rcx",
         dereference_offset: None,
+        dereference_offsets: Vec::new(),
         size: 1,
         occurrence: Some(2),
         image_coordinate: None,
@@ -2237,6 +2244,7 @@ fn execution_trace_activates_function_watch_at_selector_entry() {
         absolute_address: None,
         register: "rcx",
         dereference_offset: None,
+        dereference_offsets: Vec::new(),
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -2406,6 +2414,7 @@ fn execution_trace_witnesses_memory_before_and_after_a_call() {
         absolute_address: None,
         register: "rcx",
         dereference_offset: None,
+        dereference_offsets: Vec::new(),
         size: 4,
         occurrence: None,
         image_coordinate: None,
@@ -2453,6 +2462,7 @@ fn execution_trace_selects_one_based_watch_occurrence_without_spending_witness_b
         absolute_address: None,
         register: "rcx",
         dereference_offset: None,
+        dereference_offsets: Vec::new(),
         size: 1,
         occurrence: Some(2),
         image_coordinate: None,
@@ -2493,6 +2503,7 @@ fn inferred_return_path_completes_pending_memory_witness() {
         absolute_address: None,
         register: "rcx",
         dereference_offset: None,
+        dereference_offsets: Vec::new(),
         size: 4,
         occurrence: None,
         image_coordinate: None,
@@ -3258,6 +3269,8 @@ fn trace_event_limit_marks_capture_as_truncated() {
         unhookable_watches: Vec::new(),
         witnesses: Vec::new(),
         dropped_witnesses: 0,
+        reserved_watch_bytes: 0,
+        reserved_watch_count: 0,
         basic_blocks: HashMap::new(),
         branch_edges: HashMap::new(),
         dropped_basic_blocks: 0,
@@ -3672,4 +3685,207 @@ fn census_extents_merge_overlapping_translation_block_variants() {
     assert_eq!(extents[1].start_rva, 0x10);
     assert_eq!(extents[1].end_rva, 0x1c);
     assert_eq!(extents[1].block_variants, 2);
+}
+
+#[test]
+fn resident_checkpoint_pointer_chains_stack_and_occurrences() {
+    const CODE: u64 = 0x1000_0000;
+    // Two calls; leaf loads a two-hop pointer and increments its target.
+    let code = [
+        0xe8, 6, 0, 0, 0, 0xe8, 1, 0, 0, 0, 0xc3, 0x48, 0x8b, 0x01, 0x48, 0x8b, 0x00, 0xfe, 0x00,
+        0xc3,
+    ];
+    for checkpoint in [false, true] {
+        for register in ["rcx", "stack5"] {
+            for occurrence in [Some(1), None] {
+                let mut engine = test_engine(&code);
+                let target = engine.allocate(1, 1).unwrap();
+                engine.write(target, &[40]).unwrap();
+                let holder = engine.allocate(8, 8).unwrap();
+                engine.write(holder, &target.to_le_bytes()).unwrap();
+                let root = engine.allocate(8, 8).unwrap();
+                engine.write(root, &holder.to_le_bytes()).unwrap();
+                // stack5 at leaf entry is caller rsp+0x20. With this tiny
+                // caller (no shadow reservation) that is the fourth home slot.
+                if register == "stack5" {
+                    // Test stack-relative resolution at selector entry instead.
+                    engine.configure_trace_watches(vec![TraceWatchSpec {
+                        id: "chain".into(),
+                        function_rva: Some(0),
+                        instruction_rva: None,
+                        absolute_address: None,
+                        register,
+                        dereference_offset: None,
+                        dereference_offsets: vec![0, 0],
+                        size: 1,
+                        occurrence,
+                        image_coordinate: None,
+                        image_row_offset: None,
+                        image_format: None,
+                    }]);
+                } else {
+                    engine.configure_trace_watches(vec![TraceWatchSpec {
+                        id: "chain".into(),
+                        function_rva: Some(11),
+                        instruction_rva: None,
+                        absolute_address: None,
+                        register,
+                        dereference_offset: None,
+                        dereference_offsets: vec![0, 0],
+                        size: 1,
+                        occurrence,
+                        image_coordinate: None,
+                        image_row_offset: None,
+                        image_format: None,
+                    }]);
+                }
+                engine.configure_trace_checkpoint_only(checkpoint);
+                engine.begin_execution_trace("SMART_RENDER", CODE).unwrap();
+                engine.call_win64(CODE, [root, 0, 0, 0, root, 0]).unwrap();
+                let trace = engine.finish_execution_trace(0).unwrap();
+                let expected = if register == "stack5" || occurrence.is_some() {
+                    1
+                } else {
+                    2
+                };
+                assert_eq!(trace.memory_witnesses.len(), expected);
+                assert_eq!(trace.memory_witnesses[0].before.u8_values, [40]);
+                assert_eq!(
+                    trace.memory_witnesses[0].after.u8_values,
+                    [if register == "stack5" { 42 } else { 41 }]
+                );
+                if expected == 2 {
+                    assert_eq!(trace.memory_witnesses[1].after.u8_values, [42]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn resident_snapshot_exceeds_old_plane_cap() {
+    const CODE: u64 = 0x1000_0000;
+    let mut engine = test_engine(&[0xc3]);
+    let size = 3840 * 2160 * 16; // Complete 4K float RGBA plane.
+    let buffer = 0x5000_0000;
+    engine
+        .unicorn
+        .mem_map(
+            buffer,
+            (size as u64 + 4095) & !4095,
+            Prot::READ | Prot::WRITE,
+        )
+        .unwrap();
+    engine.write(buffer + size as u64 - 1, &[73]).unwrap();
+    engine.configure_trace_watches(vec![TraceWatchSpec {
+        id: "large".into(),
+        function_rva: Some(0),
+        instruction_rva: None,
+        absolute_address: None,
+        register: "rcx",
+        dereference_offset: None,
+        dereference_offsets: vec![],
+        size,
+        occurrence: Some(1),
+        image_coordinate: None,
+        image_row_offset: None,
+        image_format: None,
+    }]);
+    engine.configure_trace_checkpoint_only(true);
+    engine.begin_execution_trace("SMART_RENDER", CODE).unwrap();
+    engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
+    let trace = engine.finish_execution_trace(0).unwrap();
+    let snapshot = &trace.memory_witnesses[0].before;
+    assert_eq!(snapshot.status, "captured");
+    assert_eq!(snapshot.hex.as_ref().unwrap().len(), size * 2);
+    assert!(snapshot.hex.as_ref().unwrap().ends_with("49"));
+    assert_eq!(trace.memory_witnesses[0].after.sha256, snapshot.sha256);
+}
+
+#[test]
+fn resident_bad_chains_and_reservation_budget_are_explicit() {
+    const CODE: u64 = 0x1000_0000;
+    let mut engine = test_engine(&[0xc3]);
+    let holder = engine.allocate(8, 8).unwrap();
+    engine.write(holder, &u64::MAX.to_le_bytes()).unwrap();
+    let watch = TraceWatchSpec {
+        id: "invalid".into(),
+        function_rva: Some(0),
+        instruction_rva: None,
+        absolute_address: None,
+        register: "rcx",
+        dereference_offset: None,
+        dereference_offsets: vec![0, 8],
+        size: 1,
+        occurrence: None,
+        image_coordinate: None,
+        image_row_offset: None,
+        image_format: None,
+    };
+    engine.configure_trace_watches(vec![watch.clone()]);
+    engine.configure_trace_checkpoint_only(true);
+    engine.begin_execution_trace("SMART_RENDER", CODE).unwrap();
+    engine.call_win64(CODE, [holder, 0, 0, 0, 0, 0]).unwrap();
+    let trace = engine.finish_execution_trace(0).unwrap();
+    assert_eq!(trace.memory_witnesses[0].before.status, "unmapped");
+    engine
+        .write(holder, &0xffff_0000_0000_u64.to_le_bytes())
+        .unwrap();
+    engine.begin_execution_trace("SMART_RENDER", CODE).unwrap();
+    engine.call_win64(CODE, [holder, 0, 0, 0, 0, 0]).unwrap();
+    assert_eq!(
+        engine.finish_execution_trace(0).unwrap().memory_witnesses[0]
+            .before
+            .status,
+        "unmapped"
+    );
+    engine.begin_execution_trace("SMART_RENDER", CODE).unwrap();
+    let capture = engine.unicorn.get_data_mut().trace.as_mut().unwrap();
+    let mut large = watch;
+    large.size = MAX_TRACE_WATCH_BYTES;
+    assert!(selected_watch_occurrence(capture, &large));
+    assert!(!selected_watch_occurrence(capture, &large));
+    assert_eq!(capture.dropped_witnesses, 1);
+    engine.discard_execution_trace().unwrap();
+}
+
+#[test]
+fn resident_changed_ranges_are_bounded_without_losing_snapshot_bytes() {
+    let mut engine = test_engine(&[0xc3]);
+    let size = 10000;
+    let buffer = 0x5000_0000;
+    engine
+        .unicorn
+        .mem_map(buffer, 12288, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let before = trace_memory_snapshot(&engine.unicorn, buffer, size, 0, 0);
+    let mut bytes = vec![0; size];
+    for n in (0..size).step_by(2) {
+        bytes[n] = 1;
+    }
+    engine.write(buffer, &bytes).unwrap();
+    let after = trace_memory_snapshot(&engine.unicorn, buffer, size, 0, 0);
+    let (ranges, truncated) = trace_changed_ranges(&before, &after);
+    assert!(truncated);
+    assert_eq!(ranges.len(), 4096);
+    assert_eq!(ranges[4095].offset, 8190);
+    assert_eq!(after.hex.unwrap().len(), size * 2);
+}
+
+#[test]
+fn trace_hex_preserves_all_byte_values_and_leading_zeroes() {
+    assert_eq!(bytes_to_hex(&[]), "");
+    assert_eq!(
+        bytes_to_hex(&[0, 1, 15, 16, 127, 128, 255]),
+        "00010f107f80ff"
+    );
+    let bytes: Vec<u8> = (0..=255).collect();
+    let encoded = bytes_to_hex(&bytes);
+    assert_eq!(encoded.len(), bytes.len() * 2);
+    let decoded: Vec<u8> = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    assert_eq!(decoded, bytes);
 }

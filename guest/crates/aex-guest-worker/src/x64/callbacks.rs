@@ -444,7 +444,7 @@ fn install_log2f_import(
         unicorn.add_code_hook(address, address, move |unicorn, _, _| {
             if let Ok(mut xmm0) = unicorn.reg_read_long(RegisterX86::XMM0) {
                 let value = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
-                let output = value.log2();
+                let output = olm_ucrtmath::log2f(value);
                 if unicorn.get_data().math_calls.len() < 32 {
                     unicorn
                         .get_data_mut()
@@ -614,7 +614,7 @@ fn install_atan2f_import(
             ) {
                 let y = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
                 let x = f32::from_le_bytes(xmm1[..4].try_into().unwrap());
-                let output = y.atan2(x);
+                let output = olm_ucrtmath::atan2f(y, x);
                 if unicorn.get_data().math_calls.len() < 32 {
                     unicorn
                         .get_data_mut()
@@ -4120,7 +4120,7 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
                 state.smart_current_time, state.smart_current_time_scale
             ));
         }
-        let (world, width, height) = smart_checkout_world(unicorn, index)?;
+        let (mut world, width, height) = smart_checkout_world(unicorn, index)?;
         let mut request_rect = [0, 0, width, height];
         let mut observed_request = request_rect;
         if request_pointer != 0 {
@@ -4150,6 +4150,30 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
                 request_rect = [0; 4];
             }
         }
+        // F53: opt-in checkout geometry; old sessions retain F52c behavior.
+        let crop_geometry = crate::geometry::SESSION
+            .get()
+            .filter(|g| g.crop && index == 0);
+        if let Some(g) = crop_geometry {
+            let full = g.sampled()?;
+            request_rect = g.checkout.unwrap_or([
+                observed_request[0].max(0),
+                observed_request[1].max(0),
+                observed_request[2].min(full[0] as i32),
+                observed_request[3].min(full[1] as i32),
+            ]);
+            if request_rect[0] >= request_rect[2] || request_rect[1] >= request_rect[3] {
+                request_rect = [0; 4];
+            }
+            *crate::geometry::CHECKOUT_ORIGIN.lock().unwrap() = [request_rect[0], request_rect[1]];
+            if g.checkout.is_none() {
+                world = cropped_checkout_world(unicorn, world, request_rect)?;
+            }
+            eprintln!(
+                "F53_CHECKOUT request={observed_request:?} result={request_rect:?} max=[0, 0, {}, {}]",
+                full[0], full[1]
+            );
+        }
         unicorn
             .get_data_mut()
             .pre_checkout_requests
@@ -4172,6 +4196,26 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
         {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
+        if let Some(g) = crop_geometry {
+            let full = g.sampled()?;
+            for (at, v) in [(24, full[0] as i32), (28, full[1] as i32)] {
+                bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        // F52c: checked-out aspect and reference dimensions are layer metadata,
+        // not the sampled world dimensions (AE_Effect.h PF_CheckoutResult).
+        if index == 0 {
+            if let Some(g) = crate::geometry::SESSION.get().filter(|g| g.negotiate) {
+                for (at, v) in [
+                    (32, g.aspect[0]),
+                    (36, g.aspect[1]),
+                    (44, g.full[0] as i32),
+                    (48, g.full[1] as i32),
+                ] {
+                    bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
         unicorn
             .mem_write(result_pointer, &bytes)
             .map_err(|error| format!("pre-checkout result write: {error}"))?;
@@ -4186,6 +4230,65 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
         Ok(())
     })();
     finish_callback(unicorn, result);
+}
+
+fn cropped_checkout_world(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    world: u64,
+    request_rect: [i32; 4],
+) -> Result<u64, String> {
+    let mut header = vec![0; abi::PF_LAYER_DEF_SIZE];
+    unicorn
+        .mem_read(world, &mut header)
+        .map_err(|e| e.to_string())?;
+    let stride = i32::from_le_bytes(
+        header[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let data = u64::from_le_bytes(
+        header[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let pixel_format = unicorn
+        .get_data()
+        .resident_world_formats
+        .get(&world)
+        .copied()
+        .unwrap_or(unicorn.get_data().smart_pixel_format);
+    let pixel = match pixel_format {
+        crate::pixel::PF_PIXEL_FORMAT_ARGB32 => 4,
+        crate::pixel::PF_PIXEL_FORMAT_ARGB64 => 8,
+        _ => 16,
+    };
+    let offset = request_rect[1] as u64 * stride as u64 + request_rect[0] as u64 * pixel;
+    header[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+        .copy_from_slice(&(data + offset).to_le_bytes());
+    let w = request_rect[2] - request_rect[0];
+    let h = request_rect[3] - request_rect[1];
+    for (at, v) in [
+        (abi::LAYER_WIDTH_OFFSET, w),
+        (abi::LAYER_HEIGHT_OFFSET, h),
+        (104, request_rect[0]),
+        (108, request_rect[1]),
+        (abi::LAYER_EXTENT_HINT_OFFSET, 0),
+        (abi::LAYER_EXTENT_HINT_OFFSET + 4, 0),
+        (abi::LAYER_EXTENT_HINT_OFFSET + 8, w),
+        (abi::LAYER_EXTENT_HINT_OFFSET + 12, h),
+    ] {
+        header[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let world = allocate_crt_region(unicorn, header.len() as u64).map_err(|e| e.to_string())?;
+    unicorn
+        .mem_write(world, &header)
+        .map_err(|e| e.to_string())?;
+    unicorn
+        .get_data_mut()
+        .resident_world_formats
+        .insert(world, pixel_format);
+    unicorn.get_data_mut().cropped_worlds.push(world);
+    Ok(world)
 }
 
 fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {

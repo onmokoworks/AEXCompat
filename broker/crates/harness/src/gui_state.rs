@@ -281,3 +281,21 @@ mod tests {
         );
     }
 }
+
+/// Both backends park the complete editor for each stage.
+pub(crate) const MAX_EFFECT_CHAIN_STAGES: usize = 8;
+
+#[derive(Clone)]
+pub(crate) struct EffectChainSlot<T> {
+    pub(crate) enabled: bool,
+    pub(crate) editor: T,
+}
+
+/// Preserve visible order and ordinals while omitting bypassed stages.
+pub(crate) fn enabled_chain<T>(slots: &[EffectChainSlot<T>]) -> impl Iterator<Item = (usize, &T)> {
+    slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.enabled)
+        .map(|(index, slot)| (index, &slot.editor))
+}

@@ -1,0 +1,68 @@
+// Frozen original-UCRT observations from OLM F27c, not host libm expectations.
+// tools/ucrt_math_probe/rosetta/results-f27c/powf-first.csv.gz SHA256 18a2deda50af7fcc23bb11e7f77a50254000fc2bca819aac4b39484de724a21a
+// tools/ucrt_math_probe/rosetta/results-f27c/paper-results.json SHA256 3c84ea10bfe8fa1ab701377eee46ec6bdae8668c258e29d5a51ab462395ece5f
+#[test]
+fn powf_retained_ucrt_bits() {
+    let rows: &[(i32, u32, u32, u32)] = &[
+        (0, 0x2f2533, 0x3f95df7a, 0x0),
+        (0, 0xceb208e, 0x3fbc9a41, 0x1),
+        (0, 0xd4b2cfb, 0x3fbe6e26, 0x0),
+        (0, 0x15799362, 0x3fe3a184, 0x0),
+        (0, 0x2be3b0e5, 0x40737782, 0x0),
+        (0, 0x324af216, 0x389b4cb9, 0x3f7fa779),
+        (0, 0x32e28a66, 0xb97c6740, 0x3f8089ef),
+        (0, 0x3ac98005, 0x4157fe4c, 0x72ae46),
+        (0, 0x3f7f3bc1, 0xc6e1b0e5, 0x7dfe026a),
+        (0, 0x3f7fff9c, 0x4b5eac4a, 0xb67c6b),
+        (0, 0x3f812b9b, 0x46184fca, 0x7f7ffb22),
+        (0, 0x3f887ffa, 0x44ac7ebb, 0x7f7ff8b2),
+        (0, 0x3f9a1f27, 0x43d79e20, 0x793a0169),
+        (0, 0x3fb3ca5b, 0x437cf8dd, 0x7d800000),
+        (0, 0x41fede2b, 0xc1f0394d, 0x0),
+        (0, 0x54738288, 0xc063703b, 0x0),
+        (0, 0x56363937, 0xc052da19, 0x0),
+        (0, 0x58eda54c, 0xc03bc573, 0x0),
+        (0, 0x5ef523cd, 0x390c6bf1, 0x3f80bffe),
+        (0, 0x756b3940, 0xbfb1bf8d, 0x0),
+        (0, 0x757418d6, 0xbfb1e390, 0x0),
+        (0, 0x7f11b335, 0xbf969499, 0x0),
+        (0, 0x7f8fc553, 0x7fd8ab72, 0x7fcfc553),
+        (0, 0x7f95782b, 0x7fcfc0ee, 0x7fd5782b),
+        (0, 0x7fa01a96, 0xffa18b83, 0x7fe01a96),
+        (0, 0x7fa66de2, 0xff80f9d2, 0x7fe66de2),
+        (0, 0x7fa947a6, 0x7fd8337b, 0x7fe947a6),
+        (0, 0x7fa9480f, 0xff8cba31, 0x7fe9480f),
+        (0, 0x7face475, 0x7ff7445b, 0x7fece475),
+        (0, 0x7fbe99ae, 0x7fb207b7, 0x7ffe99ae),
+        (0, 0x7fc80872, 0xffc52532, 0x7fc80872),
+        (0, 0x7fd03234, 0x7fe28565, 0x7fd03234),
+        (0, 0x7fd34312, 0x7fa23415, 0x7fd34312),
+        (0, 0x7ff5ff3d, 0x7f8a7c1c, 0x7ff5ff3d),
+        (0, 0xff82348b, 0x7fff4f11, 0xffc2348b),
+        (0, 0xff861035, 0xfffd4330, 0xffc61035),
+        (0, 0xff9f6fa9, 0x7fe49622, 0xffdf6fa9),
+        (0, 0xffa52ec0, 0x7f9c43a8, 0xffe52ec0),
+        (0, 0xffbd5d56, 0x7fe6dcbc, 0xfffd5d56),
+        (0, 0xffc1f61d, 0x7fcdde1f, 0xffc1f61d),
+        (0, 0xffcf7d93, 0x7fe193cf, 0xffcf7d93),
+        (0, 0xfff273bd, 0x7fac62c0, 0xfff273bd),
+        (1, 0xceb208e, 0x3fbc9a41, 0x1),
+        (1, 0x324af216, 0x389b4cb9, 0x3f7fa779),
+        (1, 0x3ac98005, 0x4157fe4c, 0x72ae46),
+        (1, 0x3f7f3bc1, 0xc6e1b0e5, 0x7dfe026a),
+        (1, 0x3f7fff9c, 0x4b5eac4a, 0xb67c6b),
+        (1, 0x3f812b9b, 0x46184fca, 0x7f7ffb22),
+        (1, 0x3f887ffa, 0x44ac7ebb, 0x7f7ff8b2),
+        (1, 0x3f9a1f27, 0x43d79e20, 0x793a0169),
+        (1, 0x3fb3ca5b, 0x437cf8dd, 0x7d800000),
+        (1, 0x54738288, 0xc063703b, 0x0),
+    ];
+    for &(mode, a, b, expected) in rows {
+        let _ = b;
+        assert_eq!(
+            unsafe { ucrt_powf(f32::from_bits(a), f32::from_bits(b), mode) }.to_bits(),
+            expected,
+            "mode={mode} a={a:x} b={b:x}"
+        );
+    }
+}

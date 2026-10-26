@@ -14842,12 +14842,21 @@ fn pf_world_suite_v2_owns_formats_and_fails_closed() {
         4
     );
     assert!(engine.unicorn.get_data().worlds.is_empty());
-    let error = engine
-        .call_win64(HOST_NEW_WORLD8, [1, 3, 2, 0x2, world, 0])
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("unsupported DEEP_PIXELS"),
-        "{error}"
+    assert_eq!(
+        engine
+            .call_win64(HOST_NEW_WORLD8, [1, 3, 2, 0x2, world, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().worlds[&world].pixel_format as u32,
+        0x3631_6561
+    );
+    assert_eq!(
+        engine
+            .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
+            .unwrap(),
+        0
     );
     assert!(engine.unicorn.get_data().worlds.is_empty());
 }
@@ -26242,4 +26251,86 @@ fn concurrent_unicorn_initialization_does_not_expire_active_guest_calls() {
         }
         initialize.join().unwrap();
     });
+}
+
+#[test]
+fn frame_arena_spills_on_demand_and_stays_bounded() {
+    let mut engine = test_engine(&[0xc3]);
+    let small = engine.allocate(16, 8).unwrap();
+    assert_eq!(small, DATA_BASE);
+    assert!(engine.read(FRAME_DATA_BASE, &mut [0; 1]).is_err());
+    engine.next_data = HANDLE_DATA_BASE - 8;
+    let spill = engine.allocate(16, 64).unwrap();
+    assert_eq!(spill, FRAME_DATA_BASE);
+    engine.write(spill, &[0x5a; 16]).unwrap();
+    let mut bytes = [0; 16];
+    engine.read(spill, &mut bytes).unwrap();
+    assert_eq!(bytes, [0x5a; 16]);
+    assert!(engine.read(spill + PAGE_SIZE, &mut [0; 1]).is_err());
+    assert_eq!(engine.allocate(1, 8).unwrap(), spill + PAGE_SIZE);
+    engine.next_data = FRAME_DATA_END;
+    assert!(engine.allocate(1, 8).is_err());
+}
+
+#[test]
+fn cropped_world_preserves_depth_stride_and_scope_ownership() {
+    for (format, pixel_bytes) in [
+        (crate::pixel::PF_PIXEL_FORMAT_ARGB32, 4),
+        (crate::pixel::PF_PIXEL_FORMAT_ARGB64, 8),
+        (crate::pixel::PF_PIXEL_FORMAT_ARGB128, 16),
+    ] {
+        for pad in [0, 3] {
+            let mut engine = test_engine(&[0xc3]);
+            let source = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+            let output = engine.allocate(4, 4).unwrap();
+            let pixels = engine.allocate(1024, 8).unwrap();
+            let stride: i32 = 8 * pixel_bytes + pad;
+            let mut header = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+            header[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&pixels.to_le_bytes());
+            header[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&8i32.to_le_bytes());
+            header[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&8i32.to_le_bytes());
+            header[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&stride.to_le_bytes());
+            engine.write(source, &header).unwrap();
+            engine.unicorn.get_data_mut().smart_pixel_format =
+                crate::pixel::PF_PIXEL_FORMAT_ARGB128;
+            engine
+                .unicorn
+                .get_data_mut()
+                .resident_world_formats
+                .insert(source, format);
+            let cropped =
+                cropped_checkout_world(&mut engine.unicorn, source, [1, 2, 4, 6]).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(HOST_GET_WORLD_PIXEL_FORMAT, [cropped, output, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            let mut observed = [0u8; 4];
+            engine.read(output, &mut observed).unwrap();
+            assert_eq!(i32::from_le_bytes(observed), format);
+            engine.read(cropped, &mut header).unwrap();
+            assert_eq!(
+                u64::from_le_bytes(
+                    header[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                        .try_into()
+                        .unwrap()
+                ),
+                pixels + (2 * stride + pixel_bytes) as u64
+            );
+            assert!(engine.finish_smart_checkout_scope());
+            assert!(
+                !engine
+                    .unicorn
+                    .get_data()
+                    .resident_world_formats
+                    .contains_key(&cropped)
+            );
+            assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+        }
+    }
 }

@@ -1,5 +1,7 @@
 # AEXCompat
 
+GUI instructions: [日本語 (primary)](docs/GUI_GUIDE_JA.md) · [English translation](docs/GUI_GUIDE.md)
+
 **A compatibility host for loading, rendering, and debugging `.aex` plug-ins outside After Effects.**
 
 [日本語](README.md) · [Quick start](#quick-start) · [Documentation](#documentation) · [License](#license)

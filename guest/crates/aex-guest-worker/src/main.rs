@@ -46,6 +46,9 @@ fn main() -> ExitCode {
         usage();
         return ExitCode::from(2);
     };
+    if command == "ui-session" {
+        return run_ui_session_command(args.collect());
+    }
     if command == "session" {
         return run_session_command(args.collect());
     }
@@ -433,6 +436,30 @@ fn extract_render_backend(
 }
 
 fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
+    let mut geometry = aex_guest_worker::geometry::Geometry::default();
+    let mut geometry_requested = false;
+    for option in [
+        "--checkout-rect",
+        "--negotiate-output",
+        "--downsample-x",
+        "--downsample-y",
+        "--rowbytes-pad",
+        "--extent-hint",
+        "--request-rect",
+        "--pixel-aspect",
+    ] {
+        let result = extract_single_string_option(&mut arguments, option).and_then(|v| match v {
+            Some(v) => {
+                geometry_requested = true;
+                aex_guest_worker::geometry::parse(option, &v, &mut geometry)
+            }
+            None => Ok(()),
+        });
+        if let Err(e) = result {
+            eprintln!("aex_guest_error: {option}: {e}");
+            return ExitCode::from(2);
+        }
+    }
     let effect_selector = match extract_effect_selector(&mut arguments) {
         Ok(selector) => selector,
         Err(error) => {
@@ -497,6 +524,17 @@ fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    geometry.full = [width, height];
+    let [width, height] = match geometry.world() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("aex_guest_error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if geometry_requested && aex_guest_worker::geometry::SESSION.set(geometry).is_err() {
+        return ExitCode::from(2);
+    }
     let result = fs::read(&path)
         .map_err(|error| format!("read AEX: {error}"))
         .and_then(|bytes| PeImage::parse_and_map(&bytes).map_err(|error| error.to_string()))
@@ -781,6 +819,7 @@ fn parse_trace_watches(
             absolute_address: None,
             register,
             dereference_offset,
+            dereference_offsets: Vec::new(),
             size,
             occurrence,
             image_coordinate: None,
@@ -1110,4 +1149,129 @@ mod tests {
             assert!(parse_trace_watches(&mut values).is_err(), "{specification}");
         }
     }
+}
+
+#[cfg(any(not(feature = "native-carrier"), not(target_os = "macos")))]
+fn run_ui_session_command(args: Vec<std::ffi::OsString>) -> ExitCode {
+    let result = (|| -> Result<(), String> {
+        if args.len() != 2 {
+            return Err("usage: ui-session <plugin.aex> <session.json>".into());
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+        enum Operation {
+            Update {
+                parameters: Vec<String>,
+            },
+            Event {
+                event: aex_guest_worker::classic::UiEvent,
+            },
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Session {
+            current_time: i32,
+            time_scale: u32,
+            #[serde(default)]
+            updates: Vec<Vec<String>>,
+            #[serde(default)]
+            events: Vec<aex_guest_worker::classic::UiEvent>,
+            #[serde(default)]
+            operations: Vec<Operation>,
+            #[serde(default)]
+            initial_state_u32: std::collections::BTreeMap<u64, u32>,
+        }
+        let request: Session =
+            serde_json::from_slice(&fs::read(&args[1]).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        let bytes = fs::read(&args[0]).map_err(|e| e.to_string())?;
+        let image = PeImage::parse_and_map(&bytes).map_err(|e| e.to_string())?;
+        let mut host = ClassicHost::new(&image).map_err(|e| e.to_string())?;
+        let setup = host
+            .begin_ui_session(request.current_time, request.time_scale)
+            .map_err(|e| e.to_string())?;
+        if !request.operations.is_empty()
+            && (!request.updates.is_empty() || !request.events.is_empty())
+        {
+            return Err("operations cannot be mixed with updates/events".into());
+        }
+        let initial_before = host
+            .ui_state_u32(&request.initial_state_u32, true)
+            .map_err(|e| e.to_string())?;
+        let operations = request
+            .operations
+            .into_iter()
+            .chain(
+                request
+                    .updates
+                    .into_iter()
+                    .map(|parameters| Operation::Update { parameters }),
+            )
+            .chain(
+                request
+                    .events
+                    .into_iter()
+                    .map(|event| Operation::Event { event }),
+            )
+            .collect::<Vec<_>>();
+        let run = (|| -> Result<(), String> {
+            if operations.len() > 256 {
+                return Err("UI session is limited to 256 events".into());
+            }
+            for operation in operations {
+                let state_before = host
+                    .ui_state_u32(&request.initial_state_u32, false)
+                    .map_err(|e| e.to_string())?;
+                let report = match operation {
+                    Operation::Update { parameters } => {
+                        let args = parameters
+                            .into_iter()
+                            .map(std::ffi::OsString::from)
+                            .collect::<Vec<_>>();
+                        let values = parse_parameter_values(&args)?;
+                        host.apply_resident_parameter_values(&values)
+                            .map_err(|e| e.to_string())?;
+                        host.update_params_ui()
+                    }
+                    Operation::Event { event } => host.ui_event(&event),
+                }
+                .map_err(|e| {
+                    serde_json::to_string(&host.failure_report(&e))
+                        .unwrap_or_else(|_| e.to_string())
+                })?;
+                let state_after = host
+                    .ui_state_u32(&request.initial_state_u32, false)
+                    .map_err(|e| e.to_string())?;
+                println!(
+                    "{}",
+                    serde_json::json!({"schema_version":1,"plugin_sha256":format!("{:x}",Sha256::digest(&bytes)),"current_time":request.current_time,"time_scale":request.time_scale,"setup":setup,"initial_state_u32":request.initial_state_u32,"initial_state_before":initial_before,"state_before":state_before,"state_after":state_after,"event":report})
+                );
+            }
+            Ok(())
+        })();
+        eprintln!("ui_lifetimes_pre_teardown: {}", host.ui_lifetimes());
+        let close = host.close_resident_session();
+        run?;
+        if !close.session_clean {
+            return Err(format!("unclean UI teardown: {close:?}"));
+        }
+        // Include the existing lifecycle diagnostic rather than hiding teardown failures.
+        eprintln!(
+            "ui_session_close: {}",
+            serde_json::to_string(&close).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+#[cfg(all(feature = "native-carrier", target_os = "macos"))]
+fn run_ui_session_command(_: Vec<std::ffi::OsString>) -> ExitCode {
+    eprintln!("ui-session requires the Unicorn backend");
+    ExitCode::from(2)
 }

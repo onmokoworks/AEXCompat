@@ -105,9 +105,10 @@ bool dispatch(const Request& r, const Hooks& hooks, Result& result) {
     write_rect(extra.data() + 16, 203);
     write<int32_t>(extra, 32, 32);
   } else if (r.click || r.drag) {
+    // PF_Point stores horizontal/x first, then vertical/y (also for drag/key).
     write<uint32_t>(extra, 16, 1);
-    write<int32_t>(extra, 20, r.click_y);
-    write<int32_t>(extra, 24, r.click_x);
+    write<int32_t>(extra, 20, r.click_x);
+    write<int32_t>(extra, 24, r.click_y);
     write<int32_t>(extra, 28, 1);
     write<int32_t>(extra, 32, 0);
   } else {
@@ -160,8 +161,8 @@ bool dispatch(const Request& r, const Hooks& hooks, Result& result) {
       write<int32_t>(extra, 8, events[index]);
       if (r.keydown && index == 2) {
         write<uint32_t>(extra, 16, 1);
-        write<int32_t>(extra, 20, r.click_y);
-        write<int32_t>(extra, 24, r.click_x);
+        write<int32_t>(extra, 20, r.click_x);
+        write<int32_t>(extra, 24, r.click_y);
         write<uint32_t>(extra, 28, r.keydown_code);
         write<uint32_t>(extra, 32, r.keydown_modifiers);
       }
@@ -186,9 +187,9 @@ bool dispatch(const Request& r, const Hooks& hooks, Result& result) {
     for (int32_t step = 1; result.drag_requested && step <= r.drag_steps; ++step) {
       write<int32_t>(extra, 8, 3);
       write<int32_t>(extra, 20,
-          r.click_y + (r.drag_end_y - r.click_y) * step / r.drag_steps);
-      write<int32_t>(extra, 24,
           r.click_x + (r.drag_end_x - r.click_x) * step / r.drag_steps);
+      write<int32_t>(extra, 24,
+          r.click_y + (r.drag_end_y - r.click_y) * step / r.drag_steps);
       write<uint8_t>(extra, 73, step == r.drag_steps ? 1 : 0);
       write<int32_t>(extra, 204, 0);
       exception_code = 0;

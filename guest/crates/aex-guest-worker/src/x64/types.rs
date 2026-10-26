@@ -169,6 +169,7 @@ struct WindowsInitOnceState {
 
 #[derive(Default)]
 struct GuestState {
+    ui_session: UiSessionState,
     pointer_encoding_key: Option<u64>,
     crt_wlocale_buffer: Option<u64>,
     crt_pctype_buffer: Option<u64>,
@@ -225,6 +226,7 @@ struct GuestState {
     handles: HashMap<u64, GuestHandle>,
     worlds: HashMap<u64, GuestWorld>,
     resident_world_formats: HashMap<u64, i32>,
+    cropped_worlds: Vec<u64>,
     aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
     aegp_memory_free: Vec<AegpMemoryBlock>,
     next_aegp_memory_handle: u64,
@@ -660,6 +662,8 @@ struct TraceCapture {
     unhookable_watches: Vec<UnhookableWatch>,
     witnesses: Vec<TraceMemoryWitness>,
     dropped_witnesses: u64,
+    reserved_watch_bytes: usize,
+    reserved_watch_count: usize,
     basic_blocks: HashMap<(u64, u32), u64>,
     branch_edges: HashMap<(u64, u64), u64>,
     dropped_basic_blocks: u64,
@@ -699,6 +703,8 @@ pub struct TraceWatchSpec {
     pub register: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dereference_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dereference_offsets: Vec<u64>,
     pub size: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<u64>,
@@ -807,6 +813,7 @@ pub struct TraceMemoryWitness {
     pub before: TraceMemorySnapshot,
     pub after: TraceMemorySnapshot,
     pub changed_ranges: Vec<TraceChangedRange>,
+    pub changed_ranges_truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

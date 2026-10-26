@@ -1728,6 +1728,14 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     if output != 0 {
         let _ = unicorn.mem_write(output, &0u64.to_le_bytes());
     }
+    if unicorn.get_data().ui_session.enabled && output != 0 {
+        if let Some(address) = ui_suite_address(&name, version) {
+            if unicorn.mem_write(output, &address.to_le_bytes()).is_ok() {
+                finish_acquire_suite_success(unicorn);
+                return;
+            }
+        }
+    }
     if name == "PF Handle Suite"
         && version == 2
         && output != 0
@@ -1861,6 +1869,12 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .is_ok()
     {
         finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if unicorn.get_data().ui_session.enabled {
+        unicorn.get_data_mut().callback_error =
+            Some(format!("unsupported UI session suite {name} v{version}"));
+        let _ = unicorn.emu_stop();
         return;
     }
     if unicorn.get_data().selector_dispatch_active {
@@ -2902,13 +2916,6 @@ fn emulate_new_world8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
 
 fn emulate_new_world_common(unicorn: &mut Unicorn<'_, GuestState>, legacy_argb8: bool) {
     let flags = unicorn.reg_read(RegisterX86::R9).unwrap_or_default() as u32;
-    if legacy_argb8 && flags & 0x2 != 0 {
-        unicorn.get_data_mut().callback_error =
-            Some("legacy new-world requested unsupported DEEP_PIXELS".into());
-        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
-        let _ = unicorn.emu_stop();
-        return;
-    }
     let result = (|| {
         let width = unicorn
             .reg_read(RegisterX86::RDX)
@@ -2924,7 +2931,14 @@ fn emulate_new_world_common(unicorn: &mut Unicorn<'_, GuestState>, legacy_argb8:
             flags as u8 != 0
         };
         let (pixel_format, world) = if legacy_argb8 {
-            (0x6267_7261u32 as i32, aegp_stack_arg(unicorn, 0x28)?)
+            (
+                if flags & 0x2 != 0 {
+                    0x3631_6561u32
+                } else {
+                    0x6267_7261u32
+                } as i32,
+                aegp_stack_arg(unicorn, 0x28)?,
+            )
         } else {
             (
                 aegp_stack_arg(unicorn, 0x28)? as u32 as i32,

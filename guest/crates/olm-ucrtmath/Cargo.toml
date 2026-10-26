@@ -1,0 +1,9 @@
+[package]
+name = "olm-ucrtmath"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# AMD portions are BSD-3-Clause; ms/ retains its OLM-internal notice.
+
+[build-dependencies]
+cc = "1"

@@ -4522,6 +4522,7 @@ static void x86_cpu_reset(CPUState *dev)
     cpu_set_fpuc(env, 0x37f);
 
     env->mxcsr = 0x1f80;
+    env->sse_status.x86_sse_nan_order = 1;
     /* All units are in INIT state.  */
     env->xstate_bv = 0;
 

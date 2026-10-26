@@ -1580,6 +1580,7 @@ void helper_xsetbv(CPUX86State *env, uint32_t ecx, uint64_t mask)
 void update_mxcsr_status(CPUX86State *env)
 {
     uint32_t mxcsr = env->mxcsr;
+    env->sse_status.x86_sse_nan_order = 1;
     int rnd_type;
 
     /* set rounding mode */

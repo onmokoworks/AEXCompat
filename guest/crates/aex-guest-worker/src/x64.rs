@@ -277,6 +277,10 @@ const MAX_PF_HANDLE_SIZE: u64 = 0x8000_0000;
 const MAX_PF_HANDLE_COUNT: usize = 16_384;
 const WORLD_DATA_BASE: u64 = PF_HANDLE_DATA_END;
 const WORLD_DATA_END: u64 = WORLD_DATA_BASE + 0x2_0000_0000;
+// Spill host-owned frame allocations into a separate bounded region. Map only
+// requested pages; small sessions retain their historical addresses and footprint.
+const FRAME_DATA_BASE: u64 = 0x0000_0006_0000_0000;
+const FRAME_DATA_END: u64 = FRAME_DATA_BASE + 0x8000_0000;
 const CRT_HEAP_BASE: u64 = 0x0000_0010_0000_0000;
 const CRT_HEAP_END: u64 = CRT_HEAP_BASE + MAX_CRT_HEAP_BYTES;
 const ENVIRONMENT_STRINGS_BASE: u64 = 0x0000_0020_0000_0000;
@@ -289,13 +293,9 @@ const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
 const MAX_WORLD_DIMENSION: i32 = 32_768;
 const MAX_ITERATE_PIXELS: i64 = 16_777_216;
-// A nonzero Unicorn instruction limit enables instruction counting across the
-// whole run, which is prohibitively expensive for image kernels. The wall-clock
-// timeout and return-sentinel check still bound and validate guest execution.
+// Default matches F53. F50 deterministic budgets are an explicit opt-in;
+// counting every instruction is substantially slower for image kernels.
 const MAX_INSTRUCTIONS: usize = 0;
-// A plug-in call that cannot finish inside an interactive frame budget must
-// fail with a bounded crash snapshot instead of stalling the host or a corpus
-// sweep for minutes. This covers loader callbacks and effect selectors alike.
 const TIMEOUT_MICROSECONDS: u64 = 20_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
 const MAX_TRACE_BASIC_BLOCKS: usize = 50_000;
@@ -305,7 +305,7 @@ const TRACE_FIRST_SAMPLES: usize = 3;
 const TRACE_LAST_SAMPLES: usize = 3;
 const TRACE_DISTINCT_SAMPLES: usize = 16;
 const TRACE_DISTINCT_FINGERPRINTS: usize = 4096;
-const MAX_TRACE_WATCH_BYTES: usize = 4096;
+const MAX_TRACE_WATCH_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TRACE_WITNESSES: usize = 256;
 const MAX_UNSUPPORTED_SUITE_CALLS: usize = 256;
 const MAX_SUITE_REQUESTS: usize = 256;
@@ -522,6 +522,7 @@ include!("x64/gpu_runtime.rs");
 include!("x64/gpu_suite.rs");
 include!("x64/types.rs");
 include!("x64/imports.rs");
+include!("x64/f30_import_probe.rs");
 include!("x64/opencl_imports.rs");
 include!("x64/engine.rs");
 include!("x64/libraries.rs");
@@ -539,6 +540,7 @@ mod tests {
     include!("x64/tests_cases.rs");
     include!("x64/tests_issue1077.rs");
     include!("x64/tests_gpu.rs");
+    include!("x64/tests_numeric.rs");
 }
 
 include!("x64/lockit.rs");
@@ -558,3 +560,7 @@ include!("x64/network.rs");
 
 include!("x64/printf.rs");
 include!("x64/windows_files.rs");
+
+include!("x64/ui_session.rs");
+
+include!("x64/ui_draw.rs");

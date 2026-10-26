@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/amd/aocl-libm-ose",
+  "commit": "29fd054f383e6c5e2dec2fce781d5220059f1836",
+  "sha256": {
+    "optimized/expf.c": "ff66bcc1342d64c55661efe93d4dfa62a27b98e1e8b6b0d704c610815af21cbc",
+    "optimized/powf.c": "72b9f8e07886e0e71b32546c42227061053ca29f4bea8c160ca83a622f59c814",
+    "ref/atan2f.c": "6ef24c22fae20f4911323d0eed0c69209dad4075fa17cbb08400503167cf0084",
+    "optimized/expf_data.h": "dfcc00387d1ab1426bd712131f3145b5d2d66678ba1449da604b855af6c2f4a6",
+    "optimized/data/_exp_j_by_64.c": "822f78ed5ef9bc00ca7dca95c694076337940bd576fef5a6b3922dd2452ffc67",
+    "optimized/log_tables.c": "29a544b096f9a216227ed7ec6c5cf033366742be255ea11f1dc5e83d38dc9b8b"
+  }
+}

@@ -1171,6 +1171,8 @@ impl GuestEngine<'static> {
             unhookable_watches: Vec::new(),
             witnesses: Vec::new(),
             dropped_witnesses: 0,
+            reserved_watch_bytes: 0,
+            reserved_watch_count: 0,
             basic_blocks: HashMap::new(),
             branch_edges: HashMap::new(),
             dropped_basic_blocks: 0,
@@ -1333,10 +1335,10 @@ impl GuestEngine<'static> {
         }
         let selector_watches = self
             .unicorn
-            .get_data()
+            .get_data_mut()
             .trace
-            .as_ref()
-            .map(|capture| capture.selector_watches.clone())
+            .as_mut()
+            .map(|capture| std::mem::take(&mut capture.selector_watches))
             .unwrap_or_default();
         let selector_witnesses = selector_watches
             .into_iter()
@@ -1348,6 +1350,8 @@ impl GuestEngine<'static> {
                     self.image_base,
                     self.image_end,
                 );
+                let (changed_ranges, changed_ranges_truncated) =
+                    trace_changed_ranges(&pending.before, &after);
                 TraceMemoryWitness {
                     watch_id: pending.spec_id,
                     call_id: pending.call_id,
@@ -1357,7 +1361,8 @@ impl GuestEngine<'static> {
                     image_coordinate: pending.image_coordinate,
                     image_row_offset: pending.image_row_offset,
                     image_format: pending.image_format,
-                    changed_ranges: trace_changed_ranges(&pending.before, &after),
+                    changed_ranges,
+                    changed_ranges_truncated,
                     before: pending.before,
                     after,
                 }
@@ -1718,7 +1723,8 @@ impl GuestEngine<'static> {
     /// callers that need to pass a raw `f32` word can place `value.to_bits()` in
     /// the low 32 bits without a host-side numeric conversion.
     pub fn call_win64_args(&mut self, address: u64, args: &[u64]) -> Result<u64, GuestError> {
-        self.call_win64_with_timeout(address, args, TIMEOUT_MICROSECONDS)
+        let (timeout, count) = default_execution_limits()?;
+        self.call_win64_with_limits(address, args, timeout, count)
     }
 
     pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
@@ -1728,7 +1734,9 @@ impl GuestEngine<'static> {
             state.pending_unsupported_suite = None;
             state.selector_abort = None;
         }
-        let result = self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS);
+        let result = default_execution_limits().and_then(|(timeout, count)| {
+            self.call_win64_with_limits(address, &args, timeout, count)
+        });
         {
             let state = self.unicorn.get_data_mut();
             state.selector_dispatch_active = false;
@@ -1743,6 +1751,16 @@ impl GuestEngine<'static> {
         address: u64,
         args: &[u64],
         timeout_microseconds: u64,
+    ) -> Result<u64, GuestError> {
+        self.call_win64_with_limits(address, args, timeout_microseconds, MAX_INSTRUCTIONS)
+    }
+
+    fn call_win64_with_limits(
+        &mut self,
+        address: u64,
+        args: &[u64],
+        timeout_microseconds: u64,
+        instruction_limit: usize,
     ) -> Result<u64, GuestError> {
         const WIN64_HOME_SPACE_BYTES: u64 = 0x20;
         const RETURN_ADDRESS_BYTES: u64 = 8;
@@ -1837,19 +1855,23 @@ impl GuestEngine<'static> {
             self.unicorn.get_data_mut().scheduler_switches_remaining =
                 (MAX_SCHEDULER_SWITCHES - scheduler_switch) as u64;
             let elapsed = started.elapsed();
-            if elapsed >= timeout {
+            if timeout_microseconds != 0 && elapsed >= timeout {
                 return Err(self.execution_crash(format!(
                     "execution exceeded the total timeout of {timeout_microseconds} microseconds"
                 )));
             }
-            let remaining_timeout_microseconds = u64::try_from((timeout - elapsed).as_micros())
-                .unwrap_or(u64::MAX)
-                .max(1);
+            let remaining_timeout_microseconds = if timeout_microseconds == 0 {
+                0
+            } else {
+                u64::try_from((timeout - elapsed).as_micros())
+                    .unwrap_or(u64::MAX)
+                    .max(1)
+            };
             if let Err(error) = self.unicorn.emu_start(
                 begin,
                 RETURN_ADDRESS,
                 remaining_timeout_microseconds,
-                MAX_INSTRUCTIONS,
+                instruction_limit,
             ) {
                 return Err(self.execution_crash(format!("emulation error: {error}")));
             }
@@ -2379,9 +2401,14 @@ impl GuestEngine<'static> {
             return Err(GuestError::Callback(error));
         }
         if rip != RETURN_ADDRESS {
-            return Err(self.execution_crash(format!(
-                "execution stopped before the guest returned (RIP={rip:#x})"
-            )));
+            let reason = if instruction_limit == 0 {
+                format!("execution stopped before the guest returned (RIP={rip:#x})")
+            } else {
+                format!(
+                    "execution stopped before the guest returned (instruction budget {instruction_limit} per scheduler slice; RIP={rip:#x})"
+                )
+            };
+            return Err(self.execution_crash(reason));
         }
         uc("read return value", self.unicorn.reg_read(RegisterX86::RAX))
     }
@@ -2531,7 +2558,26 @@ impl GuestEngine<'static> {
             .checked_add(u64::try_from(size).map_err(|_| GuestError::DataCapacity)?)
             .ok_or(GuestError::DataCapacity)?;
         if end > HANDLE_DATA_BASE {
-            return Err(GuestError::DataCapacity);
+            let alignment = alignment.max(PAGE_SIZE);
+            let start = self
+                .next_data
+                .max(FRAME_DATA_BASE)
+                .checked_add(alignment - 1)
+                .map(|value| value & !(alignment - 1))
+                .ok_or(GuestError::DataCapacity)?;
+            let end = start
+                .checked_add(size.max(1) as u64)
+                .and_then(|value| value.checked_add(PAGE_SIZE - 1))
+                .map(|value| value & !(PAGE_SIZE - 1))
+                .filter(|value| *value <= FRAME_DATA_END)
+                .ok_or(GuestError::DataCapacity)?;
+            uc(
+                "map host frame allocation",
+                self.unicorn
+                    .mem_map(start, end - start, Prot::READ | Prot::WRITE),
+            )?;
+            self.next_data = end;
+            return Ok(start);
         }
         self.next_data = end;
         Ok(start)
@@ -2892,6 +2938,13 @@ impl GuestEngine<'static> {
             .values()
             .all(|checkout| !checkout.checked_out);
         state.smart_checkout_ids.clear();
+        for world in state.cropped_worlds.drain(..) {
+            state.resident_world_formats.remove(&world);
+            if let Err(error) = state.crt_heap.remove(world) {
+                state.callback_error = Some(format!("cropped world cleanup: {error}"));
+                return false;
+            }
+        }
         balanced
     }
 
@@ -2925,4 +2978,19 @@ fn initialize_windows_command_line_w(engine: &mut GuestEngine<'static>) -> Resul
     engine.write(command_line, &bytes)?;
     engine.unicorn.get_data_mut().windows_command_line_w = command_line;
     Ok(())
+}
+
+fn default_execution_limits() -> Result<(u64, usize), GuestError> {
+    match std::env::var("AEXCOMPAT_INSTRUCTION_BUDGET") {
+        Err(std::env::VarError::NotPresent) => Ok((TIMEOUT_MICROSECONDS, MAX_INSTRUCTIONS)),
+        Ok(value) => match value.parse::<usize>() {
+            Ok(count) if count > 0 && count <= 2_000_000_000 => Ok((0, count)),
+            _ => Err(GuestError::Callback(
+                "AEXCOMPAT_INSTRUCTION_BUDGET must be 1..=2000000000".into(),
+            )),
+        },
+        Err(_) => Err(GuestError::Callback(
+            "AEXCOMPAT_INSTRUCTION_BUDGET must be UTF-8".into(),
+        )),
+    }
 }
