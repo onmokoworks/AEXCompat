@@ -1370,29 +1370,27 @@ fn encode_resident_image(
         }
         return Ok((width, height, argb));
     }
-    let image = image::open(input)
-        .map_err(|error| format!("open resident input PNG: {error}"))?
-        .to_rgba8();
-    let (width, height) = image.dimensions();
+    let decoded =
+        image::open(input).map_err(|error| format!("open resident input PNG: {error}"))?;
+    let (width, height) = (decoded.width(), decoded.height());
     if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
         return Err(format!(
             "resident input dimensions must be 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
         ));
     }
-    let mut argb = Vec::with_capacity(width as usize * height as usize * format.bytes_per_pixel());
-    for pixel in image.as_raw().chunks_exact(4) {
-        for sample in [pixel[3], pixel[0], pixel[1], pixel[2]] {
-            match format {
-                MacRenderFormat::RawArgb16 => {
-                    let ae_word = (u32::from(sample) * 32768 + 127) / 255;
-                    argb.extend_from_slice(&(ae_word as u16).to_le_bytes());
-                }
-                MacRenderFormat::ExrArgb32f => {
-                    argb.extend_from_slice(&(f32::from(sample) / 255.0).to_le_bytes());
-                }
-                MacRenderFormat::PngArgb8 => unreachable!(),
-            }
-        }
+    let rgba = aexcompat_broker::decoded_image::decoded_rgba(decoded, format.artifact_format());
+    if format == MacRenderFormat::ExrArgb32f
+        && rgba
+            .chunks_exact(4)
+            .any(|word| !f32::from_le_bytes(word.try_into().unwrap()).is_finite())
+    {
+        return Err("resident float input contains a non-finite sample".into());
+    }
+    let component_bytes = format.bytes_per_pixel() / 4;
+    let mut argb = Vec::with_capacity(rgba.len());
+    for pixel in rgba.chunks_exact(format.bytes_per_pixel()) {
+        argb.extend_from_slice(&pixel[3 * component_bytes..]);
+        argb.extend_from_slice(&pixel[..3 * component_bytes]);
     }
     Ok((width, height, argb))
 }
@@ -3493,6 +3491,76 @@ mod tests {
             argb_to_rgba_words(&argb8, 1),
             [255, 128, 0, 64],
             "artifact conversion must preserve component words"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fixture_image_encoding_preserves_sixteen_bit_png_precision() {
+        let root =
+            std::env::temp_dir().join(format!("aexcompat-deep-input-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("deep.png");
+        image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_pixel(
+            1,
+            1,
+            image::Rgba([20001, 7, 40001, 32769]),
+        )
+        .save(&path)
+        .unwrap();
+        let (_, _, argb) = encode_resident_image(&path, MacRenderFormat::RawArgb16).unwrap();
+        assert_eq!(
+            argb,
+            [16385u16, 10001, 4, 20001]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        let (_, _, argb) = encode_resident_image(&path, MacRenderFormat::ExrArgb32f).unwrap();
+        assert_eq!(
+            argb,
+            [32769.0f32, 20001.0, 7.0, 40001.0]
+                .into_iter()
+                .flat_map(|v| (v / 65535.0).to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fixture_image_encoding_rejects_nonfinite_and_keeps_finite_hdr() {
+        let root =
+            std::env::temp_dir().join(format!("aexcompat-float-input-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("float.tiff");
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            image::ImageBuffer::<image::Rgba<f32>, Vec<f32>>::from_pixel(
+                1,
+                1,
+                image::Rgba([bad, 0.0, 0.0, 1.0]),
+            )
+            .save(&path)
+            .unwrap();
+            assert!(
+                encode_resident_image(&path, MacRenderFormat::ExrArgb32f)
+                    .unwrap_err()
+                    .contains("non-finite")
+            );
+        }
+        image::ImageBuffer::<image::Rgba<f32>, Vec<f32>>::from_pixel(
+            1,
+            1,
+            image::Rgba([1.25, -0.125, -0.0, 0.5]),
+        )
+        .save(&path)
+        .unwrap();
+        let (_, _, argb) = encode_resident_image(&path, MacRenderFormat::ExrArgb32f).unwrap();
+        assert_eq!(
+            argb,
+            [0.5f32, 1.25, -0.125, -0.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>()
         );
         std::fs::remove_dir_all(root).unwrap();
     }

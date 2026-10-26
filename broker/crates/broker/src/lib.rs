@@ -3,6 +3,7 @@ pub mod cli_operation;
 pub mod cluster_manifest;
 pub mod companion_manifest;
 pub mod cuda_compute_probe;
+pub mod decoded_image;
 pub mod fixture_profiles;
 pub mod gpu_platform_collector;
 pub mod gpu_runtime_policy_generator;

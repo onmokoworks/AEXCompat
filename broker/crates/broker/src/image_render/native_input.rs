@@ -46,23 +46,7 @@ impl NativeImageInput {
 
     fn from_decoded(decoded: image::DynamicImage, format: RenderPixelFormat) -> io::Result<Self> {
         let (width, height) = (decoded.width(), decoded.height());
-        let rgba = match format {
-            RenderPixelFormat::Argb8 => decoded.into_rgba8().into_raw(),
-            RenderPixelFormat::Argb16 => decoded
-                .into_rgba16()
-                .into_raw()
-                .into_iter()
-                .flat_map(|value| {
-                    (((u32::from(value) * 32768 + 32767) / 65535) as u16).to_le_bytes()
-                })
-                .collect(),
-            RenderPixelFormat::Argb32f => decoded
-                .into_rgba32f()
-                .into_raw()
-                .into_iter()
-                .flat_map(f32::to_le_bytes)
-                .collect(),
-        };
+        let rgba = crate::decoded_image::decoded_rgba(decoded, format);
         let image = Self {
             width,
             height,
