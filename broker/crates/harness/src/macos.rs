@@ -837,7 +837,7 @@ impl MacHarnessApp {
                 None => {
                     self.output = Some(result.output);
                     self.output_texture = None;
-                    self.status = "Completed: FLOAT32 EXR artifact".into();
+                    self.status = "Completed: render artifact".into();
                     self.report = result.report;
                 }
             },
@@ -902,6 +902,11 @@ impl eframe::App for MacHarnessApp {
                                 &mut self.render_format,
                                 MacRenderFormat::PngArgb8,
                                 "ARGB8 PNG",
+                            );
+                            ui.selectable_value(
+                                &mut self.render_format,
+                                MacRenderFormat::RawArgb16,
+                                "ARGB16 raw",
                             );
                             ui.selectable_value(
                                 &mut self.render_format,
@@ -1435,6 +1440,66 @@ fn save_argb8_slot(
     image
         .save(output)
         .map_err(|error| format!("save resident output PNG: {error}"))?;
+    Ok(checksum)
+}
+
+fn save_argb16_raw_slot(
+    slot: &Path,
+    directory: &Path,
+    width: u32,
+    height: u32,
+    plugin_sha256: &str,
+    input_sha256: &str,
+    parameters: &str,
+    render_path: &str,
+    expected_checksum: &str,
+) -> Result<String, String> {
+    let expected = u64::from(width) * u64::from(height) * 8;
+    let file = std::fs::File::open(slot)
+        .map_err(|error| format!("open resident ARGB16 output slot: {error}"))?;
+    if file.metadata().map_err(|error| error.to_string())?.len() != expected {
+        return Err(format!(
+            "resident ARGB16 output size mismatch; expected {expected} bytes"
+        ));
+    }
+    let mut argb = Vec::new();
+    file.take(expected + 1)
+        .read_to_end(&mut argb)
+        .map_err(|error| format!("read resident ARGB16 output slot: {error}"))?;
+    if argb.len() as u64 != expected {
+        return Err("resident ARGB16 output changed size while reading".into());
+    }
+    let checksum = format!("{:x}", Sha256::digest(&argb));
+    if checksum != expected_checksum {
+        return Err(format!(
+            "resident output checksum mismatch: response={expected_checksum} slot={checksum}"
+        ));
+    }
+    let conditions = fixture_conditions(
+        plugin_sha256,
+        input_sha256,
+        &argb,
+        "argb16",
+        render_path,
+        &json!([parameters]),
+        "premultiplied",
+        0,
+        1,
+        1,
+        30,
+        None,
+    );
+    write_raw_world_artifact(
+        directory,
+        &argb_to_rgba_words(&argb, 2),
+        width,
+        height,
+        RenderPixelFormat::Argb16,
+        0,
+        0,
+        conditions,
+    )
+    .map_err(|error| format!("write ARGB16 raw artifact: {error}"))?;
     Ok(checksum)
 }
 
@@ -2822,10 +2887,12 @@ fn start_resident_session(
                                 (checksum, output.join("output.exr"), None)
                             }
                             MacRenderFormat::RawArgb16 => {
-                                return Err(
-                                    "ARGB16 raw is available through --render-fixture only"
-                                        .into(),
-                                );
+                                let checksum = save_argb16_raw_slot(
+                                    &output_slot, &output, width, height,
+                                    &plugin_sha256, &input_sha256, &payload,
+                                    render_path, &expected_checksum,
+                                )?;
+                                (checksum, output.join("output.bin"), None)
                             }
                         };
                         debug_assert_eq!(observed_checksum, expected_checksum);
@@ -4302,6 +4369,108 @@ mod tests {
         let mut unknown = valid;
         unknown["unexpected"] = json!(true);
         assert!(validate_resident_frame(&unknown, 0, 2, 1, MacRenderFormat::PngArgb8).is_err());
+    }
+
+    #[test]
+    fn resident_argb16_raw_export_preserves_words_and_rejects_invalid_output() {
+        let root =
+            std::env::temp_dir().join(format!("aexcompat-raw16-export-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let slot = root.join("slot");
+        let artifact = root.join("artifact");
+        let bytes = [32768u16, 10001, 4, 65535]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        std::fs::write(&slot, &bytes).unwrap();
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let save = |checksum: &str| {
+            save_argb16_raw_slot(
+                &slot,
+                &artifact,
+                1,
+                1,
+                &"a".repeat(64),
+                &"b".repeat(64),
+                "[]",
+                "smartfx",
+                checksum,
+            )
+        };
+        assert!(
+            save(&"0".repeat(64))
+                .unwrap_err()
+                .contains("checksum mismatch")
+        );
+        assert!(!artifact.exists());
+        std::fs::write(&slot, &bytes[..7]).unwrap();
+        assert!(save(&hash).unwrap_err().contains("size mismatch"));
+        assert!(!artifact.exists());
+        std::fs::write(&slot, &bytes).unwrap();
+        assert_eq!(save(&hash).unwrap(), hash);
+        assert_eq!(std::fs::read(artifact.join("output.bin")).unwrap(), bytes);
+        let metadata: Value =
+            serde_json::from_slice(&std::fs::read(artifact.join("output.json")).unwrap()).unwrap();
+        assert_eq!(metadata["pixel_format"], "argb16");
+        assert_eq!(metadata["channel_order"], "ARGB");
+        assert_eq!(metadata["data_sha256"], hash);
+        assert!(save(&hash).is_err(), "must protect published output");
+        assert_eq!(std::fs::read(artifact.join("output.bin")).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_AEX and AEXCOMPAT_GUEST_WORKER"]
+    fn real_resident_argb16_gui_export_matches_worker_world() {
+        let aex = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_AEX").unwrap());
+        let root = std::env::temp_dir().join(format!("aexcompat-real16-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("input.png");
+        image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_pixel(
+            3,
+            2,
+            image::Rgba([20001, 7, 40001, 65535]),
+        )
+        .save(&input)
+        .unwrap();
+        let workers = guest_worker_candidates(&repository_root().unwrap()).unwrap();
+        let mut session = start_resident_session(
+            &workers,
+            &aex,
+            &input,
+            &root,
+            MacRenderFormat::RawArgb16,
+            Vec::new(),
+        )
+        .unwrap();
+        let artifact = root.join("artifact");
+        session
+            .sender
+            .send(ResidentCommand::Render {
+                frame_index: 0,
+                parameters: Vec::new(),
+                output: artifact.clone(),
+            })
+            .unwrap();
+        let result = session
+            .receiver
+            .recv_timeout(RESIDENT_RENDER_DEADLINE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.output, artifact.join("output.bin"));
+        assert!(result.preview.is_none());
+        let report: Value = serde_json::from_str(&result.report).unwrap();
+        let bytes = std::fs::read(&result.output).unwrap();
+        assert_eq!(bytes.len(), 3 * 2 * 8);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            report["frame"]["output"]["checksum"]
+        );
+        let metadata: Value =
+            serde_json::from_slice(&std::fs::read(artifact.join("output.json")).unwrap()).unwrap();
+        assert_eq!(metadata["pixel_format"], "argb16");
+        session.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
