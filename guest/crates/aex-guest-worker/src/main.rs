@@ -816,6 +816,7 @@ fn parse_trace_watches(
             absolute_address: None,
             register,
             dereference_offset,
+            dereference_offsets: Vec::new(),
             size,
             occurrence,
             image_coordinate: None,

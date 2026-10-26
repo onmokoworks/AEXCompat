@@ -176,8 +176,17 @@ fn selected_watch_occurrence(capture: &mut TraceCapture, spec: &TraceWatchSpec) 
         .entry(spec.id.clone())
         .or_default();
     *count += 1;
-    spec.occurrence
-        .is_none_or(|occurrence| occurrence == *count)
+    if !spec.occurrence.is_none_or(|occurrence| occurrence == *count) { return false; }
+    // Reserve both snapshots before reading, including nested pending calls.
+    // At most 1 GiB of hex payloads (256 MiB logical before-plane bytes).
+    if capture.reserved_watch_count >= MAX_TRACE_WITNESSES ||
+        spec.size > MAX_TRACE_WATCH_BYTES.saturating_sub(capture.reserved_watch_bytes) {
+        capture.dropped_witnesses += 1;
+        return false;
+    }
+    capture.reserved_watch_bytes += spec.size;
+    capture.reserved_watch_count += 1;
+    true
 }
 
 fn trace_watch_address(
@@ -185,19 +194,16 @@ fn trace_watch_address(
     register: &'static str,
     stack_offset: u64,
     dereference_offset: Option<u64>,
+    dereference_offsets: &[u64],
 ) -> u64 {
-    let base = trace_register_value(unicorn, register, stack_offset).unwrap_or(0);
-    let Some(offset) = dereference_offset else {
-        return base;
-    };
-    let Some(pointer_address) = base.checked_add(offset) else {
-        return 0;
-    };
-    let mut bytes = [0u8; 8];
-    if unicorn.mem_read(pointer_address, &mut bytes).is_err() {
-        return 0;
+    let mut base = trace_register_value(unicorn, register, stack_offset).unwrap_or(0);
+    for offset in dereference_offset.iter().chain(dereference_offsets.iter()) {
+        let Some(pointer_address) = base.checked_add(*offset) else { return 0; };
+        let mut bytes = [0u8; 8];
+        if unicorn.mem_read(pointer_address, &mut bytes).is_err() { return 0; }
+        base = u64::from_le_bytes(bytes);
     }
-    u64::from_le_bytes(bytes)
+    base
 }
 
 fn select_function_watches(capture: &mut TraceCapture, function_rva: u64) -> Vec<TraceWatchSpec> {
@@ -365,7 +371,7 @@ fn arm_selector_entry_watches(
         .into_iter()
         .map(|spec| {
             let watch_address =
-                trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset);
+                trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset, &spec.dereference_offsets);
             PendingTraceWatch {
                 spec_id: spec.id,
                 register: spec.register,
@@ -438,7 +444,7 @@ fn checkpoint_instruction(
         .into_iter()
         .map(|spec| {
             let watch_address =
-                trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset);
+                trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset, &spec.dereference_offsets);
             PendingTraceWatch {
                 spec_id: spec.id,
                 register: spec.register,
@@ -699,7 +705,7 @@ fn trace_instruction(
             .into_iter()
             .map(|spec| {
                 let address =
-                    trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset);
+                    trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset, &spec.dereference_offsets);
                 PendingTraceWatch {
                     spec_id: spec.id,
                     register: spec.register,
@@ -799,7 +805,7 @@ fn trace_instruction(
                 .into_iter()
                 .map(|spec| {
                     let address =
-                        trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset);
+                        trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset, &spec.dereference_offsets);
                     PendingTraceWatch {
                         spec_id: spec.id,
                         register: spec.register,
@@ -1134,17 +1140,16 @@ fn trace_memory_snapshot(
 fn trace_changed_ranges(
     before: &TraceMemorySnapshot,
     after: &TraceMemorySnapshot,
-) -> Vec<TraceChangedRange> {
+) -> (Vec<TraceChangedRange>, bool) {
     let (Some(before), Some(after)) = (&before.hex, &after.hex) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let before = before.as_bytes().chunks_exact(2);
     let after = after.as_bytes().chunks_exact(2);
     let changed = before
         .zip(after)
         .enumerate()
-        .filter_map(|(index, (left, right))| (left != right).then_some(index))
-        .collect::<Vec<_>>();
+        .filter_map(|(index, (left, right))| (left != right).then_some(index));
     let mut ranges = Vec::<TraceChangedRange>::new();
     for offset in changed {
         if let Some(last) = ranges.last_mut()
@@ -1152,10 +1157,11 @@ fn trace_changed_ranges(
         {
             last.size += 1;
         } else {
+            if ranges.len() == 4096 { return (ranges, true); }
             ranges.push(TraceChangedRange { offset, size: 1 });
         }
     }
-    ranges
+    (ranges, false)
 }
 
 fn complete_trace_watches(
@@ -1174,6 +1180,7 @@ fn complete_trace_watches(
                 image_base,
                 image_end,
             );
+            let (changed_ranges, changed_ranges_truncated) = trace_changed_ranges(&pending.before, &after);
             TraceMemoryWitness {
                 watch_id: pending.spec_id,
                 call_id: pending.call_id,
@@ -1183,7 +1190,8 @@ fn complete_trace_watches(
                 image_coordinate: pending.image_coordinate,
                 image_row_offset: pending.image_row_offset,
                 image_format: pending.image_format,
-                changed_ranges: trace_changed_ranges(&pending.before, &after),
+                changed_ranges,
+                changed_ranges_truncated,
                 before: pending.before,
                 after,
             }

@@ -661,6 +661,8 @@ struct TraceCapture {
     unhookable_watches: Vec<UnhookableWatch>,
     witnesses: Vec<TraceMemoryWitness>,
     dropped_witnesses: u64,
+    reserved_watch_bytes: usize,
+    reserved_watch_count: usize,
     basic_blocks: HashMap<(u64, u32), u64>,
     branch_edges: HashMap<(u64, u64), u64>,
     dropped_basic_blocks: u64,
@@ -700,6 +702,8 @@ pub struct TraceWatchSpec {
     pub register: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dereference_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dereference_offsets: Vec<u64>,
     pub size: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<u64>,
@@ -808,6 +812,7 @@ pub struct TraceMemoryWitness {
     pub before: TraceMemorySnapshot,
     pub after: TraceMemorySnapshot,
     pub changed_ranges: Vec<TraceChangedRange>,
+    pub changed_ranges_truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

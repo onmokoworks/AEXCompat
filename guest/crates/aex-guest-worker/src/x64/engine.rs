@@ -1171,6 +1171,8 @@ impl GuestEngine<'static> {
             unhookable_watches: Vec::new(),
             witnesses: Vec::new(),
             dropped_witnesses: 0,
+        reserved_watch_bytes: 0,
+        reserved_watch_count: 0,
             basic_blocks: HashMap::new(),
             branch_edges: HashMap::new(),
             dropped_basic_blocks: 0,
@@ -1333,10 +1335,10 @@ impl GuestEngine<'static> {
         }
         let selector_watches = self
             .unicorn
-            .get_data()
+            .get_data_mut()
             .trace
-            .as_ref()
-            .map(|capture| capture.selector_watches.clone())
+            .as_mut()
+            .map(|capture| std::mem::take(&mut capture.selector_watches))
             .unwrap_or_default();
         let selector_witnesses = selector_watches
             .into_iter()
@@ -1348,6 +1350,7 @@ impl GuestEngine<'static> {
                     self.image_base,
                     self.image_end,
                 );
+                let (changed_ranges, changed_ranges_truncated) = trace_changed_ranges(&pending.before, &after);
                 TraceMemoryWitness {
                     watch_id: pending.spec_id,
                     call_id: pending.call_id,
@@ -1357,7 +1360,8 @@ impl GuestEngine<'static> {
                     image_coordinate: pending.image_coordinate,
                     image_row_offset: pending.image_row_offset,
                     image_format: pending.image_format,
-                    changed_ranges: trace_changed_ranges(&pending.before, &after),
+                    changed_ranges,
+                    changed_ranges_truncated,
                     before: pending.before,
                     after,
                 }

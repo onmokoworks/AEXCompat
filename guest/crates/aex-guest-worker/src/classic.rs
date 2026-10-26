@@ -2137,6 +2137,7 @@ impl ClassicHost {
                 ),
                 register: "absolute",
                 dereference_offset: None,
+                dereference_offsets: Vec::new(),
                 size: format.bytes_per_pixel(),
                 occurrence: None,
                 image_coordinate: Some([x, y]),
@@ -3035,7 +3036,22 @@ impl ClassicHost {
         // than a plugin-specific address. Unset means no tracing work.
         let trace_path =
             std::env::var_os("AEXCOMPAT_SMART_TRACE").filter(|_| selector_name == "SMART_RENDER");
-        let trace_enabled = trace_enabled || trace_path.is_some();
+        let resident_path = std::env::var_os("AEXCOMPAT_RESIDENT_TRACE")
+            .filter(|_| selector_name == "SMART_RENDER");
+        if resident_path.is_some() && trace_path.is_some() {
+            return Err(ClassicError::Input(
+                "Select either RESIDENT_TRACE or SMART_TRACE".into(),
+            ));
+        }
+        if resident_path.is_some() {
+            let path = std::env::var_os("AEXCOMPAT_RESIDENT_WATCHES").ok_or_else(|| {
+                ClassicError::Input("RESIDENT_WATCHES requires a JSON file".into())
+            })?;
+            let file = std::fs::File::open(path)
+                .map_err(|e| ClassicError::Input(format!("Resident watches: {e}")))?;
+            self.configure_trace(resident_trace_watches(file)?, None);
+        }
+        let trace_enabled = trace_enabled || trace_path.is_some() || resident_path.is_some();
         if trace_path.is_some() {
             let config = std::env::var("AEXCOMPAT_SMART_TRACE_WATCH").map_err(|_| {
                 ClassicError::Input("SMART_TRACE_WATCH requires rva,bytes,first|all".into())
@@ -3071,7 +3087,12 @@ impl ClassicHost {
         } else {
             None
         };
-        if let Some(path) = trace_path {
+        if let Some(path) = &resident_path {
+            if let Some(trace) = &trace {
+                write_resident_raw(std::path::Path::new(path), trace)?;
+            }
+        }
+        if let Some(path) = trace_path.or(resident_path) {
             let file = std::fs::File::create(path)
                 .map_err(|e| ClassicError::Input(format!("Smart trace file: {e}")))?;
             serde_json::to_writer(file, &trace)
@@ -5163,6 +5184,7 @@ fn smart_trace_watches(config: &str) -> Result<Vec<TraceWatchSpec>, ClassicError
             absolute_address: None,
             register,
             dereference_offset: None,
+            dereference_offsets: Vec::new(),
             size,
             occurrence,
             image_coordinate: None,
@@ -5194,4 +5216,135 @@ fn resident_smart_watch_config_preserves_occurrence_and_bounds() {
     ] {
         assert!(smart_trace_watches(bad).is_err(), "{bad}");
     }
+}
+
+/// C53b-compatible resident watch configuration. Offsets are successive pointer
+/// reads, never slices. The captured entry pointer is reused on return.
+fn resident_trace_watches(reader: impl std::io::Read) -> Result<Vec<TraceWatchSpec>, ClassicError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Watch {
+        id: String,
+        function_rva: Option<u64>,
+        instruction_rva: Option<u64>,
+        register: String,
+        dereference_offset: Option<u64>,
+        #[serde(default)]
+        dereference_offsets: Vec<u64>,
+        size: usize,
+        occurrence: Option<u64>,
+    }
+    let invalid = || {
+        ClassicError::Input("Resident watches require 1..64 unique nonempty IDs, exactly one RVA, a supported register, 1..268435456 bytes, positive occurrence and at most 16 pointer offsets (singular or plural)".into())
+    };
+    let specs: Vec<Watch> = serde_json::from_reader(reader)
+        .map_err(|e| ClassicError::Input(format!("Resident watch JSON: {e}")))?;
+    if specs.is_empty() || specs.len() > 64 {
+        return Err(invalid());
+    }
+    let mut ids = std::collections::HashSet::new();
+    specs
+        .into_iter()
+        .map(|w| {
+            if w.id.is_empty()
+                || !ids.insert(w.id.clone())
+                || w.function_rva.is_some() == w.instruction_rva.is_some()
+                || !(1..=268435456).contains(&w.size)
+                || w.occurrence == Some(0)
+                || w.dereference_offsets.len() > 16
+                || (w.dereference_offset.is_some() && !w.dereference_offsets.is_empty())
+            {
+                return Err(invalid());
+            }
+            let register = match w.register.as_str() {
+                "rcx" => "rcx",
+                "rdx" => "rdx",
+                "r8" => "r8",
+                "r9" => "r9",
+                "rax" => "rax",
+                "stack5" => "stack5",
+                "stack6" => "stack6",
+                "stack7" => "stack7",
+                "stack8" => "stack8",
+                _ => return Err(invalid()),
+            };
+            Ok(TraceWatchSpec {
+                id: w.id,
+                function_rva: w.function_rva,
+                instruction_rva: w.instruction_rva,
+                absolute_address: None,
+                register,
+                dereference_offset: w.dereference_offset,
+                dereference_offsets: w.dereference_offsets,
+                size: w.size,
+                occurrence: w.occurrence,
+                image_coordinate: None,
+                image_row_offset: None,
+                image_format: None,
+            })
+        })
+        .collect()
+}
+
+/// Numeric witness indices avoid interpreting user watch IDs as paths. Decode
+/// in bounded chunks so raw export does not allocate another full plane.
+fn write_resident_raw(path: &std::path::Path, trace: &ExecutionTrace) -> Result<(), ClassicError> {
+    use std::io::Write;
+    for (index, witness) in trace.memory_witnesses.iter().enumerate() {
+        for (when, snapshot) in [("before", &witness.before), ("after", &witness.after)] {
+            if let Some(hex) = &snapshot.hex {
+                let mut name = path.as_os_str().to_os_string();
+                name.push(format!(".{index:03}.{when}.bin"));
+                let mut file = std::io::BufWriter::new(
+                    std::fs::File::create(name)
+                        .map_err(|e| ClassicError::Input(format!("Resident raw file: {e}")))?,
+                );
+                for chunk in hex.as_bytes().chunks(8192) {
+                    let bytes = chunk
+                        .chunks_exact(2)
+                        .map(|pair| {
+                            let nibble = |c: u8| if c <= b'9' { c - b'0' } else { c - b'a' + 10 };
+                            (nibble(pair[0]) << 4) | nibble(pair[1])
+                        })
+                        .collect::<Vec<_>>();
+                    file.write_all(&bytes)
+                        .map_err(|e| ClassicError::Input(format!("Resident raw write: {e}")))?;
+                }
+                file.flush()
+                    .map_err(|e| ClassicError::Input(format!("Resident raw flush: {e}")))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn resident_watch_configuration_validation() {
+    let parse = |s: &str| resident_trace_watches(s.as_bytes());
+    let good = r#"[{"id":"plane","function_rva":42,"register":"stack5","dereference_offsets":[8,245760],"size":132710400}]"#;
+    let watches = parse(good).unwrap();
+    assert_eq!(watches[0].dereference_offsets, [8, 245760]);
+    assert_eq!(watches[0].occurrence, None);
+    for bad in [
+        "[]".to_string(),
+        good.replace("stack5", "rsp"),
+        good.replace("132710400", "268435457"),
+        good.replace("132710400", "0"),
+        good.replace("\"size\"", "\"unknown\""),
+        good.replace("\"size\":", "\"occurrence\":0,\"size\":"),
+        good.replace("\"size\":", "\"instruction_rva\":1,\"size\":"),
+        good.replace("\"size\":", "\"dereference_offset\":0,\"size\":"),
+        format!(
+            "[{},{}]",
+            &good[1..good.len() - 1],
+            &good[1..good.len() - 1]
+        ),
+    ] {
+        assert!(parse(&bad).is_err(), "{bad}");
+    }
+    let single = good.replace(
+        "\"dereference_offsets\":[8,245760]",
+        "\"dereference_offset\":245760",
+    );
+    assert_eq!(parse(&single).unwrap()[0].dereference_offset, Some(245760));
 }
