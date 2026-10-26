@@ -35,8 +35,8 @@ use aexcompat_broker::render_pixel_format::RenderPixelFormat;
 
 include!("macos_chain.rs");
 
-const MAX_WIDTH: u32 = 1920;
-const MAX_HEIGHT: u32 = 1080;
+const MAX_WIDTH: u32 = 3840;
+const MAX_HEIGHT: u32 = 2160;
 const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
@@ -539,6 +539,11 @@ impl MacHarnessApp {
             self.report = error;
             return;
         }
+        if let Err(error) = validate_resident_image_dimensions(&path) {
+            self.status = "Input exceeds the supported image boundary.".into();
+            self.report = error;
+            return;
+        }
         match load_texture(ctx, "mac-input", &path) {
             Ok((texture, width, height)) if width <= MAX_WIDTH && height <= MAX_HEIGHT => {
                 self.input = Some(path);
@@ -549,7 +554,7 @@ impl MacHarnessApp {
                 self.status = format!("Input ready: {width}x{height}");
             }
             Ok((_, width, height)) => {
-                self.status = "Input exceeds the initial Full HD boundary.".into();
+                self.status = "Input exceeds the 4K UHD boundary.".into();
                 self.report = format!(
                     "PNG must be within 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
                 );
@@ -1217,7 +1222,7 @@ impl MacHarnessApp {
             ui.selectable_value(&mut self.viewer_mode, ViewerMode::Output, "AEX OUTPUT");
             ui.selectable_value(&mut self.viewer_mode, ViewerMode::Compare, "COMPARE");
             ui.separator();
-            ui.weak("FHD workspace / aspect fit");
+            ui.weak("4K UHD workspace / aspect fit");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Fit").clicked() {
                     self.viewer_zoom = 1.0;
@@ -1404,10 +1409,23 @@ fn write_resident_input_slot(
     Ok((width, height))
 }
 
+fn validate_resident_image_dimensions(input: &Path) -> Result<(u32, u32), String> {
+    let (width, height) = image::image_dimensions(input)
+        .map_err(|error| format!("read input dimensions: {error}"))?;
+    if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
+        return Err(format!(
+            "resident input dimensions must be 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
+        ));
+    }
+    Ok((width, height))
+}
+
 fn encode_resident_image(
     input: &Path,
     format: MacRenderFormat,
 ) -> Result<(u32, u32, Vec<u8>), String> {
+    // Bound allocation before decoding, including all secondary layers.
+    validate_resident_image_dimensions(input)?;
     if format == MacRenderFormat::PngArgb8 {
         let rgba = image::open(input)
             .map_err(|error| format!("open resident input PNG: {error}"))?
@@ -4482,6 +4500,111 @@ mod tests {
         assert_eq!(metadata["data_sha256"], hash);
         assert!(save(&hash).is_err(), "must protect published output");
         assert_eq!(std::fs::read(artifact.join("output.bin")).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gui_4k_admission_preserves_each_depth_and_rejects_one_past_boundary() {
+        let root = std::env::temp_dir().join(format!("aexcompat-gui-4k-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("4k.png");
+        image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_pixel(
+            3840,
+            2160,
+            image::Rgba([20001, 7, 40001, 65535]),
+        )
+        .save(&input)
+        .unwrap();
+        for format in [
+            MacRenderFormat::PngArgb8,
+            MacRenderFormat::RawArgb16,
+            MacRenderFormat::ExrArgb32f,
+        ] {
+            let (width, height, bytes) = encode_resident_image(&input, format).unwrap();
+            assert_eq!((width, height), (3840, 2160));
+            assert_eq!(bytes.len(), 3840 * 2160 * format.bytes_per_pixel());
+            assert!(
+                bytes
+                    .chunks_exact(format.bytes_per_pixel())
+                    .all(|pixel| pixel == &bytes[..format.bytes_per_pixel()])
+            );
+        }
+        for (width, height) in [(3841, 1), (1, 2161)] {
+            image::RgbaImage::new(width, height).save(&input).unwrap();
+            assert!(validate_resident_image_dimensions(&input).is_err());
+            assert!(encode_resident_image(&input, MacRenderFormat::PngArgb8).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_AEX and AEXCOMPAT_GUEST_WORKER; full 4K guest render"]
+    fn real_gui_4k_render_at_all_depths() {
+        let aex = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_AEX").unwrap());
+        let root = std::env::temp_dir().join(format!("aexcompat-real-4k-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("4k.png");
+        image::RgbaImage::from_pixel(3840, 2160, image::Rgba([21, 7, 40, 255]))
+            .save(&input)
+            .unwrap();
+        let workers = guest_worker_candidates(&repository_root().unwrap()).unwrap();
+        for format in [
+            MacRenderFormat::PngArgb8,
+            MacRenderFormat::RawArgb16,
+            MacRenderFormat::ExrArgb32f,
+        ] {
+            let mut session =
+                start_resident_session(&workers, &aex, &input, &root, format, Vec::new()).unwrap();
+            let output = if format == MacRenderFormat::PngArgb8 {
+                root.join("output.png")
+            } else {
+                root.join(format.pixel_format())
+            };
+            session
+                .sender
+                .send(ResidentCommand::Render {
+                    frame_index: 0,
+                    parameters: Vec::new(),
+                    output,
+                })
+                .unwrap();
+            let result = session
+                .receiver
+                .recv_timeout(RESIDENT_RENDER_DEADLINE + Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            let report: Value = serde_json::from_str(&result.report).unwrap();
+            if format == MacRenderFormat::PngArgb8 {
+                assert_eq!(
+                    image::image_dimensions(&result.output).unwrap(),
+                    (3840, 2160)
+                );
+                let (_, _, bytes) = encode_resident_image(&result.output, format).unwrap();
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(&bytes)),
+                    report["frame"]["output"]["checksum"]
+                );
+            } else {
+                let metadata: Value = serde_json::from_slice(
+                    &std::fs::read(result.output.parent().unwrap().join("output.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(metadata["width"], 3840);
+                assert_eq!(metadata["height"], 2160);
+                assert_eq!(
+                    metadata["comparison_identity"]["world_sha256"],
+                    report["frame"]["output"]["checksum"]
+                );
+                assert_eq!(
+                    metadata["data_sha256"],
+                    format!(
+                        "{:x}",
+                        Sha256::digest(std::fs::read(&result.output).unwrap())
+                    )
+                );
+            }
+            session.shutdown().unwrap();
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
