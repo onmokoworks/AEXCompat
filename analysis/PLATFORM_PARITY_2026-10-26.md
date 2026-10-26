@@ -162,3 +162,118 @@ FACT: macOS `cargo build --release --manifest-path broker/Cargo.toml -p
 `--describe-aex` with registered F54c and ColorKeep produced a valid descriptor
 packet (defaults, parameters, plugin_identity, schema, schema_version). No GUI
 visual QA or Windows execution is implied by this headless smoke check.
+
+## X01b continuation — implemented deltas
+
+FACT: the earlier table describes the X01 starting boundary. The following rows
+supersede its affected cells; unlisted gaps remain open. Full parity is **not**
+achieved. No native AE equivalence is claimed.
+
+| Capability | Windows | macOS after X01b | Disposition / code |
+|---|---|---|---|
+| GUI effect chains, order/bypass, independent scalar/default/layer state | yes | yes | `harness/src/macos_chain.rs`; common `gui_state::EffectChainSlot`. At most eight stages, sequential workers; exact typed ARGB intermediates, per-stage checksum and provenance, final PNG/raw/EXR. Supervised warmup never publishes a single stage as chain output. Deep preview remains a separate gap. |
+| 4K UHD GUI | yes | yes | `macos.rs::validate_resident_image_dimensions`: 3840x2160, matching guest bounds. Check before decode and after decode. Existing session byte/file/process/deadline bounds retained. Large multi-layer requests can still exceed those bounds explicitly. |
+| Explicit UPDATE/EVENT guest CLI | yes (native dispatcher) | yes (bounded U03 recorder) | Merge `olm/U03-ui-session` at `92c5b4b3`. `classic_ui.rs`, `x64/ui_session.rs`, `ui_draw.rs`; not an interactive Mac custom-UI canvas. |
+| Click/drag/keydown point ABI | corrected, **untested on Windows** | yes for supported U03 events | `worker_ui_event_execution.cpp`: h/x precedes v/y. Production dispatcher linked into `tests/portable/ui_event_coordinates.cpp`; asymmetric signed-coordinate test fails before and passes after correction. Existing default symmetric coordinates remain the same. |
+| Instruction/RVA/pointer-chain/plane watches in native worker | no public counterpart | yes in guest | Still (a), implementable but not implemented here. Existing native `instruments/common/trace_writer.*` and `worker_host_suite_router.cpp` record host calls, not instruction-site observations. Mapping flags onto that logger would not implement F54c semantics. |
+
+### UI suite boundary after the U03 merge
+
+FACT: these are implemented slot subsets in the explicit UI session, not blanket
+suite support, drawing rasterization, nor ordinary render-session suite upgrades.
+Unsupported calls remain explicit errors. Version mapping is in
+`x64/ui_session.rs::ui_suite_address` (paths under `guest/crates/aex-guest-worker/src`).
+
+| UI family / versions | Implemented guest boundary | Remaining parity work (a) |
+|---|---|---|
+| Param Utils 3 | UI update recording / parameter UI flags, `emulate_ui_callback` | Compare every slot/version against native runtime |
+| PF Interface 1, Layer 11, Effect 3/4 | Interface slots 0/1; Layer slot 14 current time; Effect slot 8 disposal | Other scene/effect/layer operations |
+| Stream 7/10; Dynamic Stream 2/3/5 | Stream slots 5,7,13,14; DynamicStream slots 4/5 (v5 shifts one slot); checked handle lifetimes and HIDDEN | Complete stream types and arbitrary stream values |
+| Custom UI 1, Draw 1 | Context-bound drawing reference, supplier/surface reference | Native GUI interaction adapter, actual canvas |
+| Supplier 1 | Slots 0/1/4/6 object creation, 11/12 retain/release | Remaining supplier operations |
+| Surface 2 | Slots 2/3/4/9/13 (recorded bit-exact drawing/text/antialias calls) | Rasterization/font metrics, remaining operations |
+| Path 1 | Slots 0/1/3/5 | Other path operations |
+| App 1/4 | Slots 1/7/9 (explicit theme, picker and invalidation) | Other app services; no approximate color fallback |
+| Arbitrary parameter lifecycle | Original callbacks perform COPY, FLAT_SIZE and FLATTEN in `classic_ui.rs` | This does not establish native/guest arbitrary *stream* support or raw equality of uninitialized serializer tails |
+| ACE / color management | No X01b addition | Profiles/transforms and per-slot paired witnesses remain open |
+
+FACT: U03 replay on the combined worker: **17 sessions, 174 operations, zero
+semantic mismatches**, using the existing versioned active-arbitrary-record
+comparator. Ten KiraKira sessions have raw inactive serializer-tail differences;
+full raw-buffer equality is explicitly **not** claimed. The replay retains both
+worker identities; it does not rewrite U03's frozen manifest or expected traces.
+The ten U03 focused tests pass after integration.
+
+FACT: chain tests pass with original ColorKeep/F54c at all three depths; the
+first stage output hash equals the second stage input hash. Final selected
+artifacts are checked, and all-bypassed export uses no worker. Unit tests cover
+noncommutative ordering, bypass, failure short-circuit, deep bit preservation
+(including signed zero/NaN payload), invalid layout, independent layer state and
+supervised warmup with Auto Update off. These are transport/host tests, not AE
+arithmetic conformance. Real 4K ColorKeep renders pass at 8/16/32 bpc; no deadline
+or resource limit was raised.
+
+### Remaining work and Windows verification
+
+Native RVA watches require a real instruction observer, module-relative address
+resolution, bounded validated pointer reads, hit ordering and capture timing,
+plus paired native/guest fixtures. No debugger breakpoint, page-guard or native
+pointer-reading implementation has been added. This remains an implementation
+gap, not an inherently Mac-only feature or an intentionally different result.
+
+Other implementable gaps remain: interactive custom-UI canvas on Mac (U03 is a
+CLI recording session), deep previews, full suite/version coverage, audio/time
+editing, shared diagnostics UI, negotiated geometry GUI controls, and the paired
+native/guest ROI fixture matrix. The inherited full inventory still records
+these; the successful bounded tests do not close them.
+
+Windows verification: build the native worker with `tools/build-native.ps1` and
+run the portable UI-coordinate harness with MSVC against the production
+dispatcher; then run original-AEX click, drag and keydown probes with distinct
+x/y coordinates and native lifecycle self-tests. Run shared artifact tests and
+Windows effect-chain tests at all depths, including all-bypass. The native point
+fix and shared chain/artifact changes are **untested on Windows**.
+
+### Updated draft claim and PR text (not posted)
+
+Draft claim: Continue X01 platform parity in the existing worktree. Implement
+Mac typed effect chains and 4K UHD admission, integrate U03's explicit UI session,
+and align the native UI point ABI. Acceptance: behavioral tests, original-AEX
+chain and 4K renders, frozen UI witness replay, Release builds, compile checks,
+and independent local diff review. Native watches and full host-suite parity
+remain explicitly open. No external claim is posted.
+
+Draft PR title: Add macOS effect chains and 4K, integrate Unicorn UI sessions
+
+Draft PR body: Mac GUI chains now preserve typed ARGB values between independently
+configured stages and export the selected PNG/raw/EXR artifact. 4K UHD inputs are
+admitted with bounded decode and existing process limits. Merge U03's explicit
+UI recorder without enabling its suite interception in ordinary render sessions.
+Correct reversed native event coordinates using a production-dispatcher test.
+This is a partial parity stack; native instruction watches and full UI/suite
+coverage remain open. Windows runtime is untested. No push, PR, claim, or release
+gate change was made. See the OLM X01b report for final counts, source/build hashes,
+commands and review boundary. Local review findings (warmup publication, deep
+export, stale FHD label) were accepted and fixed; none were rejected.
+
+Final X01b validation facts: harness **87 passed, 5 ignored**; artifact tests
+**8 passed**; combined-worker chain tests **5 passed** (including real AEX and
+all-bypass exports); 4K admission/real all-depth tests **2 passed** against the
+registered F54c worker. Guest full suite: **719 passed, 3 ignored** in the library,
+plus **10 passed** in the CLI. macOS Release harness and guest builds passed.
+Windows **harness** target check (`x86_64-pc-windows-msvc`) passed, including its
+shared broker dependencies. Native C++ dispatcher portable test passed; the
+Windows worker executable was not built or run. Release `--describe-aex` returned
+101 ColorKeep parameters through the combined worker. No GUI visual QA claimed.
+
+Combined worker registered separately as `worker-X01b-parity`, SHA-256
+`34ce39821a53815dbd2252046cf375222d27a8045685fa6d946cfad211e40c4b`, source
+`2c7b29d60962c57a7f376c3fa5c5cc34de51e00d`, with `build.json` and source archive.
+Existing F54c remains SHA-256
+`3d5eec0c6792f176a9cfbc38093c53b852f4ea1baae2cfd313345c02f55d6fba`.
+Full OLM render corpora were not replayed; registered prior workers and OLM
+plugin kernels are unchanged. Guest tests cover ordinary render/session routes.
+
+Whole-tree rustfmt still reports the same three inherited files (`engine.rs`,
+`tests_cases.rs`, `trace.rs` under guest x64); all are byte-unchanged from X01
+`97b596d1`. All changed Rust files pass. Code review boundary: `2c7b29d6`.
