@@ -37,9 +37,9 @@ If you already have an arm64 worker, skip its build and set `AEXCOMPAT_GUEST_WOR
 
 ## Choose an AEX and image
 
-1. Select a Windows x64 `.aex` with **Add AEX...** on Windows or **AEX...** on Mac. After inspection, editable parameters appear in **Effect Controls**.
-2. Select the input with **Choose image...** on Windows or **PNG...** on Mac. You can also drag and drop an image.
-3. Click **Render preview** on Windows or **Render** on Mac. Windows also offers **Render current frame** in the detailed panel.
+1. Select a Windows x64 `.aex` with Add AEX... on Windows or AEX... on Mac. After inspection, editable parameters appear in Effect Controls.
+2. Select the input with Choose image... on Windows or PNG... on Mac. You can also drag and drop an image.
+3. Click Render preview on Windows or Render on Mac. Windows also offers Render current frame in the detailed panel.
 
 Windows accepts PNG, JPEG, BMP, TIFF, and WebP. This Mac GUI version accepts PNG, with width at most 1920 and height at most 1080 pixels.
 
@@ -47,19 +47,19 @@ Windows accepts PNG, JPEG, BMP, TIFF, and WebP. This Mac GUI version accepts PNG
 
 Change numbers, sliders, checkboxes, choices, colors, and coordinates. For effects with layer inputs, choose another image in that control. Available controls and ranges depend on the AEX.
 
-Use each control's **Reset** to restore its default. To restore all parameters, use **Reset** in the Effect Controls header on Windows or **Reset All** on Mac. In a Windows chain, these apply to the selected stage.
+Use each control's Reset to restore its default. To restore all parameters, use Reset in the Effect Controls header on Windows or Reset All on Mac. In a Windows chain, these apply to the selected stage.
 
-Enable **Auto Update** to render automatically after edits. For slow effects, turn it off, make your edits, then click the render button. Some controls are disabled while work is running. Check the diagnostics for disabled or unsupported operations.
+Enable Auto Update to render automatically after edits. For slow effects, turn it off, make your edits, then click the render button. Some controls are disabled while work is running. Check the diagnostics for disabled or unsupported operations.
 
 ## View input and output
 
-**INPUT** shows the source, **AEX OUTPUT** shows the rendered result, and **COMPARE** shows both side by side. Scroll over an image to zoom and drag to pan. **Fit** restores the fitted view. The zoom percentage is relative to the fitted image.
+INPUT shows the source, AEX OUTPUT shows the rendered result, and COMPARE shows both side by side. Scroll over an image to zoom and drag to pan. Fit restores the fitted view. The zoom percentage is relative to the fitted image.
 
-Mac 16 bpc and 32 bpc float renders write files but do not show an output preview. Check the destination under **Output** and the **Worker report** to confirm completion.
+Mac 16 bpc and 32 bpc float renders write files but do not show an output preview. Check the destination under Output and the Worker report to confirm completion.
 
 ## Select pixel depth
 
-Use **Analysis & Logs → Render Settings → Pixel depth**. Mac also has a format selector in the top bar.
+Use Analysis & Logs → Render Settings → Pixel depth. Mac also has a format selector in the top bar.
 
 | Depth | Use and limits |
 |---|---|
@@ -74,10 +74,10 @@ Choose a depth supported by the AEX. Selecting a higher depth does not add preci
 Chains are available in the Windows GUI in this version. The Mac GUI handles one AEX at a time.
 
 1. Choose an input image and the first AEX.
-2. Use **Effect Controls → Effect chain → Add...** to add another AEX, up to eight stages.
+2. Use Effect Controls → Effect chain → Add... to add another AEX, up to eight stages.
 3. Select a row to edit that stage's parameters. Each stage retains its own settings, even when the same AEX appears more than once.
-4. Use **Up / Down** to reorder, clear the checkbox to bypass a stage, or use **Remove** to delete the selected stage.
-5. Run **Render preview** or PNG export. Enabled stages run from top to bottom.
+4. Use Up / Down to reorder, clear the checkbox to bypass a stage, or use Remove to delete the selected stage.
+5. Run Render preview or PNG export. Enabled stages run from top to bottom.
 
 Use the Auto or CPU backend. Every enabled stage must support the selected depth. If a stage fails, later stages stop and the report identifies the failed stage.
 
@@ -87,7 +87,7 @@ Chains support still images, not audio. Settings remain in the current GUI sessi
 
 ### Windows
 
-Choose a destination with **Save PNG...** or **Render and save PNG...** in the detailed panel. Chain exports contain:
+Choose a destination with Save PNG... or Render and save PNG... in the detailed panel. Chain exports contain:
 
 | Depth | Files |
 |---|---|
@@ -99,7 +99,7 @@ Raw sidecars are tightly packed, little-endian RGBA. Read dimensions and format 
 
 ### Mac
 
-**Render** saves under `target/harness-output`. **Analysis & Logs → Output** displays the actual destination.
+Render saves under `target/harness-output`. Analysis & Logs → Output displays the actual destination.
 
 | Top-bar format | Files |
 |---|---|
@@ -107,11 +107,11 @@ Raw sidecars are tightly packed, little-endian RGBA. Read dimensions and format 
 | ARGB16 raw | `output.bin` and `output.json` inside `mac-aex-….raw-artifact/` |
 | FLOAT32 EXR | `output.exr` and `output.json` inside `mac-aex-….exr-artifact/` |
 
-Mac ARGB16 raw is little-endian **ARGB**. Do not read it as the Windows chain's RGBA sidecar. `output.json` records dimensions, channel order, depth, hashes, and other metadata. Keep the whole directory. The Mac GUI does not also export a 16-bit PNG or float raw sidecar.
+Mac ARGB16 raw is little-endian ARGB. Do not read it as the Windows chain's RGBA sidecar. `output.json` records dimensions, channel order, depth, hashes, and other metadata. Keep the whole directory. The Mac GUI does not also export a 16-bit PNG or float raw sidecar.
 
 ## Read diagnostics and reports
 
-Open **Analysis & Logs** to inspect the selected AEX and input, render settings, and results. Mac's **Worker report** shows worker results and errors. Windows also offers compatibility, GPU, and performance diagnostics. If an operation is disabled, check its stated capability limit.
+Open Analysis & Logs to inspect the selected AEX and input, render settings, and results. Mac's Worker report shows worker results and errors. Windows also offers compatibility, GPU, and performance diagnostics. If an operation is disabled, check its stated capability limit.
 
 For a bug report, record the OS, AEXCompat commit, AEX version, input dimensions and depth, parameters, operation, and error text. Remove personal absolute paths from reports. Do not publish private AEX binaries, SDK files, or source images.
 

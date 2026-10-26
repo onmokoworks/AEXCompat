@@ -4,7 +4,7 @@
 
 Windows x64 の AEX を読み込み、画像に適用して、パラメーターや出力を調べます。After Effects 本体や AEP 編集には対応しません。画像が出ても、After Effects とのピクセル一致を確認したことにはなりません。
 
-このガイドは `olm/X01-platform-parity`（`97b596d1`）を対象とします。日本語を正本とし、英語版はその翻訳です。ボタン名は英語表示に合わせています。Windows の日本語表示では対応する項目を選んでください。
+このガイドは `olm/X01-platform-parity`（`97b596d1`）時点の内容です。英語版は、この日本語版を訳したものです。ボタン名は英語表示に合わせています。Windows の日本語表示では対応する項目を選んでください。
 
 ## 起動する
 
@@ -37,9 +37,9 @@ cargo run --manifest-path broker/Cargo.toml -p aexcompat-harness --jobs 1
 
 ## AEX と画像を選ぶ
 
-1. Windows は **Add AEX...**、Mac は **AEX...** で Windows x64 の `.aex` を選びます。解析が終わると **Effect Controls** に編集可能なパラメーターが表示されます。
-2. Windows は **Choose image...**、Mac は **PNG...** で入力画像を選びます。画像のドラッグ＆ドロップも使えます。
-3. Windows は **Render preview**、Mac は **Render** を押します。Windows の詳細パネルでは **Render current frame** も使えます。
+1. Windows は Add AEX...、Mac は AEX... で Windows x64 の `.aex` を選びます。解析が終わると Effect Controls に編集可能なパラメーターが表示されます。
+2. Windows は Choose image...、Mac は PNG... で入力画像を選びます。画像のドラッグ＆ドロップも使えます。
+3. Windows は Render preview、Mac は Render を押します。Windows の詳細パネルでは Render current frame も使えます。
 
 Windows の入力は PNG、JPEG、BMP、TIFF、WebP に対応します。このバージョンの Mac GUI では PNG を使い、幅 1920、高さ 1080 ピクセル以下にしてください。
 
@@ -47,19 +47,19 @@ Windows の入力は PNG、JPEG、BMP、TIFF、WebP に対応します。この�
 
 数値、スライダー、チェックボックス、選択肢、色、座標を変更します。レイヤー入力を持つエフェクトでは、その項目から別の画像を選びます。表示される項目と編集範囲は AEX によって変わります。
 
-各項目の **Reset** で初期値に戻します。全パラメーターを戻すには、Effect Controls の見出しにある Windows の **Reset**、Mac の **Reset All** を押してください。Windows のチェーンでは選択中の段に適用されます。
+各項目の Reset で初期値に戻します。全パラメーターを戻すには、Effect Controls の見出しにある Windows の Reset、Mac の Reset All を押してください。Windows のチェーンでは選択中の段に適用されます。
 
-**Auto Update** をオンにすると、編集後に自動で再描画します。重いエフェクトではオフにして、編集をまとめてから描画ボタンを押してください。処理中は一部の操作が無効になります。無効な項目や未対応の項目は、診断欄の理由を確認してください。
+Auto Update をオンにすると、編集後に自動で再描画します。重いエフェクトではオフにして、編集をまとめてから描画ボタンを押してください。処理中は一部の操作が無効になります。無効な項目や未対応の項目は、診断欄の理由を確認してください。
 
 ## 入力と出力を見る
 
-**INPUT** は入力、**AEX OUTPUT** は描画結果、**COMPARE** は両方を横に並べます。画像上でホイールを動かすと拡大・縮小し、ドラッグすると表示位置を動かせます。**Fit** で全体表示に戻します。倍率はウィンドウに収めた状態を基準にしています。
+INPUT は入力、AEX OUTPUT は描画結果、COMPARE は両方を横に並べます。画像上でホイールを動かすと拡大・縮小し、ドラッグすると表示位置を動かせます。Fit で全体表示に戻します。倍率はウィンドウに収めた状態を基準にしています。
 
-Mac の 16 bpc と 32 bpc float はファイルを書き出しますが、出力プレビューは表示しません。成功したかどうかは **Output** の保存先と **Worker report** で確認してください。
+Mac の 16 bpc と 32 bpc float はファイルを書き出しますが、出力プレビューは表示しません。成功したかどうかは Output の保存先と Worker report で確認してください。
 
 ## 色深度を選ぶ
 
-**Analysis & Logs → Render Settings → Pixel depth** で選びます。Mac では上部の形式選択も使えます。
+Analysis & Logs → Render Settings → Pixel depth で選びます。Mac では上部の形式選択も使えます。
 
 | 色深度 | 用途・注意点 |
 |---|---|
@@ -74,10 +74,10 @@ AEX が対応する色深度を選んでください。高い色深度を選ん�
 このバージョンのチェーンは Windows GUI で使えます。Mac GUI は単一の AEX のみです。
 
 1. 入力画像と最初の AEX を選びます。
-2. **Effect Controls → Effect chain → Add...** で次の AEX を追加します。最大 8 段です。
+2. Effect Controls → Effect chain → Add... で次の AEX を追加します。最大 8 段です。
 3. 行を選んで、その段のパラメーターを編集します。同じ AEX を複数回使っても、設定は段ごとに保持されます。
-4. **Up / Down** で順序を変え、チェックを外すとその段を飛ばします。**Remove** で選択中の段を削除します。
-5. **Render preview** または PNG 保存を実行します。有効な段を上から順に適用します。
+4. Up / Down で順序を変え、チェックを外すとその段を飛ばします。Remove で選択中の段を削除します。
+5. Render preview または PNG 保存を実行します。有効な段を上から順に適用します。
 
 バックエンドは Auto または CPU を使います。有効な全段が選択した色深度に対応する必要があります。途中で失敗すると後続の段を止め、失敗した段を報告します。
 
@@ -87,7 +87,7 @@ AEX が対応する色深度を選んでください。高い色深度を選ん�
 
 ### Windows
 
-**Save PNG...** または詳細パネルの **Render and save PNG...** で保存先を指定します。チェーンの出力は次の組み合わせです。
+Save PNG... または詳細パネルの Render and save PNG... で保存先を指定します。チェーンの出力は次の組み合わせです。
 
 | 色深度 | 保存される内容 |
 |---|---|
@@ -99,7 +99,7 @@ raw サイドカーは行間の余白を含まない little-endian の RGBA で�
 
 ### Mac
 
-**Render** で `target/harness-output` に保存します。**Analysis & Logs → Output** に実際の保存先が表示されます。
+Render で `target/harness-output` に保存します。Analysis & Logs → Output に実際の保存先が表示されます。
 
 | 上部の形式 | 保存される内容 |
 |---|---|
@@ -107,11 +107,11 @@ raw サイドカーは行間の余白を含まない little-endian の RGBA で�
 | ARGB16 raw | `mac-aex-….raw-artifact/` 内の `output.bin` と `output.json` |
 | FLOAT32 EXR | `mac-aex-….exr-artifact/` 内の `output.exr` と `output.json` |
 
-Mac の ARGB16 raw は little-endian の **ARGB** です。Windows チェーンの RGBA サイドカーと取り違えないでください。`output.json` に寸法、チャンネル順、色深度、ハッシュなどが記録されます。ディレクトリごと保管してください。Mac の GUI は 16-bit PNG や float raw サイドカーを同時出力しません。
+Mac の ARGB16 raw は little-endian の ARGB です。Windows チェーンの RGBA サイドカーと取り違えないでください。`output.json` に寸法、チャンネル順、色深度、ハッシュなどが記録されます。ディレクトリごと保管してください。Mac の GUI は 16-bit PNG や float raw サイドカーを同時出力しません。
 
 ## 診断とレポートを読む
 
-**Analysis & Logs** で、選択中の AEX と入力、描画設定、実行結果を確認します。Mac の **Worker report** には worker の結果とエラーが表示されます。Windows では互換性、GPU、性能などの診断操作も使えます。操作が無効なら、表示される未対応理由を確認してください。
+Analysis & Logs で、選択中の AEX と入力、描画設定、実行結果を確認します。Mac の Worker report には worker の結果とエラーが表示されます。Windows では互換性、GPU、性能などの診断操作も使えます。操作が無効なら、表示される未対応理由を確認してください。
 
 不具合の報告にはOS、AEXCompat のコミット、AEX のバージョン、入力の寸法と色深度、パラメーター、実行した操作、エラー文を残します。レポート内の個人の絶対パスを取り除き、非公開 AEX、SDK、画像そのものは公開しないでください。
 
