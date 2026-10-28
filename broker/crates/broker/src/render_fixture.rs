@@ -13,7 +13,8 @@ pub struct InteractiveParameter {
     pub minimum: f64,
     pub maximum: f64,
     pub value: f64,
-    /// Resolve a numeric parameter from the loaded plug-in's declared default.
+    /// Resolve a numeric parameter from the loaded plug-in's declared default,
+    /// clamped to its declared range by the worker.
     /// `value` is ignored in this mode; explicit assignments remain range checked.
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_declared_default: bool,

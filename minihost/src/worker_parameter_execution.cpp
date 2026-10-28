@@ -20,6 +20,21 @@ constexpr std::size_t kInCurrentTime = 224;
 Hooks g_hooks{};
 Hooks& hooks() { return g_hooks; }
 parameters::State& runtime() { return parameters::state(); }
+bool has_default_range(const parameters::ParamRecord& record) {
+  return record.type == 1 || record.type == 2 || record.type == 7 || record.type == 10;
+}
+bool valid_default_range(const parameters::ParamRecord& record) {
+  return record.has_numeric && std::isfinite(record.valid_min) &&
+      std::isfinite(record.valid_max) && record.valid_min <= record.valid_max;
+}
+double effective_default(const parameters::ParamRecord& record) {
+  // Preserve the declaration for discovery. Normalize only the value supplied
+  // to the effect, both at initialization and on a later default/reset request.
+  if (has_default_range(record) && valid_default_range(record) &&
+      std::isfinite(record.default_value))
+    return std::clamp(record.default_value, record.valid_min, record.valid_max);
+  return record.default_value;
+}
 template <typename T, std::size_t N> T read(const std::array<std::byte, N>& b, std::size_t o) { T v{}; std::memcpy(&v, b.data()+o, sizeof(v)); return v; }
 template <typename T, std::size_t N> void write(std::array<std::byte, N>& b, std::size_t o, const T& v) { std::memcpy(b.data()+o, &v, sizeof(v)); }
 
@@ -683,6 +698,9 @@ bool validate_requested_assignments(const parameters::RequestedAssignments& requ
           (descriptor.type == 2 && (value * 65536.0 < INT32_MIN || value * 65536.0 > INT32_MAX)))
         return reject("numeric_representation", descriptor.type);
     }
+    if (assignment.use_declared_default && has_default_range(descriptor) &&
+        !valid_default_range(descriptor))
+      return reject("numeric_range", descriptor.type);
     if (descriptor.type == 12 && (value < 0 ||
          value > static_cast<double>(hooks().active_mask_count()) ||
          std::trunc(value) != value))
@@ -716,11 +734,12 @@ void initialize_parameter_definitions(
   auto staged_records = runtime().records;
   for (std::size_t i = 0; i < staged_records.size(); ++i) {
     auto& record = staged_records[i];
+    const double default_value = effective_default(record);
     definitions[i + 1] = record.raw;
     if (record.type == 0)
       std::memset(definitions[i + 1].data() + 56, 0, 40);
     else if (record.type == 1 || record.type == 7) {
-      const auto encoded = static_cast<int32_t>(record.default_value);
+      const auto encoded = static_cast<int32_t>(default_value);
       write<int32_t>(definitions[i + 1], 56, encoded);
       record.has_current = true;
       record.current_value = encoded;
@@ -731,15 +750,15 @@ void initialize_parameter_definitions(
       record.current_value = record.default_value != 0 ? 1.0 : 0.0;
     }
     else if (record.type == 2) {
-      const auto encoded = to_fixed(record.default_value);
+      const auto encoded = to_fixed(default_value);
       write<int32_t>(definitions[i + 1], 56, encoded);
       record.has_current = true;
       record.current_value = encoded / 65536.0;
     }
     else if (record.type == 10) {
-      write<double>(definitions[i + 1], 56, record.default_value);
+      write<double>(definitions[i + 1], 56, default_value);
       record.has_current = true;
-      record.current_value = record.default_value;
+      record.current_value = default_value;
     }
     else if (record.type == 5) {
       std::memcpy(record.current_color.data(), record.raw.data() + 56,
@@ -805,7 +824,7 @@ bool apply_requested_assignments(
     const auto slot = static_cast<std::size_t>(assignment.index);
     const auto type = staged_records[slot - 1].type;
     auto& record = staged_records[slot - 1];
-    const double value = assignment.use_declared_default ? record.default_value : assignment.value;
+    const double value = assignment.use_declared_default ? effective_default(record) : assignment.value;
     if (type == 11 && assignment.kind == parameters::RequestedKind::ArbitraryText) continue;
     if (type == 1 || type == 4 || type == 7) {
       const auto encoded = static_cast<int32_t>(value);
