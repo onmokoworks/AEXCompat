@@ -51,7 +51,7 @@ def struct_members(path, name):
 # Exact numeric versions are acquisition versions, not C++ struct suffixes.
 p = N + 'worker_pf_param_suites.hpp'
 for suite, symbol in [('PF PointParamSuite', 'floating_point_from_point'), ('PF AngleParamSuite', 'floating_point_from_angle'), ('PF ColorParamSuite', 'floating_point_from_color')]:
-    guest = 'no: suite absent [P1]' if 'Angle' in suite else 'partial: bounded parameter conversion [P1]'
+    guest = 'no: suite absent [P1]' if 'Angle' in suite else 'partial: first disk-id match; byte/255, no float-color fallback [P1]' if 'Color' in suite else 'yes: signed 16.16 to two doubles'
     add('Parameters and ANSI', suite, 1, 0, symbol, 'yes', guest,
         ref(p, symbol) + '; ' + ref(I, 'fn emulate_color_param_value') if 'Color' in suite else ref(p, symbol) + '; ' + ref(I, 'fn emulate_acquire_suite'))
 for version, name in [(2, 'ParamUtilsSuite1'), (3, 'ParamUtilsSuite3')]:
@@ -142,7 +142,7 @@ for bi,match in enumerate(branches):
     body = re.sub(r'//[^\n]*','',scene[match.end():end])
     count = int(re.search(r'unsupported_suite_slots<UnsupportedSuiteId::\w+, (\d+)>',body).group(1))
     implemented = {}
-    for assignment in re.finditer(r'(?:\b\w+\[(\d+)\]|reinterpret_cast<void\*\*>\(&\w+\)\[(\d+)\])\s*=\s*([^;]+);',body):
+    for assignment in re.finditer(r'(?:(?<![.\w])(?:g_\w+|effect_suite)\[(\d+)\]|reinterpret_cast<void\*\*>\(&\w+\)\[(\d+)\])\s*=\s*([^;]+);',body):
         slot = int(assignment.group(1) or assignment.group(2))
         expr = assignment.group(3).strip()
         callback = re.search(r'reinterpret_cast<void\*>\(\s*&([\w:]+)\)',expr)
@@ -183,8 +183,9 @@ for bi,match in enumerate(branches):
 maskpath = N+'worker_mask_suite_tables.cpp'
 for suite,version,table in [('AEGP Stream Suite',11,'g_stream_suite'),('AEGP Stream Suite',9,'g_stream_suite4'),('AEGP Keyframe Suite',5,'g_keyframe_suite'),('AEGP Keyframe Suite',4,'g_keyframe_suite4'),('AEGP Keyframe Suite',3,'g_keyframe_suite4'),('AEGP Dynamic Stream Suite',5,'g_dynamic_stream_suite')]:
     for slot,name in enumerate(callbacks(maskpath,table)):
-        win = 'no: explicit rejection' if name.startswith(('unsupported_','reject_')) else 'partial: bounded mask/stream model'
-        add('Mask stream fallback',suite,version,slot,name,win,guest_scene(suite,version,slot),ref(maskpath,table+'{')+'; '+ref(W,'"'+suite+'"')+' (mask mode; scene resolver takes precedence); '+ref(U,'fn emulate_ui_stream_call'))
+        win = 'no: explicit error 4' if name in {'unsupported_new_layer_stream', 'unsupported_effect_stream_count', 'unsupported_new_effect_stream', 'unsupported_layer_stream_value', 'reject_get_expression_ansi', 'reject_set_expression_ansi', 'reject_set_dimensions_separated', 'reject_get_separation_follower', 'reject_get_separation_leader', 'reject_get_separation_dimension'} else 'partial: bounded mask/stream model'
+        mode = 'model_enabled && !scene_context' if (suite == 'AEGP Stream Suite' and version == 9) or (suite == 'AEGP Keyframe Suite' and version in [3,4]) else 'model_enabled; scene resolver takes precedence'
+        add('Mask stream fallback',suite,version,slot,name,win,guest_scene(suite,version,slot),ref(maskpath,table+'{')+'; '+ref(W,'"'+suite+'"')+f' ({mode}); '+ref(U,'fn emulate_ui_stream_call'))
 for slot in range(14):
     add('Mask stream fallback','AEGP Dynamic Stream Suite',2,slot,'aegp_set_dynamic_stream_flag_v2' if slot == 5 else 'unnamed ABI slot','partial: legacy flag adapter' if slot == 5 else 'no: diagnosed error 4',guest_scene('AEGP Dynamic Stream Suite',2,slot),ref(N+'worker_host_suite_catalog.cpp','const void* provide_dynamic_stream2')+'; '+ref(U,'fn emulate_ui_stream_call'))
 for slot,name in enumerate(struct_members(N+'worker_aegp_pf_interface_suite.hpp','PfInterfaceSuite')):
@@ -222,7 +223,8 @@ for suite,version,first in assembly_specs:
     for v,names in versions:
         for slot,name in enumerate(names):
             win = 'no: clears output and returns 4' if name == 'render_sound_reject' else 'partial: bounded world/options/receipt runtime [R1]'
-            ev = ref(W,match.group(0))+'; '+ref(N+'worker_l2_render_abi.cpp','int32_t __cdecl render_checkout_frame_reject')
+            mode = 'render worker && layer-render runtime active' if suite == 'AEGP Render Options Suite' and v == 4 else 'command-roundtrip OR (render worker && layer-render runtime active)' if suite == 'AEGP Render Suite' and v == 2 else 'static catalog; callbacks validate runtime state'
+            ev = ref(W,match.group(0))+f' ({mode}); '+ref(N+'worker_l2_render_abi.cpp','int32_t __cdecl render_checkout_frame_reject')
             add('Worlds and rendering',suite,v,slot,name,win,'no: suite absent [R1]',ev)
 
 # A carrier is not the Unicorn engine. It is selected only by native-carrier;
@@ -231,7 +233,7 @@ for suite,version,first in assembly_specs:
 for suite,count in [('PF ColorParamSuite',1),('PF PointParamSuite',1),('AEGP Memory Suite',8)]:
     for slot in range(count):
         name = 'get_floating_point_value' if count == 1 else struct_members(N+'worker_handle_runtime.hpp','AegpMemorySuite')[slot]
-        add('Optional native carrier (not default Unicorn)',suite,1,slot,name,'see main table','partial: carrier implementation; not run in X06',ref(G+'native_x64.rs','unsafe extern "win64" fn acquire_suite')+'; '+ref(G+'native_aegp_memory.rs'))
+        add('Optional native carrier (not default Unicorn)',suite,1,slot,name,'see main table','no: returns 4; shared unsupported callback' if suite == 'AEGP Memory Suite' and slot >= 6 else 'partial: carrier implementation; not run in X06',ref(G+'native_x64.rs','unsafe extern "win64" fn acquire_suite')+'; '+ref(G+'native_aegp_memory.rs'))
 for v,count,reg,win in [(3,9,7,8),(7,25,7,8),(11,31,8,9),(13,33,9,10)]:
     for slot in range(count):
         name = 'RegisterWithAEGP' if slot == reg else 'GetMainHWND' if slot == win else 'unnamed ABI slot'
@@ -303,7 +305,9 @@ Windows desktop HWND in the native host. Both limitations remain visible below.
   capacity; only 0/2 have observed signatures and depth-conversion behavior.
 * Render symbols ending in `reject` must be read: item/layer checkout, async
   checkout/cancel, region, timestamps and GUID now delegate to real runtimes.
-  Sound remains unsupported. Render v2 and Render Options v4 are mode gated;
+  Sound remains unsupported. Likewise mask Stream name/expression callbacks
+  bearing `unsupported`/`reject` names now have real owned-string/state behavior.
+  Render v2 and Render Options v4 are mode gated;
   all render operations still require valid owned state.
 
 ## Arbitrary values: separate from parameter serialization
@@ -326,7 +330,7 @@ stream parity test was added or claimed by X06. See follow-up A1.
 
 | ID | Concrete scope / acceptance boundary |
 |---|---|
-| P1 | Bring ParamUtils v2/v3 and Angle v1 to render dispatch with correct obsolete/new state layouts, keyframe/time semantics and parameter identity; preserve UI cosmetic/value ownership separation. Differentially test all returned data and malformed/stale references. |
+| P1 | Bring ParamUtils v2/v3 and Angle v1 to render dispatch with correct obsolete/new state layouts, keyframe/time semantics and parameter identity; preserve UI cosmetic/value ownership separation. ColorParam must handle duplicate disk IDs and stored float colors like native, instead of first-id lookup and byte/255 conversion. Differentially test all returned data and malformed/stale references. |
 | P2 | Implement ANSI varargs Win64 formatting with bounded destination/error semantics; establish Windows-UCRT-versus-host-libm exact witnesses for every numeric operation, including nonfinite/domain/rounding boundaries. Existing CRT formatter is a lead, not evidence of identical PF sprintf semantics. |
 | U1 | Specify headless main-window behavior and implement required Utility slots from verified ABI signatures. Native null v3/v11 slots also need explicit rejection/diagnostics; guest missing behavior is not fixed by table presence. |
 | U2 | Implement Memory reporting toggle and stats from the existing handle registry (slots 6/7), including exact counters/plugin ownership/error writes; add per-slot unsupported telemetry until implemented. |
