@@ -35,6 +35,16 @@ use aexcompat_broker::render_pixel_format::RenderPixelFormat;
 
 include!("macos_chain.rs");
 
+const INPUT_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"];
+
+fn supported_input_image(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        INPUT_IMAGE_EXTENSIONS
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    })
+}
+
 const MAX_WIDTH: u32 = 3840;
 const MAX_HEIGHT: u32 = 2160;
 const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
@@ -88,8 +98,7 @@ impl MacRenderFormat {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResidentFrameOutput {
-    // Legacy workers omit rect. The GUI currently requests a zero-origin full frame;
-    // accept the F54 response only when its rectangle agrees with that contract.
+    // Legacy workers omit rect only for the fixed, zero-origin full-frame path.
     #[serde(default)]
     rect: Option<[i32; 4]>,
     width: u32,
@@ -133,6 +142,16 @@ fn validate_resident_frame(
     height: u32,
     format: MacRenderFormat,
 ) -> Result<String, String> {
+    validate_resident_frame_geometry(value, frame_index, Some((width, height)), format)
+        .map(|output| output.checksum)
+}
+
+fn validate_resident_frame_geometry(
+    value: &Value,
+    frame_index: u64,
+    fixed_size: Option<(u32, u32)>,
+    format: MacRenderFormat,
+) -> Result<ResidentFrameOutput, String> {
     let done: ResidentFrameDone = serde_json::from_value(value.clone())
         .map_err(|error| format!("malformed resident frame response: {error}"))?;
     let expected_generation = frame_index
@@ -155,15 +174,20 @@ fn validate_resident_frame(
         || done.status != "ok"
         || done.render_error != 0
         || done.generation != Some(expected_generation)
-        || output.width != width
-        || output.height != height
+        || output.width == 0
+        || output.height == 0
+        || output.width > MAX_WIDTH
+        || output.height > MAX_HEIGHT
+        || fixed_size.is_some_and(|size| size != (output.width, output.height))
+        || (fixed_size.is_none() && output.rect.is_none())
         || output.rect.is_some_and(|rect| {
-            rect[0] != 0
-                || rect[1] != 0
-                || i64::from(rect[2]) != i64::from(width)
-                || i64::from(rect[3]) != i64::from(height)
+            (fixed_size.is_some() && (rect[0] != 0 || rect[1] != 0))
+                || rect[0].unsigned_abs() > 4096
+                || rect[1].unsigned_abs() > 4096
+                || i64::from(rect[2]) - i64::from(rect[0]) != i64::from(output.width)
+                || i64::from(rect[3]) - i64::from(rect[1]) != i64::from(output.height)
         })
-        || output.rowbytes != width * format.bytes_per_pixel() as u32
+        || output.rowbytes != output.width.saturating_mul(format.bytes_per_pixel() as u32)
         || output.pixel_format != format.pixel_format()
         || !matches!(output.render_path.as_str(), "classic" | "smartfx")
         || output.checksum.len() != 64
@@ -174,7 +198,7 @@ fn validate_resident_frame(
             "resident frame response failed invariants: {value}"
         ));
     }
-    Ok(output.checksum)
+    Ok(output)
 }
 
 fn validate_resident_close(value: &Value, worker_pid: u32) -> Result<(), String> {
@@ -299,6 +323,7 @@ struct ResidentSessionHandle {
     plugin_path: PathBuf,
     input: PathBuf,
     format: MacRenderFormat,
+    negotiate_output: bool,
     layers: Vec<(u32, PathBuf)>,
     sender: Sender<ResidentCommand>,
     receiver: Receiver<Result<RenderResult, String>>,
@@ -320,6 +345,7 @@ struct ResidentAdmissionHandle {
     plugin_path: PathBuf,
     input: PathBuf,
     format: MacRenderFormat,
+    negotiate_output: bool,
     layers: Vec<(u32, PathBuf)>,
     receiver: Receiver<Result<ResidentSessionHandle, String>>,
 }
@@ -424,6 +450,7 @@ struct MacHarnessApp {
     viewer_pan: egui::Vec2,
     busy: bool,
     render_format: MacRenderFormat,
+    negotiate_output: bool,
     resident: ResidentState,
     user_changed: Option<Receiver<Result<Vec<DynamicParameterUi>, String>>>,
     pending_user_changed: Option<u32>,
@@ -450,7 +477,7 @@ impl MacHarnessApp {
             output: None,
             input_texture: None,
             output_texture: None,
-            status: "Select an x64 AEX and a PNG image.".into(),
+            status: "Select an x64 AEX and an image.".into(),
             report: String::new(),
             parameters: Vec::new(),
             parameter_defaults: Vec::new(),
@@ -461,6 +488,7 @@ impl MacHarnessApp {
             viewer_pan: egui::Vec2::ZERO,
             busy: false,
             render_format: MacRenderFormat::PngArgb8,
+            negotiate_output: false,
             resident: ResidentState::Idle,
             user_changed: None,
             pending_user_changed: None,
@@ -525,7 +553,7 @@ impl MacHarnessApp {
 
     fn choose_input(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG image", &["png"])
+            .add_filter("Image", INPUT_IMAGE_EXTENSIONS)
             .pick_file()
         else {
             return;
@@ -556,11 +584,11 @@ impl MacHarnessApp {
             Ok((_, width, height)) => {
                 self.status = "Input exceeds the 4K UHD boundary.".into();
                 self.report = format!(
-                    "PNG must be within 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
+                    "Image must be within 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
                 );
             }
             Err(error) => {
-                self.status = "Could not open input PNG.".into();
+                self.status = "Could not open input image.".into();
                 self.report = error;
             }
         }
@@ -575,11 +603,10 @@ impl MacHarnessApp {
             self.status = "Image drop ignored while a native task is running.".into();
             return;
         }
-        let Some(path) = crate::shared_ui::single_supported_dropped_path(&dropped, |path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
-        }) else {
-            self.status = "Drop exactly one PNG image file.".into();
+        let Some(path) =
+            crate::shared_ui::single_supported_dropped_path(&dropped, supported_input_image)
+        else {
+            self.status = "Drop exactly one PNG, JPEG, BMP, TIFF or WebP image file.".into();
             return;
         };
         self.load_input_path(ctx, path);
@@ -631,6 +658,7 @@ impl MacHarnessApp {
                 if session.plugin_path == aex
                     && session.input == input
                     && session.format == self.render_format
+                    && session.negotiate_output == self.negotiate_output
                     && session.layers == selected_layer_paths(&self.parameters)
         );
         let same_starting = matches!(
@@ -639,6 +667,7 @@ impl MacHarnessApp {
                 if admission.plugin_path == aex
                     && admission.input == input
                     && admission.format == self.render_format
+                    && admission.negotiate_output == self.negotiate_output
                     && admission.layers == selected_layer_paths(&self.parameters)
         );
         let pending = PendingResidentRender {
@@ -670,6 +699,7 @@ impl MacHarnessApp {
                     output_directory,
                     self.render_format,
                     self.parameters.clone(),
+                    self.negotiate_output,
                 ),
                 pending,
             };
@@ -938,7 +968,7 @@ impl eframe::App for MacHarnessApp {
                     self.choose_aex();
                 }
                 if ui
-                    .add_enabled(!occupied, egui::Button::new("PNG..."))
+                    .add_enabled(!occupied, egui::Button::new("Image..."))
                     .clicked()
                 {
                     self.choose_input(ctx);
@@ -947,8 +977,8 @@ impl eframe::App for MacHarnessApp {
                     egui::ComboBox::from_id_salt("mac-render-format")
                         .selected_text(match self.render_format {
                             MacRenderFormat::PngArgb8 => "ARGB8 PNG",
-                            MacRenderFormat::RawArgb16 => "ARGB16 raw",
-                            MacRenderFormat::ExrArgb32f => "FLOAT32 EXR",
+                            MacRenderFormat::RawArgb16 => "ARGB16 PNG + raw",
+                            MacRenderFormat::ExrArgb32f => "FLOAT32 EXR + PNG + raw",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
@@ -959,14 +989,20 @@ impl eframe::App for MacHarnessApp {
                             ui.selectable_value(
                                 &mut self.render_format,
                                 MacRenderFormat::RawArgb16,
-                                "ARGB16 raw",
+                                "ARGB16 PNG + raw",
                             );
                             ui.selectable_value(
                                 &mut self.render_format,
                                 MacRenderFormat::ExrArgb32f,
-                                "FLOAT32 EXR",
+                                "FLOAT32 EXR + PNG + raw",
                             );
                         });
+                });
+                ui.add_enabled_ui(!occupied && !self.uses_chain_renderer(), |ui| {
+                    ui.checkbox(
+                        &mut self.negotiate_output,
+                        "Negotiate output size (single effect)",
+                    );
                 });
                 let ready = !occupied && self.plugin_path.is_some() && self.input.is_some();
                 if ui.add_enabled(ready, egui::Button::new("Render")).clicked() {
@@ -1193,7 +1229,7 @@ impl MacHarnessApp {
                 }
                 crate::shared_ui::EffectControlIntent::ChooseLayer { slot } => {
                     let selected = rfd::FileDialog::new()
-                        .add_filter("Image", &["png"])
+                        .add_filter("Image", INPUT_IMAGE_EXTENSIONS)
                         .pick_file();
                     if let Some(parameter) =
                         self.parameters.iter_mut().find(|value| value.slot == slot)
@@ -1428,7 +1464,7 @@ fn encode_resident_image(
     validate_resident_image_dimensions(input)?;
     if format == MacRenderFormat::PngArgb8 {
         let rgba = image::open(input)
-            .map_err(|error| format!("open resident input PNG: {error}"))?
+            .map_err(|error| format!("open resident input image: {error}"))?
             .into_rgba8();
         let (width, height) = rgba.dimensions();
         if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
@@ -1443,7 +1479,7 @@ fn encode_resident_image(
         return Ok((width, height, argb));
     }
     let decoded =
-        image::open(input).map_err(|error| format!("open resident input PNG: {error}"))?;
+        image::open(input).map_err(|error| format!("open resident input image: {error}"))?;
     let (width, height) = (decoded.width(), decoded.height());
     if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
         return Err(format!(
@@ -1510,6 +1546,60 @@ fn save_argb8_slot(
     Ok(checksum)
 }
 
+/// Display/export is derived from the verified world, never fed back into rendering.
+/// PNG16 uses the native Windows AE16 expansion; float PNG is an SDR display copy.
+fn save_deep_preview(
+    slot: &Path,
+    output: &Path,
+    width: u32,
+    height: u32,
+    format: MacRenderFormat,
+    expected_checksum: &str,
+) -> Result<(), String> {
+    use aexcompat_broker::decoded_image::{native_rgba_to_preview, rgba16_transport_to_png16};
+    if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
+        return Err("deep preview dimensions exceed GUI bounds".into());
+    }
+    let expected = u64::from(width) * u64::from(height) * format.bytes_per_pixel() as u64;
+    let mut argb = Vec::new();
+    std::fs::File::open(slot)
+        .map_err(|e| e.to_string())?
+        .take(expected + 1)
+        .read_to_end(&mut argb)
+        .map_err(|e| e.to_string())?;
+    if argb.len() as u64 != expected || format!("{:x}", Sha256::digest(&argb)) != expected_checksum
+    {
+        return Err("deep preview output size/checksum mismatch".into());
+    }
+    let rgba = argb_to_rgba_words(&argb, format.bytes_per_pixel() / 4);
+    let image = match format {
+        MacRenderFormat::RawArgb16 => {
+            let (samples, _) = rgba16_transport_to_png16(&rgba).map_err(|e| e.to_string())?;
+            image::DynamicImage::ImageRgba16(
+                image::ImageBuffer::from_raw(width, height, samples)
+                    .ok_or("invalid PNG16 dimensions")?,
+            )
+        }
+        MacRenderFormat::ExrArgb32f => {
+            let samples = native_rgba_to_preview(&rgba, format.artifact_format())
+                .map_err(|e| e.to_string())?;
+            image::DynamicImage::ImageRgba8(
+                image::RgbaImage::from_raw(width, height, samples)
+                    .ok_or("invalid float preview dimensions")?,
+            )
+        }
+        MacRenderFormat::PngArgb8 => return Err("deep preview requires a deep world".into()),
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .map_err(|e| e.to_string())?;
+    image
+        .write_to(&mut file, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())
+}
+
 fn save_argb16_raw_slot(
     slot: &Path,
     directory: &Path,
@@ -1520,6 +1610,32 @@ fn save_argb16_raw_slot(
     parameters: &str,
     render_path: &str,
     expected_checksum: &str,
+) -> Result<String, String> {
+    save_argb16_raw_slot_at_origin(
+        slot,
+        directory,
+        width,
+        height,
+        plugin_sha256,
+        input_sha256,
+        parameters,
+        render_path,
+        expected_checksum,
+        (0, 0),
+    )
+}
+
+fn save_argb16_raw_slot_at_origin(
+    slot: &Path,
+    directory: &Path,
+    width: u32,
+    height: u32,
+    plugin_sha256: &str,
+    input_sha256: &str,
+    parameters: &str,
+    render_path: &str,
+    expected_checksum: &str,
+    origin: (i32, i32),
 ) -> Result<String, String> {
     let expected = u64::from(width) * u64::from(height) * 8;
     let file = std::fs::File::open(slot)
@@ -1542,7 +1658,7 @@ fn save_argb16_raw_slot(
             "resident output checksum mismatch: response={expected_checksum} slot={checksum}"
         ));
     }
-    let conditions = fixture_conditions(
+    let mut conditions = fixture_conditions(
         plugin_sha256,
         input_sha256,
         &argb,
@@ -1556,14 +1672,15 @@ fn save_argb16_raw_slot(
         30,
         None,
     );
+    conditions.comparison_identity["origin"] = json!({"x": origin.0, "y": origin.1});
     write_raw_world_artifact(
         directory,
         &argb_to_rgba_words(&argb, 2),
         width,
         height,
         RenderPixelFormat::Argb16,
-        0,
-        0,
+        origin.0,
+        origin.1,
         conditions,
     )
     .map_err(|error| format!("write ARGB16 raw artifact: {error}"))?;
@@ -1580,6 +1697,32 @@ fn save_argb32f_exr_slot(
     parameters: &str,
     render_path: &str,
     expected_checksum: &str,
+) -> Result<String, String> {
+    save_argb32f_exr_slot_at_origin(
+        slot,
+        directory,
+        width,
+        height,
+        plugin_sha256,
+        input_sha256,
+        parameters,
+        render_path,
+        expected_checksum,
+        (0, 0),
+    )
+}
+
+fn save_argb32f_exr_slot_at_origin(
+    slot: &Path,
+    directory: &Path,
+    width: u32,
+    height: u32,
+    plugin_sha256: &str,
+    input_sha256: &str,
+    parameters: &str,
+    render_path: &str,
+    expected_checksum: &str,
+    origin: (i32, i32),
 ) -> Result<String, String> {
     let argb = std::fs::read(slot)
         .map_err(|error| format!("read resident ARGB32F output slot: {error}"))?;
@@ -1613,11 +1756,15 @@ fn save_argb32f_exr_slot(
             "pixel_format": "argb32f",
             "timing": {"current_time": 0, "time_step": 1, "total_time": 1, "time_scale": 30},
             "requested_parameters": [parameters],
-            "origin": {"x": 0, "y": 0}
+            "origin": {"x": origin.0, "y": origin.1}
         }),
     };
-    write_float32_exr_artifact(directory, &rgba, width, height, 0, 0, conditions)
-        .map_err(|error| format!("write FLOAT32 EXR artifact: {error}"))?;
+    write_float32_exr_artifact(
+        directory, &rgba, width, height, origin.0, origin.1, conditions,
+    )
+    .map_err(|error| format!("write FLOAT32 EXR artifact: {error}"))?;
+    std::fs::write(directory.join("output.argb"), &argb)
+        .map_err(|error| format!("write FLOAT32 raw sidecar: {error}"))?;
     Ok(format!("{:x}", Sha256::digest(&argb)))
 }
 
@@ -1702,25 +1849,32 @@ fn start_resident_worker(
     input: &Path,
     format: MacRenderFormat,
     fixture: Option<&MacFixtureLaunch<'_>>,
+    negotiate_output: bool,
 ) -> Result<StartedResidentWorker, String> {
     let mut failures = Vec::new();
     for candidate in candidates {
-        let mut probe_worker =
-            match launch_resident_candidate(candidate, aex, input, format, fixture) {
-                Ok(worker) => worker,
-                Err(error) => {
-                    failures.push(format!(
-                        "{} ({}): {error}",
-                        candidate.path.display(),
-                        if candidate.native {
-                            "native"
-                        } else {
-                            "fallback"
-                        },
-                    ));
-                    continue;
-                }
-            };
+        let mut probe_worker = match launch_resident_candidate(
+            candidate,
+            aex,
+            input,
+            format,
+            fixture,
+            negotiate_output,
+        ) {
+            Ok(worker) => worker,
+            Err(error) => {
+                failures.push(format!(
+                    "{} ({}): {error}",
+                    candidate.path.display(),
+                    if candidate.native {
+                        "native"
+                    } else {
+                        "fallback"
+                    },
+                ));
+                continue;
+            }
+        };
         let admission =
             write_control_message(&mut probe_worker.stdin, &json!({"v": 1, "type": "probe"}))
                 .and_then(|()| {
@@ -1766,7 +1920,7 @@ fn start_resident_worker(
             ));
             continue;
         }
-        match launch_resident_candidate(candidate, aex, input, format, fixture) {
+        match launch_resident_candidate(candidate, aex, input, format, fixture, negotiate_output) {
             Ok(mut fresh_worker) => {
                 fresh_worker.fallback_reasons = failures;
                 return Ok(fresh_worker);
@@ -1796,6 +1950,7 @@ fn launch_resident_candidate(
     input: &Path,
     format: MacRenderFormat,
     fixture: Option<&MacFixtureLaunch<'_>>,
+    negotiate_output: bool,
 ) -> Result<StartedResidentWorker, String> {
     let session = WorkerSession::create()?;
     let worker = session.stage_file(&candidate.path, "worker")?;
@@ -1848,6 +2003,9 @@ fn launch_resident_candidate(
         "--pixel-format".to_string(),
         format.pixel_format().to_string(),
     ];
+    if negotiate_output {
+        arguments.extend(["--negotiate-output".into(), "1".into()]);
+    }
     let mut fixture_layer_worlds = Vec::new();
     if let Some(fixture) = fixture {
         let mixed_primary = primary_format != format;
@@ -2528,8 +2686,14 @@ fn render_single_fixture_headless(
         raw_primary: None,
     };
     let workers = guest_worker_candidates(repository)?;
-    let mut started =
-        start_resident_worker(&workers, aex, &loaded.primary_layer, format, Some(&launch))?;
+    let mut started = start_resident_worker(
+        &workers,
+        aex,
+        &loaded.primary_layer,
+        format,
+        Some(&launch),
+        false,
+    )?;
     let primary_width = started.width;
     let primary_height = started.height;
     let request = fixture_render_request(&fixture.timing, &parameters.transport);
@@ -2799,18 +2963,28 @@ fn begin_resident_admission(
     output_directory: PathBuf,
     format: MacRenderFormat,
     parameters: Vec<InteractiveParameter>,
+    negotiate_output: bool,
 ) -> ResidentAdmissionHandle {
     let plugin_path = aex.clone();
     let admission_input = input.clone();
     let layers = selected_layer_paths(&parameters);
     let identity_layers = layers.clone();
     let receiver = spawn_resident_admission(move || {
-        start_resident_session(&candidates, &aex, &input, &output_directory, format, layers)
+        start_resident_session_with_geometry(
+            &candidates,
+            &aex,
+            &input,
+            &output_directory,
+            format,
+            layers,
+            negotiate_output,
+        )
     });
     ResidentAdmissionHandle {
         plugin_path,
         input: admission_input,
         format,
+        negotiate_output,
         layers: identity_layers,
         receiver,
     }
@@ -2861,13 +3035,34 @@ fn recv_resident_response(
     }
 }
 
+#[cfg(test)]
 fn start_resident_session(
+    candidates: &[GuestWorkerCandidate],
+    aex: &Path,
+    input: &Path,
+    output_directory: &Path,
+    format: MacRenderFormat,
+    layers: Vec<(u32, PathBuf)>,
+) -> Result<ResidentSessionHandle, String> {
+    start_resident_session_with_geometry(
+        candidates,
+        aex,
+        input,
+        output_directory,
+        format,
+        layers,
+        false,
+    )
+}
+
+fn start_resident_session_with_geometry(
     candidates: &[GuestWorkerCandidate],
     aex: &Path,
     input: &Path,
     _output_directory: &Path,
     format: MacRenderFormat,
     layers: Vec<(u32, PathBuf)>,
+    negotiate_output: bool,
 ) -> Result<ResidentSessionHandle, String> {
     if layers.len() > 8 {
         return Err("resident secondary layer count exceeds 8".into());
@@ -2879,7 +3074,14 @@ fn start_resident_session(
         time_scale: 30,
         raw_primary: None,
     });
-    let started = start_resident_worker(candidates, aex, input, format, fixture.as_ref())?;
+    let started = start_resident_worker(
+        candidates,
+        aex,
+        input,
+        format,
+        fixture.as_ref(),
+        negotiate_output,
+    )?;
     let plugin_sha256 = started.plugin_sha256.clone();
     let input_sha256 = started.input_sha256.clone();
     let width = started.width;
@@ -2929,8 +3131,11 @@ fn start_resident_session(
                             RESIDENT_RENDER_DEADLINE,
                         )?
                             .ok_or_else(|| "resident worker closed stdout".to_string())?;
-                        let expected_checksum =
-                            validate_resident_frame(&response, frame_index, width, height, format)?;
+                        let frame = validate_resident_frame_geometry(&response, frame_index,
+                            (!negotiate_output).then_some((width, height)), format)?;
+                        let (width, height) = (frame.width, frame.height);
+                        let origin = frame.rect.map_or((0, 0), |rect| (rect[0], rect[1]));
+                        let expected_checksum = frame.checksum;
                         let render_path = response["output"]["render_path"]
                             .as_str()
                             .expect("validated resident render path");
@@ -2948,7 +3153,7 @@ fn start_resident_session(
                                 Some(output.clone()),
                             ),
                             MacRenderFormat::ExrArgb32f => {
-                                let checksum = save_argb32f_exr_slot(
+                                let checksum = save_argb32f_exr_slot_at_origin(
                                     &output_slot,
                                     &output,
                                     width,
@@ -2958,16 +3163,20 @@ fn start_resident_session(
                                     &payload,
                                     render_path,
                                     &expected_checksum,
+                                    origin,
                                 )?;
-                                (checksum, output.join("output.exr"), None)
+                                save_deep_preview(&output_slot, &output.join("output.png"), width, height, format, &checksum)?;
+                                (checksum, output.join("output.exr"), Some(output.join("output.png")))
                             }
                             MacRenderFormat::RawArgb16 => {
-                                let checksum = save_argb16_raw_slot(
+                                let checksum = save_argb16_raw_slot_at_origin(
                                     &output_slot, &output, width, height,
                                     &plugin_sha256, &input_sha256, &payload,
                                     render_path, &expected_checksum,
+                                    origin,
                                 )?;
-                                (checksum, output.join("output.bin"), None)
+                                save_deep_preview(&output_slot, &output.join("output.png"), width, height, format, &checksum)?;
+                                (checksum, output.join("output.bin"), Some(output.join("output.png")))
                             }
                         };
                         debug_assert_eq!(observed_checksum, expected_checksum);
@@ -3076,6 +3285,7 @@ fn start_resident_session(
         plugin_path: aex.to_path_buf(),
         input: input.to_path_buf(),
         format,
+        negotiate_output,
         layers,
         sender: command_sender,
         receiver: result_receiver,
@@ -3563,6 +3773,7 @@ fn repository_root() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("macos_transport_tests.rs");
 
     fn fixture_resident_child() -> Child {
         let mut command = Command::new("/bin/sleep");
@@ -4647,7 +4858,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.output, artifact.join("output.bin"));
-        assert!(result.preview.is_none());
+        assert_eq!(result.preview, Some(artifact.join("output.png")));
         let report: Value = serde_json::from_str(&result.report).unwrap();
         let bytes = std::fs::read(&result.output).unwrap();
         assert_eq!(bytes.len(), 3 * 2 * 8);
@@ -4798,6 +5009,7 @@ mod tests {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
             format: MacRenderFormat::PngArgb8,
+            negotiate_output: false,
             layers: Vec::new(),
             sender: command_sender,
             receiver: result_receiver,
@@ -4919,6 +5131,7 @@ mod tests {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
             format: MacRenderFormat::PngArgb8,
+            negotiate_output: false,
             layers: Vec::new(),
             sender: command_sender,
             receiver: result_receiver,
@@ -4972,6 +5185,7 @@ mod tests {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
             format: MacRenderFormat::PngArgb8,
+            negotiate_output: false,
             layers: Vec::new(),
             sender: command_sender,
             receiver: result_receiver,

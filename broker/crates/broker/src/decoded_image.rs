@@ -1,5 +1,10 @@
 //! Depth conversion shared by the native and emulated image transports.
 use crate::render_pixel_format::RenderPixelFormat;
+use std::io;
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
 
 /// Encode packed little-endian RGBA, retaining the decoded source depth.
 /// AE 16-bpc white is 32768; float samples are not clamped to display range.
@@ -83,4 +88,62 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+}
+
+pub fn native_rgba_to_preview(bytes: &[u8], format: RenderPixelFormat) -> io::Result<Vec<u8>> {
+    match format {
+        RenderPixelFormat::Argb8 => Ok(bytes.to_vec()),
+        RenderPixelFormat::Argb16 => {
+            if bytes.len() % 8 != 0 {
+                return Err(invalid("RGBA16 output is misaligned"));
+            }
+            Ok(bytes
+                .chunks_exact(2)
+                .map(|sample| {
+                    let value = u16::from_le_bytes([sample[0], sample[1]]);
+                    ((u32::from(value.min(32768)) * 255 + 16384) / 32768) as u8
+                })
+                .collect())
+        }
+        RenderPixelFormat::Argb32f => {
+            if bytes.len() % 16 != 0 {
+                return Err(invalid("RGBA32f output is misaligned"));
+            }
+            Ok(bytes
+                .chunks_exact(4)
+                .map(|sample| {
+                    let value = f32::from_le_bytes(sample.try_into().expect("four-byte sample"));
+                    if value.is_finite() {
+                        (value.clamp(0.0, 1.0) * 255.0).round() as u8
+                    } else {
+                        0
+                    }
+                })
+                .collect())
+        }
+    }
+}
+
+/// AE 16-bpc white point: ARGB16 transport samples are 0..=32768, not 0..=65535.
+const AE_ARGB16_WHITE: u32 = 32768;
+
+/// Expand AE-range RGBA16 transport bytes to full-range PNG16 samples.
+/// Over-white samples are clamped exactly like the 8-bit preview path; the
+/// count is returned so reports can surface them instead of hiding the clamp.
+pub fn rgba16_transport_to_png16(bytes: &[u8]) -> io::Result<(Vec<u16>, u64)> {
+    if bytes.len() % 8 != 0 {
+        return Err(invalid("RGBA16 output is misaligned"));
+    }
+    let mut overrange_samples = 0u64;
+    let samples = bytes
+        .chunks_exact(2)
+        .map(|sample| {
+            let value = u32::from(u16::from_le_bytes([sample[0], sample[1]]));
+            if value > AE_ARGB16_WHITE {
+                overrange_samples += 1;
+            }
+            ((value.min(AE_ARGB16_WHITE) * 65535 + 16384) / 32768) as u16
+        })
+        .collect();
+    Ok((samples, overrange_samples))
 }
