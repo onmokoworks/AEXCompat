@@ -1331,8 +1331,8 @@ fn resolve_runtime_target_provenance(
 }
 
 fn is_suite_address(address: u64) -> bool {
-    (HOST_AEGP_UTILITY_TABLES..HOST_AEGP_UTILITY_TABLES + 0x400).contains(&address)
-        || (HOST_AEGP_UNSUPPORTED_STUBS..HOST_AEGP_UNSUPPORTED_STUBS + 0x4000).contains(&address)
+    (HOST_AEGP_UTILITY_TABLES..HOST_AEGP_UTILITY_TABLES + 0x600).contains(&address)
+        || (HOST_AEGP_UNSUPPORTED_STUBS..HOST_AEGP_UNSUPPORTED_STUBS + 0x5000).contains(&address)
         || (HOST_ITERATE8_UNSUPPORTED_STUBS..HOST_ITERATE8_UNSUPPORTED_STUBS + 0x1000)
             .contains(&address)
         || [
