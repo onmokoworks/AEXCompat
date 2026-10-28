@@ -630,7 +630,8 @@ bool valid_parameter_id(const std::wstring& id) {
 bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) {
   if (!text) return false;
   const std::wstring encoded(text);
-  const bool version6 = encoded.compare(0, 3, L"v6|") == 0;
+  const bool version7 = encoded.compare(0, 3, L"v7|") == 0;
+  const bool version6 = version7 || encoded.compare(0, 3, L"v6|") == 0;
   const bool version5 = version6 || encoded.compare(0, 3, L"v5|") == 0;
   const bool version4 = encoded.compare(0, 3, L"v4|") == 0;
   const bool version3 = encoded.compare(0, 3, L"v3|") == 0;
@@ -695,7 +696,11 @@ bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) 
       }
       value.resize(slash);
     }
-    if (kind == RequestedKind::Color) {
+    const bool use_declared_default = version7 && value == L"default" &&
+        (kind == RequestedKind::Integer || kind == RequestedKind::Float);
+    if (use_declared_default) {
+      // The loaded descriptor is authoritative, never a caller-supplied value.
+    } else if (kind == RequestedKind::Color) {
       std::size_t start = 0;
       for (std::size_t channel = 0; channel < color.size(); ++channel) {
         const std::size_t comma = value.find(L',', start);
@@ -745,7 +750,8 @@ bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) 
       if (!parse_double_arg(value.c_str(), minimum, maximum, parsed) ||
           (kind == RequestedKind::Integer && std::trunc(parsed) != parsed)) return false;
     }
-    output.push_back({id, index, kind, parsed, color, components, arbitrary_text, has_float_color, float_color});
+    output.push_back({id, index, kind, parsed, color, components, arbitrary_text,
+                      has_float_color, float_color, use_declared_default});
     if (output.size() > kMaxParams) return false;
     if (separator == std::wstring::npos) break;
     offset = separator + 1;

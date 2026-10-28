@@ -670,12 +670,25 @@ bool validate_requested_assignments(const parameters::RequestedAssignments& requ
          std::any_of(assignment.float_color.begin(), assignment.float_color.end(),
                      [](float value) { return !std::isfinite(value); })))
       return reject("invalid_float_color", descriptor.type);
-    if (descriptor.type == 12 && (assignment.value < 0 ||
-         assignment.value > static_cast<double>(hooks().active_mask_count()) ||
-         std::trunc(assignment.value) != assignment.value))
+    const double value = assignment.use_declared_default
+        ? descriptor.default_value : assignment.value;
+    if (assignment.use_declared_default &&
+        (assignment.kind != RequestedKind::Integer && assignment.kind != RequestedKind::Float))
+      return reject("default_kind_mismatch", descriptor.type);
+    if (assignment.kind == RequestedKind::Integer || assignment.kind == RequestedKind::Float) {
+      if (!std::isfinite(value) ||
+          (assignment.kind == RequestedKind::Integer &&
+           (std::trunc(value) != value || value < INT32_MIN || value > INT32_MAX)) ||
+          (descriptor.type == 4 && value != 0.0 && value != 1.0) ||
+          (descriptor.type == 2 && (value * 65536.0 < INT32_MIN || value * 65536.0 > INT32_MAX)))
+        return reject("numeric_representation", descriptor.type);
+    }
+    if (descriptor.type == 12 && (value < 0 ||
+         value > static_cast<double>(hooks().active_mask_count()) ||
+         std::trunc(value) != value))
       return reject("mask_range", descriptor.type);
     if ((assignment.kind == parameters::RequestedKind::Integer || assignment.kind == parameters::RequestedKind::Float) && descriptor.type != 12 && (!descriptor.has_numeric ||
-         assignment.value < descriptor.valid_min || assignment.value > descriptor.valid_max))
+         (!assignment.use_declared_default && (value < descriptor.valid_min || value > descriptor.valid_max))))
       return reject("numeric_range", descriptor.type);
   }
   return true;
@@ -792,30 +805,31 @@ bool apply_requested_assignments(
     const auto slot = static_cast<std::size_t>(assignment.index);
     const auto type = staged_records[slot - 1].type;
     auto& record = staged_records[slot - 1];
+    const double value = assignment.use_declared_default ? record.default_value : assignment.value;
     if (type == 11 && assignment.kind == parameters::RequestedKind::ArbitraryText) continue;
     if (type == 1 || type == 4 || type == 7) {
-      const auto encoded = static_cast<int32_t>(assignment.value);
+      const auto encoded = static_cast<int32_t>(value);
       write<int32_t>(staged_definitions[slot], 56, encoded);
       record.has_current = true;
       record.current_value = encoded;
     }
     else if (type == 12) {
-      const int32_t index = static_cast<int32_t>(assignment.value);
+      const int32_t index = static_cast<int32_t>(value);
       int32_t mask_id = 0;
       if (index > 0 && !hooks().active_mask_id(static_cast<std::size_t>(index - 1), &mask_id)) return false;
       write<int32_t>(staged_definitions[slot], 56, mask_id);
     }
     else if (type == 2) {
-      const double fixed = assignment.value * 65536.0;
+      const double fixed = value * 65536.0;
       if (!std::isfinite(fixed) || fixed < INT32_MIN || fixed > INT32_MAX) return false;
       const auto encoded = static_cast<int32_t>(std::round(fixed));
       write<int32_t>(staged_definitions[slot], 56, encoded);
       record.has_current = true;
       record.current_value = encoded / 65536.0;
     } else if (type == 10) {
-      write<double>(staged_definitions[slot], 56, assignment.value);
+      write<double>(staged_definitions[slot], 56, value);
       record.has_current = true;
-      record.current_value = assignment.value;
+      record.current_value = value;
     }
     else if (type == 5) {
       std::memcpy(staged_definitions[slot].data() + 56, assignment.color.data(), assignment.color.size());
@@ -878,7 +892,9 @@ std::string requested_parameters_json(const parameters::RequestedAssignments& re
                assignment.kind == parameters::RequestedKind::Point ? "point" :
                assignment.kind == parameters::RequestedKind::Point3D ? "point3d" : "arbitrary_text")
            << "\",\"value\":";
-    if (assignment.kind == parameters::RequestedKind::Integer)
+    if (assignment.use_declared_default)
+      output << "null";
+    else if (assignment.kind == parameters::RequestedKind::Integer)
       output << static_cast<int32_t>(assignment.value);
     else if (assignment.kind == parameters::RequestedKind::Float)
       output << std::setprecision(17) << assignment.value;
@@ -899,6 +915,7 @@ std::string requested_parameters_json(const parameters::RequestedAssignments& re
       }
       output << "]";
     }
+    if (assignment.use_declared_default) output << ",\"use_declared_default\":true";
     if (assignment.has_float_color) {
       output << ",\"float_argb_bits\":[";
       for (std::size_t channel = 0; channel < 4; ++channel) {

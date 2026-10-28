@@ -331,6 +331,7 @@ fn inspection_result_from_report(
                 .and_then(Value::as_str)
                 .map(|text| text.split('|').map(str::to_owned).collect())
                 .unwrap_or_default(),
+            use_declared_default: false,
             color_float: None,
             color: [
                 channel("alpha"),
@@ -1471,7 +1472,7 @@ pub fn dispatch_experimental_aegp_switch_roundtrip(
 }
 
 /// Encodes interactive parameters into the worker payload transport form
-/// (`v2|`..`v6|`). Public so integration tests can compute the exact payload
+/// (`v2|`..`v7|`). Public so integration tests can compute the exact payload
 /// a session frame carries; production callers stay inside the crate.
 pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Result<String> {
     let parameters = parameters
@@ -1483,7 +1484,9 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
             )
         })
         .collect::<Vec<_>>();
-    let mut payload = if parameters.iter().any(|item| item.color_float.is_some()) {
+    let mut payload = if parameters.iter().any(|item| item.use_declared_default) {
+        "v7|".to_owned()
+    } else if parameters.iter().any(|item| item.color_float.is_some()) {
         "v6|".to_owned()
     } else if parameters.iter().any(|item| item.kind == "arbitrary_data") {
         "v5|".to_owned()
@@ -1501,9 +1504,10 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
         if item.slot == 0
             || item.slot > MAX_PARAMETERS
             || (item.color_float.is_some() && item.kind != "color")
-            || !item.value.is_finite()
-            || item.value < item.minimum
-            || item.value > item.maximum
+            || (!item.use_declared_default
+                && (!item.value.is_finite()
+                    || item.value < item.minimum
+                    || item.value > item.maximum))
         {
             return Err(invalid("interactive parameter is out of range"));
         }
@@ -1511,6 +1515,15 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
             payload.push(';');
         }
         let id = format!("param_{}", item.slot);
+        if item.use_declared_default {
+            let kind = match item.kind.as_str() {
+                "integer" | "path" | "popup" => "i32",
+                "float" => "f64",
+                _ => return Err(invalid("declared default requires a numeric parameter")),
+            };
+            payload.push_str(&format!("{id}@{}:{kind}=default", item.slot));
+            continue;
+        }
         match item.kind.as_str() {
             "integer" | "path" if item.value.fract() == 0.0 => {
                 payload.push_str(&format!("{id}@{}:i32={}", item.slot, item.value as i64))
@@ -1592,8 +1605,8 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
 }
 
 /// Encodes values obtained from parameter discovery for a session launch.
-/// Numeric defaults are constrained to the descriptor's declared host range,
-/// matching the value an exposed UI control can actually send. An arbitrary
+/// Numeric defaults outside the declared range are resolved by the worker from
+/// the loaded plug-in's declaration, without clamping. An arbitrary
 /// default that the plug-in could not PRINT is left unassigned: the worker has
 /// already copied that plug-in-owned default before applying assignments.
 /// Explicit per-frame values continue to use [`encode_interactive_payload`]
@@ -1622,7 +1635,9 @@ pub fn normalize_default_interactive_parameters(
                 && item.maximum.is_finite()
                 && item.minimum <= item.maximum
             {
-                item.value = item.value.clamp(item.minimum, item.maximum);
+                if item.value < item.minimum || item.value > item.maximum {
+                    item.use_declared_default = true;
+                }
             } else if !matches!(item.kind.as_str(), "integer" | "float" | "path" | "popup") {
                 // These fields share descriptor storage with the typed value
                 // and are not part of color/component/arbitrary transport.

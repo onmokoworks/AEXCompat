@@ -1550,6 +1550,7 @@ mod tests {
             maximum: 100.0,
             value: 0.1,
             choices: Vec::new(),
+            use_declared_default: false,
             color_float: None,
             color: [0; 4],
             components: [0.0; 3],
@@ -1586,7 +1587,8 @@ mod tests {
             descriptor(26, "layer"),
         ];
         let normalized = normalize_inspected_ui_parameters(&radial_blur_parameters);
-        assert_eq!(normalized[0].value, 1.0);
+        assert_eq!(normalized[0].value, 0.1);
+        assert!(normalized[0].use_declared_default);
         assert_eq!(normalized.len(), 5, "UI keeps every discovered descriptor");
         assert_eq!(normalized[1].kind, "arbitrary_data");
         let defaults = normalized.clone();
@@ -2232,6 +2234,7 @@ mod tests {
             maximum: 1.0,
             value: 0.0,
             choices: Vec::new(),
+            use_declared_default: false,
             color_float: None,
             color: [255, 0, 0, 0],
             components: [0.0; 3],

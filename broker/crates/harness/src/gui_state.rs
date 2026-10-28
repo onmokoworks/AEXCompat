@@ -107,6 +107,7 @@ pub(crate) fn parameter_is_default(
 ) -> bool {
     parameter.slot == default.slot
         && parameter.value == default.value
+        && parameter.use_declared_default == default.use_declared_default
         && parameter.color == default.color
         && parameter.components == default.components
         && parameter.layer_path == default.layer_path
@@ -121,6 +122,7 @@ pub(crate) fn reset_parameter(
         return false;
     }
     parameter.value = default.value;
+    parameter.use_declared_default = default.use_declared_default;
     parameter.color = default.color;
     parameter.components = default.components;
     parameter.layer_path.clone_from(&default.layer_path);
@@ -161,6 +163,7 @@ mod tests {
             maximum: 100.0,
             value,
             choices: Vec::new(),
+            use_declared_default: false,
             color_float: None,
             color: [255, 0, 0, 0],
             components: [0.0; 3],

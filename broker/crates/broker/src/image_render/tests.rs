@@ -883,6 +883,7 @@ mod tests {
                 maximum,
                 value,
                 choices: vec![],
+                use_declared_default: false,
                 color_float: None,
                 color: [0; 4],
                 components: [0.0; 3],
@@ -1039,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn default_interactive_payload_is_slot_bound_and_range_normalized() {
+    fn default_interactive_payload_is_slot_bound_and_distinct_from_explicit() {
         let parameters = vec![InteractiveParameter {
             slot: 2,
             name: "Direction".into(),
@@ -1048,6 +1049,7 @@ mod tests {
             maximum: 3.0,
             value: 2.0,
             choices: vec!["Horizontal".into(), "Vertical".into(), "Both".into()],
+            use_declared_default: false,
             color_float: None,
             color: [255, 0, 0, 0],
             components: [0.0; 3],
@@ -1066,9 +1068,10 @@ mod tests {
         );
         let mut invalid = parameters;
         invalid[0].value = 4.0;
+        assert!(encode_interactive_payload(&invalid).is_err());
         assert_eq!(
             encode_default_interactive_payload(&invalid).unwrap(),
-            "v2|param_2@2:i32=3"
+            "v7|param_2@2:i32=default"
         );
         let mut malformed = invalid;
         malformed[0].minimum = 4.0;
@@ -1101,6 +1104,38 @@ mod tests {
     }
 
     #[test]
+    fn declared_default_mode_ignores_caller_value_but_keeps_slot_and_kind() {
+        let mut p: InteractiveParameter = serde_json::from_value(json!({
+            "slot":5,"name":"Gain","kind":"float","minimum":1,"maximum":100,"value":0.1,
+            "choices":[],"color":[255,0,0,0],"components":[0,0,0],"component_count":0,
+            "layer_path":null,"enabled":true,"visible":true,"supervised":false
+        }))
+        .unwrap();
+        assert!(!p.use_declared_default);
+        assert!(encode_interactive_payload(&[p.clone()]).is_err());
+        p.use_declared_default = true;
+        let wire = "v7|param_5@5:f64=default";
+        assert_eq!(encode_interactive_payload(&[p.clone()]).unwrap(), wire);
+        p.value = 99.0;
+        assert_eq!(encode_interactive_payload(&[p.clone()]).unwrap(), wire);
+        let roundtrip: InteractiveParameter =
+            serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert!(roundtrip.use_declared_default);
+        p.slot = 0;
+        assert!(encode_interactive_payload(&[p.clone()]).is_err());
+        p.slot = 5;
+        p.kind = "color".into();
+        assert!(encode_interactive_payload(&[p.clone()]).is_err());
+        p.kind = "float".into();
+        p.use_declared_default = false;
+        p.value = 1.0;
+        assert_eq!(
+            encode_interactive_payload(&[p]).unwrap(),
+            "v2|param_5@5:f64=1"
+        );
+    }
+
+    #[test]
     fn empty_parameter_set_uses_valid_default_payload() {
         assert_eq!(encode_interactive_payload(&[]).unwrap(), "v2|");
     }
@@ -1115,6 +1150,7 @@ mod tests {
             maximum: 0.0,
             value: 0.0,
             choices: vec![],
+            use_declared_default: false,
             color_float: None,
             color: [0; 4],
             components: [0.0; 3],
@@ -1151,6 +1187,7 @@ mod tests {
             maximum: -10.0,
             value: f64::NAN,
             choices: vec![],
+            use_declared_default: false,
             color_float: None,
             color: [0; 4],
             components: [0.0; 3],
@@ -1187,6 +1224,7 @@ mod tests {
             maximum: 0.0,
             value: 0.0,
             choices: vec![],
+            use_declared_default: false,
             color_float: None,
             color: [0; 4],
             components: [0.0; 3],
@@ -1215,6 +1253,7 @@ mod tests {
             maximum: 0.0,
             value: 0.0,
             choices: vec![],
+            use_declared_default: false,
             color_float: None,
             color: [0; 4],
             components: [50.0, 25.5, 0.0],

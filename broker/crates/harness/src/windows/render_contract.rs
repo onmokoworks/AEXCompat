@@ -481,6 +481,7 @@ fn apply_typed_assignments(
                     return Err(format!("parameter slot {slot} value is out of range"));
                 }
                 parameter.value = value;
+                parameter.use_declared_default = false;
             }
             "color" => {
                 let values = object

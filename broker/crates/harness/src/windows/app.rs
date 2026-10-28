@@ -115,13 +115,16 @@ fn normalize_inspected_ui_parameters(
         .iter()
         .cloned()
         .map(|mut parameter| {
-            if matches!(parameter.kind.as_str(), "integer" | "float" | "path")
-                && parameter.value.is_finite()
+            if matches!(
+                parameter.kind.as_str(),
+                "integer" | "float" | "path" | "popup"
+            ) && parameter.value.is_finite()
                 && parameter.minimum.is_finite()
                 && parameter.maximum.is_finite()
                 && parameter.minimum <= parameter.maximum
             {
-                parameter.value = parameter.value.clamp(parameter.minimum, parameter.maximum);
+                parameter.use_declared_default =
+                    parameter.value < parameter.minimum || parameter.value > parameter.maximum;
             }
             parameter
         })

@@ -59,6 +59,11 @@ def test_compute_cache_suite1_route_passes_on_all_workers() -> None:
         pass
 
 
+def test_declared_defaults_are_exact_and_explicit_values_remain_checked() -> None:
+    for _ in _all_workers("--self-test-declared-defaults", "declared_defaults"):
+        pass
+
+
 def test_aegp_layer_source_item_passes_on_all_workers() -> None:
     for name, report in _all_workers(
         "--self-test-aegp-layer-source-item", "aegp_layer_source_item"
