@@ -1,5 +1,7 @@
 /// Packed little-endian RGBA at the requested AE depth (16-bit white = 32768).
 /// The dimensions and format travel with the bytes; PNG previews are never inputs.
+/// Float input preserves all IEEE-754 words. Callers reading rendered output
+/// must enforce their output-finiteness contract separately.
 pub struct NativeImageInput {
     pub width: u32,
     pub height: u32,
