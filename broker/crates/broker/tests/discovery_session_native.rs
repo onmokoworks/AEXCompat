@@ -48,6 +48,69 @@ mod windows_e2e {
         }
     }
 
+    #[test]
+    fn discovery_reclamation_spans_swaps_and_reinspection_without_reviving_handles() {
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let worker = source_root.join("target/minihost-build/aex_worker.exe");
+        let probe = source_root.join("target/minihost-build/worker_discovery_handle_fixture.aex");
+        if !worker.is_file() || !probe.is_file() {
+            eprintln!("skipping discovery reclamation test: worker or handle fixture missing");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-discovery-handles-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        let repository = TempRepository(root);
+        write_freshness_source_marker(&repository.0);
+        let worker_dir = repository.0.join("target/minihost-build");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::copy(worker, worker_dir.join("aex_worker.exe")).unwrap();
+        let plugins = ["first", "second"]
+            .map(|name| {
+                let path = repository.0.join(format!("{name}.aex"));
+                std::fs::copy(&probe, &path).unwrap();
+                approved_artifact(&path)
+            })
+            .to_vec();
+        let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
+            repository: &repository.0,
+            plugins,
+            dependency_search_dirs: vec![repository.0.clone()],
+            module_bound: 64,
+            inspect_deadline: Some(Duration::from_secs(30)),
+            launch_environment: LaunchEnvironment::default(),
+        })
+        .expect("open native discovery session");
+        for (request, plugin) in [0u32, 1, 0, 0].into_iter().enumerate() {
+            let outcome = session.inspect_plugin(plugin, request as u32).unwrap();
+            let InspectOutcome::Inspected { report } = outcome else {
+                panic!("request {request} did not inspect: {outcome:?}");
+            };
+            assert_eq!(report["global_setup_error"], 0, "{report}");
+            assert_eq!(report["global_setdown_error"], 0, "{report}");
+            assert_eq!(report["parameters"].as_array().unwrap().len(), 0);
+        }
+        let exhausted = session.inspect_plugin(1, 4).unwrap();
+        let InspectOutcome::InspectError {
+            error_kind,
+            report: Some(report),
+        } = exhausted
+        else {
+            panic!("disposed allocations escaped the session budget: {exhausted:?}");
+        };
+        assert_eq!(error_kind, "selector_error");
+        assert_eq!(report["global_setup_error"], 4, "{report}");
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "{close}");
+        assert_eq!(close["inspects_ok"], 4, "{close}");
+        assert_eq!(close["inspects_errored"], 1, "{close}");
+    }
+
     /// Every column of one discovery session offers the layer-scoped suite
     /// catalog (issue #1764): the host catalog probe registers a BUTTON only
     /// when PF Path Data Suite v1 is offered at GLOBAL_SETUP, so a column that

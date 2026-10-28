@@ -2242,6 +2242,11 @@ int run_discovery_session(const std::wstring& manifest_argument,
     return 13;
   }
 
+  // Match one-shot discovery and render sessions: disposal invalidates the
+  // handle immediately, but its backing stays quarantined until all plug-in
+  // teardown has returned. Keep the scope across member swaps/re-inspects so
+  // stale handle identities cannot alias a later member's allocation.
+  wr::handles::HandleReclamationScope handle_reclamation_scope;
   aexcompat::worker_runtime::effect_bootstrap::State effect_state;
   aexcompat::aex_strings::StringTable aex_string_table;
   HMODULE current_module = nullptr;
@@ -2294,6 +2299,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
     if (!teardown_cor_birth_sequence()) cor_teardown_failed = true;
     if (!cor_teardown_failed && !teardown_bib_suite(nullptr))
       bib_teardown_failed = true;
+    handle_reclamation_scope.reclaim();
     // The sealed-directory cookie stays too: a detaching DLL may delay-load
     // from the sealed root during process teardown.
     runtime_hooks.restore_native_stdout();

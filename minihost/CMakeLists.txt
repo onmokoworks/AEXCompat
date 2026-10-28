@@ -395,6 +395,13 @@ target_compile_features(worker_unhandled_thread_fault_fixture PRIVATE cxx_std_17
 target_compile_definitions(worker_unhandled_thread_fault_fixture PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 add_dependencies(aex_worker worker_unhandled_thread_fault_fixture)
+add_library(worker_discovery_handle_fixture MODULE
+  ../tests/native/worker_discovery_handle_fixture.cpp
+  ../tests/native/worker_discovery_handle_fixture.rc)
+target_compile_features(worker_discovery_handle_fixture PRIVATE cxx_std_17)
+target_include_directories(worker_discovery_handle_fixture PRIVATE src)
+set_target_properties(worker_discovery_handle_fixture PROPERTIES PREFIX "" SUFFIX ".aex")
+add_dependencies(aex_worker worker_discovery_handle_fixture)
 target_compile_features(aex_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_worker PRIVATE bcrypt aexcompat_trace_writer)
