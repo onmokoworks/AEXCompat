@@ -355,8 +355,14 @@ fn render_mac_chain_stage(
         time_scale: 30,
         raw_primary: Some(world),
     };
-    let mut started =
-        start_resident_worker(workers, aex, Path::new(""), world.format, Some(&launch))?;
+    let mut started = start_resident_worker(
+        workers,
+        aex,
+        Path::new(""),
+        world.format,
+        Some(&launch),
+        false,
+    )?;
     let result = (|| -> Result<_, String> {
         write_control_message(
             &mut started.stdin,
@@ -485,7 +491,15 @@ fn render_mac_chain(
             save_argb8_slot(&raw, &staging.join("output.png"), width, height, &checksum)?;
             Some(output.join("output.png"))
         } else {
-            None
+            save_deep_preview(
+                &raw,
+                &staging.join("output.png"),
+                width,
+                height,
+                format,
+                &checksum,
+            )?;
+            Some(output.join("output.png"))
         };
         let final_output = match format {
             MacRenderFormat::PngArgb8 => output.join("output.png"),
@@ -707,6 +721,7 @@ mod chain_tests {
             plugin_path: PathBuf::from("first"),
             input: PathBuf::new(),
             format: MacRenderFormat::PngArgb8,
+            negotiate_output: false,
             layers: Vec::new(),
             sender,
             receiver,
