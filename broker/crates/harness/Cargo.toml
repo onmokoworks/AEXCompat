@@ -1,5 +1,6 @@
 [package]
 name = "aexcompat-harness"
+default-run = "aexcompat-harness"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
