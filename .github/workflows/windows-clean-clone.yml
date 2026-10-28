@@ -411,6 +411,7 @@ jobs:
           path: |
             target/minihost-build/*.exe
             target/minihost-build/*.dll
+            target/minihost-build/*.aex
             target/instruments-build/*.exe
           if-no-files-found: error
           retention-days: 1
