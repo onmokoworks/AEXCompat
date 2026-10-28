@@ -1152,6 +1152,14 @@ mod tests {
 }
 
 #[cfg(any(not(feature = "native-carrier"), not(target_os = "macos")))]
+fn deserialize_ui_event<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<aex_guest_worker::classic::UiEvent, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
+#[cfg(any(not(feature = "native-carrier"), not(target_os = "macos")))]
 fn run_ui_session_command(args: Vec<std::ffi::OsString>) -> ExitCode {
     let result = (|| -> Result<(), String> {
         let streaming = args.len() == 3 && args[2] == "--stream";
@@ -1165,6 +1173,9 @@ fn run_ui_session_command(args: Vec<std::ffi::OsString>) -> ExitCode {
                 parameters: Vec<String>,
             },
             Event {
+                // Serde's internally-tagged ContentDeserializer loses JSON's
+                // integer map-key conversion. Re-enter the JSON deserializer.
+                #[serde(deserialize_with = "deserialize_ui_event")]
                 event: aex_guest_worker::classic::UiEvent,
             },
         }
@@ -1229,16 +1240,25 @@ fn run_ui_session_command(args: Vec<std::ffi::OsString>) -> ExitCode {
                     operation
                 } else if streaming {
                     let mut line = String::new();
-                    let size = input.by_ref().take(1048577).read_line(&mut line)
+                    let size = input
+                        .by_ref()
+                        .take(1048577)
+                        .read_line(&mut line)
                         .map_err(|e| e.to_string())?;
-                    if size == 0 { break; }
+                    if size == 0 {
+                        break;
+                    }
                     if size > 1048576 || !line.ends_with('\n') {
                         return Err("UI stream line exceeds 1 MiB or lacks newline".into());
                     }
                     serde_json::from_str::<Operation>(&line).map_err(|e| e.to_string())?
-                } else { break; };
+                } else {
+                    break;
+                };
                 count += 1;
-                if count > 256 { return Err("UI session is limited to 256 events".into()); }
+                if count > 256 {
+                    return Err("UI session is limited to 256 events".into());
+                }
 
                 let state_before = host
                     .ui_state_u32(&request.initial_state_u32, false)

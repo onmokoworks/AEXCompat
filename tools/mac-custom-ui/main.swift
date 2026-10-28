@@ -43,11 +43,13 @@ final class DrawObject {
 final class Rasterizer {
     var objects: [Int: DrawObject] = [:]
     // Keep objects across callbacks; retained objects may outlive one draw.
-    func render(_ calls: [JSON], into image: NSImage) throws {
+    func render(_ calls: [JSON], into image: NSImage, origin: NSPoint) throws {
         image.lockFocusFlipped(true)
         defer { image.unlockFocus() }
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
+        let transform = NSAffineTransform()
+        transform.translateX(by: -origin.x, yBy: -origin.y); transform.concat()
         for c in calls {
             let name = c["call"] as? String ?? ""
             let id = number(c["object"]), pathID = number(c["path"])
@@ -87,17 +89,31 @@ final class Rasterizer {
                 let b = try object(number(c["brush"])), f = try object(number(c["font"]))
                 let p = try floats(c["origin_bits"], count: 2)
                 guard let units = c["utf16"] as? [UInt16] else { throw CanvasError("Invalid UTF16") }
-                // Font metrics are AppKit's, not AE's. Non-default layout is explicit.
-                guard number(c["alignment"]) == 0 && number(c["truncation"]) == 0 else {
-                    throw CanvasError("Text alignment/truncation is not implemented")
+                // AppKit measures and lays out the preview only; guest font metrics
+                // are not fabricated. Drawbot defines origin on the text baseline.
+                let alignment = number(c["alignment"]), truncation = number(c["truncation"])
+                guard (0...2).contains(alignment) && (0...2).contains(truncation) else {
+                    throw CanvasError("Unsupported text alignment/path ellipsis")
                 }
                 let font = NSFont.systemFont(ofSize: f.size)
-                let text = NSString(string: String(decoding: units, as: UTF16.self))
-                text.draw(at: NSPoint(x: p[0], y: p[1] - font.ascender), withAttributes: [.font: font, .foregroundColor: b.color])
+                let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: b.color]
+                var text = String(decoding: units, as: UTF16.self)
+                let width = try floats([c["truncation_width_bits"]!], count: 1)[0]
+                if truncation != 0 {
+                    guard width >= 0 else { throw CanvasError("Negative text width") }
+                    let suffix = truncation == 2 ? "…" : ""
+                    if (text as NSString).size(withAttributes: attributes).width > width {
+                        while !text.isEmpty && ((text + suffix) as NSString).size(withAttributes: attributes).width > width { text.removeLast() }
+                        text += suffix
+                    }
+                }
+                let size = (text as NSString).size(withAttributes: attributes)
+                let offset = alignment == 1 ? size.width / 2 : (alignment == 2 ? size.width : 0)
+                (text as NSString).draw(at: NSPoint(x: p[0] - offset, y: p[1] - font.ascender), withAttributes: attributes)
             case "SetAntiAliasPolicy":
                 let policy = number(c["policy"])
                 guard (0...2).contains(policy) else { throw CanvasError("Unsupported antialias policy") }
-                NSGraphicsContext.current?.shouldAntialias = policy != 1
+                NSGraphicsContext.current?.shouldAntialias = policy != 0
             case "PF_GetDrawingReference", "GetSupplier", "GetSurface", "PF_AppGetColor", "PF_AppColorPickerDialog", "PF_InvalidateRect": break
             default:
                 // Non-drawing UPDATE/stream calls need no rasterization.
@@ -113,7 +129,10 @@ final class Session {
     let directory: URL, worker: URL, plugin: URL
     var request: JSON, operations: [JSON] = [], buffer = Data()
     let trace: FileHandle, errors: FileHandle
-    var count = 0
+    var count = 0, traceBytes = 0
+    var monitor: DispatchSourceTimer?
+    var capture: JSON = [:]
+    var loadedPluginHashes = Set<String>()
     init(worker: URL, plugin: URL, directory: URL, request: JSON) throws {
         self.worker = worker; self.plugin = plugin; self.directory = directory; self.request = request
         guard !FileManager.default.fileExists(atPath: directory.path) else { throw CanvasError("Output directory already exists") }
@@ -127,14 +146,31 @@ final class Session {
         FileManager.default.createFile(atPath: traceURL.path, contents: nil)
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         trace = try FileHandle(forWritingTo: traceURL); errors = try FileHandle(forWritingTo: logURL)
-        try writeJSON(["worker_sha256": try digest(worker), "plugin_sha256": try digest(plugin), "input_source": "AppKit NSEvent", "clean_close": false], directory.appendingPathComponent("capture.json"))
-        process.executableURL = worker
-        process.arguments = ["ui-session", plugin.path, directory.appendingPathComponent("header.json").path, "--stream"]
+        capture = ["worker_sha256": try digest(worker), "plugin_sha256_at_launch": try digest(plugin),
+                   "canvas_sha256": try digest(URL(fileURLWithPath: CommandLine.arguments[0])),
+                   "input_source": CommandLine.arguments.count == 6 ? "AppKit NSEvent injection" : "desktop AppKit input",
+                   "exercise": CommandLine.arguments.count == 6 ? CommandLine.arguments[5] : "none",
+                   "identity_note": "worker hash observed before launch; plugin loaded-byte identity is in trace rows",
+                   "clean_close": false]
+        try writeJSON(capture, directory.appendingPathComponent("capture.json"))
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        process.arguments = ["--worker-child", worker.path, plugin.path, directory.appendingPathComponent("header.json").path]
         process.standardInput = input; process.standardOutput = output; process.standardError = errors
         var env = ProcessInfo.processInfo.environment; env["TMPDIR"] = directory.path; process.environment = env
         try process.run()
         // Parent must not retain the child end: EOF must be observable on crashes.
         try output.fileHandleForWriting.close(); try input.fileHandleForReading.close()
+        let monitor = DispatchSource.makeTimerSource(queue: .global())
+        monitor.schedule(deadline: .now(), repeating: .milliseconds(100))
+        monitor.setEventHandler { [process] in
+            guard process.isRunning else { return }
+            var info = proc_taskinfo()
+            let size = proc_pidinfo(process.processIdentifier, PROC_PIDTASKINFO, 0, &info, Int32(MemoryLayout<proc_taskinfo>.size))
+            if size == MemoryLayout<proc_taskinfo>.size && info.pti_resident_size > 1 << 30 {
+                kill(-process.processIdentifier, SIGKILL); kill(process.processIdentifier, SIGKILL)
+            }
+        }
+        monitor.resume(); self.monitor = monitor
     }
     func exchange(_ operation: JSON) throws -> JSON {
         guard count < 256 else { throw CanvasError("256-operation limit reached; close and start a new session") }
@@ -146,18 +182,26 @@ final class Session {
         // Interactive-only deadline, not a discovery gate. Timer never waits on the UI queue.
         let timer = DispatchSource.makeTimerSource(queue: .global())
         timer.schedule(deadline: .now() + 30)
-        timer.setEventHandler { [process] in if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+        timer.setEventHandler { [process] in if process.isRunning { kill(-process.processIdentifier, SIGKILL); kill(process.processIdentifier, SIGKILL) } }
         timer.resume(); defer { timer.cancel() }
         while !buffer.contains(10) {
-            guard let part = try output.fileHandleForReading.read(upToCount: 65536), !part.isEmpty else {
+            // Foundation read(upToCount:) can wait to fill the requested size
+            // on a pipe. POSIX read returns the currently available response chunk.
+            var chunk = [UInt8](repeating: 0, count: 65536)
+            let size = Darwin.read(output.fileHandleForReading.fileDescriptor, &chunk, chunk.count)
+            if size < 0 && errno == EINTR { continue }
+            guard size > 0 else {
                 throw CanvasError("Worker closed stdout; see worker.log")
             }
-            buffer.append(part)
+            buffer.append(contentsOf: chunk.prefix(size))
             guard buffer.count <= 32 << 20 else { throw CanvasError("Worker response exceeds 32 MiB") }
         }
         let end = buffer.firstIndex(of: 10)!, line = buffer.prefix(through: end)
+        traceBytes += line.count
+        guard traceBytes <= 128 << 20 else { throw CanvasError("Trace exceeds 128 MiB") }
         try trace.write(contentsOf: line)
         let row = try dictionary(Data(line)); buffer.removeSubrange(...end); count += 1
+        if let hash = row["plugin_sha256"] as? String { loadedPluginHashes.insert(hash) }
         guard let result = row["event"] as? JSON, number(result["selector_error"]) == 0 else { throw CanvasError("Invalid worker event response") }
         return row
     }
@@ -165,10 +209,17 @@ final class Session {
         try? input.fileHandleForWriting.close()
         let timer = DispatchSource.makeTimerSource(queue: .global())
         timer.schedule(deadline: .now() + 5)
-        timer.setEventHandler { [process] in if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
-        timer.resume(); process.waitUntilExit(); timer.cancel()
+        timer.setEventHandler { [process] in if process.isRunning { kill(-process.processIdentifier, SIGKILL); kill(process.processIdentifier, SIGKILL) } }
+        timer.resume(); process.waitUntilExit(); timer.cancel(); monitor?.cancel()
+        kill(-process.processIdentifier, SIGKILL)
         try trace.close(); try errors.close()
-        try writeJSON(["worker_sha256": try digest(worker), "plugin_sha256": try digest(plugin), "input_source": "AppKit NSEvent", "clean_close": process.terminationStatus == 0, "returncode": process.terminationStatus, "operations": count], directory.appendingPathComponent("capture.json"))
+        capture["worker_sha256_at_close"] = (try? digest(worker)) ?? "unavailable"
+        capture["plugin_sha256_at_close"] = (try? digest(plugin)) ?? "unavailable"
+        capture["loaded_plugin_sha256"] = loadedPluginHashes.sorted()
+        capture["clean_close"] = process.terminationStatus == 0
+        capture["returncode"] = process.terminationStatus
+        capture["operations"] = count
+        try writeJSON(capture, directory.appendingPathComponent("capture.json"))
         guard process.terminationStatus == 0 else { throw CanvasError("Worker exit \(process.terminationStatus); see worker.log") }
     }
 }
@@ -177,12 +228,18 @@ final class Canvas: NSView {
     var eventTemplate: JSON = [:]
     var image: NSImage!
     var send: ((JSON) -> Void)?
-    var activeDrag = false, ready = false
+    var activeDrag = false, ready = false, needsGuestDraw = true
     var lastPoint = NSPoint.zero
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func draw(_ dirtyRect: NSRect) {
+        if needsGuestDraw {
+            needsGuestDraw = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }; self.send?(self.event(4, nil))
+            }
+        }
         NSColor.darkGray.setFill(); bounds.fill()
         image?.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
     }
@@ -197,17 +254,22 @@ final class Canvas: NSView {
     override func mouseDown(with e: NSEvent) {
         guard ready else { return }; window?.makeFirstResponder(self); send?(event(2, e))
     }
-    override func mouseDragged(with e: NSEvent) { guard ready && activeDrag else { return }; send?(event(3, e)) }
-    override func mouseUp(with e: NSEvent) { guard ready && activeDrag else { return }; send?(event(3, e, last: true)) }
+    override func mouseDragged(with e: NSEvent) { guard ready else { return }; send?(event(3, e)) }
+    override func mouseUp(with e: NSEvent) { guard ready else { return }; send?(event(3, e, last: true)) }
     override func keyDown(with e: NSEvent) {
         guard ready else { return }
-        // ASCII and editing keys have explicit cross-platform PF keycodes. Function
-        // keys / IME / modifier mapping need their own ABI witnesses.
-        guard e.modifierFlags.intersection([.shift, .control, .option, .command]).isEmpty,
-              let text = e.charactersIgnoringModifiers, text.utf16.count == 1,
+        // PF printable keycode = unshifted uppercase UTF16 | 0x80000000.
+        // Restrict to ASCII until non-US/IME handling has an ABI witness.
+        guard let text = e.characters(byApplyingModifiers: [])?.uppercased(), text.utf16.count == 1,
               let unit = text.utf16.first, unit < 128 else { NSSound.beep(); return }
+        let controls: [UInt16: UInt32] = [32: 1, 127: 2, 9: 3, 13: 4, 3: 5, 27: 6]
+        let code = controls[unit] ?? (UInt32(unit) | 0x80000000)
+        var modifiers: UInt32 = 0
+        for (flag, bit): (NSEvent.ModifierFlags, UInt32) in [(.command, 0x100), (.shift, 0x200), (.capsLock, 0x400), (.option, 0x800), (.control, 0x1000)] {
+            if e.modifierFlags.contains(flag) { modifiers |= bit }
+        }
         var op = event(10, nil), value = op["event"] as! JSON
-        value["key_code"] = Int(unit); value["modifiers"] = 0; op["event"] = value; send?(op)
+        value["key_code"] = code; value["modifiers"] = modifiers; op["event"] = value; send?(op)
     }
 }
 
@@ -219,6 +281,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var pending: [JSON] = [], busy = false, closing = false, failed = false
     var steps: [(NSEvent.EventType, CGFloat, CGFloat)] = []
     var snapshots = 0
+    var signals: [DispatchSourceSignal] = []
     init(session: Session, template: JSON, exercise: String?) { self.session = session; self.template = template; self.exercise = exercise }
     func applicationDidFinishLaunching(_ notification: Notification) {
         let f = template["frame"] as! [Int], w = f[2]-f[0], h = f[3]-f[1]
@@ -239,17 +302,33 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             default: steps = [(.leftMouseDown, 260, 15), (.leftMouseDragged, 260, 150), (.leftMouseUp, 260, 150), (.leftMouseDown, 260, 38), (.leftMouseUp, 260, 38), (.keyDown, 260, 38)]
             }
         }
-        enqueue(canvas.event(4, nil))
+        for sig in [SIGINT, SIGTERM, SIGHUP] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [weak self] in self?.finish() }
+            source.resume(); signals.append(source)
+        }
+        canvas.needsDisplay = true
     }
     func enqueue(_ op: JSON) {
         guard !closing && !failed else { return }
+        // Coalesce only consecutive pending non-final drag moves. Never drop a
+        // click, mouse-up, key, or the movement currently executing in the guest.
+        if let e = op["event"] as? JSON, number(e["event"]) == 3, e["last"] as? Bool == false,
+           let previous = pending.last?["event"] as? JSON, number(previous["event"]) == 3, previous["last"] as? Bool == false {
+            pending[pending.count - 1] = op; return
+        }
         guard pending.count < 128 else { fail(CanvasError("Input queue overflow")); return }
         pending.append(op); pump()
     }
     func pump() {
         guard !busy && !pending.isEmpty && !closing && !failed else { return }
+        if session.count >= 256 { pending.removeAll(); finish(); return }
         busy = true
         let op = pending.removeFirst()
+        if let e = op["event"] as? JSON, number(e["event"]) == 3 && !canvas.activeDrag {
+            busy = false; pump(); return
+        }
         queue.async { [self] in
             let result = Result { try session.exchange(op) }
             DispatchQueue.main.async { [self] in
@@ -261,22 +340,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     if kind == 3 && event["last"] as? Bool == true { canvas.activeDrag = false }
                     // The whole guest frame uses window coordinates; canvas origin is frame.left/top.
                     let f = template["frame"] as! [Int]
-                    canvas.image.lockFocusFlipped(true)
-                    let transform = NSAffineTransform(); transform.translateX(by: CGFloat(-f[0]), yBy: CGFloat(-f[1])); transform.concat()
-                    // Rasterizer locks the same image independently below; translate via temporary full frame instead.
-                    canvas.image.unlockFocus()
+                    let origin = NSPoint(x: f[0], y: f[1])
                     if kind == 4 {
-                        let full = NSImage(size: NSSize(width: f[2], height: f[3]))
-                        try rasterizer.render(report["calls"] as? [JSON] ?? [], into: full)
-                        let crop = NSImage(size: canvas.bounds.size)
-                        crop.lockFocusFlipped(true)
-                        full.draw(in: canvas.bounds, from: NSRect(x: f[0], y: f[1], width: f[2]-f[0], height: f[3]-f[1]), operation: .copy, fraction: 1, respectFlipped: true, hints: nil)
-                        crop.unlockFocus(); canvas.image = crop; canvas.needsDisplay = true; canvas.ready = true
+                        let frame = NSImage(size: canvas.bounds.size)
+                        try rasterizer.render(report["calls"] as? [JSON] ?? [], into: frame, origin: origin)
+                        canvas.image = frame; canvas.needsDisplay = true; canvas.ready = true
                         try snapshot()
                     } else {
-                        // Process object lifetimes even when a handler draws outside DRAW.
-                        let unused = NSImage(size: NSSize(width: f[2], height: f[3]))
-                        try rasterizer.render(report["calls"] as? [JSON] ?? [], into: unused)
+                        try rasterizer.render(report["calls"] as? [JSON] ?? [], into: canvas.image, origin: origin)
                         pending.insert(canvas.event(4, nil), at: 0)
                     }
                     label.stringValue = "\(session.count)/256 operations · slot \(number(template["slot"]))\nClick / drag · ASCII keys · close to save. AppKit font preview."
@@ -308,7 +379,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func fail(_ error: Error) {
         failed = true; label.stringValue = "ERROR: \(error)\nClose to retain diagnostics."
         fputs("canvas_error: \(error)\n", stderr)
-        if session.process.isRunning { kill(session.process.processIdentifier, SIGKILL) }
+        if session.process.isRunning { kill(-session.process.processIdentifier, SIGKILL); kill(session.process.processIdentifier, SIGKILL) }
         if exercise != nil { finish() }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool { finish(); return false }
@@ -325,6 +396,19 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 // Positional CLI keeps plugin/config paths out of saved, shareable provenance.
 let args = CommandLine.arguments
+if args.count == 5 && args[1] == "--worker-child" {
+    // Keep resource limits in the child, never constrain the AppKit process.
+    guard setpgid(0, 0) == 0 || getpgrp() == getpid() else { exit(126) }
+    for (resource, value): (Int32, rlim_t) in [(RLIMIT_CPU, 120), (RLIMIT_NOFILE, 64), (RLIMIT_FSIZE, 64 << 20), (RLIMIT_CORE, 0)] {
+        var limit = rlimit(rlim_cur: value, rlim_max: value)
+        guard setrlimit(resource, &limit) == 0 else { exit(126) }
+    }
+    let arguments: [String] = [args[2], "ui-session", args[3], args[4], "--stream"]
+    let strings = arguments.map { arg in arg.withCString { strdup($0) } }
+    var pointers = strings + [nil]
+    execv(args[2], &pointers)
+    exit(127)
+}
 if args.count < 5 || args.count > 6 {
     fputs("usage: mac-custom-ui WORKER PLUGIN CONFIG.json NEW_OUTPUT_DIR [insert|delete|presets]\n", stderr); exit(2)
 }
