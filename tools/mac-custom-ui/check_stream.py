@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the real guest stream: response before EOF, replay identity and bounds.
+"""Exercise the real guest stream: response before EOF, key dispatch and bounds.
 
 Needs an original AEX plus a canvas config. All artifacts go to --output.
 No plugin-specific serialization normalization is done here.
