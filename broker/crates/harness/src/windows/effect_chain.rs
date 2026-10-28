@@ -615,15 +615,28 @@ fn run_effect_chain(
                 return Err(format!("Effect {} output is empty.", stage.ordinal));
             }
             if let Some(extension) = chain_raw_extension(format) {
-                native_input = Some(
-                    NativeImageInput::read_raw(
-                        &scratch.outputs[index].with_extension(extension),
-                        image.width(),
-                        image.height(),
-                        format,
-                    )
-                    .map_err(|error| format!("Effect {} native output: {error}", stage.ordinal))?,
-                );
+                let next_input = NativeImageInput::read_raw(
+                    &scratch.outputs[index].with_extension(extension),
+                    image.width(),
+                    image.height(),
+                    format,
+                )
+                .map_err(|error| format!("Effect {} native output: {error}", stage.ordinal))?;
+                // Input transport accepts every IEEE-754 word, but a rendered
+                // stage must still satisfy the finite-output contract before
+                // it is passed to another stage or published.
+                if format == RenderPixelFormat::Argb32f
+                    && next_input
+                        .rgba
+                        .chunks_exact(4)
+                        .any(|sample| !f32::from_le_bytes(sample.try_into().unwrap()).is_finite())
+                {
+                    return Err(format!(
+                        "Effect {} native float output contains a non-finite sample",
+                        stage.ordinal
+                    ));
+                }
+                native_input = Some(next_input);
             }
             current = scratch.outputs[index].clone();
         }

@@ -1,5 +1,7 @@
 /// Packed little-endian RGBA at the requested AE depth (16-bit white = 32768).
 /// The dimensions and format travel with the bytes; PNG previews are never inputs.
+/// Float input preserves all IEEE-754 words. Callers reading rendered output
+/// must enforce their output-finiteness contract separately.
 pub struct NativeImageInput {
     pub width: u32,
     pub height: u32,
@@ -28,14 +30,8 @@ impl NativeImageInput {
                 "native input byte count does not match dimensions/depth",
             ));
         }
-        if self.format == RenderPixelFormat::Argb32f
-            && self
-                .rgba
-                .chunks_exact(4)
-                .any(|sample| !f32::from_le_bytes(sample.try_into().unwrap()).is_finite())
-        {
-            return Err(invalid("native float input contains a non-finite sample"));
-        }
+        // All IEEE-754 input words are transport data, including NaN payloads.
+        // Layout/size limits above and worker output validation remain intact.
         Ok(())
     }
 
@@ -159,7 +155,15 @@ mod native_input_tests {
         input.format = RenderPixelFormat::Argb16;
         assert!(input.validate().is_err());
         input.format = RenderPixelFormat::Argb32f;
-        input.rgba[..4].copy_from_slice(&f32::INFINITY.to_le_bytes());
+        let words = [0x7fc12345u32, 0x7f800001, 0x7f800000, 0xff800000];
+        input.rgba = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        assert!(input.validate().is_ok());
+        let root = std::env::temp_dir().join(format!("native-nonfinite-{}", std::process::id()));
+        fs::write(&root, &input.rgba).unwrap();
+        let loaded = NativeImageInput::read_raw(&root, 1, 1, RenderPixelFormat::Argb32f).unwrap();
+        assert_eq!(loaded.rgba, input.rgba);
+        fs::remove_file(root).unwrap();
+        input.rgba.pop();
         assert!(input.validate().is_err());
         input.width = 0;
         assert!(input.validate().is_err());
