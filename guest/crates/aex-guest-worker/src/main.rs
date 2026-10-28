@@ -1152,10 +1152,19 @@ mod tests {
 }
 
 #[cfg(any(not(feature = "native-carrier"), not(target_os = "macos")))]
+fn deserialize_ui_event<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<aex_guest_worker::classic::UiEvent, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
+#[cfg(any(not(feature = "native-carrier"), not(target_os = "macos")))]
 fn run_ui_session_command(args: Vec<std::ffi::OsString>) -> ExitCode {
     let result = (|| -> Result<(), String> {
-        if args.len() != 2 {
-            return Err("usage: ui-session <plugin.aex> <session.json>".into());
+        let streaming = args.len() == 3 && args[2] == "--stream";
+        if args.len() != 2 && !streaming {
+            return Err("usage: ui-session <plugin.aex> <session.json> [--stream]".into());
         }
         #[derive(serde::Deserialize)]
         #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -1164,6 +1173,9 @@ fn run_ui_session_command(args: Vec<std::ffi::OsString>) -> ExitCode {
                 parameters: Vec<String>,
             },
             Event {
+                // Serde's internally-tagged ContentDeserializer loses JSON's
+                // integer map-key conversion. Re-enter the JSON deserializer.
+                #[serde(deserialize_with = "deserialize_ui_event")]
                 event: aex_guest_worker::classic::UiEvent,
             },
         }
@@ -1218,7 +1230,36 @@ fn run_ui_session_command(args: Vec<std::ffi::OsString>) -> ExitCode {
             if operations.len() > 256 {
                 return Err("UI session is limited to 256 events".into());
             }
-            for operation in operations {
+            use std::io::{BufRead, Read, Write};
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            let mut initial = operations.into_iter();
+            let mut count = 0;
+            loop {
+                let operation = if let Some(operation) = initial.next() {
+                    operation
+                } else if streaming {
+                    let mut line = String::new();
+                    let size = input
+                        .by_ref()
+                        .take(1048577)
+                        .read_line(&mut line)
+                        .map_err(|e| e.to_string())?;
+                    if size == 0 {
+                        break;
+                    }
+                    if size > 1048576 || !line.ends_with('\n') {
+                        return Err("UI stream line exceeds 1 MiB or lacks newline".into());
+                    }
+                    serde_json::from_str::<Operation>(&line).map_err(|e| e.to_string())?
+                } else {
+                    break;
+                };
+                count += 1;
+                if count > 256 {
+                    return Err("UI session is limited to 256 events".into());
+                }
+
                 let state_before = host
                     .ui_state_u32(&request.initial_state_u32, false)
                     .map_err(|e| e.to_string())?;
@@ -1246,6 +1287,7 @@ fn run_ui_session_command(args: Vec<std::ffi::OsString>) -> ExitCode {
                     "{}",
                     serde_json::json!({"schema_version":1,"plugin_sha256":format!("{:x}",Sha256::digest(&bytes)),"current_time":request.current_time,"time_scale":request.time_scale,"setup":setup,"initial_state_u32":request.initial_state_u32,"initial_state_before":initial_before,"state_before":state_before,"state_after":state_after,"event":report})
                 );
+                std::io::stdout().flush().map_err(|e| e.to_string())?;
             }
             Ok(())
         })();

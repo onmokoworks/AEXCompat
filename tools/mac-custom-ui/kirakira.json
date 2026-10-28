@@ -1,0 +1,9 @@
+{
+  "session": {"current_time":7,"time_scale":24},
+  "event": {
+    "event":4,"slot":14,"area":2,"frame":[30,40,340,210],
+    "x":30,"y":40,"clicks":1,"last":false,"context":1,"window_type":2,
+    "theme":{"2":[60000,60000,60000],"7":[18000,18000,18000],"8":[26000,26000,26000],"42":[0,0,0]},
+    "picker_argb_bits":null
+  }
+}

@@ -327,6 +327,8 @@ fn ui_drag_preserves_continuation_across_draw_and_checks_context_and_slot() {
         window_type: 2,
         theme: BTreeMap::new(),
         picker_argb_bits: None,
+        key_code: None,
+        modifiers: None,
     };
     assert_eq!(host.ui_event(&event).unwrap()["send_drag"], 1);
     event.event = 4;
@@ -400,4 +402,44 @@ fn ui_draw_records_all_rect_words_and_rejects_released_resources() {
             .call_win64_with_timeout(release, &[id], TIMEOUT_MICROSECONDS)
             .is_err()
     );
+}
+
+#[test]
+fn ui_keydown_writes_native_abi_and_preserves_legacy_json() {
+    // Real emulated EffectMain copies x, y, keycode, modifiers into a point3D
+    // parameter's 24-byte snapshot. This observes guest memory, not source text.
+    let code = [
+        0x48, 0x8b, 0x44, 0x24, 0x30, // rax = event extra
+        0x4d, 0x8b, 0x51, 0x08, // r10 = params[1]
+        0x48, 0x8b, 0x50, 0x14, // rdx = x,y
+        0x49, 0x89, 0x52, 0x38, // param union[0..8]
+        0x48, 0x8b, 0x50, 0x1c, // rdx = key,modifiers
+        0x49, 0x89, 0x52, 0x40, // param union[8..16]
+        0x31, 0xc0, 0xc3,
+    ];
+    let mut engine = test_engine(&code);
+    engine.enable_ui_session().unwrap();
+    let mut host = crate::classic::ClassicHost::from_test_engine(engine, TEST_CODE).unwrap();
+    let mut definition = vec![0; abi::PF_PARAM_DEF_SIZE];
+    definition[12..16].copy_from_slice(&18i32.to_le_bytes());
+    host.prepare_test_user_changed_parameters(vec![definition])
+        .unwrap();
+    let old = serde_json::json!({"event":4,"slot":1,"area":2,"frame":[30,40,340,210],"x":17,"y":-31,"clicks":1,"last":false,"context":1,"window_type":2,"theme":{"2":[1,2,3]},"picker_argb_bits":null});
+    let mut event: crate::classic::UiEvent = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&event).unwrap(), old);
+    event.event = 10;
+    assert!(host.ui_event(&event).is_err());
+    event.key_code = Some(0x80000041);
+    event.modifiers = Some(0x300);
+    let result = host.ui_event(&event).unwrap();
+    let expected: Vec<u8> = [17u32, (-31i32) as u32, 0x80000041, 0x300, 0, 0]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    assert_eq!(
+        result["after"][0]["value"]["bytes"],
+        serde_json::json!(expected)
+    );
+    event.event = 4;
+    assert!(host.ui_event(&event).is_err());
 }
