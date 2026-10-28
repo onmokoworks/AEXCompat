@@ -270,6 +270,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_smart_setup.cpp
     src/worker_smart_dispatch.cpp
     src/worker_smart_finalize.cpp
+    src/worker_smart_finalize_selftest.cpp
     src/worker_smart_render_runtime.cpp
     src/worker_mask_runtime.cpp
     src/worker_mask_selftests.cpp

@@ -2110,6 +2110,7 @@ pub(crate) fn build_interactive_image_report(
         "smart_render_selector_error",
         "smart_render_error",
         "output_pixels_valid",
+        "output_samples_finite",
         "output_coverage",
         "cuda_context_used",
         "cuda_upload_bytes",

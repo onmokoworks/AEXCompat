@@ -238,6 +238,7 @@ struct SmartReport {
     std::array<int32_t, 2> input_dimensions{};
     std::array<int32_t, 2> pre_effect_source_origin{};
     std::array<int32_t, 2> output_origin{};
+    bool output_samples_finite{};
   } context;
   struct Lifetimes {
     std::string mask_scene_id;

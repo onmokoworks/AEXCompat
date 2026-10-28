@@ -4,6 +4,7 @@
 #include "worker_request_parser.hpp"
 #include "worker_smart_dispatch.hpp"
 #include "worker_smart_setup.hpp"
+#include "worker_smart_finalize.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 
 #include "worker_aegp_compat_selftests.hpp"
@@ -311,7 +312,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 47> simple_commands{{
+  const std::array<selftest::SimpleCommand, 48> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -345,6 +346,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        hooks.simple.pf_color_param_suite},
       {L"--self-test-declared-defaults", "declared_defaults",
        parameter_execution::verify_declared_defaults},
+      {L"--self-test-nonfinite-output", "nonfinite_output",
+       smart_finalize::verify_nonfinite_output},
       {L"--self-test-pf-iterate", "pf_iterate_suite", hooks.simple.pf_iterate},
       {L"--self-test-world-transform-composite", "world_transform_composite_rect",
        hooks.simple.world_transform_composite},

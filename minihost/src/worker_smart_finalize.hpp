@@ -35,4 +35,5 @@ struct Request {
   smart_execution::SessionFrame* session{};
 };
 bool finalize(const Request&, const Hooks&, smart_execution::Result&);
+bool verify_nonfinite_output();
 }
