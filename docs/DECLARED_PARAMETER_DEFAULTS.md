@@ -27,7 +27,9 @@ restores it. Callers editing a previously marked descriptor must likewise clear
 Discovery descriptors retain the declaration as provenance; they are not the
 effective render value. The worker normalizes at `initialize_parameter_definitions`
 (before first use) and at default assignment/reset, leaving the stored declaration
-unchanged. The applied/current parameter diagnostic reports the effective value.
+unchanged. The worker's `current_value` tracks the effective value. A caller or
+bridge echo of the input descriptor is still the declaration, not a readback
+of that worker state.
 UI slider ranges do not replace declared valid ranges. Nonfinite or unrepresentable
 default assignments and invalid default ranges are rejected, not rescued by clamp.
 
