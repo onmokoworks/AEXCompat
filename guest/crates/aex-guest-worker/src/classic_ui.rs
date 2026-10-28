@@ -189,7 +189,9 @@ impl ClassicHost {
         if (event.event == 10) != event.key_code.is_some()
             || (event.event != 10 && event.modifiers.is_some())
         {
-            return Err(ClassicError::Input("key payload requires keydown event 10".into()));
+            return Err(ClassicError::Input(
+                "key payload requires keydown event 10".into(),
+            ));
         }
         let context = if let Some((address, kind)) = self.ui_contexts.get(&event.context) {
             if *kind != event.window_type {
