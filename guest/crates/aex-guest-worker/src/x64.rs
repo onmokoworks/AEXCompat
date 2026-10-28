@@ -377,6 +377,7 @@ const VCRUNTIME_EXCEPTION_DATA_BYTES: usize = 16;
 pub(crate) fn utility_suite_layout(version: u32) -> Option<(usize, usize, usize)> {
     match version {
         3 => Some((9, 7, 8)),
+        5 => Some((19, 7, 8)),
         7 => Some((25, 7, 8)),
         11 => Some((31, 8, 9)),
         13 => Some((33, 9, 10)),
@@ -387,6 +388,8 @@ pub(crate) fn utility_suite_layout(version: u32) -> Option<(usize, usize, usize)
 fn utility_suite_table_address(version: u32) -> Option<u64> {
     match version {
         3 => Some(HOST_AEGP_UTILITY_TABLES),
+        // Leave the existing tables fixed; v13 occupies 0x300..0x408.
+        5 => Some(HOST_AEGP_UTILITY_TABLES + 0x500),
         7 => Some(HOST_AEGP_UTILITY_TABLES + 0x100),
         11 => Some(HOST_AEGP_UTILITY_TABLES + 0x200),
         13 => Some(HOST_AEGP_UTILITY_TABLES + 0x300),
@@ -397,6 +400,7 @@ fn utility_suite_table_address(version: u32) -> Option<u64> {
 fn unsupported_suite_stub_address(version: u32, slot: usize) -> Option<u64> {
     let version_index = match version {
         3 => 0,
+        5 => 4,
         7 => 1,
         11 => 2,
         13 => 3,
@@ -535,6 +539,7 @@ mod tests {
     include!("x64/tests_support.rs");
     include!("x64/tests_area_sample.rs");
     include!("x64/tests_ansi_callbacks.rs");
+    include!("x64/tests_host_suite_versions.rs");
     include!("x64/tests_transfer_rect.rs");
     include!("x64/tests_register_ui.rs");
     include!("x64/tests_cases.rs");

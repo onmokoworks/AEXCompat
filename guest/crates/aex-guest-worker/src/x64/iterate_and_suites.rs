@@ -613,7 +613,7 @@ fn install_typed_iterate_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result
 }
 
 fn install_aegp_utility_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
-    for version in [3u32, 7, 11, 13] {
+    for version in [3u32, 5, 7, 11, 13] {
         let (slot_count, register_slot, window_slot) =
             utility_suite_layout(version).expect("known utility suite version");
         let table =
@@ -1806,8 +1806,9 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         finish_acquire_suite_success(unicorn);
         return;
     }
+    // v1 is the 19-slot prefix of v2 (native provide_ansi1/provide_ansi2).
     if name == "PF ANSI Suite"
-        && version == 2
+        && matches!(version, 1 | 2)
         && output != 0
         && unicorn
             .mem_write(output, &HOST_PF_ANSI_SUITE_V2.to_le_bytes())
