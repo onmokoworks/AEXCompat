@@ -46,6 +46,8 @@ struct Result {
   bool rects_valid{};
   bool guards_intact{};
   bool output_pixels_valid{};
+  // Content diagnostic, separate from the output transport/coverage verdict.
+  bool output_samples_finite{};
   // The guarded output still held its initialization sentinel after a
   // successful selector. Kept separate from non-finite/otherwise-invalid
   // output so only this exact no-output case can authorize route fallback.
@@ -116,9 +118,8 @@ struct Result {
   bool selector_failure_substituted{};
   // The Premiere GPU-filter route saw a non-finite value in the float32 frame
   // the plug-in produced before narrowing it to an 8/16bpc session's depth.
-  // finalize folds it into the same `output_pixels_valid` / -6 verdict a
-  // float32 session gets from its own finite check, so the depth a session
-  // renders at does not decide whether a broken output is a diagnostic.
+  // finalize reports it as output_samples_finite=false and rejects the narrowed
+  // output. Native 32bpc words are instead preserved with the same diagnostic.
   bool output_non_finite{};
   std::array<int32_t, 4> output_extent_hint{};
 };

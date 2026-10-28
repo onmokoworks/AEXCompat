@@ -41,6 +41,9 @@ and bounded image input/output are now the main implementation path.
   references) to make an AEX appear compatible. These are host-protection
   runtime invariants that keep a malformed plug-in producing diagnostics instead
   of corrupting host state or crashing; they are part of the always-on floor.
+  Native 32 bpc NaN/Inf words are transportable content (#1805): report the
+  finite check as `output_samples_finite` independently of structural/write
+  validation. Never sanitize the words or suppress bounds/coverage diagnostics.
 - Do not fabricate or hand-edit recorded provenance to make an AEX appear
   compatible or an observation look reproducible; records are written by the
   code path that executed, or not at all.

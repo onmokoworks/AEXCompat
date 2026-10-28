@@ -403,6 +403,7 @@ void append_smart_context(ReportSnapshot& report, const SmartReport::Context& v)
       << ',' << v.max_result_rect[2] << ',' << v.max_result_rect[3] << ']'
       << ",\"guard_bytes_intact\":" << (v.validity[0] ? "true" : "false")
       << ",\"output_pixels_valid\":" << (v.validity[1] ? "true" : "false")
+      << ",\"output_samples_finite\":" << (v.output_samples_finite ? "true" : "false")
       << ",\"param_checkouts_balanced\":" << (v.validity[2] ? "true" : "false")
       << ",\"param_checkout_calls\":" << v.parameter_checkouts[0]
       << ",\"param_checkin_calls\":" << v.parameter_checkouts[1]

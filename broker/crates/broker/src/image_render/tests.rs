@@ -123,6 +123,22 @@ mod tests {
     }
 
     #[test]
+    fn native_nonfinite_output_diagnostic_survives_public_report_projection() {
+        for finite in [false, true] {
+            let worker = json!({"output_pixels_valid": true, "output_samples_finite": finite});
+            let mut facts = audio_report_facts(None);
+            facts.smart = true;
+            facts.pixel_format = RenderPixelFormat::Argb32f;
+            let report = build_interactive_image_report(&worker, facts);
+            assert_eq!(report["output_pixels_valid"], true);
+            assert_eq!(report["output_samples_finite"], finite);
+        }
+        // Old or unexecuted workers must not get a fabricated finite verdict.
+        let report = build_interactive_image_report(&json!({}), audio_report_facts(None));
+        assert_eq!(report["output_samples_finite"], Value::Null);
+    }
+
+    #[test]
     fn close_failure_diagnostic_names_a_bounded_invariant_without_worker_strings() {
         let close = json!({
             "invalidated": false,

@@ -93,17 +93,21 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
       : result.output_coverage.promised_pixels != 0 &&
           result.output_coverage.unwritten_pixels == result.output_coverage.promised_pixels;
   result.output_untouched = untouched;
-  // An 8/16bpc world cannot hold a non-finite value, so the check is on the
-  // float32 world; the Premiere GPU-filter route reports the same condition
-  // for the float32 frame it narrowed into an 8/16bpc world (issue #1271).
+  // Preserve native float words, including NaN payloads, as AE does. Finiteness
+  // remains a diagnostic independent of geometry/write coverage. A non-finite
+  // GPU frame narrowed to 8/16bpc is still rejected: those words were lost.
   const bool finite =
-      (r.pixel_bytes != 16 || render::finite_float_world(logical_output)) &&
+      (r.pixel_bytes != 16 || logical_output.empty() ||
+       render::finite_float_world(logical_output)) &&
       !result.output_non_finite;
+  result.output_samples_finite = finite;
+  const bool samples_transportable = r.pixel_bytes == 16 || finite;
   // A legally empty result promised no pixels; zero output bytes are the
   // correct fulfillment of that contract, not a validation failure.
   result.output_pixels_valid = result.empty_result_rect
-      ? (!result.empty_result_passthrough || (!logical_output.empty() && finite))
-      : !logical_output.empty() && finite &&
+      ? (!result.empty_result_passthrough ||
+         (!logical_output.empty() && samples_transportable))
+      : !logical_output.empty() && samples_transportable &&
           (result.output_coverage_external_world ? !untouched :
            result.output_coverage.geometry_valid &&
            result.output_coverage.unwritten_pixels == 0);

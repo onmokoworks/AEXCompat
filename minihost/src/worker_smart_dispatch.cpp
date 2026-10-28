@@ -2050,12 +2050,9 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   if (!frames.pr_download(out_record->world, download_pixels, out_float_rowbytes,
                           out_frame_w, out_frame_h))
     return decline("download_failed");
-  // The float32 session's finalize rejects a non-finite output
-  // (output_pixels_valid false, -6). Narrowing would silently turn NaN into 0
-  // and +-inf into the bounds, so the check is taken here on the float frame
-  // the plug-in produced, before the narrowing, and handed to finalize as
-  // `output_non_finite` so it lands in the same verdict: the depth a session
-  // renders at must not decide whether a broken output is a diagnostic.
+  // Native float32 output preserves non-finite words with a diagnostic.
+  // Narrowing would turn NaN into 0 and +-inf into the bounds, so check the
+  // original frame here and keep that lossy output rejected by finalize.
   // Held locally until the route commits: every field this function publishes
   // into `result` is written on the success path below, because a declined
   // route falls through to the ordinary PF render and must not colour its
