@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+windows-sys.workspace = true
 eframe = "0.33"
 egui-shadcn = "=0.3.1"
 rfd = "0.15"
@@ -22,3 +23,7 @@ libc = "0.2"
 [[bin]]
 name = "aexcompat-harness"
 path = "src/main.rs"
+
+[[bin]]
+name = "native-watch"
+path = "src/bin/native_watch.rs"

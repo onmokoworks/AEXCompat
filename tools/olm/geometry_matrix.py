@@ -29,6 +29,7 @@ class Case:
     padding: int = 0
     expected: str = 'ok'
     native: str = 'identity'
+    rejection: str | None = None
 
     def world(self):
         if isinstance(self.checkout, tuple):
@@ -56,6 +57,7 @@ NATIVE = {
     'negotiate': ('comparable', 'SmartOutputBounds; prepare_smart_output_bounds uses effect result_rect and negates output origin for InData'),
     'request': ('comparable', 'RenderContextState::smart_output_request / DiagnosticWorldLayout::request_rect -> worker_smart_setup'),
     'extent': ('comparable', 'DiagnosticWorldLayout::extent_hint -> worker_smart_setup; full source extent remains separate'),
+    'odd_padding': ('gap', 'DiagnosticWorldLayout parser accepts 3, but worker_smart_setup::prepare rejects padding not divisible by pixel_bytes; guest permits byte-granular padding'),
     'padding': ('comparable', 'DiagnosticWorldLayout::input_row_padding/output_row_padding (0..256); output serialization packs rows'),
     'crop': ('gap', 'worker_smart_runtime::checkout_pixels returns view_world with original allocation/dimensions; request intersection changes extent only. No F54 physically cropped checkout/rebased data contract'),
     'negative_request': ('partial', 'smart_output_request supports signed layer coordinates; DiagnosticWorldLayout parser rejects negative request coordinates'),
@@ -74,15 +76,15 @@ def cases():
              Case('extent-inset', extent=(1,2,16,9), native='extent'),
              Case('checkout-explicit', negotiate=True, checkout=(3,2,14,9), request=(3,2,14,9), native='crop'),
              Case('checkout-auto', negotiate=True, checkout='auto', request=(3,2,14,9), native='crop'),
-             Case('padding-odd', padding=3, native='padding'),
+             Case('padding-odd', padding=3, native='odd_padding'),
              Case('padding-max', padding=256, native='padding')]
     for depth in (8,16,32):
         for c in small:
             yield replace(c, name=f'{c.name}-{depth}', depth=depth)
         yield Case(f'4k-{depth}', full=(3840,2160), depth=depth, native='4k')
-    yield Case('padding-over-limit', padding=257, expected='reject', native='bad_pad')
-    yield Case('checkout-without-negotiation', checkout=(3,2,14,9), expected='reject', native='bad_checkout')
-    yield Case('checkout-outside', negotiate=True, checkout=(0,0,18,11), expected='reject', native='bad_checkout')
+    yield Case('padding-over-limit', padding=257, expected='reject', native='bad_pad', rejection='--rowbytes-pad: padding must be 0..256')
+    yield Case('checkout-without-negotiation', checkout=(3,2,14,9), expected='reject', native='bad_checkout', rejection='checkout rectangles require --negotiate-output 1')
+    yield Case('checkout-outside', negotiate=True, checkout=(0,0,18,11), expected='reject', native='bad_checkout', rejection='rectangle outside sampled world')
 
 
 def digest(path):
@@ -141,7 +143,7 @@ def run(worker, aex, c, directory):
             result['output_sha256']==output['checksum'] and
             result['output_bytes']==output['width']*output['height']*len(pixel) and
             not any(result['setup_errors'].values()))
-    result['expectation_met'] = actual == c.expected and (actual != 'ok' or result['invariants_ok']) and isinstance(code,int) and code >= 0
+    result['expectation_met'] = expected_result(c, result)
     ip.unlink()
     op.unlink(missing_ok=True)
     result['world_captures'] = []
@@ -157,6 +159,14 @@ def run(worker, aex, c, directory):
             'bytes':words[10], 'sha256':digest(dump)})
         dump.unlink()
     return result
+
+
+def expected_result(case, result):
+    if case.expected == 'reject':
+        return (result['exit_code'] == 2 and result['frame'] is None and
+                result['setup_errors'] is None and case.rejection is not None and
+                result['stderr'].strip() == 'aex_guest_error: '+case.rejection)
+    return result['status'] == 'ok' and result['exit_code'] == 0 and result['invariants_ok']
 
 
 def main():
