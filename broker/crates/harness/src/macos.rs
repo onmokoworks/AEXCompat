@@ -4054,6 +4054,7 @@ mod tests {
             maximum: 255.0,
             value,
             choices: Vec::new(),
+            use_declared_default: false,
             color_float: None,
             color: [255, 1, 2, 3],
             components: [1.5, 2.5, 3.5],

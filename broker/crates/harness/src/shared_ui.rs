@@ -274,7 +274,11 @@ pub(crate) fn show_effect_controls(
                                         ui.selectable_value(&mut selected, index + 1, choice);
                                     }
                                 });
-                            parameter.value = selected as f64;
+                            if !parameter.use_declared_default
+                                || selected != parameter.value as usize
+                            {
+                                parameter.value = selected as f64;
+                            }
                         }
                         "integer" if parameter.minimum == 0.0 && parameter.maximum == 1.0 => {
                             let mut checked = parameter.value != 0.0;
@@ -283,11 +287,12 @@ pub(crate) fn show_effect_controls(
                             }
                         }
                         _ => {
-                            modern_slider(
+                            modern_slider_with_default(
                                 ui,
                                 &mut parameter.value,
                                 parameter.minimum..=parameter.maximum,
                                 &parameter.name,
+                                parameter.use_declared_default,
                             );
                         }
                     }
@@ -299,6 +304,7 @@ pub(crate) fn show_effect_controls(
                     || parameter.components != previous_components
                     || parameter.debug_summary != previous_summary
                 {
+                    parameter.use_declared_default = false;
                     intents.push(EffectControlIntent::Changed {
                         slot: parameter.slot,
                         supervised: parameter.supervised,
@@ -320,11 +326,25 @@ pub(crate) fn modern_slider(
     range: std::ops::RangeInclusive<f64>,
     accessible_label: &str,
 ) -> egui::Response {
+    modern_slider_with_default(ui, value, range, accessible_label, false)
+}
+
+fn modern_slider_with_default(
+    ui: &mut egui::Ui,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
+    accessible_label: &str,
+    preserve_declared_default: bool,
+) -> egui::Response {
     let minimum = *range.start();
     let maximum = *range.end();
     let previous = *value;
     let enabled = ui.is_enabled();
-    let mut displayed_value = value.clamp(minimum, maximum);
+    let mut displayed_value = if preserve_declared_default {
+        *value
+    } else {
+        value.clamp(minimum, maximum)
+    };
     let (track_response, numeric_response) = ui
         .horizontal(|ui| {
             let desired = egui::vec2(ui.available_width().min(180.0).max(96.0), 28.0);
@@ -395,7 +415,7 @@ pub(crate) fn modern_slider(
                     }
                 });
             }
-            if response.enabled() {
+            if response.enabled() && (!preserve_declared_default || *value != previous) {
                 *value = value.clamp(minimum, maximum);
             }
             if *value != previous {
@@ -471,6 +491,7 @@ pub(crate) fn modern_slider(
             let numeric = ui.add(
                 egui::DragValue::new(numeric_value)
                     .range(range)
+                    .clamp_existing_to_range(!preserve_declared_default)
                     .speed(((maximum - minimum).abs() / 200.0).max(0.01)),
             );
             (response, numeric)
@@ -700,6 +721,7 @@ mod tests {
             maximum: 100.0,
             value: 50.0,
             choices: Vec::new(),
+            use_declared_default: false,
             color_float: None,
             color: [255, 0, 0, 0],
             components: [0.0; 3],
@@ -733,6 +755,42 @@ mod tests {
         );
         assert!(single_supported_dropped_path(std::slice::from_ref(&memory), supported).is_none());
         assert!(single_supported_dropped_path(&[png, memory], supported).is_none());
+    }
+
+    #[test]
+    fn passive_controls_preserve_out_of_range_declared_default_and_reset_mode() {
+        let mut p = parameter(1, "float");
+        p.minimum = 1.0;
+        p.maximum = 100.0;
+        p.value = f64::from(0.1f32);
+        p.use_declared_default = true;
+        let defaults = [p.clone()];
+        let parameters = std::cell::RefCell::new([p]);
+        eframe::egui::__run_test_ui(|ui| {
+            let output = show_effect_controls(
+                ui,
+                &mut *parameters.borrow_mut(),
+                &defaults,
+                false,
+                EffectControlCapabilities {
+                    choose_layer: false,
+                    trigger_button: false,
+                },
+                EffectControlsText::default(),
+            );
+            assert!(output.intents.is_empty());
+            assert_eq!(parameters.borrow()[0].value, defaults[0].value);
+            assert!(parameters.borrow()[0].use_declared_default);
+        });
+        let mut parameters = parameters.borrow_mut();
+        parameters[0].value = 1.0;
+        parameters[0].use_declared_default = false;
+        assert!(crate::gui_state::reset_parameter(
+            &mut parameters[0],
+            &defaults[0]
+        ));
+        assert_eq!(parameters[0].value, defaults[0].value);
+        assert!(parameters[0].use_declared_default);
     }
 
     #[test]
@@ -929,6 +987,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut current = parameter(9, "float");
         current.value = 75.0;
+        current.use_declared_default = true;
         current.supervised = true;
         let parameters = std::cell::RefCell::new(vec![current]);
         let mut default = parameter(9, "float");
@@ -1036,6 +1095,7 @@ mod tests {
                 );
             });
         });
+        assert!(!parameters.borrow()[0].use_declared_default);
         assert_eq!(
             intents.into_inner(),
             vec![EffectControlIntent::Changed {

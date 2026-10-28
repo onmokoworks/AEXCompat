@@ -1520,7 +1520,7 @@ mod windows_e2e {
         let encoded =
             aexcompat_broker::image_render::encode_default_interactive_payload(&parameters)
                 .expect("encode the parameter payload");
-        assert_eq!(encoded, "v2|param_1@1:f64=100");
+        assert_eq!(encoded, "v7|param_1@1:f64=default");
         assert_eq!(launch_payload(None), encoded);
 
         // (2) An override in the fixture route's shape: a descriptor id that is

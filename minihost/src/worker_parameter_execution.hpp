@@ -45,6 +45,7 @@ struct AssignmentValidationFailure {
 };
 const char* requested_kind_name(parameters::RequestedKind) noexcept;
 bool validate_requested_assignments(const parameters::RequestedAssignments&);
+bool verify_declared_defaults();
 bool validate_requested_assignments(const parameters::RequestedAssignments&,
                                     AssignmentValidationFailure* failure);
 // layer_width/height convert POINT/POINT_3D percentage defaults to pixels, per

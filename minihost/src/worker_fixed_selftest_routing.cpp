@@ -15,6 +15,7 @@
 #include "worker_pf_adv_time_suite.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_selftest_dispatch.hpp"
+#include "worker_parameter_execution.hpp"
 
 #include <array>
 #include <iostream>
@@ -310,7 +311,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 46> simple_commands{{
+  const std::array<selftest::SimpleCommand, 47> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -342,6 +343,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-pf-color-suite", "pf_color_suite", hooks.simple.pf_color_suite},
       {L"--self-test-pf-color-param-suite", "pf_color_param_suite",
        hooks.simple.pf_color_param_suite},
+      {L"--self-test-declared-defaults", "declared_defaults",
+       parameter_execution::verify_declared_defaults},
       {L"--self-test-pf-iterate", "pf_iterate_suite", hooks.simple.pf_iterate},
       {L"--self-test-world-transform-composite", "world_transform_composite_rect",
        hooks.simple.world_transform_composite},

@@ -13,6 +13,10 @@ pub struct InteractiveParameter {
     pub minimum: f64,
     pub maximum: f64,
     pub value: f64,
+    /// Resolve a numeric parameter from the loaded plug-in's declared default.
+    /// `value` is ignored in this mode; explicit assignments remain range checked.
+    #[serde(default)]
+    pub use_declared_default: bool,
     pub choices: Vec<String>,
     pub color: [u8; 4],
     /// Exact ARGB float color returned by PF_ColorParamSuite1, independent of

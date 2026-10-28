@@ -1147,6 +1147,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
             parameter.value = value;
+            parameter.use_declared_default = false;
         }
         let smart = match args[3].to_string_lossy().as_ref() {
             "classic" => false,
@@ -1338,6 +1339,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
             parameter.value = value;
+            parameter.use_declared_default = false;
         }
         let report = if artifact_command {
             use aexcompat_broker::image_render::RenderArtifactKind;
@@ -1825,6 +1827,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
             parameter.value = value;
+            parameter.use_declared_default = false;
             assigned_slots.push(slot);
         }
         let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format(

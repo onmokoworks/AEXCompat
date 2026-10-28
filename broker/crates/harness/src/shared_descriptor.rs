@@ -122,6 +122,7 @@ pub(crate) fn parameters_from_guest_setup(
                 .map(|choices| choices.split('|').map(str::to_owned).collect())
                 .unwrap_or_default(),
             color,
+            use_declared_default: false,
             color_float: None,
             components,
             component_count,
