@@ -1182,6 +1182,88 @@ mod windows_e2e {
     }
 
     #[test]
+    fn native_primary_world_layout_reaches_the_classic_aex() {
+        use aexcompat_broker::image_render::{
+            NativeImageInput, render_native_image_with_dependencies,
+        };
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let root = repository_root();
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !root.join("target/minihost-build/aex_worker.exe").is_file() || !aex.is_file() {
+            eprintln!("skipping native world-layout fixture: build worker and layer probe");
+            return;
+        }
+        let scratch = std::env::temp_dir().join(format!(
+            "native-world-layout-{:032x}",
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&scratch).unwrap();
+        let layer = scratch.join("layer.png");
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(&layer)
+            .unwrap();
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let mut input = NativeImageInput {
+            width: 4,
+            height: 3,
+            format: RenderPixelFormat::Argb8,
+            rgba: [40, 60, 80, 255].repeat(12),
+            world_layout: None,
+        };
+        for (index, padding, origin, extent) in [
+            (0, 0, [0, 0], [0, 0, 4, 3]),
+            (1, 8, [0, 0], [0, 0, 4, 3]),
+            (2, 0, [2, -1], [0, 0, 4, 3]),
+            (3, 0, [0, 0], [1, 1, 3, 2]),
+        ] {
+            input.world_layout = Some(
+                serde_json::from_value(serde_json::json!({
+                    "pixel_format":"argb8","width":4,"height":3,"rowbytes":16+padding,
+                    "row_padding":padding,"padding_byte":165,"origin":{"x":origin[0],"y":origin[1]},
+                    "extent":{"left":extent[0],"top":extent[1],"right":extent[2],"bottom":extent[3]}
+                }))
+                .unwrap(),
+            );
+            let output = scratch.join(format!("out{index}.png"));
+            let report = render_native_image_with_dependencies(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                &output,
+                &[layer_parameter(1, &layer), float_parameter(2, 255.0)],
+                RenderTiming::default(),
+                false,
+                None,
+                None,
+                RenderGpuBackend::Cpu,
+                vec![],
+                vec![aex.parent().unwrap().to_owned()],
+            )
+            .unwrap();
+            assert_eq!(report["passed"], true);
+            let pixels = image::open(output).unwrap().into_rgba8();
+            assert_eq!(
+                pixels.get_pixel(0, 0).0,
+                [
+                    padding as u8,
+                    (origin[0] + 128) as u8,
+                    (origin[1] + 128) as u8,
+                    255
+                ]
+            );
+            assert_eq!(
+                pixels.get_pixel(1, 0).0,
+                [extent[0] as u8, extent[1] as u8, extent[2] as u8, 255]
+            );
+            assert_eq!(pixels.get_pixel(2, 0).0[0], extent[3] as u8);
+        }
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
     fn declarative_secondary_world_layout_reaches_the_classic_aex() {
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()

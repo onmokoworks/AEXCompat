@@ -1298,6 +1298,7 @@ impl RenderSession {
     pub(crate) fn open_native_input(
         request: SessionOpenRequest<'_>,
         interactive: bool,
+        layout: Option<DiagnosticWorldLayout>,
     ) -> io::Result<RenderSession> {
         Self::open_with_desktop_policy(
             request,
@@ -1308,7 +1309,7 @@ impl RenderSession {
             },
             None,
             None,
-            None,
+            layout,
             &[],
             None,
             true,

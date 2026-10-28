@@ -359,12 +359,21 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
       hooks.dump_world("smart-layer-slot" + std::to_string(layer.slot),
                        pixels.data(), layer.width, layer.height, layer_pixel_bytes);
       const int32_t packed_rowbytes = layer.width * layer_pixel_bytes;
+      // Still/temporal primary checkouts share the primary PF world's layout,
+      // not just its origin and extent. Their transport bytes remain packed.
+      const int32_t padding = layer.slot == 0
+          ? plan.rowbytes - packed_rowbytes
+          : (layer.has_world_layout ? layer.row_padding : 0);
+      if (padding < 0 || padding > 256 || padding % layer_pixel_bytes != 0)
+        return false;
+      const unsigned char padding_byte = layer.slot == 0
+          ? render::diagnostic_world_layout().input_padding_byte : layer.padding_byte;
       const int32_t layer_rowbytes = packed_rowbytes +
-          (layer.has_world_layout ? layer.row_padding : 0);
-      if (layer.has_world_layout && layer.row_padding != 0) {
+          padding;
+      if (padding != 0) {
         std::vector<unsigned char> strided(
             static_cast<std::size_t>(layer_rowbytes) * layer.height,
-            layer.padding_byte);
+            padding_byte);
         for (int32_t y = 0; y < layer.height; ++y)
           std::memcpy(strided.data() + static_cast<std::size_t>(y) * layer_rowbytes,
                       pixels.data() + static_cast<std::size_t>(y) * packed_rowbytes,
@@ -583,6 +592,62 @@ bool verify_animation_extent_wiring_for_test() {
     smart::state().hosted_layers.clear();
     return false;
   }
+  // Exercise the actual still and temporal checkout worlds at each native
+  // depth. Reconstructing a packed world here would lose the primary stride.
+  for (const int32_t bpp : {4, 8, 16}) {
+    for (const bool timed : {false, true}) {
+      plan.input_pixel_bytes = plan.pixel_bytes = bpp;
+      plan.rowbytes = plan.width * bpp + 2 * bpp;
+      render_safety::InputPixelBuffer padded_source(
+          static_cast<std::size_t>(plan.rowbytes) * plan.height);
+      if (!padded_source) return false;
+      std::memset(padded_source.data(), 0, static_cast<std::size_t>(plan.rowbytes) * plan.height);
+      world_safety::EffectWorldStorage padded_world{};
+      if (!render::prepare_world_layout(padded_world,
+          {bpp == 4 ? 0 : 1, bpp, plan.width, plan.height, plan.rowbytes},
+          padded_source.data())) return false;
+      const int32_t origin[2] = {-3, 2};
+      const int32_t extent[4] = {1, 1, 250, 140};
+      std::memcpy(padded_world.data() + 104, origin, sizeof(origin));
+      std::memcpy(padded_world.data() + 44, extent, sizeof(extent));
+      request.input_world = &padded_world;
+      request.source = &padded_source;
+      layers.front().timed = timed;
+      layers.front().rgba_pixel_bytes = bpp;
+      layers.front().rgba.resize(static_cast<std::size_t>(plan.width) * plan.height * bpp);
+      for (std::size_t i = 0; i < layers.front().rgba.size(); ++i)
+        layers.front().rgba[i] = static_cast<unsigned char>(i * 37 + 11);
+      ParameterState variant(runtime.records.size() + 1, layers.size());
+      copy_world_into_param_def(variant.definitions[0], padded_world);
+      parameter_execution::initialize_parameter_definitions(variant.definitions, plan.width, plan.height);
+      if (!prepare_parameters(request, variant, hooks)) return false;
+      const auto& world = variant.hosted_worlds.front();
+      int32_t stride = 0;
+      std::memcpy(&stride, world.data() + 32, sizeof(stride));
+      if (stride != plan.rowbytes ||
+          std::memcmp(world.data() + 104, origin, sizeof(origin)) != 0 ||
+          std::memcmp(world.data() + 44, extent, sizeof(extent)) != 0 ||
+          variant.hosted_pixels.front().size() != static_cast<std::size_t>(stride) * plan.height)
+        return false;
+      for (int y = 0; y < plan.height; ++y) {
+        const auto* row = variant.hosted_pixels.front().data() + y * stride;
+        for (int x = 0; x < plan.width; ++x) {
+          unsigned char expected[16]{};
+          render_pixel_transport::rgba_to_argb(expected,
+              layers.front().rgba.data() + (static_cast<std::size_t>(y) * plan.width + x) * bpp,
+              bpp, bpp);
+          if (std::memcmp(row + x * bpp, expected, bpp) != 0) return false;
+        }
+        for (int i = plan.width * bpp; i < stride; ++i)
+          if (row[i] != render::diagnostic_world_layout().input_padding_byte) return false;
+      }
+    }
+  }
+  request.input_world = &input_world;
+  request.source = &source;
+  plan.input_pixel_bytes = plan.pixel_bytes = 4;
+  plan.rowbytes = plan.width * 4;
+  layers.front().timed = true;
   layers.front().time = request.external_total_time + 1;
   ParameterState outside_prepared(runtime.records.size() + 1, layers.size());
   copy_world_into_param_def(outside_prepared.definitions[0], input_world);

@@ -502,6 +502,10 @@ fn render_with_artifact(
             explicit_dependency_search_dirs: &explicit_dependency_search_dirs,
             rgba: &rgba,
             native_input: native_input.is_some(),
+            native_world_layout: native_input
+                .map(NativeImageInput::diagnostic_layout)
+                .transpose()?
+                .flatten(),
             width,
             height,
             spatial,
@@ -644,6 +648,7 @@ struct SessionWrapperRequest<'a> {
     explicit_dependency_search_dirs: &'a [PathBuf],
     rgba: &'a [u8],
     native_input: bool,
+    native_world_layout: Option<crate::render_session::DiagnosticWorldLayout>,
     width: u32,
     height: u32,
     spatial: crate::render_request::SpatialContext,
@@ -821,7 +826,11 @@ fn render_classic_via_length_one_session(
                 "native chain input does not accept fixture world overrides",
             ));
         }
-        RenderSession::open_native_input(session_request, request.custom_ui_action.is_some())
+        RenderSession::open_native_input(
+            session_request,
+            request.custom_ui_action.is_some(),
+            request.native_world_layout,
+        )
     } else if request.custom_ui_action.is_some() {
         if fixture_world_layout_override().is_some()
             || fixture_secondary_layouts_override().is_some()

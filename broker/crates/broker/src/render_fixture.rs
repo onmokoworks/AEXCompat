@@ -516,7 +516,7 @@ fn validate_fixture(fixture: &DeclarativeRenderFixture) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_world_layout(layout: &FixtureWorldLayout) -> io::Result<()> {
+pub(crate) fn validate_world_layout(layout: &FixtureWorldLayout) -> io::Result<()> {
     let packed = layout
         .width
         .checked_mul(layout.pixel_format.bytes_per_pixel() as u32)
