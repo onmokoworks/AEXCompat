@@ -1730,6 +1730,7 @@ mod tests {
             maximum: 1.0,
             value: 0.0,
             choices: Vec::new(),
+            color_float: None,
             color: [0; 4],
             components: [0.0; 3],
             component_count: 0,

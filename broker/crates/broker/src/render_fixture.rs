@@ -15,6 +15,10 @@ pub struct InteractiveParameter {
     pub value: f64,
     pub choices: Vec<String>,
     pub color: [u8; 4],
+    /// Exact ARGB float color returned by PF_ColorParamSuite1, independent of
+    /// the legacy PF_ColorDef byte value and the render world's depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_float: Option<[f32; 4]>,
     pub components: [f64; 3],
     pub component_count: usize,
     pub layer_path: Option<PathBuf>,

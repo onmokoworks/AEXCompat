@@ -630,7 +630,8 @@ bool valid_parameter_id(const std::wstring& id) {
 bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) {
   if (!text) return false;
   const std::wstring encoded(text);
-  const bool version5 = encoded.compare(0, 3, L"v5|") == 0;
+  const bool version6 = encoded.compare(0, 3, L"v6|") == 0;
+  const bool version5 = version6 || encoded.compare(0, 3, L"v5|") == 0;
   const bool version4 = encoded.compare(0, 3, L"v4|") == 0;
   const bool version3 = encoded.compare(0, 3, L"v3|") == 0;
   if (encoded.size() < 3 || encoded.size() > 16384 ||
@@ -653,7 +654,7 @@ bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) 
     const std::wstring id = assignment.substr(0, at);
     const std::wstring index_text = assignment.substr(at + 1, colon - at - 1);
     const std::wstring kind_text = assignment.substr(colon + 1, equals - colon - 1);
-    const std::wstring value = assignment.substr(equals + 1);
+    std::wstring value = assignment.substr(equals + 1);
     int32_t index{};
     if (!valid_parameter_id(id) || value.size() > 8192 ||
         !parse_i32_arg(index_text.c_str(), 1, static_cast<int32_t>(kMaxParams), index) ||
@@ -662,6 +663,7 @@ bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) 
     if (kind_text == L"i32") kind = RequestedKind::Integer;
     else if (kind_text == L"f64") kind = RequestedKind::Float;
     else if ((version3 || version4 || version5) && kind_text == L"argb8") kind = RequestedKind::Color;
+    else if (version6 && kind_text == L"argb8f") kind = RequestedKind::Color;
     else if ((version4 || version5) && kind_text == L"angle") kind = RequestedKind::Angle;
     else if ((version4 || version5) && kind_text == L"point") kind = RequestedKind::Point;
     else if ((version4 || version5) && kind_text == L"point3d") kind = RequestedKind::Point3D;
@@ -671,6 +673,28 @@ bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) 
     std::array<unsigned char, 4> color{};
     std::array<double, 3> components{};
     std::string arbitrary_text;
+    const bool has_float_color = kind_text == L"argb8f";
+    std::array<float, 4> float_color{};
+    if (has_float_color) {
+      const auto slash = value.find(L'/');
+      if (slash == std::wstring::npos) return false;
+      const auto words = value.substr(slash + 1);
+      if (words.size() != 35) return false;
+      for (std::size_t channel = 0; channel < 4; ++channel) {
+        uint32_t bits = 0;
+        for (std::size_t digit = 0; digit < 8; ++digit) {
+          const auto ch = words[channel * 9 + digit];
+          const int nibble = ch >= L'0' && ch <= L'9' ? ch - L'0' :
+              ch >= L'a' && ch <= L'f' ? ch - L'a' + 10 : -1;
+          if (nibble < 0) return false;
+          bits = (bits << 4) | static_cast<uint32_t>(nibble);
+        }
+        if (channel < 3 && words[channel * 9 + 8] != L',') return false;
+        std::memcpy(&float_color[channel], &bits, sizeof(bits));
+        if (!std::isfinite(float_color[channel])) return false;
+      }
+      value.resize(slash);
+    }
     if (kind == RequestedKind::Color) {
       std::size_t start = 0;
       for (std::size_t channel = 0; channel < color.size(); ++channel) {
@@ -721,7 +745,7 @@ bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) 
       if (!parse_double_arg(value.c_str(), minimum, maximum, parsed) ||
           (kind == RequestedKind::Integer && std::trunc(parsed) != parsed)) return false;
     }
-    output.push_back({id, index, kind, parsed, color, components, arbitrary_text});
+    output.push_back({id, index, kind, parsed, color, components, arbitrary_text, has_float_color, float_color});
     if (output.size() > kMaxParams) return false;
     if (separator == std::wstring::npos) break;
     offset = separator + 1;

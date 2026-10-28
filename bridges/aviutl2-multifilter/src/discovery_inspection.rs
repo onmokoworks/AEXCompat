@@ -666,6 +666,7 @@ fn parameters_from_inspect_report(
                 .and_then(Value::as_str)
                 .map(|text| text.split('|').map(str::to_owned).collect())
                 .unwrap_or_default(),
+            color_float: None,
             color: [
                 channel("alpha"),
                 channel("red"),
