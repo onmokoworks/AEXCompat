@@ -12,6 +12,8 @@ so a default request after an explicit edit resets the numeric value. Finite,
 integer/fixed representation, checkbox and mask bounds remain checked. Explicit
 out-of-range numbers remain rejected, including numbers equal to the default.
 Default mode is not supported for colors, points or arbitrary data.
+The strict declarative fixture v1/v2 schema is unchanged: explicit mode omits
+the new field on serialization; default mode is for native/interactive APIs.
 
 `encode_default_interactive_payload` / `normalize_default_interactive_parameters`
 mark out-of-range numeric discovery defaults instead of clamping them. In-range

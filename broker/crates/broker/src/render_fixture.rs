@@ -15,7 +15,7 @@ pub struct InteractiveParameter {
     pub value: f64,
     /// Resolve a numeric parameter from the loaded plug-in's declared default.
     /// `value` is ignored in this mode; explicit assignments remain range checked.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub use_declared_default: bool,
     pub choices: Vec<String>,
     pub color: [u8; 4],
@@ -35,6 +35,10 @@ pub struct InteractiveParameter {
     pub custom_ui_events: u32,
     #[serde(default)]
     pub control_size: [u16; 2],
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -640,6 +644,17 @@ mod tests {
         assert!(validate_parameter_schema(&json!({"parameters":[unknown_parameter]})).is_err());
         assert!(fixture_relative(Path::new("fixture"), Path::new(r"C:outside.png")).is_err());
         assert!(fixture_relative(Path::new("fixture"), Path::new(r"\outside.png")).is_err());
+    }
+
+    #[test]
+    fn explicit_parameter_serialization_retains_the_canonical_fixture_schema() {
+        let parameter: InteractiveParameter = serde_json::from_value(parameter()).unwrap();
+        assert!(!parameter.use_declared_default);
+        let encoded = serde_json::to_value(&parameter).unwrap();
+        validate_parameter_schema(&json!({"parameters":[encoded.clone()]})).unwrap();
+        let decoded: InteractiveParameter = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.value, parameter.value);
+        assert!(!decoded.use_declared_default);
     }
 
     #[test]
