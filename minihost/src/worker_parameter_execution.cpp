@@ -665,6 +665,11 @@ bool validate_requested_assignments(const parameters::RequestedAssignments& requ
         (assignment.kind == parameters::RequestedKind::Point3D && !point3d_compatible) ||
         (assignment.kind == parameters::RequestedKind::ArbitraryText && !arbitrary_compatible))
       return reject("kind_mismatch", descriptor.type);
+    if (assignment.has_float_color &&
+        (assignment.kind != parameters::RequestedKind::Color ||
+         std::any_of(assignment.float_color.begin(), assignment.float_color.end(),
+                     [](float value) { return !std::isfinite(value); })))
+      return reject("invalid_float_color", descriptor.type);
     if (descriptor.type == 12 && (assignment.value < 0 ||
          assignment.value > static_cast<double>(hooks().active_mask_count()) ||
          std::trunc(assignment.value) != assignment.value))
@@ -816,7 +821,8 @@ bool apply_requested_assignments(
       std::memcpy(staged_definitions[slot].data() + 56, assignment.color.data(), assignment.color.size());
       record.current_color = assignment.color;
       for (std::size_t channel = 0; channel < 4; ++channel)
-        record.current_float_color[channel] = assignment.color[channel] / 255.0f;
+        record.current_float_color[channel] = assignment.has_float_color
+              ? assignment.float_color[channel] : assignment.color[channel] / 255.0f;
     }
     else if (type == 3) {
       const auto encoded = to_fixed(assignment.components[0]);
@@ -890,6 +896,16 @@ std::string requested_parameters_json(const parameters::RequestedAssignments& re
       for (int component = 0; component < count; ++component) {
         if (component) output << ",";
         output << std::setprecision(17) << assignment.components[component];
+      }
+      output << "]";
+    }
+    if (assignment.has_float_color) {
+      output << ",\"float_argb_bits\":[";
+      for (std::size_t channel = 0; channel < 4; ++channel) {
+        uint32_t bits{};
+        std::memcpy(&bits, &assignment.float_color[channel], sizeof(bits));
+        if (channel) output << ",";
+        output << bits;
       }
       output << "]";
     }

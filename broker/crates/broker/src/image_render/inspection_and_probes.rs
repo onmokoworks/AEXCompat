@@ -331,6 +331,7 @@ fn inspection_result_from_report(
                 .and_then(Value::as_str)
                 .map(|text| text.split('|').map(str::to_owned).collect())
                 .unwrap_or_default(),
+            color_float: None,
             color: [
                 channel("alpha"),
                 channel("red"),
@@ -1470,7 +1471,7 @@ pub fn dispatch_experimental_aegp_switch_roundtrip(
 }
 
 /// Encodes interactive parameters into the worker payload transport form
-/// (`v2|`..`v5|`). Public so integration tests can compute the exact payload
+/// (`v2|`..`v6|`). Public so integration tests can compute the exact payload
 /// a session frame carries; production callers stay inside the crate.
 pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Result<String> {
     let parameters = parameters
@@ -1482,7 +1483,9 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
             )
         })
         .collect::<Vec<_>>();
-    let mut payload = if parameters.iter().any(|item| item.kind == "arbitrary_data") {
+    let mut payload = if parameters.iter().any(|item| item.color_float.is_some()) {
+        "v6|".to_owned()
+    } else if parameters.iter().any(|item| item.kind == "arbitrary_data") {
         "v5|".to_owned()
     } else if parameters
         .iter()
@@ -1497,6 +1500,7 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
     for (index, item) in parameters.iter().enumerate() {
         if item.slot == 0
             || item.slot > MAX_PARAMETERS
+            || (item.color_float.is_some() && item.kind != "color")
             || !item.value.is_finite()
             || item.value < item.minimum
             || item.value > item.maximum
@@ -1521,6 +1525,24 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
                 payload.push_str(&format!("{id}@{}:i32={}", item.slot, item.value as i64))
             }
             "float" => payload.push_str(&format!("{id}@{}:f64={}", item.slot, item.value)),
+            "color" if item.color_float.is_some() => {
+                let color = item.color_float.unwrap();
+                if color.iter().any(|value| !value.is_finite()) {
+                    return Err(invalid("interactive float color must be finite"));
+                }
+                payload.push_str(&format!(
+                    "{id}@{}:argb8f={},{},{},{}/{:08x},{:08x},{:08x},{:08x}",
+                    item.slot,
+                    item.color[0],
+                    item.color[1],
+                    item.color[2],
+                    item.color[3],
+                    color[0].to_bits(),
+                    color[1].to_bits(),
+                    color[2].to_bits(),
+                    color[3].to_bits()
+                ));
+            }
             "color" => payload.push_str(&format!(
                 "{id}@{}:argb8={},{},{},{}",
                 item.slot, item.color[0], item.color[1], item.color[2], item.color[3]

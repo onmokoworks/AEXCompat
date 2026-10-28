@@ -92,8 +92,6 @@ int32_t __cdecl floating_point_from_color(void* effect_ref, const void* definiti
   // (issue #1060). Match on the colour value among the type-5 parameters
   // instead: the checked-out value is either a parameter's current or default
   // colour, which identifies it without depending on the id.
-  const auto by_id = std::find_if(g_params.begin(), g_params.end(),
-      [disk_id](const ParamRecord& p) { return p.disk_id == disk_id; });
   const std::array<float, 4>* resolved = nullptr;
   const auto match = [&](const ParamRecord& p) -> const std::array<float, 4>* {
     if (p.type != 5 || !p.has_color) return nullptr;
@@ -101,9 +99,20 @@ int32_t __cdecl floating_point_from_color(void* effect_ref, const void* definiti
     if (value == p.default_color) return &p.default_float_color;
     return nullptr;
   };
-  if (by_id != g_params.end()) resolved = match(*by_id);
-  if (!resolved)
-    for (const auto& p : g_params) if ((resolved = match(p))) break;
+  // Equal legacy bytes no longer imply equal float colors. Do not silently
+  // select the first parameter when IDs and byte colors collide.
+  const auto resolve = [&](bool require_id) {
+    for (const auto& p : g_params) {
+      if (require_id && p.disk_id != disk_id) continue;
+      const auto* candidate = match(p);
+      if (!candidate) continue;
+      if (resolved && std::memcmp(resolved->data(), candidate->data(),
+                                  sizeof(*candidate)) != 0) return false;
+      resolved = candidate;
+    }
+    return true;
+  };
+  if (!resolve(true) || (!resolved && !resolve(false))) return kPfBadCallbackParam;
   if (!resolved) return kPfBadCallbackParam;
 
   const PfColorParamPixelFloat result{(*resolved)[0], (*resolved)[1],

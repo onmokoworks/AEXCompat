@@ -700,6 +700,7 @@ mod tests {
             maximum: 100.0,
             value: 50.0,
             choices: Vec::new(),
+            color_float: None,
             color: [255, 0, 0, 0],
             components: [0.0; 3],
             component_count: 0,

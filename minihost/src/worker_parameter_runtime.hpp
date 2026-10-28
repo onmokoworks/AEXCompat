@@ -55,6 +55,8 @@ struct RequestedAssignment {
   std::array<unsigned char, 4> color{};
   std::array<double, 3> components{};
   std::string text;
+  bool has_float_color{};
+  std::array<float, 4> float_color{};
 };
 using RequestedAssignments = std::vector<RequestedAssignment>;
 

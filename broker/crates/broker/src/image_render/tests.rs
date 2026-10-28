@@ -883,6 +883,7 @@ mod tests {
                 maximum,
                 value,
                 choices: vec![],
+                color_float: None,
                 color: [0; 4],
                 components: [0.0; 3],
                 component_count: 0,
@@ -1047,6 +1048,7 @@ mod tests {
             maximum: 3.0,
             value: 2.0,
             choices: vec!["Horizontal".into(), "Vertical".into(), "Both".into()],
+            color_float: None,
             color: [255, 0, 0, 0],
             components: [0.0; 3],
             component_count: 0,
@@ -1075,6 +1077,30 @@ mod tests {
     }
 
     #[test]
+    fn float_color_payload_preserves_words_and_legacy_bytes() {
+        let mut p: InteractiveParameter = serde_json::from_value(json!({
+            "slot":1,"name":"Color","kind":"color","minimum":0,"maximum":0,"value":0,
+            "choices":[],"color":[255,64,128,192],"components":[0,0,0],"component_count":0,
+            "layer_path":null,"enabled":true,"visible":true,"supervised":false
+        }))
+        .unwrap();
+        assert_eq!(
+            encode_interactive_payload(&[p.clone()]).unwrap(),
+            "v3|param_1@1:argb8=255,64,128,192"
+        );
+        p.color_float = Some([1.0, f32::from_bits(0x3e800001), -0.0, 2.0]);
+        assert_eq!(
+            encode_interactive_payload(&[p.clone()]).unwrap(),
+            "v6|param_1@1:argb8f=255,64,128,192/3f800000,3e800001,80000000,40000000"
+        );
+        p.color_float.as_mut().unwrap()[1] = f32::NAN;
+        assert!(encode_interactive_payload(&[p.clone()]).is_err());
+        p.color_float = Some([0.0; 4]);
+        p.slot = 0;
+        assert!(encode_interactive_payload(&[p]).is_err());
+    }
+
+    #[test]
     fn empty_parameter_set_uses_valid_default_payload() {
         assert_eq!(encode_interactive_payload(&[]).unwrap(), "v2|");
     }
@@ -1089,6 +1115,7 @@ mod tests {
             maximum: 0.0,
             value: 0.0,
             choices: vec![],
+            color_float: None,
             color: [0; 4],
             components: [0.0; 3],
             component_count: 0,
@@ -1124,6 +1151,7 @@ mod tests {
             maximum: -10.0,
             value: f64::NAN,
             choices: vec![],
+            color_float: None,
             color: [0; 4],
             components: [0.0; 3],
             component_count: 0,
@@ -1159,6 +1187,7 @@ mod tests {
             maximum: 0.0,
             value: 0.0,
             choices: vec![],
+            color_float: None,
             color: [0; 4],
             components: [0.0; 3],
             component_count: 0,
@@ -1186,6 +1215,7 @@ mod tests {
             maximum: 0.0,
             value: 0.0,
             choices: vec![],
+            color_float: None,
             color: [0; 4],
             components: [50.0, 25.5, 0.0],
             component_count: 2,

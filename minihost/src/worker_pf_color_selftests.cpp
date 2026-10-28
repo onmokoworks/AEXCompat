@@ -1,6 +1,11 @@
 #include "worker_pf_color_selftests.hpp"
 
 #include "worker_pf_suites_internal.hpp"
+#include "worker_parameter_execution.hpp"
+
+namespace aexcompat::l2_detail {
+bool parse_parameter_payload(const wchar_t*, worker_runtime::parameters::RequestedAssignments&);
+}
 
 #include <array>
 #include <cstddef>
@@ -176,6 +181,38 @@ bool verify_pf_color_param_suite() {
       g_hooks.floating_point_from_color(g_hooks.effect, invalid_type.data(), &out) ==
           kPfUnrecognizedParamType && std::memcmp(&out, &sentinel, sizeof(out)) == 0;
   ok = g_hooks.release_suite("PF ColorParamSuite", 1) == 0 && ok;
+  // Exercise the actual parser -> assignment -> suite path. Same byte color,
+  // distinct float precision/HDR/signed zero, with no float-to-byte roundtrip.
+  worker_runtime::parameters::RequestedAssignments assignments;
+  ok = ok && l2_detail::parse_parameter_payload(
+      L"v6|color@1:argb8f=255,64,128,192/3f800000,3e800001,80000000,40000000", assignments);
+  worker_runtime::parameter_execution::Definitions definitions(params.size() + 1);
+  definitions[1] = current8;
+  ok = ok && worker_runtime::parameter_execution::apply_requested_assignments(definitions, assignments);
+  ok = ok && g_hooks.floating_point_from_color(g_hooks.effect, definitions[1].data(), &out) == 0;
+  const std::array<uint32_t, 4> expected{0x3f800000, 0x3e800001, 0x80000000, 0x40000000};
+  ok = ok && std::memcmp(&out, expected.data(), sizeof(out)) == 0 &&
+      std::memcmp(definitions[1].data() + 56, params[0].current_color.data(), 4) == 0;
+  auto collision = params[0];
+  collision.current_float_color[1] = 0.75f;
+  params.push_back(collision);
+  out = sentinel;
+  ok = ok && g_hooks.floating_point_from_color(g_hooks.effect, definitions[1].data(), &out) ==
+      kPfBadCallbackParam && std::memcmp(&out, &sentinel, sizeof(out)) == 0;
+  params.back().disk_id = 999;
+  auto distinct = definition(params.back(), true);
+  ok = ok && g_hooks.floating_point_from_color(g_hooks.effect, distinct.data(), &out) == 0 &&
+      out.red == 0.75f;
+  params.pop_back();
+  for (const wchar_t* bad : {
+      L"v5|color@1:argb8f=255,64,128,192/3f800000,3e800001,80000000,40000000",
+      L"v6|color@1:argb8f=256,64,128,192/3f800000,3e800001,80000000,40000000",
+      L"v6|color@1:argb8f=255,64,128,192/3f800000,7f800000,80000000,40000000",
+      L"v6|color@1:argb8f=255,64,128,192/3f800000,7fc12345,80000000,40000000",
+      L"v6|color@1:argb8f=255,64,128,192/3f800000,3e800001,80000000,4000000g"}) {
+    assignments.clear();
+    ok = ok && !l2_detail::parse_parameter_payload(bad, assignments);
+  }
   params = saved_params;
   return ok;
 }
