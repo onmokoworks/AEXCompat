@@ -63,7 +63,7 @@ pub(crate) fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBacken
     }
 }
 
-use crate::decoded_image::{native_rgba_to_preview, rgba16_transport_to_png16};
+pub(crate) use crate::decoded_image::{native_rgba_to_preview, rgba16_transport_to_png16};
 
 /// Opt-in world snapshot dumps and output checksum detail (issue #19). Both
 /// default off and only take effect for broker-dispatched image renders.
