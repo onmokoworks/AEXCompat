@@ -167,6 +167,11 @@ pub struct UiEvent {
     pub window_type: i32,
     pub theme: BTreeMap<u16, [u16; 3]>,
     pub picker_argb_bits: Option<[u32; 4]>,
+    /// Additive keydown payload; absent fields preserve U03 JSON output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_code: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifiers: Option<u32>,
 }
 impl ClassicHost {
     pub fn ui_event(&mut self, event: &UiEvent) -> Result<serde_json::Value, ClassicError> {
@@ -177,9 +182,14 @@ impl ClassicHost {
             .clone();
         if event.slot == 0
             || event.slot > resources.parameter_definitions.len()
-            || ![2, 3, 4, 9].contains(&event.event)
+            || ![2, 3, 4, 9, 10].contains(&event.event)
         {
             return Err(ClassicError::Input("invalid UI event or slot".into()));
+        }
+        if (event.event == 10) != event.key_code.is_some()
+            || (event.event != 10 && event.modifiers.is_some())
+        {
+            return Err(ClassicError::Input("key payload requires keydown event 10".into()));
         }
         let context = if let Some((address, kind)) = self.ui_contexts.get(&event.context) {
             if *kind != event.window_type {
@@ -225,6 +235,13 @@ impl ClassicHost {
             write_i32(&mut bytes, 24, event.y);
             write_i32(&mut bytes, 28, event.clicks);
             bytes[73] = u8::from(event.last);
+        } else if event.event == 10 {
+            // Same PF_DoKeyDownEventInfo layout as worker_ui_event_execution.cpp.
+            write_u32(&mut bytes, 16, 1);
+            write_i32(&mut bytes, 20, event.x);
+            write_i32(&mut bytes, 24, event.y);
+            write_u32(&mut bytes, 28, event.key_code.unwrap());
+            write_u32(&mut bytes, 32, event.modifiers.unwrap_or(0));
         } else if event.event == 9 {
             write_i32(&mut bytes, 16, event.x);
             write_i32(&mut bytes, 20, event.y);

@@ -327,6 +327,8 @@ fn ui_drag_preserves_continuation_across_draw_and_checks_context_and_slot() {
         window_type: 2,
         theme: BTreeMap::new(),
         picker_argb_bits: None,
+        key_code: None,
+        modifiers: None,
     };
     assert_eq!(host.ui_event(&event).unwrap()["send_drag"], 1);
     event.event = 4;
