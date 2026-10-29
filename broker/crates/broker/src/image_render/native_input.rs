@@ -7,6 +7,9 @@ pub struct NativeImageInput {
     pub height: u32,
     pub format: RenderPixelFormat,
     pub rgba: Vec<u8>,
+    /// Optional primary PF world layout. `rgba` stays packed; the isolated worker
+    /// allocates the stride and fills padding, which is never an image sample.
+    pub world_layout: Option<crate::render_fixture::FixtureWorldLayout>,
 }
 
 impl NativeImageInput {
@@ -32,7 +35,49 @@ impl NativeImageInput {
         }
         // All IEEE-754 input words are transport data, including NaN payloads.
         // Layout/size limits above and worker output validation remain intact.
+        self.diagnostic_layout()?;
         Ok(())
+    }
+
+    fn diagnostic_layout(
+        &self,
+    ) -> io::Result<Option<crate::render_session::DiagnosticWorldLayout>> {
+        let Some(world) = &self.world_layout else {
+            return Ok(None);
+        };
+        crate::render_fixture::validate_world_layout(world)?;
+        if world.slot.is_some()
+            || world.width != self.width
+            || world.height != self.height
+            || RenderPixelFormat::from(world.pixel_format) != self.format
+        {
+            return Err(invalid(
+                "native primary world layout differs from input dimensions/depth/slot",
+            ));
+        }
+        crate::render_request::validate_image_buffer_layout(
+            world.width.into(),
+            world.height.into(),
+            world.rowbytes.into(),
+            self.format.bytes_per_pixel(),
+            None,
+            MAX_DIMENSION.into(),
+            MAX_PIXELS,
+            MAX_PIXELS * 16 + u64::from(MAX_DIMENSION) * 256,
+        )?;
+        Ok(Some(crate::render_session::DiagnosticWorldLayout {
+            input_row_padding: world.row_padding,
+            input_padding_byte: Some(world.padding_byte),
+            input_origin_x: world.origin.x,
+            input_origin_y: world.origin.y,
+            extent_hint: Some([
+                world.extent.left,
+                world.extent.top,
+                world.extent.right,
+                world.extent.bottom,
+            ]),
+            ..Default::default()
+        }))
     }
 
     pub fn decode(path: &Path, format: RenderPixelFormat) -> io::Result<Self> {
@@ -48,6 +93,7 @@ impl NativeImageInput {
             height,
             format,
             rgba,
+            world_layout: None,
         };
         image.validate()?;
         Ok(image)
@@ -84,6 +130,7 @@ impl NativeImageInput {
             height,
             format,
             rgba,
+            world_layout: None,
         };
         image.validate()?;
         Ok(image)
@@ -93,6 +140,85 @@ impl NativeImageInput {
 #[cfg(test)]
 mod native_input_tests {
     use super::*;
+
+    #[test]
+    fn native_world_layout_validates_geometry_without_changing_sample_bytes() {
+        use crate::render_fixture::{
+            FixturePixelFormat, FixtureWorldExtent, FixtureWorldLayout, FixtureWorldOrigin,
+        };
+        for (format, fixture_format) in [
+            (RenderPixelFormat::Argb8, FixturePixelFormat::Argb8),
+            (RenderPixelFormat::Argb16, FixturePixelFormat::Argb16),
+            (RenderPixelFormat::Argb32f, FixturePixelFormat::Argb32f),
+        ] {
+            let bpp = format.bytes_per_pixel() as u32;
+            let world = FixtureWorldLayout {
+                slot: None,
+                pixel_format: fixture_format,
+                width: 3,
+                height: 2,
+                rowbytes: 5 * bpp,
+                row_padding: 2 * bpp,
+                padding_byte: 0xa5,
+                origin: FixtureWorldOrigin { x: -3, y: 2 },
+                extent: FixtureWorldExtent {
+                    left: 1,
+                    top: 0,
+                    right: 3,
+                    bottom: 2,
+                },
+            };
+            let mut input = NativeImageInput {
+                width: 3,
+                height: 2,
+                format,
+                rgba: (0..6 * bpp).map(|i| i as u8).collect(),
+                world_layout: Some(world.clone()),
+            };
+            let samples = input.rgba.clone();
+            input.validate().unwrap();
+            let layout = input.diagnostic_layout().unwrap().unwrap();
+            assert_eq!(layout.input_row_padding, 2 * bpp);
+            assert_eq!(layout.input_padding_byte, Some(0xa5));
+            assert_eq!((layout.input_origin_x, layout.input_origin_y), (-3, 2));
+            assert_eq!(layout.extent_hint, Some([1, 0, 3, 2]));
+            assert_eq!(input.rgba, samples);
+            for bad in 0..12 {
+                let mut w = world.clone();
+                match bad {
+                    0 => w.rowbytes -= 1,
+                    1 => {
+                        w.row_padding = 1;
+                        w.rowbytes = 3 * bpp + 1;
+                    }
+                    2 => {
+                        w.row_padding = 272;
+                        w.rowbytes = 3 * bpp + 272;
+                    }
+                    3 => w.origin.x = i32::MIN,
+                    4 => w.extent.left = -1,
+                    5 => w.extent.right = 4,
+                    6 => w.extent.bottom = 0,
+                    7 => w.width = u32::MAX,
+                    8 => w.height = 3,
+                    9 => w.slot = Some(0),
+                    10 => w.origin.y = 4097,
+                    _ => {
+                        w.pixel_format = if fixture_format == FixturePixelFormat::Argb8 {
+                            FixturePixelFormat::Argb16
+                        } else {
+                            FixturePixelFormat::Argb8
+                        }
+                    }
+                }
+                input.world_layout = Some(w);
+                assert!(input.validate().is_err(), "invalid case {bad} admitted");
+            }
+            input.world_layout = Some(world);
+            input.rgba.resize((10 * bpp) as usize, 0xa5);
+            assert!(input.validate().is_err(), "padding must not become samples");
+        }
+    }
 
     #[test]
     fn native_decode_admits_4k_deep_images_beyond_legacy_allocation_limit() {
@@ -146,6 +272,7 @@ mod native_input_tests {
             width: 1,
             height: 1,
             format: RenderPixelFormat::Argb32f,
+            world_layout: None,
             rgba: [1.25f32, -0.125, 0.1001, 0.5]
                 .into_iter()
                 .flat_map(f32::to_le_bytes)
