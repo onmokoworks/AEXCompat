@@ -12,6 +12,7 @@ Words: 0 magic, 1 schema, 2 count, 3 PreRender map error,
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from PIL import Image
@@ -20,7 +21,11 @@ from _render_session import HARNESS, assert_artifact_fresh
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from aex_pipl_identity import analyze_aex_file
+
 PROBE_SOURCE = ROOT / "instruments/pf-empty-layer-contract-probe/pf_empty_layer_contract_probe.cpp"
+PROBE_RESOURCE = PROBE_SOURCE.with_suffix(".rc")
 PROBE = ROOT / "target/pf-empty-layer-contract-probe-build/Release/pf_empty_layer_contract_probe.aex"
 WORKER = ROOT / "target/minihost-build/aex_worker.exe"
 
@@ -37,8 +42,8 @@ def decode_contract(path: Path) -> list[int]:
             red, green, blue, alpha = image.getpixel(
                 (position % image.width, position // image.width)
             )
-            assert alpha == 255 and red == green == blue
-            value = (value << 1) | (red >= 128)
+            assert alpha == 255 and red == green == blue and red in (0, 255)
+            value = (value << 1) | (red == 255)
         words.append(value)
     assert words[:3] == [0x554C5031, 1, 32]
     return words
@@ -59,13 +64,24 @@ def render(plugin: Path, input_image: Path, output: Path, layer: Path | None):
     report = json.loads(result.stdout)
     assert report["passed"] is True, report
     assert report["suite_leases_balanced"] is True, report
+    # AE chooses the render route from the compiled PiPL. A successful native
+    # SmartFX dispatch alone misses a PiPL that advertises only Classic render.
+    identity = analyze_aex_file(plugin)
+    assert identity["classification"] == "effect", identity
+    assert len(identity["pipl_records"]) == 1
+    pipl = identity["pipl_records"][0]
+    advertised = report["depth_provenance"]
+    assert int(pipl["global_out_flags"], 16) == advertised["advertised_out_flags"]
+    assert int(pipl["global_out_flags_2"], 16) == advertised["advertised_out_flags2"]
+    assert int(pipl["global_out_flags_2"], 16) & (1 << 10)  # SUPPORTS_SMART_RENDER
+    assert pipl["version"]["raw"] == 524288  # PF_VERSION(1, 0, 0, DEVELOP, 0)
     assert output.is_file() and output.stat().st_size > 0
     return decode_contract(output)
 
 
 def test_unassigned_and_assigned_smart_layer_emit_decodable_contract(tmp_path):
     assert WORKER.is_file() and HARNESS.is_file()
-    assert_artifact_fresh(PROBE, PROBE_SOURCE, WORKER, HARNESS)
+    assert_artifact_fresh(PROBE, PROBE_SOURCE, PROBE_RESOURCE, WORKER, HARNESS)
     source = tmp_path / "primary.png"
     secondary = tmp_path / "secondary.png"
     Image.new("RGBA", (64, 32), (25, 43, 61, 255)).save(source)
