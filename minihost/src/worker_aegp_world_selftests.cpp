@@ -131,6 +131,7 @@ bool verify_world_suite3(const Hooks& h) {
         aegp_world_get_size(owned, &width, &height) != 0 || width != 4 || height != 3 ||
         aegp_world_get_rowbytes(owned, &rowbytes) != 0 || rowbytes != static_cast<uint32_t>(4 * (4 << (type - 1))) ||
         aegp_world_fill_pf_world(owned, &projection) != 0 || projection.width != 4 || projection.height != 3 ||
+        projection.world_flags != (type == 1 ? 0 : (type == 2 ? 0x01000001 : 0x02000000)) ||
         (type == 1 ? aegp_world_get_base_addr8(owned, &base) :
          (type == 2 ? aegp_world_get_base_addr16(owned, &base) : aegp_world_get_base_addr32(owned, &base))) != 0 ||
         !base || aegp_world_dispose(owned) != 0 || aegp_world_get_type(owned, &actual_type) == 0 ||

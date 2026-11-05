@@ -244,9 +244,9 @@ bool verify_pf_pixel_format_suite_versions() {
     g_global_setup_active = false;
 
     const std::array<std::array<int32_t, 4>, 3> world_cases{{
-        {kPublicArgb8, 0, 8, 2},
-        {kPublicArgb16, 3, 16, 3},
-        {kPublicArgb32f, 2, 32, 3},
+        {kPublicArgb8, 0, 8, 0},
+        {kPublicArgb16, 3, 16, 0x01000001},
+        {kPublicArgb32f, 2, 32, 0x02000000},
     }};
     for (const auto& world_case : world_cases) {
       std::array<std::byte, world_safety::kEffectWorldSize> world{};

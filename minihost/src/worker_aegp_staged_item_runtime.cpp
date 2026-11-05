@@ -785,7 +785,7 @@ int32_t transform(const StagedItemWorld& stage, const ItemValue& options,
   receipt->effect_order_hash = plan.effect_order_hash;
   receipt->world.data = receipt->pixels.data();
   receipt->world.rowbytes = width * pixel_bytes;
-  receipt->world.world_flags = pixel_bytes == 4 ? 0 : 1;
+  receipt->world.world_flags = world_safety::world_flags_for_pixel_bytes(pixel_bytes);
   receipt->world.width = width;
   receipt->world.height = height;
   receipt->world.extent_hint = {0, 0, width, height};

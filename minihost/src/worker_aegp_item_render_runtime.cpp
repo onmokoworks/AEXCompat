@@ -121,7 +121,7 @@ int32_t publish_synthetic(int32_t pixel_format, void** output,
   } else {
     receipt->rendered_region = {0, 0, width, height};
   }
-  receipt->world.world_flags = type == 1 ? 0 : 1;
+  receipt->world.world_flags = world_safety::world_flags_for_pixel_bytes(bytes_per_pixel);
   receipt->world.data = receipt->pixels.data();
   receipt->world.rowbytes = width * bytes_per_pixel;
   receipt->world.width = width;

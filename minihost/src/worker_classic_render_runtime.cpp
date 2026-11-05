@@ -609,7 +609,7 @@ struct ClassicRenderDispatchOwner {
             destination, guarded.size(), width, height, rowbytes, pixel_bytes))
       return fail(-3);
     if (!aexcompat::render::prepare_world_layout(world,
-            {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination))
+            {pixel_bytes, width, height, rowbytes}, destination))
       return fail(-3);
     if (!worlds.register_world(world.data(), pixel_format)) {
       resize_reason = "world_registration_failed";
@@ -722,9 +722,9 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
 
   aexcompat::world_safety::EffectWorldStorage input_world{}, output_world{};
   const aexcompat::render::WorldLayout input_layout{
-      input_pixel_bytes == 4 ? 0 : 1, input_pixel_bytes, width, height, input_rowbytes};
+      input_pixel_bytes, width, height, input_rowbytes};
   const aexcompat::render::WorldLayout output_layout{
-      pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes};
+      pixel_bytes, width, height, rowbytes};
   if (!aexcompat::render::prepare_world_layout(input_world, input_layout, source.data()) ||
       !aexcompat::render::prepare_world_layout(output_world, output_layout, destination)) return -3;
   if (diagnostic.enabled) {
@@ -811,7 +811,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     }
     auto& world = hosted_worlds[layer_index];
     if (!aexcompat::render::prepare_world_layout(
-            world, {layer_pixel_bytes == 4 ? 0 : 1, layer_pixel_bytes,
+            world, {layer_pixel_bytes,
                     layer.width, layer.height,
                     layer_rowbytes}, pixels.data()) ||
         !dispatch_worlds.register_world(world.data(),

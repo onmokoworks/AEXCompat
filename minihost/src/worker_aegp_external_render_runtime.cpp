@@ -145,7 +145,7 @@ int32_t publish_cached_receipt(const ItemValue& options, void** output, bool* ca
   receipt->render_options = cached_options;
   receipt->rendered_region = cached_region;
   receipt->render_timestamp = current_timestamp;
-  receipt->world.world_flags = type == 1 ? 0 : 1;
+  receipt->world.world_flags = world_safety::world_flags_for_pixel_bytes(pixel_bytes);
   receipt->world.data = receipt->pixels.data();
   receipt->world.rowbytes = static_cast<int32_t>(tight_rowbytes);
   receipt->world.width = backing->world.width;

@@ -184,3 +184,58 @@ fn finite_instruction_limit_stops_nonreturning_guest_without_wall_timeout() {
         "{error}"
     );
 }
+
+#[test]
+fn new_world_flags_match_ae_at_each_depth() {
+    for (format, expected, pixel_bytes) in [
+        (0x6267_7261, 0, 4),
+        (0x3631_6561, 0x0100_0001, 8),
+        (0x3233_6561, 0x0200_0000, 16),
+    ] {
+        for clear in [0, 1] {
+            let mut engine = test_engine(&[]);
+            let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(HOST_NEW_WORLD, [1, 3, 2, clear, format, world])
+                    .unwrap(),
+                0
+            );
+            let definition = engine
+                .unicorn
+                .mem_read_as_vec(world, abi::PF_LAYER_DEF_SIZE)
+                .unwrap();
+            let flags = i32::from_le_bytes(
+                definition[abi::LAYER_WORLD_FLAGS_OFFSET..abi::LAYER_WORLD_FLAGS_OFFSET + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            assert_eq!(flags, expected);
+            // Emulate the common plug-in depth selection (DEEP before float).
+            let selected_bytes = if flags & 1 != 0 {
+                8
+            } else if flags & 0x0200_0000 != 0 {
+                16
+            } else {
+                4
+            };
+            assert_eq!(selected_bytes, pixel_bytes);
+            let record = &engine.unicorn.get_data().worlds[&world];
+            assert_eq!(record.size, 6 * selected_bytes);
+            assert_eq!(
+                engine
+                    .unicorn
+                    .mem_read_as_vec(record.data_region, record.size as usize)
+                    .unwrap(),
+                vec![if clear != 0 { 0 } else { 0xcd }; record.size as usize]
+            );
+            assert_eq!(
+                engine
+                    .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert!(engine.unicorn.get_data().worlds.is_empty());
+        }
+    }
+}

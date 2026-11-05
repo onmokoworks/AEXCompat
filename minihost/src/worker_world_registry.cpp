@@ -197,7 +197,7 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   std::memset(pixels, clear_pixels ? 0 : 0xcd, static_cast<std::size_t>(size));
   std::memset(world, 0, world_safety::kEffectWorldSize);
   auto* bytes = static_cast<std::byte*>(world);
-  const int32_t flags = 2 | (pixel_format == kPixelFormatArgb32 ? 0 : 1);
+  const int32_t flags = world_safety::world_flags_for_pixel_bytes(pixel_bytes);
   const int32_t rowbytes = static_cast<int32_t>(rowbytes64);
   const std::array<int32_t, 4> extent{0, 0, width, height};
   const int32_t aspect_num = 1;
@@ -418,7 +418,7 @@ std::shared_ptr<PlatformWorldBacking> allocate_platform_backing(
   }
   std::memset(backing->pixels.data(), 0, backing->pixels.size());
   backing->pixel_format = pixel_format;
-  backing->world.world_flags = 2 | (type == 1 ? 0 : 1);
+  backing->world.world_flags = world_safety::world_flags_for_pixel_bytes(bytes_per_pixel(pixel_format));
   backing->world.data = backing->pixels.data();
   backing->world.rowbytes = static_cast<int32_t>(rowbytes);
   backing->world.width = width;

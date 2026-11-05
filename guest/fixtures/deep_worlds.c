@@ -58,7 +58,7 @@ static i32 world_layout_valid(const void *world, i32 bit_depth) {
       bit_depth == 8 ? 4 : (bit_depth == 16 ? 8 : (bit_depth == 32 ? 16 : 0));
   return width > 0 && expected_pixel_bytes != 0 &&
          rowbytes == width * expected_pixel_bytes &&
-         flags == (bit_depth == 8 ? 0 : 1);
+         flags == (bit_depth == 8 ? 0 : (bit_depth == 16 ? 0x01000001 : 0x02000000));
 }
 
 static void copy_world(const void *input, void *output) {

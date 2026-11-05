@@ -643,7 +643,11 @@ fn emulate_gpu_create_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u3
         }
         let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
         definition[abi::LAYER_WORLD_FLAGS_OFFSET..abi::LAYER_WORLD_FLAGS_OFFSET + 4]
-            .copy_from_slice(&3i32.to_le_bytes());
+            .copy_from_slice(
+                &crate::pixel::FramePixelFormat::Argb32f
+                    .world_flags()
+                    .to_le_bytes(),
+            );
         definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
             .copy_from_slice(&token.to_le_bytes());
         definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]

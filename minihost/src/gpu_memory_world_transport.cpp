@@ -348,7 +348,7 @@ int32_t __cdecl gpu_create_world(void*, uint32_t index, int32_t width,
     return 4;
   }
   descriptor->fill(std::byte{});
-  const int32_t flags = 3;
+  const int32_t flags = world_safety::world_flags_for_pixel_bytes(16);
   const int32_t rowbytes = static_cast<int32_t>(rowbytes64);
   const std::array<int32_t, 4> extent{0, 0, width, height};
   const int32_t aspect_num = 1;
