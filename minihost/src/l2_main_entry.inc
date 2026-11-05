@@ -1922,11 +1922,14 @@ bool verify_pf_world_facade() {
     aexcompat::world_safety::DispatchWorldFormatScope worlds;
     const int32_t pixel_bytes = entry.depth / 8 * 4;
     if (!aexcompat::render::prepare_world_layout(
-            world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, 4, 1, 4 * pixel_bytes},
+            world, {pixel_bytes, 4, 1, 4 * pixel_bytes},
             pixels.data())) {
       check(false, "world layout preparation failed");
       continue;
     }
+    const int32_t expected_flags = entry.depth == 8 ? 0 :
+        (entry.depth == 16 ? 0x01000001 : 0x02000000);
+    check(read<int32_t>(world, 16) == expected_flags, "prepared world flags differ from AE");
     check(worlds.register_world(world.data(), entry.pixel_format), "world registration failed");
     void* reserved_long4 = nullptr;
     std::memcpy(&reserved_long4, world.data() + 0x50, sizeof(reserved_long4));

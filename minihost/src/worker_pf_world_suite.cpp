@@ -45,7 +45,7 @@ bool verify_world_double_dispose_rejected() {
   std::memcpy(&rowbytes, world.data() + 32, sizeof(rowbytes));
   std::memcpy(&width, world.data() + 36, sizeof(width));
   std::memcpy(&height, world.data() + 40, sizeof(height));
-  const bool layout_valid = pixels && flags == 3 && rowbytes == 112 && width == 7 && height == 5 &&
+  const bool layout_valid = pixels && flags == 0x02000000 && rowbytes == 112 && width == 7 && height == 5 &&
       get_pixel_format(world.data(), &format) == 0 && format == kPixelFormatArgb128 &&
       std::all_of(static_cast<const unsigned char*>(pixels),
                   static_cast<const unsigned char*>(pixels) + 560,

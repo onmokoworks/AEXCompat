@@ -86,7 +86,6 @@ bool is_fixed_image_case(const std::string& case_id);
 // makes its dimensions, row stride, and extent checks independent of either
 // worker's selector plumbing.
 struct WorldLayout {
-  int32_t world_flags{};
   int32_t pixel_bytes{};
   int32_t width{};
   int32_t height{};

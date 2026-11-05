@@ -587,7 +587,7 @@ void checkpoint_capture_keeps_the_live_world_stride_and_bounds() {
       pixels[static_cast<std::size_t>(row) * 24 + index] =
           static_cast<unsigned char>(row * 16 + index);
   aexcompat::world_safety::EffectWorldStorage world{};
-  check(aexcompat::render::prepare_world_layout(world, {0, 4, 4, 3, 24}, pixels.data()),
+  check(aexcompat::render::prepare_world_layout(world, {4, 4, 3, 24}, pixels.data()),
         "the checkpoint fixture owns a strided world");
   const int32_t origin_x = -2, origin_y = 3;
   const std::array<int32_t, 4> extent{0, 0, 4, 3};

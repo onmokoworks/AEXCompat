@@ -195,19 +195,10 @@ int32_t fill_matte_denied(const char* callback, const char* reason) {
 // depth. Reading the depth off the world (issue #1086: SolidComposite calls the
 // float-colour fill and Unmultiply the float-colour premultiply on an 8-bit
 // world) rather than assuming it matches the colour is what this recovers.
-// world_flags cannot tell 16-bit from float apart (host-stamped deep worlds set
-// the DEEP bit for both), so the registered dispatch format is the authority: it
-// distinguishes all three depths and covers every world an effect is handed in
-// render (checkout worlds and new_world scratch worlds are both registered). A
-// world the scope has not seen - a bare PF_EffectWorld the caller filled in
-// itself (the fill/matte self-test) or a sub-world struct laid over a registered
-// buffer - reaches the fallback: the DEEP bit separates 8-bit (clear) from deep
-// (set), and the deep case is disambiguated 16-vs-float by the session format,
-// since an unregistered deep world almost always shares the render's depth.
-// That last step is a heuristic, not a proof: a deep sub-world whose depth
-// differs from the session (e.g. a float scratch strip in an 8-bit session) is
-// still mis-depthed here. It is depth-correct for every registered world and for
-// the depth-matching sessions that produce the observed callers.
+// Registered/owned formats remain authoritative. For a caller-created world or
+// derived view that is not registered, use the world's own AE depth flags:
+// RESERVED1 denotes float, DEEP denotes 16bpc. Session depth is unrelated to
+// scratch depth. This does not admit new registry references or bypass bounds.
 int32_t world_pixel_bytes(void* world) {
   DispatchWorldFormat format{};
   if (world && resolve_dispatch_world_format(world, format)) {
@@ -218,8 +209,8 @@ int32_t world_pixel_bytes(void* world) {
   if (world) {
     int32_t flags{};
     std::memcpy(&flags, static_cast<const std::byte*>(world) + 16, sizeof(flags));
-    if ((flags & 1) == 0) return 4;
-    return std::strcmp(pixel_format(), "argb32f") == 0 ? 16 : 8;
+    if (flags & 0x02000000) return (flags & 1) ? 0 : 16;
+    return (flags & 1) ? 8 : 4;
   }
   return 4;
 }
@@ -523,6 +514,61 @@ bool verify_legacy_fill_matte_callbacks() {
           kPfErrBadCallbackParam &&
       premultiply16(nullptr, &world16, nullptr, 1, &world16) ==
           kPfErrBadCallbackParam;
+  // AE flags must determine unregistered view depth independently of the
+  // session. Use an offset, padded view of registered storage: the strict
+  // registry must keep refusing it, while legacy fill writes only its pixels.
+  for (const char* session : {"argb8", "argb16", "argb32f"}) {
+    ok = set_pixel_format(session) && ok;
+    for (int bytes : {4, 8, 16}) {
+      const int32_t format = bytes == 4 ? kPixelFormatArgb32 :
+          (bytes == 8 ? kPixelFormatArgb64 : kPixelFormatArgb128);
+      const int32_t flags = bytes == 4 ? 0 : (bytes == 8 ? 0x01000001 : 0x02000000);
+      std::array<unsigned char, 192> storage;
+      storage.fill(0xa5);
+      LocalEffectWorld parent{};
+      parent.world_flags = flags;
+      parent.data = storage.data();
+      parent.width = 4; parent.height = 3; parent.rowbytes = 4 * bytes;
+      DispatchWorldFormatScope scope;
+      ok = scope.register_world(&parent, format) && ok;
+      LocalEffectWorld view = parent;
+      view.data = storage.data() + 5 * bytes;
+      view.width = 2; view.height = 2;
+      DispatchWorldFormat unresolved{};
+      ok = !resolve_dispatch_world_format(&view, unresolved) && ok;
+      const std::array<float, 4> color{1.0f, 0.5f, 0.25f, 0.0f};
+      const std::array<uint8_t, 4> expected8{255, 128, 64, 0};
+      const std::array<uint16_t, 4> expected16{32768, 16384, 8192, 0};
+      const void* expected = bytes == 4 ? static_cast<const void*>(expected8.data()) :
+          (bytes == 8 ? static_cast<const void*>(expected16.data()) : color.data());
+      auto wanted = storage;
+      for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x)
+          std::memcpy(wanted.data() + (5 + y * 4 + x) * bytes, expected, bytes);
+      ok = fill_world_float(nullptr, color.data(), nullptr, &view) == 0 && ok;
+      ok = storage == wanted && ok;
+      // Opaque premultiply preserves the same exact samples and red zones.
+      ok = premultiply_world8(nullptr, 1, &view) == 0 && storage == wanted && ok;
+      // Float's clear DEEP bit must not make the typed 8/16-bit fallback
+      // accept it. Conflicting DEEP/float flags cannot select a depth either.
+      if (bytes == 16) {
+        unsigned char* ignored_pixels{};
+        int32_t ignored_stride{}, ignored_width{}, ignored_height{};
+        for (int wrong_bytes : {4, 8})
+          ok = !world_safety::bounded_typed_world(&view, wrong_bytes,
+              ignored_pixels, ignored_stride, ignored_width, ignored_height) && ok;
+        view.world_flags |= 1;
+        ok = fill_world_float(nullptr, color.data(), nullptr, &view) ==
+            kPfErrBadCallbackParam && storage == wanted && ok;
+        view.world_flags = flags;
+      }
+      // A known reference with altered geometry remains a refusal.
+      const auto before = storage;
+      parent.width = 3;
+      ok = fill_world_float(nullptr, color.data(), nullptr, &parent) ==
+          kPfErrBadCallbackParam && storage == before && ok;
+    }
+  }
   if (!set_pixel_format(saved_format.c_str())) return false;
   return ok;
 }

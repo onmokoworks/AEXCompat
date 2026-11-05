@@ -118,7 +118,7 @@ int32_t publish_from_context(const Context& context, const LayerValue& options,
   loaded_receipt->rendered_region = {0, 0, width, height};
   loaded_receipt->world.data = loaded_receipt->pixels.data();
   loaded_receipt->world.rowbytes = width * pixel_bytes;
-  loaded_receipt->world.world_flags = pixel_bytes == 4 ? 0 : 1;
+  loaded_receipt->world.world_flags = world_safety::world_flags_for_pixel_bytes(pixel_bytes);
   loaded_receipt->world.width = width;
   loaded_receipt->world.height = height;
   loaded_receipt->world.extent_hint = {0, 0, width, height};

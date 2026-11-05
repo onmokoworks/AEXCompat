@@ -4,6 +4,16 @@ pub const PF_PIXEL_FORMAT_ARGB32: i32 = 0x6267_7261;
 pub const PF_PIXEL_FORMAT_ARGB64: i32 = 0x3631_6561;
 pub const PF_PIXEL_FORMAT_ARGB128: i32 = 0x3233_6561;
 
+// AE 25.1 CPU SmartFX / PF_NewWorld oracle (#1728).
+// Callers validate the pixel size before constructing a world.
+pub const fn world_flags_for_pixel_bytes(pixel_bytes: usize) -> i32 {
+    match pixel_bytes {
+        8 => 0x0100_0001,
+        16 => 0x0200_0000,
+        _ => 0,
+    }
+}
+
 const OUT_FLAG_DEEP_COLOR_AWARE: u32 = 1 << 25;
 const OUT_FLAG2_FLOAT_COLOR_AWARE: u32 = 1 << 12;
 
@@ -69,10 +79,7 @@ impl FramePixelFormat {
     }
 
     pub const fn world_flags(self) -> i32 {
-        match self {
-            Self::Argb8 => 0,
-            Self::Argb16 | Self::Argb32f => 1,
-        }
+        world_flags_for_pixel_bytes(self.bytes_per_pixel())
     }
 
     pub const fn pf_pixel_format(self) -> i32 {
@@ -195,8 +202,8 @@ mod tests {
         assert_eq!(FramePixelFormat::Argb16.pf_pixel_format(), 909_206_881);
         assert_eq!(FramePixelFormat::Argb32f.pf_pixel_format(), 842_229_089);
         assert_eq!(FramePixelFormat::Argb8.world_flags(), 0);
-        assert_eq!(FramePixelFormat::Argb16.world_flags(), 1);
-        assert_eq!(FramePixelFormat::Argb32f.world_flags(), 1);
+        assert_eq!(FramePixelFormat::Argb16.world_flags(), 0x0100_0001);
+        assert_eq!(FramePixelFormat::Argb32f.world_flags(), 0x0200_0000);
         assert!(FramePixelFormat::Argb8.advertised_by(0, 0));
         assert!(!FramePixelFormat::Argb16.advertised_by(0, 0));
         assert!(FramePixelFormat::Argb16.advertised_by(1 << 25, 0));

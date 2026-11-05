@@ -1526,6 +1526,12 @@ fn pf_world_suite_v2_native_lifecycle_matches_unicorn() {
     assert_eq!(unsafe { new_world(1, 3, 2, 1, 0xdead_beef, world) }, 4);
     assert!(state.worlds.is_empty());
     assert_eq!(unsafe { new_world(1, 3, 2, 1, 0x3631_6561, world) }, 0);
+    assert_eq!(
+        unsafe {
+            ptr::read_unaligned((world + abi::LAYER_WORLD_FLAGS_OFFSET as u64) as *const i32)
+        },
+        0x0100_0001
+    );
     let data =
         unsafe { ptr::read_unaligned((world + abi::LAYER_DATA_OFFSET as u64) as *const u64) };
     assert_ne!(data, 0);
@@ -1582,6 +1588,12 @@ fn pf_world_suite_v2_native_lifecycle_matches_unicorn() {
     );
     assert_eq!(format, 0x6267_7261);
     assert_eq!(unsafe { new_world(1, 1, 1, 0x100, 0x3233_6561, world) }, 0);
+    assert_eq!(
+        unsafe {
+            ptr::read_unaligned((world + abi::LAYER_WORLD_FLAGS_OFFSET as u64) as *const i32)
+        },
+        0x0200_0000
+    );
     let float_data =
         unsafe { ptr::read_unaligned((world + abi::LAYER_DATA_OFFSET as u64) as *const u64) };
     assert_eq!(

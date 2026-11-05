@@ -175,7 +175,8 @@ bool prepare_world_layout(aexcompat::world_safety::EffectWorldStorage& world,
                           const WorldLayout& layout, void* pixels) {
   if (!pixels || !valid_world_layout(layout)) return false;
   world.fill(std::byte{});
-  store_world_field(world, 16, layout.world_flags);
+  store_world_field(world, 16,
+      aexcompat::world_safety::world_flags_for_pixel_bytes(layout.pixel_bytes));
   store_world_field(world, 24, pixels);
   store_world_field(world, 32, layout.rowbytes);
   store_world_field(world, 36, layout.width);
@@ -358,7 +359,7 @@ bool prepare_connected_map_world(const std::string& case_id, int32_t input_width
       pixel[0] = 255; pixel[1] = value; pixel[2] = value; pixel[3] = value;
     }
   }
-  return prepare_world_layout(map.world, {0, 4, map.width, map.height, map.width * 4},
+  return prepare_world_layout(map.world, {4, map.width, map.height, map.width * 4},
                               map.pixels.data());
 }
 
@@ -496,7 +497,7 @@ bool copy_packed_world(const unsigned char* strided_source, int32_t rowbytes,
     packed_destination.clear();
     return true;
   }
-  if (!valid_world_layout({0, pixel_bytes, width, height, rowbytes})) return false;
+  if (!valid_world_layout({pixel_bytes, width, height, rowbytes})) return false;
   packed_destination.resize(static_cast<std::size_t>(width) * height * pixel_bytes);
   for (int32_t y = 0; y < height; ++y)
     std::memcpy(packed_destination.data() + static_cast<std::size_t>(y) * width * pixel_bytes,

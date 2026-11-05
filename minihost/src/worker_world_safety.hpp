@@ -9,6 +9,12 @@ namespace aexcompat::world_safety {
 
 inline constexpr std::size_t kEffectWorldSize = 120;
 
+// AE 25.1 CPU SmartFX / PF_NewWorld oracle (#1728). DEEP is 16bpc only;
+// WRITEABLE is not part of the observed words, including allocated worlds.
+constexpr int32_t world_flags_for_pixel_bytes(int32_t pixel_bytes) noexcept {
+  return pixel_bytes == 16 ? 0x02000000 : (pixel_bytes == 8 ? 0x01000001 : 0);
+}
+
 // Storage of a world the host hands to a plug-in, in AE's shape: the 120-byte
 // PF_LayerDef preceded by the 8-byte vtable slot of the PF_World object AE
 // embeds it in (worker_pf_world_facade, issue #1276). `data()` / `size()` /

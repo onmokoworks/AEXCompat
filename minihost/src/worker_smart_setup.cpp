@@ -230,10 +230,8 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
   *buffers.destination = buffers.output->data();
   if (!output_coverage::seed(*buffers.destination, buffers.output->size(),
           plan.width, plan.height, plan.output_rowbytes, plan.pixel_bytes)) return false;
-  const render::WorldLayout input_layout{plan.input_pixel_bytes == 4 ? 0 : 1,
-      plan.input_pixel_bytes, plan.width, plan.height, plan.rowbytes};
-  const render::WorldLayout output_layout{(plan.deep16 || plan.float32) ? 1 : 0,
-      plan.pixel_bytes, plan.width, plan.height, plan.output_rowbytes};
+  const render::WorldLayout input_layout{plan.input_pixel_bytes, plan.width, plan.height, plan.rowbytes};
+  const render::WorldLayout output_layout{plan.pixel_bytes, plan.width, plan.height, plan.output_rowbytes};
   if (!render::prepare_world_layout(*buffers.input_world, input_layout, source.data()) ||
       !render::prepare_world_layout(*buffers.output_world, output_layout,
                                     *buffers.destination)) return false;
@@ -382,7 +380,7 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
       }
       auto& world = prepared.hosted_worlds[layer_index];
       if (!render::prepare_world_layout(
-              world, {layer_pixel_bytes == 4 ? 0 : 1, layer_pixel_bytes,
+              world, {layer_pixel_bytes,
                        layer.width, layer.height, layer_rowbytes},
                pixels.data()) ||
            !request.formats->register_world(world.data(),
@@ -512,7 +510,7 @@ bool verify_animation_extent_wiring_for_test() {
   render_safety::InputPixelBuffer source(
       static_cast<std::size_t>(plan.rowbytes) * plan.height);
   if (!source || !render::prepare_world_layout(
-                     input_world, {0, plan.pixel_bytes, plan.width, plan.height,
+                     input_world, {plan.pixel_bytes, plan.width, plan.height,
                                    plan.rowbytes},
                      source.data()))
     return false;
@@ -604,7 +602,7 @@ bool verify_animation_extent_wiring_for_test() {
       std::memset(padded_source.data(), 0, static_cast<std::size_t>(plan.rowbytes) * plan.height);
       world_safety::EffectWorldStorage padded_world{};
       if (!render::prepare_world_layout(padded_world,
-          {bpp == 4 ? 0 : 1, bpp, plan.width, plan.height, plan.rowbytes},
+          {bpp, plan.width, plan.height, plan.rowbytes},
           padded_source.data())) return false;
       const int32_t origin[2] = {-3, 2};
       const int32_t extent[4] = {1, 1, 250, 140};
@@ -622,9 +620,11 @@ bool verify_animation_extent_wiring_for_test() {
       parameter_execution::initialize_parameter_definitions(variant.definitions, plan.width, plan.height);
       if (!prepare_parameters(request, variant, hooks)) return false;
       const auto& world = variant.hosted_worlds.front();
-      int32_t stride = 0;
+      int32_t stride = 0, flags = 0;
       std::memcpy(&stride, world.data() + 32, sizeof(stride));
-      if (stride != plan.rowbytes ||
+      std::memcpy(&flags, world.data() + 16, sizeof(flags));
+      if (flags != (bpp == 4 ? 0 : (bpp == 8 ? 0x01000001 : 0x02000000)) ||
+          stride != plan.rowbytes ||
           std::memcmp(world.data() + 104, origin, sizeof(origin)) != 0 ||
           std::memcmp(world.data() + 44, extent, sizeof(extent)) != 0 ||
           variant.hosted_pixels.front().size() != static_cast<std::size_t>(stride) * plan.height)

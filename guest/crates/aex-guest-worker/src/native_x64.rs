@@ -2571,7 +2571,7 @@ unsafe extern "win64" fn new_world(
             );
         }
         let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
-        let flags = 2 | i32::from(pixel_format as u32 != 0x6267_7261);
+        let flags = crate::pixel::world_flags_for_pixel_bytes(pixel_bytes as usize);
         definition[abi::LAYER_WORLD_FLAGS_OFFSET..abi::LAYER_WORLD_FLAGS_OFFSET + 4]
             .copy_from_slice(&flags.to_le_bytes());
         definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]

@@ -2105,7 +2105,7 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
 
   if (!render::prepare_world_layout(
           *request.output_world,
-          {session_pixel_bytes == 4 ? 0 : 1, session_pixel_bytes, out_frame_w,
+          {session_pixel_bytes, out_frame_w,
            out_frame_h, rowbytes},
           *request.destination) ||
       !request.formats->register_world(request.output_world->data(),
@@ -2645,7 +2645,7 @@ bool dispatch(const Request& request, const Hooks& hooks,
     if (output_reset) {
       if (!render::prepare_world_layout(
             *request.output_world,
-            {(plan.deep16 || plan.float32) ? 1 : 0, plan.pixel_bytes,
+            {plan.pixel_bytes,
              smart_bounds.width, smart_bounds.height, smart_bounds.rowbytes},
             *request.destination) ||
           !request.formats->register_world(request.output_world->data(),

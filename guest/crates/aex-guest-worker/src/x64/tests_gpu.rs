@@ -254,6 +254,14 @@ fn gpu_world_roundtrip_uses_buffer_tokens_and_cleans_every_failure_path() {
     let world = u64::from_le_bytes(pointer);
     let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
     engine.read(world, &mut definition).unwrap();
+    assert_eq!(
+        i32::from_le_bytes(
+            definition[abi::LAYER_WORLD_FLAGS_OFFSET..abi::LAYER_WORLD_FLAGS_OFFSET + 4]
+                .try_into()
+                .unwrap()
+        ),
+        0x0200_0000
+    );
     let token = u64::from_le_bytes(
         definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
             .try_into()

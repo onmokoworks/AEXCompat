@@ -523,8 +523,10 @@ bool bounded_typed_world(void* world, int32_t pixel_bytes,
   // and output through AE's own PPix/pixel-format suites, and those worlds come
   // back with world_flags 0x02000000 (bit 0 clear) - so requiring the DEEP bit
   // for a float iterate rejected a valid AE float world and failed the callback
-  // with missing_world (issue #1035, observed on Cartoon's iterateFloat). Keep
-  // the 8-vs-16 distinction on the DEEP bit; accept float regardless of it.
+  // with missing_world (issue #1035, observed on Cartoon's iterateFloat).
+  // RESERVED1 prevents those DEEP-clear worlds from entering an 8/16-bit
+  // fallback. Keep accepting float from explicitly typed callers regardless
+  // of DEEP, preserving the existing iterateFloat contract.
   // Dropping the bit does not weaken buffer safety: that never came from the
   // DEEP bit (this function cannot see the real allocation) but from the
   // rowbytes >= width * pixel_bytes and rowbytes <= 4096 * 16 bounds below,
@@ -533,8 +535,8 @@ bool bounded_typed_world(void* world, int32_t pixel_bytes,
   // pixel_bytes choice) is read at its declared stride, in bounds, just with
   // the wrong depth semantics - the same latitude the pre-change code gave an
   // 8-bit world handed to the 8-bit suite.
-  const bool depth_matches = pixel_bytes == 4 ? (flags & 1) == 0
-      : pixel_bytes == 8 ? (flags & 1) != 0 : true;
+  const bool depth_matches = pixel_bytes == 4 ? (flags & 0x02000001) == 0
+      : pixel_bytes == 8 ? (flags & 0x02000001) == 1 : true;
   return pixels && (pixel_bytes == 4 || pixel_bytes == 8 || pixel_bytes == 16) &&
       width > 0 && height > 0 && width <= 4096 && height <= 4096 &&
       static_cast<int64_t>(width) * height <= 16'777'216 &&
