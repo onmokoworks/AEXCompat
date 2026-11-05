@@ -14,9 +14,6 @@ namespace {
 constexpr std::size_t kCheckoutResultBytes = 76;
 constexpr std::size_t kMaxPixelCheckouts = 64;
 thread_local State g_default_state;
-// Counts what `--self-test-pf-checkout-intersection`'s stub allocator did; the
-// stub is a plain function pointer, so it needs somewhere to record that.
-thread_local int g_empty_layer_allocations_for_self_test;
 thread_local State* g_active_state{};
 
 int32_t finish_callback(callback_diagnostics::Callback callback, int32_t result,
@@ -161,9 +158,6 @@ void State::clear_transient() {
   empty_checkout_pixel_denials = 0;
   empty_layer_param_checkouts = 0;
   empty_layer_param_pixel_checkouts = 0;
-  empty_layer_world = {};
-  empty_layer_world_live = false;
-  allocate_empty_layer = nullptr;
   // Set fresh by every dispatch, but a session that ends before that would
   // otherwise carry the previous one's declared count into the range
   // `pre_checkout_layer` accepts.
@@ -379,9 +373,8 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   // when it asked about a layer parameter its project leaves unset (issue
   // #898).
   //
-  // The registration carries no world of its own; `checkout_pixels` answers the
-  // follow-up from the dispatch's shared empty layer - see the paragraph there
-  // for what shape that is and why (issues #958, #962).
+  // The AE 25.1 CPU oracle returns success and a null world for this
+  // registration at current time (8/16/32 bpc, issue #962).
   if (index >= 1 && index <= runtime.param_count) {
     ++runtime.empty_layer_param_checkouts;
     const std::array<int32_t, 4> empty{0, 0, 0, 0};
@@ -411,53 +404,15 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
   if (checkout == runtime.pixel_checkouts.end())
     return finish_callback(Callback::CheckoutPixels, 4, Reason::UnknownCheckout);
   checkout->checkout_attempted = true;
-  // A checkout PreRender already answered as empty. The plug-in was told there
-  // are no pixels here (an empty result_rect, which the SDK documents as a real
-  // answer), and asking for them anyway is not a fault on either side: AE hands
-  // an effect a layer parameter with no source as an empty layer, not as a
-  // failed call. Refusing instead ended DeepGlow2's SmartRender (issue #898).
-  //
-  // What comes back is an empty *layer*, not an empty answer: a real
-  // PF_EffectWorld at the session's geometry with every pixel zero. A layer
-  // parameter with no layer is transparent, not absent, and the two shapes that
-  // tried to say "absent" each broke a real plug-in - a null pointer behind
-  // PF_Err_NONE (3DGlasses answered PF_Err_BAD_CALLBACK_PARAM) and a 120-byte
-  // zeroed world describing a 0x0 layer (DeepGlow2 answered
-  // PF_Err_INTERNAL_STRUCT_DAMAGED). Both were shipped, in that order, and each
-  // was measured only against the plug-in it was written for (issues #958,
-  // #962).
-  //
-  // One world for all of a dispatch's empty parameters, handed out as many
-  // times as it is asked for and not re-cleared between checkouts. Checked-out
-  // layer pixels are the host's to read from, not the plug-in's to write to, so
-  // sharing them is the same thing AE does with one "None" layer; a plug-in
-  // that writes through this would see its own writes on the next empty
-  // parameter, which is recorded on #962 rather than paid for with a
-  // full-frame clear per checkout.
-  //
-  // The geometry deliberately does not match the empty rect PreRender answered
-  // for the same checkout. Answering the session rect there instead was tried
-  // and is worse: 3DGlasses fails at both, where with the empty rect it renders.
-  // Why a plug-in reads the pair that way is an oracle question (#962).
+  // An unassigned layer is a successful null checkout, not a transparent
+  // allocation. AE 25.1 CPU returns this shape at 8/16/32 bpc (#962).
+  // It still participates in checkout/checkin ownership accounting.
   if (checkout->empty_layer_param) {
-    // Allocated on first need, through the hook the dispatch installs: the
-    // world comes out of the same bounded registry a plug-in's own
-    // PF_NEW_WORLD draws from, so a frame that never asks for an empty layer
-    // must not hold a full frame's worth of it. Without one there is nothing to
-    // hand back that the host's other callbacks would accept, so fail closed.
-    if (!runtime.empty_layer_world_live && runtime.allocate_empty_layer)
-      runtime.empty_layer_world_live =
-          runtime.allocate_empty_layer(runtime.empty_layer_world.data());
-    if (!runtime.empty_layer_world_live)
-      return finish_callback(Callback::CheckoutPixels, 4, Reason::MissingWorld);
-    if (checkout->checked_out) {
-      *world = runtime.empty_layer_world.data();
-      return finish_callback(Callback::CheckoutPixels, 0);
+    if (!checkout->checked_out) {
+      ++runtime.empty_layer_param_pixel_checkouts;
+      checkout->checked_out = true;
+      checkout->ever_checked_out = true;
     }
-    ++runtime.empty_layer_param_pixel_checkouts;
-    checkout->checked_out = true;
-    checkout->ever_checked_out = true;
-    *world = runtime.empty_layer_world.data();
     return finish_callback(Callback::CheckoutPixels, 0);
   }
   if (!checkout->world)
@@ -769,14 +724,8 @@ bool checkout_intersection_self_test() {
       checkin_pixels(nullptr, 0) == 0 &&
       pixel_checkouts_balanced() && passed;
 
-  // A layer parameter this host has no world for: PreRender answers an empty
-  // rect and SmartRender hands back the session's empty layer. Both halves are
-  // pinned because both are what a plug-in reads, and the pair decides whether
-  // a real effect renders. Two other shapes stood here and each broke one:
-  // a null pointer behind PF_Err_NONE (3DGlasses) and a 120-byte zeroed world
-  // describing a 0x0 layer (DeepGlow2 answered PF_Err_INTERNAL_STRUCT_DAMAGED
-  // for the whole frame). Nothing pinned the shape while it changed twice
-  // (issues #958, #962).
+  // The AE current-time oracle: empty PreRender rects followed by a
+  // successful null pixel checkout. Null does not bypass ownership checks.
   runtime.gpu_render_dispatched = false;
   runtime.param_count = 9;
   std::array<std::byte, kCheckoutResultBytes> empty_result{};
@@ -790,36 +739,19 @@ bool checkout_intersection_self_test() {
   std::memcpy(empty_maximum.data(), empty_result.data() + 16,
               sizeof(empty_maximum));
   const std::array<int32_t, 4> nothing{0, 0, 0, 0};
-  // No hook and no layer - the dispatch installs the one and it allocates the
-  // other - so the checkout fails closed rather than answering with a pointer
-  // to an uninitialized struct.
   checked_out = input_world.data();
   passed = empty_answer == nothing && empty_maximum == nothing &&
-      !runtime.empty_layer_world_live && !runtime.allocate_empty_layer &&
-      checkout_pixels(nullptr, 21, &checked_out) == 4 && passed;
-  // With the hook, the checkout allocates on first need and spends the checkout
-  // like any other: an empty layer is an answer, not a skipped call. The hook
-  // stands in for the dispatch's allocation here; what it does with the storage
-  // is the registry's business, and what this pins is that the runtime asks for
-  // one exactly once and hands back what came of it.
-  g_empty_layer_allocations_for_self_test = 0;
-  runtime.allocate_empty_layer = +[](void* storage) {
-    ++g_empty_layer_allocations_for_self_test;
-    std::memset(storage, 0, 120);
-    return true;
-  };
-  checked_out = nullptr;
-  passed = checkout_pixels(nullptr, 21, &checked_out) == 0 &&
-      checked_out == runtime.empty_layer_world.data() &&
-      runtime.empty_layer_world_live &&
-      g_empty_layer_allocations_for_self_test == 1 &&
+      checkout_pixels(nullptr, 21, &checked_out) == 0 && !checked_out &&
       runtime.empty_layer_param_pixel_checkouts == empty_pixels_before + 1 &&
-      checkout_pixels(nullptr, 21, &checked_out) == 0 &&
-      checked_out == runtime.empty_layer_world.data() &&
+      checkout_pixels(nullptr, 21, &checked_out) == 0 && !checked_out &&
       runtime.empty_layer_param_pixel_checkouts == empty_pixels_before + 1 &&
       !pixel_checkouts_balanced() &&
       checkin_pixels(nullptr, 21) == 0 &&
-      pixel_checkouts_balanced() && passed;
+      pixel_checkouts_balanced() &&
+      checkin_pixels(nullptr, 21) == 4 &&
+      checkout_pixels(nullptr, 21, &checked_out) == 0 && !checked_out &&
+      runtime.empty_layer_param_pixel_checkouts == empty_pixels_before + 2 &&
+      checkin_pixels(nullptr, 21) == 0 && pixel_checkouts_balanced() && passed;
   // The configured secondary input is not an arbitrary unset parameter. When
   // no secondary world was supplied, refusing its checkout leaves the effect
   // free to use its own procedural fallback instead of presenting a synthetic
@@ -828,39 +760,26 @@ bool checkout_intersection_self_test() {
   passed = pre_checkout_layer(nullptr, 6, 24, nullptr, 7, 1, 30,
                               empty_result.data()) == 4 &&
       checkout_pixels(nullptr, 24, &checked_out) == 4 && !checked_out && passed;
-  // A second ordinary empty parameter reuses the lazily allocated world rather
-  // than allocating again: the registry it comes from is bounded and shared
-  // with the plug-in's own worlds.
+  // Distinct empty parameters have independent checkout ownership; neither
+  // needs a world allocation or consumes registry budget.
   passed = pre_checkout_layer(nullptr, 8, 24, nullptr, 7, 1, 30,
                               empty_result.data()) == 0 &&
-      checkout_pixels(nullptr, 24, &checked_out) == 0 &&
-      g_empty_layer_allocations_for_self_test == 1 &&
-      checkin_pixels(nullptr, 24) == 0 && passed;
-  // A successful PreRender registration may be retired without a pixel
-  // checkout. This is the exact PathArray shape: it registers an empty
-  // alternate layer, uses only its other layers in SmartRender, then checks
-  // every registered id back in. The first checkin consumes the registration;
-  // a duplicate checkin and a later checkout remain stale failures, and no
-  // empty world was allocated for pixels that were never requested.
-  const int allocations_before_unused_checkin =
-      g_empty_layer_allocations_for_self_test;
+      checkout_pixels(nullptr, 21, &checked_out) == 0 && !checked_out &&
+      checkout_pixels(nullptr, 24, &checked_out) == 0 && !checked_out &&
+      checkin_pixels(nullptr, 24) == 0 && !pixel_checkouts_balanced() &&
+      checkin_pixels(nullptr, 21) == 0 && pixel_checkouts_balanced() && passed;
+  // A successful registration can be retired without checking out pixels.
+  // Duplicate checkin and checkout of that consumed registration stay stale.
   passed = pre_checkout_layer(nullptr, 9, 26, nullptr, 7, 1, 30,
                               empty_result.data()) == 0 &&
       checkin_pixels(nullptr, 26) == 0 &&
       checkin_pixels(nullptr, 26) == 4 &&
-      checkout_pixels(nullptr, 26, &checked_out) == 4 &&
-      g_empty_layer_allocations_for_self_test ==
-          allocations_before_unused_checkin &&
-      passed;
-  // A hook that cannot allocate leaves the checkout refused, not answered.
-  runtime.empty_layer_world_live = false;
-  runtime.allocate_empty_layer = +[](void*) { return false; };
-  checked_out = input_world.data();
+      checkout_pixels(nullptr, 26, &checked_out) == 4 && !checked_out && passed;
+  // A null destination is still invalid, even for an empty layer.
   passed = pre_checkout_layer(nullptr, 7, 25, nullptr, 7, 1, 30,
                               empty_result.data()) == 0 &&
-      checkout_pixels(nullptr, 25, &checked_out) == 4 && passed;
-  runtime.allocate_empty_layer = nullptr;
-  runtime.empty_layer_world_live = false;
+      checkout_pixels(nullptr, 25, nullptr) == 4 &&
+      checkin_pixels(nullptr, 25) == 0 && pixel_checkouts_balanced() && passed;
   // A parameter index past what the plug-in declared is still unknown; the
   // empty answer is for the range it did declare, not for anything asked.
   passed = pre_checkout_layer(nullptr, 5, 22, nullptr, 7, 1, 30,
