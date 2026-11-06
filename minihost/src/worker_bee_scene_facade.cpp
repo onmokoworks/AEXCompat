@@ -393,7 +393,8 @@ LayerLayout loaded_bee_layout() noexcept {
 
 LayerLayout layout_for_bee_image(uint32_t image_size,
                                   uint32_t timestamp) noexcept {
-  if (image_size == 0x1648000 && timestamp == 0x67d4aa97)
+  if ((image_size == 0x1648000 && timestamp == 0x67d4aa97) ||
+      (image_size == 0x1627000 && timestamp == 0x6740074a))
     return LayerLayout::Ae2025;
   if (image_size == 0x17d3000 && timestamp == 0x6a2ae3d2)
     return LayerLayout::Ae2026;
