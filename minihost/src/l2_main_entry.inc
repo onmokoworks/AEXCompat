@@ -522,6 +522,15 @@ int32_t __cdecl diag_copy_world(void* effect_ref, void* source, void* destinatio
                                const ::LegacyRect* source_rect,
                                const ::LegacyRect* destination_rect) {
   return utility_callback_result(aexcompat::callback_diagnostics::Callback::Copy,
+      private_copy_world_area8(effect_ref, source, destination, source_rect, destination_rect),
+      !source || !destination
+          ? aexcompat::callback_diagnostics::Reason::MissingWorld
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_copy_world_overlap(void* effect_ref, void* source, void* destination,
+                                       const ::LegacyRect* source_rect,
+                                       const ::LegacyRect* destination_rect) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Copy,
       copy_world8(effect_ref, source, destination, source_rect, destination_rect),
       !source || !destination
           ? aexcompat::callback_diagnostics::Reason::MissingWorld
@@ -537,6 +546,20 @@ int32_t __cdecl diag_private_copy_world_area8(void* effect_ref, void* source,
       !source || !destination
           ? aexcompat::callback_diagnostics::Reason::MissingWorld
           : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_private_copy_world_nearest(void* ref,void* src,void* dst,
+    const ::LegacyRect* sr,const ::LegacyRect* dr) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Copy,
+      private_copy_world_nearest(ref,src,dst,sr,dr),
+      !src || !dst ? aexcompat::callback_diagnostics::Reason::MissingWorld
+                  : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_private_copy_world_premultiplied(void* ref,void* src,void* dst,
+    const ::LegacyRect* sr,const ::LegacyRect* dr) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Copy,
+      private_copy_world_premultiplied(ref,src,dst,sr,dr),
+      !src || !dst ? aexcompat::callback_diagnostics::Reason::MissingWorld
+                  : aexcompat::callback_diagnostics::Reason::CallbackError);
 }
 int32_t __cdecl diag_fill_world(void* effect_ref, const void* color,
                                const ::LegacyRect* area, void* world) {
@@ -654,7 +677,11 @@ int32_t __cdecl diag_get_callback_addr(void* effect_ref, int32_t quality,
   if (result == 0 && callback && id == 9)
     *callback = *callback == reinterpret_cast<void*>(&private_copy_world_area8)
         ? reinterpret_cast<void*>(&diag_private_copy_world_area8)
-        : reinterpret_cast<void*>(&diag_copy_world);
+        : *callback == reinterpret_cast<void*>(&private_copy_world_nearest)
+            ? reinterpret_cast<void*>(&diag_private_copy_world_nearest)
+            : *callback == reinterpret_cast<void*>(&private_copy_world_premultiplied)
+                ? reinterpret_cast<void*>(&diag_private_copy_world_premultiplied)
+                : reinterpret_cast<void*>(&diag_copy_world_overlap);
   std::string request_text;
   if (result != 0 || extended_diag_enabled()) {
     std::ostringstream request;
@@ -1336,8 +1363,8 @@ bool verify_pf_private_callbacks() {
   void* raw_unknown = reinterpret_cast<void*>(1);
   check(get_callback_addr(effect_ref, 1, 0, -3, &raw_unknown) == kPfBadCallbackParam && raw_unknown == nullptr,
         "id -3 answered");
-  // #1681: the private id-9 q1/m1 entry is not the public overlap-copy
-  // contract. AE's 2x2 downsample averages the four source pixels.
+  // Private COPY routes follow the CPU oracle, including q0 end-of-bin
+  // replication and the q1 premultiplied four-byte sampler.
   {
     void* raw_copy{};
     void* raw_other_copy{};
@@ -1375,8 +1402,8 @@ bool verify_pf_private_callbacks() {
       copy_destination_pixels.fill(0);
       check(other_copy(effect_ref, copy_source.data(), copy_destination.data(),
                        nullptr, nullptr) == 0 &&
-                copy_destination_pixels == std::array<unsigned char, 4>{255, 10, 0, 0},
-            "id 9 q0/m1 changed overlap behavior");
+                copy_destination_pixels == std::array<unsigned char, 4>{255, 40, 0, 0},
+            "id 9 q0/m1 did not select the last source pixel");
       for (uint32_t mode : std::array<uint32_t, 2>{0, 2}) {
         void* raw_other_mode{};
         check(get_callback_addr(effect_ref, 1, mode, 9, &raw_other_mode) == 0 &&
@@ -1388,8 +1415,8 @@ bool verify_pf_private_callbacks() {
         check(copy_other_mode(effect_ref, copy_source.data(),
                               copy_destination.data(), nullptr, nullptr) == 0 &&
                   copy_destination_pixels ==
-                      std::array<unsigned char, 4>{255, 10, 0, 0},
-              "id 9 q1 other mode changed overlap behavior");
+                      std::array<unsigned char, 4>{255, 25, 0, 0},
+              "id 9 q1 other mode did not average opaque pixels");
       }
       copy_destination_pixels.fill(0);
       const LegacyRect one_pixel{0, 0, 1, 1};

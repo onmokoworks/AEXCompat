@@ -1,4 +1,6 @@
 #include "worker_pf_world_transform_runtime.hpp"
+#include "worker_pf_copy_sampling.hpp"
+#include "worker_pf_copy_oracle_fixtures.hpp"
 
 #include "worker_extended_diag.hpp"
 #include "worker_pf_suites_internal.hpp"
@@ -1079,85 +1081,162 @@ int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
   return 0;
 }
 
-// AE's private id-9 q1/m1 COPY resamples a full ARGB8 world when the output
-// is smaller (#1262/#1681). The public World Transform copy and every other
-// private quality/mode keep their established rectangle/overlap contract.
-int32_t __cdecl private_copy_world_area8(void* effect_ref, void* source_world,
-                                         void* destination_world,
-                                         const LegacyRect* source_rect,
-                                         const LegacyRect* destination_rect) {
-  if (source_rect || destination_rect)
-    return copy_world8(effect_ref, source_world, destination_world,
-                       source_rect, destination_rect);
-  DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_operand_worlds(source_world, destination_world, source_info,
-                              destination_info))
+namespace {
+// The three private COPY callbacks are distinct from WorldTransformSuite copy.
+// Real CPU COPY uses nearest replication (q0), straight-alpha sampling (q1/m1),
+// or the legacy four-byte sampler (q1/m0,2), even on deep worlds in that last
+// route. No callback may write row padding or bypass world ownership checks.
+int32_t copy_resampled(void* effect_ref, void* source_world,
+                       void* destination_world, const LegacyRect* source_rect,
+                       const LegacyRect* destination_rect, int kind) {
+  DispatchWorldFormat src{}, dst{};
+  if (!resolve_operand_worlds(source_world, destination_world, src, dst))
     return copy_denied("unresolved_world");
-  if (source_info.pixel_format != kPixelFormatArgb32 ||
-      destination_info.pixel_format != kPixelFormatArgb32 ||
-      source_info.width <= 0 || source_info.height <= 0 ||
-      destination_info.width <= 0 || destination_info.height <= 0 ||
-      destination_info.width > source_info.width ||
-      destination_info.height > source_info.height ||
-      (destination_info.width == source_info.width &&
-       destination_info.height == source_info.height))
-    return copy_world8(effect_ref, source_world, destination_world, nullptr, nullptr);
-  constexpr std::size_t kBytesPerPixel = 4;
-  if (source_info.width > 4096 || source_info.height > 4096 ||
-      destination_info.width > 4096 || destination_info.height > 4096 ||
-      source_info.rowbytes < static_cast<int64_t>(source_info.width) * kBytesPerPixel ||
-      destination_info.rowbytes < static_cast<int64_t>(destination_info.width) * kBytesPerPixel)
+  const int bytes = dispatch_pixel_format_bytes(src.pixel_format);
+  if (!bytes || src.pixel_format != dst.pixel_format)
+    return copy_denied("pixel_format_mismatch");
+  if (src.width <= 0 || src.height <= 0 || dst.width <= 0 || dst.height <= 0 ||
+      src.width > 4096 || src.height > 4096 || dst.width > 4096 ||
+      dst.height > 4096 ||
+      src.rowbytes < static_cast<int64_t>(src.width) * bytes ||
+      dst.rowbytes < static_cast<int64_t>(dst.width) * bytes)
     return copy_denied("world_bounds");
-
-  // Snapshot before writing: a plug-in may pass aliased source/destination
-  // buffers. Dimensions are bounded above, so this is at most 64 MiB.
-  const auto source_width = static_cast<std::size_t>(source_info.width);
-  const auto source_height = static_cast<std::size_t>(source_info.height);
-  std::vector<unsigned char> source_pixels;
-  try {
-    if (g_fail_next_allocation_for_self_test.exchange(false)) throw std::bad_alloc();
-    source_pixels.resize(source_width * source_height * kBytesPerPixel);
-  } catch (const std::bad_alloc&) {
-    return 4;
+  LegacyRect sr{}, dr{};
+  // Retain the established clipped-overlap contract for out-of-world
+  // rectangles.
+  if (!normalize_legacy_rect(source_rect, src.width, src.height, sr) ||
+      !normalize_legacy_rect(destination_rect, dst.width, dst.height, dr))
+    return copy_world8(effect_ref, source_world, destination_world, source_rect,
+                       destination_rect);
+  const int64_t sw = sr.right - sr.left, sh = sr.bottom - sr.top;
+  const int64_t dw = dr.right - dr.left, dh = dr.bottom - dr.top;
+  if (!sw || !sh || !dw || !dh) return 0;
+  auto* source = static_cast<unsigned char*>(src.data);
+  auto* destination = static_cast<unsigned char*>(dst.data);
+  const bool full = sr.left == 0 && sr.top == 0 && sr.right == src.width &&
+                    sr.bottom == src.height && dr.left == 0 && dr.top == 0 &&
+                    dr.right == dst.width && dr.bottom == dst.height &&
+                    sw == dw && sh == dh;
+  if (full) {
+    // AE's legacy q1/m0,2 fast path copies strides, including allocator
+    // padding. Preserve the host's padding/last-row bounds by copying only
+    // active bytes.
+    for (int64_t y = 0; y < sh; ++y)
+      std::memmove(destination + y * dst.rowbytes, source + y * src.rowbytes,
+                   sw * bytes);
+    return 0;
   }
-  const auto* source = static_cast<const unsigned char*>(source_info.data);
-  auto* destination = static_cast<unsigned char*>(destination_info.data);
-  const std::size_t packed_row = source_width * kBytesPerPixel;
-  for (int32_t y = 0; y < source_info.height; ++y)
-    std::memcpy(source_pixels.data() + static_cast<std::size_t>(y) * packed_row,
-                source + static_cast<std::size_t>(y) * source_info.rowbytes, packed_row);
-
-  const int64_t sw = source_info.width, sh = source_info.height;
-  const int64_t dw = destination_info.width, dh = destination_info.height;
-  const uint64_t area = static_cast<uint64_t>(sw) * static_cast<uint64_t>(sh);
-  for (int64_t dy = 0; dy < dh; ++dy) {
-    auto* destination_row = destination + static_cast<std::size_t>(dy) *
-                                          destination_info.rowbytes;
-    const int64_t sy_begin = dy * sh / dh;
-    const int64_t sy_end = ((dy + 1) * sh + dh - 1) / dh;
-    for (int64_t dx = 0; dx < dw; ++dx) {
-      const int64_t sx_begin = dx * sw / dw;
-      const int64_t sx_end = ((dx + 1) * sw + dw - 1) / dw;
-      std::array<uint64_t, 4> sums{};
-      for (int64_t sy = sy_begin; sy < sy_end; ++sy) {
-        const int64_t overlap_y = (std::min)((sy + 1) * dh, (dy + 1) * sh) -
-                                  (std::max)(sy * dh, dy * sh);
-        for (int64_t sx = sx_begin; sx < sx_end; ++sx) {
-          const int64_t overlap_x = (std::min)((sx + 1) * dw, (dx + 1) * sw) -
-                                    (std::max)(sx * dw, dx * sw);
-          const auto weight = static_cast<uint64_t>(overlap_x * overlap_y);
-          const auto index = (static_cast<std::size_t>(sy) * source_width +
-                              static_cast<std::size_t>(sx)) * kBytesPerPixel;
-          for (std::size_t channel = 0; channel < 4; ++channel)
-            sums[channel] += weight * source_pixels[index + channel];
-        }
+  const bool nearest = kind == 0 || (kind == 1 && sw == dw && sh == dh);
+  const bool raw = kind == 2;
+  const int components = raw ? 1 : bytes / 4;
+  const copy_sampling::Source view{source, src.rowbytes, src.width, src.height,
+                                   components};
+  const int64_t step_x = sw * 65536 / dw, step_y = sh * 65536 / dh;
+  for (int64_t y = 0; y < dh; ++y)
+    for (int64_t x = 0; x < dw; ++x) {
+      if (nearest) {
+        const int64_t ix = sr.left + ((x + 1) * sw + dw - 1) / dw - 1;
+        const int64_t iy = sr.top + ((y + 1) * sh + dh - 1) / dh - 1;
+        // Read immediately before writing: overlapping COPY has forward
+        // feedback.
+        std::array<unsigned char, 16> pixel{};
+        std::memcpy(pixel.data(), source + iy * src.rowbytes + ix * bytes,
+                    bytes);
+        std::memcpy(
+            destination + (dr.top + y) * dst.rowbytes + (dr.left + x) * bytes,
+            pixel.data(), bytes);
+      } else {
+        const int64_t cx = sr.left * 65536LL + step_x / 2 - 32768 + x * step_x;
+        const int64_t cy = sr.top * 65536LL + step_y / 2 - 32768 + y * step_y;
+        const auto p =
+            step_x <= 65536 && step_y <= 65536
+                ? copy_sampling::bilinear(view, cx, cy, raw)
+                : copy_sampling::area(view, cx, cy, step_x, step_y, raw);
+        copy_sampling::store(destination + (dr.top + y) * dst.rowbytes +
+                                 (dr.left + x) * components * 4,
+                             p, components);
       }
-      auto* pixel = destination_row + static_cast<std::size_t>(dx) * kBytesPerPixel;
-      for (std::size_t channel = 0; channel < 4; ++channel)
-        pixel[channel] = static_cast<unsigned char>((sums[channel] + area / 2) / area);
+    }
+  return 0;
+}
+}  // namespace
+
+int32_t __cdecl private_copy_world_area8(void* ref, void* src, void* dst,
+                                         const LegacyRect* sr,
+                                         const LegacyRect* dr) {
+  return copy_resampled(ref, src, dst, sr, dr, 1);
+}
+int32_t __cdecl private_copy_world_nearest(void* ref, void* src, void* dst,
+                                           const LegacyRect* sr,
+                                           const LegacyRect* dr) {
+  return copy_resampled(ref, src, dst, sr, dr, 0);
+}
+int32_t __cdecl private_copy_world_premultiplied(void* ref, void* src,
+                                                 void* dst,
+                                                 const LegacyRect* sr,
+                                                 const LegacyRect* dr) {
+  return copy_resampled(ref, src, dst, sr, dr, 2);
+}
+
+bool verify_copy_cpu_oracle() {
+  for (const auto& cell : copy_oracle::cells()) {
+    const int component = cell.depth / 8, pixel = component * 4;
+    const int src_stride = cell.sw * pixel + 28,
+              dst_stride = cell.dw * pixel + 28;
+    std::vector<unsigned char> source(src_stride * cell.sh + 32, 0xa5);
+    std::vector<unsigned char> destination(dst_stride * cell.dh + 32, 0xa5);
+    auto encode = [&](auto& bytes, int stride, int width, const auto& words) {
+      for (size_t i = 0; i < words.size(); ++i) {
+        const size_t y = i / (width * 4), x = i % (width * 4);
+        const uint32_t value = words[i];
+        std::memcpy(bytes.data() + 16 + y * stride + x * component, &value,
+                    component);
+      }
+    };
+    encode(source, src_stride, cell.sw, cell.source);
+    encode(destination, dst_stride, cell.dw, cell.destination);
+    LocalEffectWorld sw{}, dw{};
+    sw.data = source.data() + 16;
+    sw.rowbytes = src_stride;
+    sw.width = cell.sw;
+    sw.height = cell.sh;
+    dw.data = destination.data() + 16;
+    dw.rowbytes = dst_stride;
+    dw.width = cell.dw;
+    dw.height = cell.dh;
+    sw.world_flags = dw.world_flags = cell.depth == 16   ? 1
+                                      : cell.depth == 32 ? 0x02000000
+                                                         : 0;
+    DispatchWorldFormatScope formats;
+    const int format = cell.depth == 8    ? kPixelFormatArgb32
+                       : cell.depth == 16 ? kPixelFormatArgb64
+                                          : kPixelFormatArgb128;
+    if (!formats.register_world(&sw, format) ||
+        !formats.register_world(&dw, format))
+      return false;
+    auto* target = cell.alias ? &sw : &dw;
+    const auto copy = cell.quality == 0 ? &private_copy_world_nearest
+                      : cell.mode == 0 || cell.mode == 2
+                          ? &private_copy_world_premultiplied
+                          : &private_copy_world_area8;
+    const auto before_source = source, before_destination = destination;
+    if (copy(nullptr, &sw, target, cell.has_sr ? &cell.sr : nullptr,
+             cell.has_dr ? &cell.dr : nullptr))
+      return false;
+    auto expected_source = before_source,
+         expected_destination = before_destination;
+    encode(expected_source, src_stride, cell.sw, cell.source_after);
+    if (!cell.alias)
+      encode(expected_destination, dst_stride, cell.dw, cell.destination_after);
+    if (source != expected_source || destination != expected_destination) {
+      std::cerr << "COPY oracle mismatch depth=" << cell.depth
+                << " q=" << cell.quality << " mode=" << cell.mode
+                << " pattern=" << cell.pattern << " scenario=" << cell.scenario
+                << "\n";
+      return false;
     }
   }
-  return 0;
+  return true;
 }
 
 bool verify_bad_callback_param_contract() {
