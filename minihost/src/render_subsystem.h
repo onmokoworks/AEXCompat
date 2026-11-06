@@ -218,21 +218,15 @@ struct ClassicFrameOutput {
   int32_t input_origin_y{};
 };
 
-// `PF_InData::extent_hint` brought inside an output buffer that just shrank.
-//
-// The hint is written from the source extent before the lifecycle runs, and an
-// accepted shrink leaves it naming more rows and columns than the new buffer
-// holds. The SDK invites an effect to iterate exactly this rect ("copying just
-// this rectangle from the source image to the destination image is sufficient"),
-// so a hint left too large is an invitation to write past the guarded buffer
-// into its sentinel band (issue #984).
-//
-// Only ever shrinks, and never below an empty rect at the origin it already
-// had: growing it would name rows the input never had, and moving its top-left
-// would put it in a different coordinate frame than the one the effect was
-// handed. Which frame AE states the hint in after a resize is issue #997.
-std::array<int32_t, 4> extent_hint_within(const std::array<int32_t, 4>& hint,
-                                          int32_t output_width, int32_t output_height);
+// AE Classic expresses both the output extent and the intersection hint in
+// input coordinates. Buffer indexing and write coverage remain output-local.
+struct ClassicExtentGeometry {
+  std::array<int32_t, 4> output_extent{};
+  std::array<int32_t, 4> input_hint{};
+};
+// Requires accepted dimensions/origin (validate_output_extent/origin).
+ClassicExtentGeometry classic_extent_geometry(const std::array<int32_t, 4>& input_extent,
+    int32_t output_width, int32_t output_height, int32_t origin_x, int32_t origin_y);
 
 // The frame report's origin from the one the plug-in stated. The two describe
 // the same geometry from opposite ends: PF_OutData::origin is where the input

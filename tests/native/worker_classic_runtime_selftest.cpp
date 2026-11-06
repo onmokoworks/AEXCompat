@@ -250,6 +250,83 @@ int32_t __cdecl request_nop_geometry(
   }
   return 0;
 }
+// Execute the production Classic path, not just the intersection helper.
+struct ExtentOraclePoint {
+  int32_t width, height, x, y;
+  std::array<int32_t,4> hint;
+};
+const ExtentOraclePoint* g_extent_point{};
+int32_t g_extent_pixel_bytes{};
+int g_extent_render_calls{};
+bool g_extent_leave_pixel{};
+
+int32_t __cdecl observe_extent_oracle(int32_t command, void* input, void* output,
+                                     void**, void* world, void*) {
+  using namespace aexcompat::abi::x86_64_windows;
+  const auto read32 = [](void* data, size_t offset) {
+    int32_t value{}; std::memcpy(&value, static_cast<std::byte*>(data)+offset,4); return value;
+  };
+  const auto write32 = [](void* data, size_t offset, int32_t value) {
+    std::memcpy(static_cast<std::byte*>(data)+offset,&value,4);
+  };
+  const auto& p = *g_extent_point;
+  if (command == PF_CMD_FRAME_SETUP) {
+    if (read32(output,OUT_WIDTH_OFFSET)!=67 || read32(output,OUT_HEIGHT_OFFSET)!=49) return 4;
+    write32(output,OUT_WIDTH_OFFSET,p.width); write32(output,OUT_HEIGHT_OFFSET,p.height);
+    write32(output,OUT_ORIGIN_OFFSET,p.x); write32(output,OUT_ORIGIN_OFFSET+4,p.y);
+  }
+  if (command != PF_CMD_RENDER) return 0;
+  ++g_extent_render_calls;
+  std::array<int32_t,4> hint{},extent{};
+  std::memcpy(hint.data(),static_cast<std::byte*>(input)+IN_EXTENT_HINT_OFFSET,sizeof(hint));
+  std::memcpy(extent.data(),static_cast<std::byte*>(world)+LAYER_EXTENT_HINT_OFFSET,sizeof(extent));
+  if (hint!=p.hint || extent!=std::array<int32_t,4>{-p.x,-p.y,p.width-p.x,p.height-p.y} ||
+      read32(input,IN_OUTPUT_ORIGIN_X_OFFSET)!=p.x || read32(input,IN_OUTPUT_ORIGIN_Y_OFFSET)!=p.y ||
+      read32(world,LAYER_WIDTH_OFFSET)!=p.width || read32(world,LAYER_HEIGHT_OFFSET)!=p.height) return 4;
+  unsigned char* pixels{};
+  std::memcpy(&pixels,static_cast<std::byte*>(world)+LAYER_DATA_OFFSET,sizeof(pixels));
+  const int stride=read32(world,LAYER_ROWBYTES_OFFSET);
+  for (int y=0;y<p.height;++y) {
+    const int count=p.width-(g_extent_leave_pixel && y==p.height-1 ? 1 : 0);
+    std::memset(pixels+size_t(y)*stride,0x11,size_t(count)*g_extent_pixel_bytes);
+  }
+  return 0;
+}
+
+bool production_extent_oracle_points() {
+  const ExtentOraclePoint points[] = {
+    {67,49,0,0,{0,0,67,49}}, {67,49,5,3,{0,0,62,46}}, {67,49,-5,-3,{5,3,67,49}},
+    {83,61,0,0,{0,0,67,49}}, {83,61,5,3,{0,0,67,49}}, {83,61,-5,-3,{5,3,67,49}},
+    {51,37,0,0,{0,0,51,37}}, {51,37,5,3,{0,0,46,34}}, {51,37,-5,-3,{5,3,56,40}},
+  };
+  const auto previous=aexcompat::render::diagnostic_world_layout();
+  auto& layout=aexcompat::render::diagnostic_world_layout();
+  layout={}; layout.enabled=true; layout.input_row_padding=24;
+  layout.output_row_padding=16; layout.has_extent_hint=true; layout.extent_hint={0,0,67,49};
+  bool ok=true;
+  for (int bytes : {4,8}) for (const auto& point : points) for (bool partial : {false,true}) {
+    g_extent_point=&point; g_extent_pixel_bytes=bytes; g_extent_render_calls=0; g_extent_leave_pixel=partial;
+    aexcompat::l2_detail::BufferIn input{};
+    aexcompat::l2_detail::BufferOut output{};
+    const uint32_t flags=(1u<<9)|(1u<<12)|(1u<<25)|(1u<<6);
+    std::memcpy(output.data()+aexcompat::abi::x86_64_windows::OUT_OUT_FLAGS_OFFSET,&flags,sizeof(flags));
+    std::vector<unsigned char> source(67*49*bytes,0x33),captured;
+    int32_t width{},height{},stride{}; bool guards{}; std::string ih,oh;
+    aexcompat::render::ClassicFrameOutput geometry{};
+    const int error=aexcompat::l2_detail::render_once(&observe_extent_oracle,input,output,"default",
+      width,height,stride,ih,oh,guards,nullptr,&source,67,49,nullptr,0,1024,1024,24576,
+      bytes,false,&captured,&geometry);
+    ok=ok && error==(partial ? -6 : 0) && guards && g_extent_render_calls==1 &&
+      width==point.width && height==point.height && stride==width*bytes+16 &&
+      geometry.input_origin_x==point.x && geometry.input_origin_y==point.y &&
+      geometry.output_coverage.geometry_valid &&
+      geometry.output_coverage.unwritten_pixels==(partial ? 1u : 0u) &&
+      geometry.output_coverage.host_validation_failed==partial;
+    if (!partial) for (const auto pixel : captured) ok=ok && pixel==0x11;
+  }
+  layout=previous; g_extent_point=nullptr;
+  return ok;
+}
 }  // namespace
 
 int main() {
@@ -468,6 +545,9 @@ int main() {
       return manage_sequence ? 40 : 41;
   }
   if (g_frame_setup_geometry_render_observations != 2) return 42;
+
+  aexcompat::worker_runtime::parameters::state().ui.dynamic_flags_advertised = false;
+  if (!production_extent_oracle_points()) return 54;
 
   // NOP_RENDER still honors a FRAME_SETUP resize and places the source at the
   // requested origin, leaving transparent pixels around it. Compare to an
