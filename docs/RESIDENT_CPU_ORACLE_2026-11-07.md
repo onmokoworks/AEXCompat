@@ -79,6 +79,10 @@ seed生成/coverage/guardの製品コードを緩和していない。probeソ�
 ローカル再確認: Rust diagnostics6 passed、Smart session9 passed、tile/Classic seed6 passed。
 CI artifact再利用のreceipt3件はmtime freshness guardで実行前に拒否されたため、最新head CIへ委ねる。
 CI修正全diffを旧reviewed-headから再レビューし、未対応指摘0。
+次のrun42250374526のearly partitionでは、新規Classic seed3件のbuilt-artifact manifest登録漏れで
+ビルド前のharness不存在を検出した。3 nodeを既存manifestへ登録し、全collectionの整合と
+early partitionで3件が除外されることを確認。検査をskip追加で消したのではなく、既存の
+native build後partitionで必ず実行する分類へ直した。これはrunner障害ではない。
 
 ```powershell
 $env:PYTHONUTF8='1'
