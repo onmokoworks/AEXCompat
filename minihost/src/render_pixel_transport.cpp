@@ -43,14 +43,19 @@ void rgba8_to_argb(void* destination, const unsigned char* rgba,
     pixel[0] = rgba[3]; pixel[1] = rgba[0]; pixel[2] = rgba[1]; pixel[3] = rgba[2];
   } else if (pixel_bytes == 8) {
     auto* pixel = static_cast<uint16_t*>(destination);
-    pixel[0] = static_cast<uint16_t>((static_cast<uint32_t>(rgba[3]) * 32768u + 127u) / 255u);
-    pixel[1] = static_cast<uint16_t>((static_cast<uint32_t>(rgba[0]) * 32768u + 127u) / 255u);
-    pixel[2] = static_cast<uint16_t>((static_cast<uint32_t>(rgba[1]) * 32768u + 127u) / 255u);
-    pixel[3] = static_cast<uint16_t>((static_cast<uint32_t>(rgba[2]) * 32768u + 127u) / 255u);
+    // Match AE's observed RGBA8 import with float32 scaling and addition of 0.5.
+    // Integer rational rounding differs at 254; direct division also changes
+    // float output words. All 256 source values were observed in the CPU oracle.
+    const auto channel = [](unsigned char value) {
+      const float normalized = value * (1.0f / 255.0f);
+      return static_cast<uint16_t>(normalized * 32768.0f + 0.5f);
+    };
+    pixel[0] = channel(rgba[3]); pixel[1] = channel(rgba[0]);
+    pixel[2] = channel(rgba[1]); pixel[3] = channel(rgba[2]);
   } else {
     auto* pixel = static_cast<float*>(destination);
-    pixel[0] = rgba[3] / 255.0f; pixel[1] = rgba[0] / 255.0f;
-    pixel[2] = rgba[1] / 255.0f; pixel[3] = rgba[2] / 255.0f;
+    pixel[0] = rgba[3] * (1.0f / 255.0f); pixel[1] = rgba[0] * (1.0f / 255.0f);
+    pixel[2] = rgba[1] * (1.0f / 255.0f); pixel[3] = rgba[2] * (1.0f / 255.0f);
   }
 }
 

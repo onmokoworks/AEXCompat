@@ -11,8 +11,8 @@ being offered, Basic_3D answers that extent and the frame renders. Issue #984.
 
 SmartFX does not negotiate this extent, but it does reuse the same in_data and
 out_data across frames. Its origin slots therefore still need a per-frame clear
-before FRAME_SETUP so an empty PRE_RENDER cannot inherit an earlier answer.
-Issue #996.
+before PRE_RENDER so an empty result cannot inherit an earlier answer.
+It receives no Classic FRAME_SETUP/FRAME_SETDOWN pair (#98 CPU oracle).
 
 The native self-test drives `begin_frame` with a recording fake, so it needs no
 plug-in and no AEX - only the build.

@@ -126,10 +126,11 @@ def test_smart_session_renders_frames_with_hoisted_sequence():
         # liveness evidence.
         assert report["input_sha256"] == _logical_argb_hash(patterns[-1])
         # The SEQUENCE pair is hoisted out of the per-frame lifecycle: the
-        # frame stages fire once per frame while the render_lifecycle sequence
+        # Classic frame stages never fire on SmartFX; render_lifecycle sequence
         # stages never do (the hoisted setup goes through the selector
         # invoker, which does not emit stage traces).
-        assert stderr.count("stage:frame_setup_begin") == len(FULL_FRAME_TIMES)
+        assert stderr.count("stage:frame_setup_begin") == 0
+        assert stderr.count("stage:frame_setdown_begin") == 0
         assert stderr.count("stage:sequence_setup_begin") == 0
     finally:
         if process.poll() is None:

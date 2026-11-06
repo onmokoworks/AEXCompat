@@ -235,12 +235,10 @@ constexpr aexcompat::render_lifecycle::Layout make_render_lifecycle_layout() {
 constexpr aexcompat::render_lifecycle::Layout kRenderLifecycleLayout =
     make_render_lifecycle_layout();
 
-// SmartFX states its geometry through SMART_PRE_RENDER's result and max_result
-// rects, and nothing on that route reads `out_data->width/height` back or has a
-// resize step. It names no extent offsets, so FRAME_SETUP is not invited to
-// revise an extent whose answer would be discarded.
+// SmartFX states geometry through PRE_RENDER and receives no Classic frame
+// selectors (AE CPU oracle, issue #98). Sequence cleanup and origin reset stay.
 constexpr aexcompat::render_lifecycle::Layout kSmartLifecycleLayout =
-    aexcompat::render_lifecycle::without_extent_negotiation(kRenderLifecycleLayout);
+    aexcompat::render_lifecycle::smart_layout(kRenderLifecycleLayout);
 
 int32_t lifecycle_invoke_frame(void* opaque, int32_t selector, void* input,
                                void* output, void** params, void* world) {
