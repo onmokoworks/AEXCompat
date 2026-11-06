@@ -58,10 +58,11 @@ def decode_contract(pixels: list[tuple], depth: int) -> list[int]:
     return words
 
 
-def render(plugin: Path, input_image: Path, output: Path, layer: Path | None, depth: int):
+def render(plugin: Path, input_image: Path, output: Path, layer: Path | None, depth: int, offset=0):
     request = output.with_suffix(".request.json")
     request.write_text(json.dumps({"schema_version": 1, "assignments":
-        [{"slot": 1, "layer": str(layer)}] if layer else []}), encoding="utf-8")
+        ([{"slot": 1, "layer": str(layer)}] if layer else []) +
+        [{"slot": 3, "value": offset}]}), encoding="utf-8")
     args = [str(HARNESS), "--headless"]
     args.append("--render-experimental-smart-request" + {8: "", 16: "-16", 32: "-32-cpu"}[depth])
     args += [str(plugin), str(input_image), str(output), str(request)]
@@ -95,7 +96,9 @@ def render(plugin: Path, input_image: Path, output: Path, layer: Path | None, de
 @pytest.mark.parametrize("depth", [8, 16, 32])
 def test_unassigned_and_assigned_smart_layer_match_ae_cpu_oracle(tmp_path, depth):
     assert WORKER.is_file() and HARNESS.is_file()
-    assert_artifact_fresh(PROBE, PROBE_SOURCE, PROBE_RESOURCE, WORKER, HARNESS)
+    # The probe does not link the worker/harness; rebuilding those cannot make
+    # the already captured, same-binary AE oracle stale.
+    assert_artifact_fresh(PROBE, PROBE_SOURCE, PROBE_RESOURCE)
     source = tmp_path / "primary.png"
     secondary = tmp_path / "secondary.png"
     Image.new("RGBA", (64, 32), (25, 43, 61, 255)).save(source)
@@ -113,8 +116,6 @@ def test_unassigned_and_assigned_smart_layer_match_ae_cpu_oracle(tmp_path, depth
     white = {8: 255, 16: 32768, 32: 0x3F800000}[depth]
     for name, layer, expected in [("absent", None, expected_absent),
                                    ("assigned", secondary, expected_assigned)]:
-        words, pixels = render(PROBE, source, tmp_path / (name + ".png"), layer, depth)
-        assert words == expected
         # All channel samples, including alpha and the unused lower half, are
         # checked as native words. No deep-to-preview quantization or tolerance.
         expected_pixels = []
@@ -122,4 +123,10 @@ def test_unassigned_and_assigned_smart_layer_match_ae_cpu_oracle(tmp_path, depth
             bit = index < 1024 and (expected[index // 32] & (1 << (31 - index % 32)))
             color = white if bit else 0
             expected_pixels.append((color, color, color, white))
-        assert pixels == expected_pixels
+        # AE 25.1 CPU returns identical contracts at 0/+1/+5, and unassigned
+        # also at -5. The assigned -5 case additionally checks native still
+        # invariance; no AE past-assigned observation is claimed.
+        for offset in (0, 1, 5, -5):
+            words, pixels = render(PROBE, source, tmp_path / f"{name}-{offset}.png", layer, depth, offset)
+            assert words == expected
+            assert pixels == expected_pixels

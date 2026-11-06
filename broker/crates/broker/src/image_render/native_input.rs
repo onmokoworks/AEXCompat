@@ -310,6 +310,49 @@ mod native_input_tests {
 }
 
 /// Runs one chain stage using the existing isolated session and provenance path.
+/// Timed secondary images are decoded at native depth, just like static layers.
+/// Missing timestamps remain explicit failures in the worker.
+pub fn render_native_image_with_timed_layers(
+    repository: &Path,
+    plugin_path: &Path,
+    inspected_sha256: &str,
+    input: &NativeImageInput,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timed_layers: &[TimedLayerImage],
+    timing: RenderTiming,
+) -> io::Result<Value> {
+    input.validate()?;
+    let actual = observe_selected_plugin_bytes(&fs::read(plugin_path)?, inspected_sha256)?;
+    render_with_artifact(
+        repository,
+        "experimental-native-timed-layers",
+        plugin_path,
+        &actual,
+        interactive_frame_deadline_ms()?,
+        Path::new(""),
+        output_path,
+        Some(encode_interactive_payload(parameters)?),
+        Some(parameters),
+        None,
+        timing,
+        true,
+        input.format,
+        RenderGpuBackend::Cpu,
+        None,
+        None,
+        None,
+        Some(timed_layers),
+        Vec::new(),
+        Vec::new(),
+        None,
+        input.format == RenderPixelFormat::Argb16,
+        None,
+        Some(input),
+    )
+}
+
+/// Runs one chain stage using the existing isolated session and provenance path.
 pub fn render_native_image_with_dependencies(
     repository: &Path,
     plugin_path: &Path,
