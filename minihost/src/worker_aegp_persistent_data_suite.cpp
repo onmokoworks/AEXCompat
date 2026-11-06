@@ -152,6 +152,17 @@ bool write_bytes_seh(void* destination, const void* source,
   }
 }
 
+bool write_string_seh(char* destination, const char* source,
+                      std::size_t needed, std::size_t capacity) noexcept {
+  __try {
+    std::memcpy(destination, source, needed);
+    std::memset(destination + needed, 0, capacity - needed);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
 // A key is rejected for shape, not for character set: AE's preferences hold
 // names this host never sees the encoding rules for, so only what cannot be a
 // key is refused - empty, over the bound (already handled by the copy), or
@@ -299,11 +310,8 @@ Lookup lookup(Blob& state, const std::string& section_key,
 // where the host creates a directory. The known-folder API reads the user's
 // profile instead of a value the plug-in can reach.
 //
-// Whether the trailing separator belongs in the answer is unverified. AE's own
-// callers are assumed to append a leaf to what they get back, which is why it
-// is included, but no observation of AE confirms it and the SDK header says
-// only "empty string if no file". Tracked as an AE-oracle question rather than
-// stated as fact (issue #886).
+// AE 25.1 returns the directory without a trailing separator (issue #886).
+// Only that string convention is shared; the directory remains host-owned.
 std::wstring resolve_prefs_directory() {
   PWSTR roaming = nullptr;
   if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE,
@@ -332,7 +340,6 @@ std::wstring resolve_prefs_directory() {
     if (!CreateDirectoryW(path.c_str(), nullptr) &&
         GetLastError() != ERROR_ALREADY_EXISTS)
       return std::wstring();
-    path += L'\\';
   } catch (...) {
     return std::wstring();
   }
@@ -520,10 +527,12 @@ A_Err __cdecl get_data_handle(AEGP_PluginID, AEGP_PersistentBlobH handle,
     ++state.telemetry.defaults_written;
   }
 
-  // Documented: NULL for what would be a zero-sized handle.
+  // AE 25.1 returns parameter error and NULL for an empty value, including
+  // a missing key with NULL default. The default write-through above still
+  // happens, so subsequent reads do not replace it with a different default.
   if (bytes.empty()) {
     if (!store_seh<void*>(value, nullptr)) return reject(state, kErrParameter);
-    return kErrNone;
+    return reject(state, kErrParameter);
   }
   void* allocated = nullptr;
   if (handles::new_aegp_mem_handle(1, "persistent data value",
@@ -597,9 +606,14 @@ A_Err __cdecl get_string(AEGP_PersistentBlobH handle,
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
-  if (!valid_blob(handle) || !buffer || !read_key(section_key, section) ||
+  // Zero-capacity calls have crashed the AE oracle. Refuse this shape before
+  // writing a default or output; an AE crash is not a success contract.
+  if (!valid_blob(handle) || !buffer || buffer_size == 0 ||
+      !read_key(section_key, section) ||
       !read_key(value_key, key))
     return reject(state, kErrParameter);
+  // Zero-filling must remain bounded like the stored string itself (+NUL).
+  if (buffer_size > kMaxValueBytes + 1) return reject(state, kErrAlloc);
   ++state.telemetry.get_calls;
 
   // Documented: a NULL default means '\0'. A default that is unreadable or
@@ -638,7 +652,8 @@ A_Err __cdecl get_string(AEGP_PersistentBlobH handle,
       return reject(state, kErrParameter);
     return actual_size ? kErrNone : reject(state, kErrParameter);
   }
-  if (!write_bytes_seh(buffer, text.c_str(), needed))
+  // AE 25.1 clears the unused bytes of a successful string output buffer.
+  if (!write_string_seh(buffer, text.c_str(), needed, buffer_size))
     return reject(state, kErrParameter);
   return kErrNone;
 }
@@ -965,7 +980,8 @@ bool selftest() {
     return false;
 
   // Strings: round-trip, then the documented too-small-buffer answer.
-  char text[16] = {};
+  char text[16];
+  std::memset(text, 0xa5, sizeof(text));
   A_u_long actual = 0;
   if (suite.AEGP_SetString(handle, "sec", "text", "abc") != kErrNone)
     return false;
@@ -973,6 +989,8 @@ bool selftest() {
                            &actual) != kErrNone)
     return false;
   if (std::strcmp(text, "abc") != 0 || actual != 4) return false;
+  if (!std::all_of(text + 4, text + sizeof(text),
+                   [](char c) { return c == 0; })) return false;
   char narrow[2] = {'x', 'x'};
   actual = 0;
   if (suite.AEGP_GetString(handle, "sec", "text", nullptr, sizeof(narrow),
@@ -983,6 +1001,45 @@ bool selftest() {
   if (suite.AEGP_GetString(handle, "sec", "text", nullptr, sizeof(narrow),
                            narrow, nullptr) != kErrParameter)
     return false;
+
+  // AE cell26: a missing value is written even when capacity 1 cannot hold
+  // it. A later, wider read returns that original default and clears all
+  // remaining caller bytes. Sentinels also detect writes past the capacity.
+  std::array<unsigned char, 66> padded;
+  padded.fill(0xa5);
+  actual = 0;
+  if (suite.AEGP_GetString(handle, "observed", "text", "DEFAULT_A", 1,
+                           reinterpret_cast<char*>(padded.data() + 1),
+                           &actual) != kErrNone || actual != 10 ||
+      padded[1] != 0 || padded[0] != 0xa5 || padded[2] != 0xa5)
+    return false;
+  padded.fill(0xa5);
+  if (suite.AEGP_GetString(handle, "observed", "text", "DIFFERENT_B", 64,
+                           reinterpret_cast<char*>(padded.data() + 1),
+                           &actual) != kErrNone || actual != 10 ||
+      std::memcmp(padded.data() + 1, "DEFAULT_A", 10) != 0 ||
+      !std::all_of(padded.begin() + 11, padded.end() - 1,
+                   [](unsigned char c) { return c == 0; }) ||
+      padded.front() != 0xa5 || padded.back() != 0xa5)
+    return false;
+  if (suite.AEGP_DeleteEntry(handle, "observed", "text") != kErrNone)
+    return false;
+
+  // Defined host refusals, not invented AE results for the crash input or
+  // an unbounded output capacity. Neither writes output nor creates a key.
+  for (const A_u_long capacity : {0u, static_cast<A_u_long>(kMaxValueBytes + 2)}) {
+    const A_Err expected = capacity == 0 ? kErrParameter : kErrAlloc;
+    for (const char* fallback : {static_cast<const char*>(nullptr), "fallback"}) {
+      actual = 0xcccccccc;
+      char untouched = 'x';
+      if (suite.AEGP_GetString(handle, "refused", "text", fallback, capacity,
+                               &untouched, &actual) != expected ||
+          untouched != 'x' || actual != 0xcccccccc ||
+          suite.AEGP_DoesKeyExist(handle, "refused", "text", &exists) != kErrNone ||
+          exists != 0)
+        return false;
+    }
+  }
 
   // Opaque data: round-trip, then the documented "stored value is not this
   // big, so the default is used" answer.
@@ -1003,7 +1060,7 @@ bool selftest() {
     return false;
 
   // Handle form: the stored bytes come back in a caller-owned handle, and a
-  // zero-sized value is the documented NULL.
+  // zero-sized value returns NULL and parameter error as observed in AE.
   void* data_handle = nullptr;
   if (suite.AEGP_GetDataHandle(1, handle, "sec", "bytes", nullptr,
                                &data_handle) != kErrNone ||
@@ -1021,8 +1078,11 @@ bool selftest() {
   if (!handle_matches) return false;
   void* empty_handle = &foreign;
   if (suite.AEGP_GetDataHandle(1, handle, "sec", "empty", nullptr,
-                               &empty_handle) != kErrNone ||
+                               &empty_handle) != kErrParameter ||
       empty_handle != nullptr)
+    return false;
+  if (suite.AEGP_DoesKeyExist(handle, "sec", "empty", &exists) != kErrNone ||
+      exists != 1)
     return false;
 
   // A default handle is read and copied, never adopted: it is still the
@@ -1044,6 +1104,13 @@ bool selftest() {
     handles::unlock_aegp_mem_handle(default_handle);
   }
   void* defaulted = nullptr;
+  // The errored missing read wrote an empty value. A later nonempty default
+  // must not overwrite it or turn the repeat into a successful read.
+  empty_handle = &foreign;
+  if (suite.AEGP_GetDataHandle(1, handle, "sec", "empty", default_handle,
+                               &empty_handle) != kErrParameter ||
+      empty_handle != nullptr)
+    return false;
   if (suite.AEGP_GetDataHandle(1, handle, "sec", "from-default",
                                default_handle, &defaulted) != kErrNone ||
       !defaulted || defaulted == default_handle)
@@ -1188,12 +1255,15 @@ bool selftest() {
         suite.AEGP_SetString(handle, "sec", "text", guard) == kErrParameter &&
         suite.AEGP_SetData(handle, "sec", "bytes", 4, guard) == kErrParameter &&
         suite.AEGP_GetLong(handle, "sec", "num", 1,
-                           reinterpret_cast<A_long*>(guard)) == kErrParameter;
+                           reinterpret_cast<A_long*>(guard)) == kErrParameter &&
+        suite.AEGP_GetString(handle, "sec", "text", "abc", 16, guard,
+                             nullptr) == kErrParameter;
     VirtualFree(guard, 0, MEM_RELEASE);
     if (!refused) return false;
     // The unwritable-output case above still wrote the default through first,
     // which is the documented getter contract, so it leaves an entry behind.
     if (suite.AEGP_DeleteEntry(handle, "sec", "num") != kErrNone) return false;
+    if (suite.AEGP_DeleteEntry(handle, "sec", "text") != kErrNone) return false;
     if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 0)
       return false;
   }
@@ -1294,7 +1364,22 @@ bool selftest() {
 
   void* prefs = nullptr;
   if (suite.AEGP_GetPrefsDirectory(&prefs) != kErrNone || !prefs) return false;
+  uint32_t prefs_size = 0;
+  void* prefs_data = nullptr;
+  if (handles::get_aegp_mem_handle_size(prefs, &prefs_size) != 0 ||
+      prefs_size < sizeof(char16_t) || prefs_size % sizeof(char16_t) != 0 ||
+      handles::lock_aegp_mem_handle(prefs, &prefs_data) != 0 || !prefs_data)
+    return false;
+  const auto* prefs_chars = static_cast<const char16_t*>(prefs_data);
+  const std::size_t units = prefs_size / sizeof(char16_t);
+  const bool prefs_shape = prefs_chars[units - 1] == 0 &&
+      std::find(prefs_chars, prefs_chars + units - 1, char16_t{}) ==
+          prefs_chars + units - 1 &&
+      (units == 1 || (prefs_chars[units - 2] != u'\\' &&
+                      prefs_chars[units - 2] != u'/'));
+  if (handles::unlock_aegp_mem_handle(prefs) != 0) return false;
   if (handles::free_aegp_mem_handle(prefs) != 0) return false;
+  if (!prefs_shape) return false;
   if (suite.AEGP_GetPrefsDirectory(nullptr) != kErrParameter) return false;
 
   const Telemetry counters = telemetry();
