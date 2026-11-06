@@ -47,6 +47,7 @@ struct Layout {
   std::size_t in_origin{};
   std::size_t world_width{};
   std::size_t world_height{};
+  bool frame_selectors{true};
 };
 
 // The same layout with the extent negotiation dropped, for a route that runs
@@ -65,6 +66,14 @@ constexpr Layout without_extent_negotiation(const Layout& layout) {
   reduced.out_height = 0;
   reduced.world_width = 0;
   reduced.world_height = 0;
+  return reduced;
+}
+
+// AE SmartFX uses PRE_RENDER/SMART_RENDER, without the Classic frame pair.
+// Retain sequence ownership and per-frame origin initialization.
+constexpr Layout smart_layout(const Layout& layout) {
+  Layout reduced = without_extent_negotiation(layout);
+  reduced.frame_selectors = false;
   return reduced;
 }
 

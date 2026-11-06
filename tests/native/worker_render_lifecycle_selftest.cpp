@@ -13,6 +13,7 @@
 #include "generated/aex_abi_contract.hpp"
 #include "render_lifecycle.hpp"
 #include "render_subsystem.h"
+#include "resident_depth_oracle.hpp"
 
 #include <windows.h>
 
@@ -485,12 +486,12 @@ void the_frame_report_origin_is_the_negation_of_the_stated_one() {
   }
 }
 
-// SmartFX runs the same lifecycle without extent negotiation, but origin is
+// SmartFX omits Classic frame selectors and extent negotiation, but origin is
 // still frame-local. A resident session reuses these buffers, so the second
 // frame must start undecided even if PRE_RENDER never supplies a replacement.
 void the_smart_layout_drops_extents_but_clears_stale_origins() {
   constexpr Layout smart =
-      aexcompat::render_lifecycle::without_extent_negotiation(kLayout);
+      aexcompat::render_lifecycle::smart_layout(kLayout);
   check(smart.in_sequence_data == kLayout.in_sequence_data &&
             smart.out_sequence_data == kLayout.out_sequence_data &&
             smart.in_frame_data == kLayout.in_frame_data &&
@@ -499,7 +500,8 @@ void the_smart_layout_drops_extents_but_clears_stale_origins() {
             smart.sequence_setdown == kLayout.sequence_setdown &&
             smart.frame_setup == kLayout.frame_setup &&
             smart.frame_setdown == kLayout.frame_setdown,
-        "the derived layout drives the same selectors and data slots");
+        "the derived layout retains sequence and data slots");
+  check(!smart.frame_selectors, "SmartFX omits the Classic frame pair");
   check(smart.out_width == 0 && smart.out_height == 0 &&
             smart.world_width == 0 && smart.world_height == 0,
         "and names no extent offsets at all");
@@ -513,15 +515,13 @@ void the_smart_layout_drops_extents_but_clears_stale_origins() {
   std::memcpy(buffers.output + kOutOrigin, stale_origin, sizeof(stale_origin));
   std::memcpy(buffers.input + kInOrigin, stale_origin, sizeof(stale_origin));
   g_observed = {};
-  begin_frame(recording_hooks(), smart, buffers.input, buffers.output, nullptr,
-              buffers.world);
-  check(g_observed.width_on_entry == 0 && g_observed.height_on_entry == 0,
-        "so FRAME_SETUP on the derived layout is offered nothing");
-  check(g_observed.out_origin_x_on_entry == 0 &&
-            g_observed.out_origin_y_on_entry == 0 &&
-            g_observed.in_origin_x_on_entry == 0 &&
-            g_observed.in_origin_y_on_entry == 0,
-        "and FRAME_SETUP itself sees no origin from the previous frame");
+  const auto frame = begin_frame(recording_hooks(), smart, buffers.input,
+                                 buffers.output, nullptr, buffers.world);
+  check(g_observed.calls == 0 && !frame.frame_started && frame.setup_error == 0,
+        "SmartFX does not dispatch FRAME_SETUP");
+  check(end_frame(recording_hooks(), smart, buffers.input, buffers.output,
+                  nullptr, buffers.world, frame, 37) == 37,
+        "SmartFX cleanup preserves the render error");
   check(out_extent(buffers, kOutOrigin) == 0 &&
             out_extent(buffers, kOutOrigin + 4) == 0,
         "but a SmartFX frame does not inherit out_data origin");
@@ -530,6 +530,63 @@ void the_smart_layout_drops_extents_but_clears_stale_origins() {
   std::memcpy(&in_y, buffers.input + kInOrigin + 4, sizeof(in_y));
   check(in_x == 0 && in_y == 0,
         "and it does not inherit in_data output_origin");
+}
+
+void smart_sequence_cleanup_and_selector_order() {
+  struct State { std::vector<int> selectors; int cleanup{}; } state;
+  Hooks hooks{};
+  hooks.context = &state;
+  hooks.invoke_frame = [](void* p, int32_t s, void*, void*, void**, void*) {
+    static_cast<State*>(p)->selectors.push_back(s);
+    return 0;
+  };
+  hooks.invoke_sequence = [](void* p, int32_t s, void*, void*) {
+    static_cast<State*>(p)->selectors.push_back(s);
+    return s == 8 ? 73 : 0;
+  };
+  hooks.cleanup_aux = [](void* p) { ++static_cast<State*>(p)->cleanup; };
+  for (const int error : {0, 37}) {
+    state = {};
+    Buffers buffers;
+    const auto layout = smart_layout(kLayout);
+    const auto life = begin_render(hooks, layout, buffers.input, buffers.output,
+                                   nullptr, buffers.world);
+    check(life.sequence_started && !life.frame_started && !life.setup_error,
+          "SmartFX retains sequence setup without Classic frame setup");
+    for (int frame_index = 0; frame_index < 4; ++frame_index) {
+      const auto frame = begin_frame(hooks, layout, buffers.input, buffers.output,
+                                     nullptr, buffers.world);
+      state.selectors.push_back(23); // PRE_RENDER / SMART_RENDER are caller-owned.
+      state.selectors.push_back(24);
+      end_frame(hooks, layout, buffers.input, buffers.output, nullptr, buffers.world,
+                 frame, 0);
+    }
+    check(end_render(hooks, layout, buffers.input, buffers.output, nullptr,
+                       buffers.world, life, error) == (error ? error : 73),
+          "sequence cleanup failure is retained after successful SmartFX render");
+    check(state.selectors == std::vector<int>({5,23,24,23,24,23,24,23,24,8}) &&
+              state.cleanup == 1, "SmartFX selector order and aux cleanup");
+  }
+}
+
+void rgba8_depth_matches_saved_ae_words() {
+  std::vector<unsigned char> rgba(256 * 4);
+  for (int i = 0; i < 256; ++i)
+    for (int c = 0; c < 4; ++c) rgba[i * 4 + c] = static_cast<unsigned char>(i);
+  for (const int depth : {8, 16}) {
+    const aexcompat::render::ImageRequest request{256, 1, 256 * depth, depth};
+    std::vector<unsigned char> world(256 * depth), logical;
+    check(aexcompat::render::build_argb_input(request, &rgba, logical, world.data()),
+          "all 256 RGBA8 values reach native depth conversion");
+    for (int i = 0; i < 256; ++i) {
+      for (int c = 0; c < 4; ++c) {
+        uint32_t actual{};
+        std::memcpy(&actual, world.data() + i * depth + c * depth / 4, depth / 4);
+        check(actual == (depth == 8 ? kAeRgba8To16[i] : kAeRgba8To32[i]),
+              "native conversion equals saved AE sample word");
+      }
+    }
+  }
 }
 
 void diagnostic_world_layout_rejects_malformed_and_preserves_state() {
@@ -679,11 +736,11 @@ int main() {
                       const uint32_t value = rgba[p * 4 + (c + 3) % 4];
                       if (depth == 4) expected_pixel[c] = static_cast<unsigned char>(value);
                       if (depth == 8) {
-                        const uint16_t converted = static_cast<uint16_t>((value * 32768 + 127) / 255);
+                        const uint16_t converted = static_cast<uint16_t>(kAeRgba8To16[value]);
                         std::memcpy(expected_pixel + c * 2, &converted, 2);
                       }
                       if (depth == 16) {
-                        const float converted = value / 255.0f;
+                        const uint32_t converted = kAeRgba8To32[value];
                         std::memcpy(expected_pixel + c * 4, &converted, 4);
                       }
                     }
@@ -736,6 +793,8 @@ int main() {
   the_extent_hint_uses_input_coordinates();
   the_frame_report_origin_is_the_negation_of_the_stated_one();
   the_smart_layout_drops_extents_but_clears_stale_origins();
+  smart_sequence_cleanup_and_selector_order();
+  rgba8_depth_matches_saved_ae_words();
   a_null_world_offers_nothing();
   a_refused_frame_setup_does_not_start_the_frame();
   if (failures == 0)

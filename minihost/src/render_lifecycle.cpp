@@ -102,6 +102,10 @@ void prepare_frame_setup_input(const Layout& layout, void* input, void* output,
 RenderLifecycle begin_frame(const Hooks& hooks, const Layout& layout,
                             void* input, void* output, void** params, void* world) {
   RenderLifecycle lifecycle;
+  if (!layout.frame_selectors) {
+    prepare_frame_setup_input(layout, input, output, world);
+    return lifecycle;
+  }
   if (!hooks.invoke_frame) {
     lifecycle.setup_error = 512;
     return lifecycle;
