@@ -692,6 +692,9 @@ bool selftest() {
   };
   check(prepared, "default BEE layer preparation was refused");
   check(layout_for_bee_image(0x1648000, 0x67d4aa97) == LayerLayout::Ae2025 &&
+            layout_for_bee_image(0x1627000, 0x6740074a) == LayerLayout::Ae2025 &&
+            layout_for_bee_image(0x1627000, 0x67d4aa97) == LayerLayout::Unsupported &&
+            layout_for_bee_image(0x1648000, 0x6740074a) == LayerLayout::Unsupported &&
             layout_for_bee_image(0x17d3000, 0x6a2ae3d2) == LayerLayout::Ae2026 &&
             layout_for_bee_image(0x1648000, 0x6a2ae3d2) ==
                 LayerLayout::Unsupported &&
