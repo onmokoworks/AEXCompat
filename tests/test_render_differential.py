@@ -75,10 +75,10 @@ def run_differential(tmp_path: Path, marker: str, depth: str = "argb8", route: s
 
 @pytest.mark.parametrize("depth", ("argb8", "argb16", "argb32f"))
 def test_odd_frame_matches_both_tile_axes_at_native_depth(tmp_path, depth):
-    # FRAME_SETUP verifies all initial output bytes and padding before any
-    # PreRender reset can hide a missing/late initialization (#1734).
-    seed_depth = {"argb8": 8, "argb16": 16, "argb32f": 32}[depth]
-    code, report = run_differential(tmp_path, f"-difftile-seed{seed_depth}", depth)
+    # AE SmartFX has no FRAME_SETUP. Initial-seed observation belongs to the
+    # Classic selector test below; the native coverage self-test covers seeding
+    # itself at all depths. This test still compares every rendered tile byte.
+    code, report = run_differential(tmp_path, "-difftile", depth)
     assert code == 0, report
     assert report["passed"] is True
     assert [case["status"] for case in report["cases"]] == [
@@ -98,6 +98,26 @@ def test_odd_frame_matches_both_tile_axes_at_native_depth(tmp_path, depth):
                 assert receipt["host_file_sha256_after"] == host_hash
                 assert receipt["worker_file_sha256_before"] == worker_hash
                 assert receipt["worker_file_sha256_after"] == worker_hash
+
+
+@pytest.mark.parametrize("depth", ("argb8", "argb16", "argb32f"))
+def test_classic_frame_setup_observes_initial_seed_at_native_depth(tmp_path, depth):
+    # Preserve the independent full seed fingerprint/padding check at a legal
+    # FRAME_SETUP boundary, including repeated and padded differential renders.
+    seed_depth = {"argb8": 8, "argb16": 16, "argb32f": 32}[depth]
+    code, report = run_differential(
+        tmp_path, f"-classic-difftile-seed{seed_depth}", depth, route="classic")
+    assert code != 0  # Classic does not implement the requested tile rects.
+    assert [case["status"] for case in report["cases"]] == [
+        "rendered", "matched", "matched", "matched",
+        "unsupported", "unsupported", "unsupported"], report
+    for case in report["cases"][1:]:
+        assert case["status"] in ("matched", "unsupported"), case
+        if case["status"] == "matched":
+            assert case["comparison"]["differing_pixels"] == 0
+        else:
+            assert case["reason"] in (
+                "classic_has_no_request_rect", "plugin_did_not_resize_or_shift_output")
 
 
 @pytest.mark.parametrize(

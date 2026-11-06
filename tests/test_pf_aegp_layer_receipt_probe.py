@@ -36,7 +36,8 @@ def _expected_output(source, width, depth):
             expected += bytes((green ^ (x & 0xff), blue ^ (y & 0xff),
                                red ^ ((x + y) & 0xff), alpha))
         elif depth == 16:
-            to_16 = lambda value: (value * 32768 + 127) // 255
+            to_16 = lambda value: int(_float32(
+                _float32(value * _float32(1.0 / 255.0)) * 32768.0 + 0.5))
             expected += struct.pack(
                 "<4H",
                 to_16(green) ^ (x & 0xffff),
@@ -45,7 +46,7 @@ def _expected_output(source, width, depth):
                 to_16(alpha),
             )
         else:
-            to_float = lambda value: _float32(value / 255.0)
+            to_float = lambda value: _float32(value * _float32(1.0 / 255.0))
             expected += struct.pack(
                 "<4f",
                 _float32(to_float(green) + x / 65536.0),

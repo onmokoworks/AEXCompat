@@ -69,6 +69,17 @@ origin初期化の保持、cleanupのエラー優先、同深度rawの無変換�
 full lifecycle未完の表示を確認し、古いSmart frame説明を修正して再確認した。
 受理した未対応指摘は0。
 
+最初のCI run42248484951はPython後段5 failed/360 passed/14 skipped。
+内訳は診断側の旧float変換1、layer receiptテストの旧float期待式1、
+SmartFXでFRAME_SETUPのseed検査を期待した既存fixture利用3。
+診断側をnativeと同じ深度式へそろえ、独立AE wordと1-bit mutationで厳密判定を検証した。
+receipt期待式も同じ一般変換へ更新。Smartのtile比較は全byte比較を維持し、
+初期seed/fingerprint/padding検査はClassic frame selectorを通る3深度の独立テストへ分離した。
+seed生成/coverage/guardの製品コードを緩和していない。probeソース変更や追加build/installはない。
+ローカル再確認: Rust diagnostics6 passed、Smart session9 passed、tile/Classic seed6 passed。
+CI artifact再利用のreceipt3件はmtime freshness guardで実行前に拒否されたため、最新head CIへ委ねる。
+CI修正全diffを旧reviewed-headから再レビューし、未対応指摘0。
+
 ```powershell
 $env:PYTHONUTF8='1'
 # TEMP/TMP/TMPDIRは利用者指定scratchへ設定して実行する。

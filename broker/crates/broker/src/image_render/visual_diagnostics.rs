@@ -189,10 +189,11 @@ mod visual_diagnostics {
                 RenderPixelFormat::Argb8 => expected[channel_index] = *channel,
                 RenderPixelFormat::Argb16 => expected[channel_index * 2..channel_index * 2 + 2]
                     .copy_from_slice(
-                        &(((*channel as u32 * 32768 + 127) / 255) as u16).to_le_bytes(),
+                        &((*channel as f32 * (1.0f32 / 255.0) * 32768.0 + 0.5) as u16)
+                            .to_le_bytes(),
                     ),
                 RenderPixelFormat::Argb32f => expected[channel_index * 4..channel_index * 4 + 4]
-                    .copy_from_slice(&(*channel as f32 / 255.0).to_le_bytes()),
+                    .copy_from_slice(&(*channel as f32 * (1.0f32 / 255.0)).to_le_bytes()),
             }
         }
         Some(expected)
@@ -509,6 +510,30 @@ mod visual_diagnostics {
         }
 
         #[test]
+        fn rgba8_comparison_retains_ae_rounding_at_sensitive_values() {
+            let input = [254, 51, 31, 255];
+            // AE25.1 CPU words; 254 distinguishes integer-rational rounding.
+            let deep: Vec<u8> = [32640u16, 6554, 3984, 32768]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let float: Vec<u8> = [1065287424u32, 1045220558, 1039726842, 1065353216]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            for (format, mut output) in [
+                (RenderPixelFormat::Argb16, deep),
+                (RenderPixelFormat::Argb32f, float),
+            ] {
+                let result = inspect(Some(&input), (1, 1), &output, (1, 1), format);
+                assert_eq!(result["comparison"]["exact_equal"], true);
+                output[0] ^= 1;
+                let changed = inspect(Some(&input), (1, 1), &output, (1, 1), format);
+                assert_eq!(changed["comparison"]["exact_equal"], false);
+            }
+        }
+
+        #[test]
         fn native_depth_comparison_and_hdr_are_not_preview_clamped() {
             let input = vec![10, 20, 30, 255];
             let mut normalized_red = Vec::new();
@@ -516,16 +541,17 @@ mod visual_diagnostics {
                 (RenderPixelFormat::Argb8, input.clone()),
                 (
                     RenderPixelFormat::Argb16,
-                    [10u8, 20, 30, 255]
-                        .iter()
-                        .flat_map(|v| (((*v as u32 * 32768 + 127) / 255) as u16).to_le_bytes())
+                    [1285u16, 2570, 3855, 32768]
+                        .into_iter()
+                        .flat_map(u16::to_le_bytes)
                         .collect(),
                 ),
                 (
                     RenderPixelFormat::Argb32f,
-                    [10u8, 20, 30, 255]
-                        .iter()
-                        .flat_map(|v| (*v as f32 / 255.0).to_le_bytes())
+                    // Saved AE words, independent of expected_input_pixel.
+                    [1025548449u32, 1033937057, 1039200498, 1065353216]
+                        .into_iter()
+                        .flat_map(u32::to_le_bytes)
                         .collect(),
                 ),
             ] {
