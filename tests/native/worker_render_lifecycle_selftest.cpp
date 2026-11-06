@@ -425,35 +425,40 @@ void a_stated_origin_has_to_reach_the_output() {
   check(!validate_output_origin(0, 0, -1, 12, 12, 8), "as is a negative source extent");
 }
 
-// The hint an accepted shrink hands back has to be inside the buffer that now
-// backs the output, without being grown, inverted, or moved into a coordinate
-// frame the effect was not handed.
-void the_extent_hint_comes_back_inside_the_new_buffer() {
-  using aexcompat::render::extent_hint_within;
-  const auto same = [](const std::array<int32_t, 4>& left,
-                       const std::array<int32_t, 4>& right) { return left == right; };
-  check(same(extent_hint_within({0, 0, 16, 12}, 8, 6), {0, 0, 8, 6}),
-        "a shrink brings the hint back to the buffer's edge");
-  check(same(extent_hint_within({0, 0, 16, 12}, 64, 48), {0, 0, 16, 12}),
-        "an expand leaves it alone: growing it would name rows the input never had");
-  check(same(extent_hint_within({3, 2, 11, 8}, 8, 6), {3, 2, 8, 6}),
-        "a partial hint keeps its top-left and loses only the overhang");
-  check(same(extent_hint_within({3, 2, 11, 8}, 64, 48), {3, 2, 11, 8}),
-        "and keeps all of it when it already fits");
-  // Never inverted: a top-left past the new edge comes back to the edge and the
-  // bottom-right follows it, rather than crossing over into a negative extent.
-  const std::array<int32_t, 4> collapsed = extent_hint_within({30, 20, 40, 30}, 8, 6);
-  check(collapsed[2] >= collapsed[0] && collapsed[3] >= collapsed[1],
-        "a hint entirely outside the new buffer stays non-inverted");
-  check(collapsed[0] <= 8 && collapsed[1] <= 6 && collapsed[2] <= 8 && collapsed[3] <= 6,
-        "and lands inside it");
-  // The rect keeps the frame it was written in. Translating it by the accepted
-  // origin was tried and withdrawn when PF_Iterate still refused an area wider
-  // than the input world; since #1034 iterate clips such an area instead, so
-  // the frame choice is no longer forced from here - issue #997 alone owns
-  // which frame AE uses.
-  check(same(extent_hint_within({0, 0, 37, 23}, 137, 123), {0, 0, 37, 23}),
-        "an expand's hint stays in the input's frame, where iterate accepts it");
+// AE 25.1 Software oracle: 67x49, full input extent, Classic 8/16 bpc.
+// The same nine tuples were observed with opaque and transparent-border input.
+void the_extent_hint_uses_input_coordinates() {
+  using aexcompat::render::classic_extent_geometry;
+  struct Point { int width, height, x, y; std::array<int32_t, 4> hint, extent; };
+  const Point points[] = {
+      {67,49,0,0, {0,0,67,49}, {0,0,67,49}},
+      {67,49,5,3, {0,0,62,46}, {-5,-3,62,46}},
+      {67,49,-5,-3, {5,3,67,49}, {5,3,72,52}},
+      {83,61,0,0, {0,0,67,49}, {0,0,83,61}},
+      {83,61,5,3, {0,0,67,49}, {-5,-3,78,58}},
+      {83,61,-5,-3, {5,3,67,49}, {5,3,88,64}},
+      {51,37,0,0, {0,0,51,37}, {0,0,51,37}},
+      {51,37,5,3, {0,0,46,34}, {-5,-3,46,34}},
+      {51,37,-5,-3, {5,3,56,40}, {5,3,56,40}},
+  };
+  for (const auto& point : points) {
+    const auto result = classic_extent_geometry({0,0,67,49}, point.width,
+        point.height, point.x, point.y);
+    check(result.input_hint == point.hint, "Classic hint matches AE oracle");
+    check(result.output_extent == point.extent, "output extent matches AE oracle");
+    // Transform the source-coordinate hint before using it as an output
+    // address. In particular the negative-origin shrink's right edge is 56,
+    // not 51; clipping the untransformed hint would lose valid input pixels.
+    check(result.input_hint[0] + point.x >= 0 && result.input_hint[1] + point.y >= 0 &&
+          result.input_hint[2] + point.x <= point.width &&
+          result.input_hint[3] + point.y <= point.height,
+          "translated hint stays inside allocated output");
+  }
+  // General intersection cases, host tests rather than additional AE points.
+  check(classic_extent_geometry({7,5,60,44},51,37,5,3).input_hint ==
+        std::array<int32_t,4>{7,5,46,34}, "partial input extent intersects output");
+  const auto empty = classic_extent_geometry({60,44,67,49},51,37,0,0).input_hint;
+  check(empty == std::array<int32_t,4>{51,37,51,37}, "disjoint partial extent is empty");
 }
 
 // The two origin conventions meet in exactly one place, and the direction is
@@ -728,7 +733,7 @@ int main() {
   an_origin_stated_this_frame_survives();
   a_declined_resize_is_recognised_from_either_shape();
   a_stated_origin_has_to_reach_the_output();
-  the_extent_hint_comes_back_inside_the_new_buffer();
+  the_extent_hint_uses_input_coordinates();
   the_frame_report_origin_is_the_negation_of_the_stated_one();
   the_smart_layout_drops_extents_but_clears_stale_origins();
   a_null_world_offers_nothing();

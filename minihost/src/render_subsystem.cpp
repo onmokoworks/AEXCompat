@@ -414,19 +414,21 @@ bool validate_output_extent(int32_t current_width, int32_t current_height,
       (!shrinks || (output_flags & kShrinkBuffer) != 0);
 }
 
-std::array<int32_t, 4> extent_hint_within(const std::array<int32_t, 4>& hint,
-                                          int32_t output_width, int32_t output_height) {
-  if (output_width < 0 || output_height < 0) return hint;
-  std::array<int32_t, 4> shrunk = hint;
-  // The top-left only moves if it is already outside the buffer, and then only
-  // as far as the buffer's own edge; the bottom-right comes back to the edge or
-  // to the top-left, whichever is further in. That keeps the rect non-inverted
-  // without ever growing it or shifting a rect that already fitted.
-  shrunk[0] = std::min(shrunk[0], output_width);
-  shrunk[1] = std::min(shrunk[1], output_height);
-  shrunk[2] = std::min(std::max(shrunk[2], shrunk[0]), output_width);
-  shrunk[3] = std::min(std::max(shrunk[3], shrunk[1]), output_height);
-  return shrunk;
+ClassicExtentGeometry classic_extent_geometry(const std::array<int32_t, 4>& input_extent,
+    int32_t output_width, int32_t output_height, int32_t origin_x, int32_t origin_y) {
+  ClassicExtentGeometry result;
+  result.output_extent = {-origin_x, -origin_y,
+                         output_width - origin_x, output_height - origin_y};
+  result.input_hint = {
+      std::max(input_extent[0], result.output_extent[0]),
+      std::max(input_extent[1], result.output_extent[1]),
+      std::min(input_extent[2], result.output_extent[2]),
+      std::min(input_extent[3], result.output_extent[3])};
+  // A transparent input extent can miss the output even when the two buffers
+  // overlap. Keep the empty hint non-inverted without enlarging it.
+  result.input_hint[0] = std::min(result.input_hint[0], result.input_hint[2]);
+  result.input_hint[1] = std::min(result.input_hint[1], result.input_hint[3]);
+  return result;
 }
 
 bool validate_output_origin(int32_t origin_x, int32_t origin_y,

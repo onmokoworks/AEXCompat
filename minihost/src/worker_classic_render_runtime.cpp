@@ -507,12 +507,19 @@ struct ClassicRenderDispatchOwner {
           return close_render_ui_context(h.entry, h.input, h.output, h.definitions); }};
     return value;
   }
-  // Bring `in_data->extent_hint` inside the buffer that now backs the output.
-  void shrink_extent_hint(int32_t output_width, int32_t output_height) {
-    std::array<int32_t, 4> hint{};
-    std::memcpy(hint.data(), input.data() + kInExtentHint, sizeof(hint));
-    hint = aexcompat::render::extent_hint_within(hint, output_width, output_height);
-    std::memcpy(input.data() + kInExtentHint, hint.data(), sizeof(hint));
+  void apply_extent_geometry(int32_t origin_x, int32_t origin_y) {
+    std::array<int32_t, 4> source_hint{};
+    std::memcpy(source_hint.data(), input.data() + kInExtentHint, sizeof(source_hint));
+    const auto geometry = aexcompat::render::classic_extent_geometry(
+        source_hint, width, height, origin_x, origin_y);
+    std::memcpy(input.data() + kInExtentHint, geometry.input_hint.data(), sizeof(source_hint));
+    std::memcpy(world.data() + 44, geometry.output_extent.data(), sizeof(source_hint));
+    write<int32_t>(input, kInOutputOriginX, origin_x);
+    write<int32_t>(input, kInOutputOriginY, origin_y);
+    if (frame_output) {
+      frame_output->input_origin_x = origin_x;
+      frame_output->input_origin_y = origin_y;
+    }
   }
   int32_t prepare_output(bool frame_local_refusal = false) {
     const auto fail = [this](int32_t error, bool local = false) {
@@ -525,28 +532,9 @@ struct ClassicRenderDispatchOwner {
     }
     const int32_t next_width = frame_setup_output.width;
     const int32_t next_height = frame_setup_output.height;
-    // Declining the extent comes first, and is not validated: a zero or
-    // half-zero pair is not an extent, and the pair `begin_frame` offered is the
-    // extent the host already laid the world out at. Validating it would turn
-    // "I want nothing" written as a lone zero into a refused frame.
-    // The origin travels with the resize or not at all. Both halves of it - what
-    // in_data tells the plug-in, and what `ClassicFrameOutput` tells the frame
-    // report - have to say the same thing: relaying an inset to the plug-in
-    // while reporting the frame at the layer's top-left makes RENDER draw as if
-    // its buffer were displaced and the host place it as if it were not, which
-    // is a shifted picture with no error anywhere. AE_Effect.h's "non-zero only
-    // when effect changes buffer size" is what picks which of the two agreeing
-    // answers is right when nothing resized.
-    //
-    // The offer makes "restated the extent it was handed" indistinguishable from
-    // "wrote nothing", so an origin stated alongside a restated extent declines
-    // with it. Recorded, because that is a real difference from AE if AE honours
-    // it, and a diagnostic is what makes the difference findable.
-    if (aexcompat::render::output_extent_unchanged(width, height, next_width, next_height)) {
-      if (frame_setup_output.origin_x != 0 || frame_setup_output.origin_y != 0)
-        resize_reason = "origin_without_resize";
-      return 0;
-    }
+    // A zero pair declines the offered extent. Restating nonzero dimensions
+    // still carries an origin: AE honours it even without a size change (#997).
+    if (next_width == 0 && next_height == 0) return 0;
     if (!aexcompat::render::validate_output_extent(width, height, next_width, next_height,
             read<uint32_t>(output, kOutFlags))) {
       resize_reason = "extent_not_allowed";
@@ -571,6 +559,10 @@ struct ClassicRenderDispatchOwner {
                                                    source_height, next_width, next_height)) {
       resize_reason = "origin_not_plausible";
       return 4;
+    }
+    if (next_width == width && next_height == height) {
+      apply_extent_geometry(origin_x, origin_y);
+      return 0;
     }
     // The buffer about to be released was handed to FRAME_SETUP, so an overrun
     // committed there is only observable now - `guarded.reset` frees it and
@@ -615,31 +607,9 @@ struct ClassicRenderDispatchOwner {
       resize_reason = "world_registration_failed";
       return fail(4);
     }
-    // The rect the SDK invites the effect to iterate ("copying just this
-    // rectangle ... is sufficient", AE_Effect.h on extent_hint) was written from
-    // the source extent before the lifecycle, and a shrink leaves it naming more
-    // rows than the new buffer holds - an effect that honours it writes past the
-    // guarded buffer into the sentinel band. Shrinking it back is the whole of
-    // what this does.
-    //
-    // Deliberately not translated by the accepted origin, which was tried and
-    // withdrawn. This host's own PF_Iterate refuses (rather than clamps) an area
-    // wider than the *input* world - `bound_width = min(source, destination)` in
-    // worker_pf_suites.cpp - so a hint rewritten into output coordinates makes
-    // the canonical `iterate(..., &in_data->extent_hint, ...)` call fail for
-    // every expanding effect, where leaving it in input coordinates works. Which
-    // coordinate frame AE states the hint in after a resize is issue #997's
-    // question, and it is not answerable from this host's behaviour alone.
-    shrink_extent_hint(width, height);
-    // Only now: this is the frame's geometry, and only an accepted resize has
-    // one. A refused resize leaves nothing here for the frame report, and
-    // nothing in in_data either - the two have to agree.
-    write<int32_t>(input, kInOutputOriginX, origin_x);
-    write<int32_t>(input, kInOutputOriginY, origin_y);
-    if (frame_output) {
-      frame_output->input_origin_x = origin_x;
-      frame_output->input_origin_y = origin_y;
-    }
+    // AE's hint is an input-coordinate intersection, not an output index
+    // bound. Keep allocation, guards and coverage in output coordinates.
+    apply_extent_geometry(origin_x, origin_y);
     return 0;
   }
   int32_t dispatch_selector() {
@@ -1002,13 +972,20 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   // the two can be told apart: a frame that fails only past this point failed in
   // the host, not in the plug-in (issue #722).
   const int32_t selector_error = error;
+  // The diagnostic rect is in the original input coordinate system. A resized
+  // or shifted output promises its new full buffer, not that stale rectangle.
+  // Coverage remains output-local and still rejects any unwritten pixel.
+  const bool original_output_geometry =
+      width == dispatch_owner.source_width && height == dispatch_owner.source_height &&
+      read<int32_t>(input, kInOutputOriginX) == 0 &&
+      read<int32_t>(input, kInOutputOriginY) == 0;
   aexcompat::worker_runtime::classic_execution::Context final_context{
       destination, rowbytes, width, height, pixel_bytes, error,
       external_current_time, external_time_step, external_time_scale,
       read<int32_t>(input, kInQuality), dispatch_pixel_format, &output_hash,
       &guards_intact, captured_argb, guarded.sentinels_intact(),
       frame_output ? &frame_output->output_coverage : nullptr, nop_render,
-      diagnostic.enabled && diagnostic.has_extent_hint
+      original_output_geometry && diagnostic.enabled && diagnostic.has_extent_hint
           ? diagnostic.extent_hint
           : std::array<int32_t, 4>{0, 0, width, height}};
   error = aexcompat::worker_runtime::classic_execution::finalize(final_context, {
