@@ -1,4 +1,5 @@
 #include "worker_pf_sampling_runtime.hpp"
+#include "worker_pf_sampling_math.hpp"
 #include "worker_pf_suites_internal.hpp"
 #include "worker_callback_diagnostics.hpp"
 #include "worker_extended_diag.hpp"
@@ -136,48 +137,6 @@ int32_t __cdecl get_callback_addr(void*, int32_t quality, uint32_t mode_flags, i
 // abuse, and on a correct plug-in its only effect was turning a valid sample
 // into a refusal reported as PF_Err_OUT_OF_MEMORY (which is itself the wrong
 // code for an argument rejection - issue #813).
-template <typename Component, uint32_t Maximum>
-void subpixel_sample_integer(const unsigned char* source, int32_t rowbytes,
-                             int32_t width, int32_t height, int32_t fixed_x,
-                             int32_t fixed_y, void* destination) {
-  constexpr uint64_t unit = uint64_t{1} << 16;
-  const uint64_t fx = static_cast<uint32_t>(fixed_x) & 0xffffu;
-  const uint64_t fy = static_cast<uint32_t>(fixed_y) & 0xffffu;
-  // Subtract the unsigned fractional part before division: C++ signed division
-  // alone truncates negative coordinates, whereas the sampler requires floor.
-  const int32_t x0 = static_cast<int32_t>((static_cast<int64_t>(fixed_x) -
-                                         static_cast<int64_t>(fx)) / 65536);
-  const int32_t y0 = static_cast<int32_t>((static_cast<int64_t>(fixed_y) -
-                                         static_cast<int64_t>(fy)) / 65536);
-  const uint64_t weights[4]{(unit - fx) * (unit - fy), fx * (unit - fy),
-                            (unit - fx) * fy, fx * fy};
-  const unsigned char* neighbors[4]{};
-  for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
-    const int32_t x = x0 + dx, y = y0 + dy;
-    if (x >= 0 && x < width && y >= 0 && y < height)
-      neighbors[dy * 2 + dx] = source + static_cast<std::size_t>(y) * rowbytes +
-          static_cast<std::size_t>(x) * (4 * sizeof(Component));
-  }
-  // The denominator is 2^32. Even raw uint16_t values produce a numerator
-  // below 2^48, so every original double product/sum was exact. Adding half
-  // the denominator reproduces positive lround, without an approximation.
-  for (int channel = 0; channel < 4; ++channel) {
-    uint64_t sum = 0;
-    for (int neighbor = 0; neighbor < 4; ++neighbor) {
-      if (!neighbors[neighbor]) continue;
-      Component sample{};
-      std::memcpy(&sample, neighbors[neighbor] + channel * sizeof(Component), sizeof(sample));
-      sum += static_cast<uint64_t>(sample) * weights[neighbor];
-    }
-    const Component value = static_cast<Component>(
-        std::min<uint64_t>((sum + (uint64_t{1} << 31)) >> 32, Maximum));
-    // Keep the original channel-read/store order even when destination aliases
-    // a shifted portion of the source. memcpy also permits unaligned worlds.
-    std::memcpy(static_cast<unsigned char*>(destination) + channel * sizeof(Component),
-                &value, sizeof(value));
-  }
-}
-
 int32_t subpixel_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x,
                               int32_t fixed_y, const void* sampling_params,
                               void* destination_pixel) {
@@ -193,45 +152,16 @@ int32_t subpixel_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fix
   int32_t rowbytes{}, width{}, height{};
   if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height))
     return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::MissingWorld);
-  if (pixel_bytes == 4 || pixel_bytes == 8) {
-    if (pixel_bytes == 4)
-      subpixel_sample_integer<uint8_t, 255>(source, rowbytes, width, height,
-                                           fixed_x, fixed_y, destination_pixel);
-    else
-      subpixel_sample_integer<uint16_t, 32768>(source, rowbytes, width, height,
-                                              fixed_x, fixed_y, destination_pixel);
-    return finish_callback(Callback::Sampling, 0);
-  }
-  const double x = fixed_x / 65536.0;
-  const double y = fixed_y / 65536.0;
-  const int32_t x0 = static_cast<int32_t>(std::floor(x));
-  const int32_t y0 = static_cast<int32_t>(std::floor(y));
-  const double fraction_x = x - x0;
-  const double fraction_y = y - y0;
-  const auto weight = [&](int dx, int dy) {
-    return (dx ? fraction_x : 1.0 - fraction_x) *
-        (dy ? fraction_y : 1.0 - fraction_y);
-  };
-  for (int channel = 0; channel < 4; ++channel) {
-    double value = 0.0;
-    for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
-      const int32_t sample_x = x0 + dx, sample_y = y0 + dy;
-      if (sample_x < 0 || sample_x >= width || sample_y < 0 || sample_y >= height) continue;
-      const auto* pixel = source + static_cast<std::size_t>(sample_y) * rowbytes +
-          static_cast<std::size_t>(sample_x) * pixel_bytes;
-      const double sample = pixel_bytes == 4 ? pixel[channel] :
-          (pixel_bytes == 8 ? reinterpret_cast<const uint16_t*>(pixel)[channel] :
-                              reinterpret_cast<const float*>(pixel)[channel]);
-      value += sample * weight(dx, dy);
-    }
-    if (pixel_bytes == 4)
-      static_cast<uint8_t*>(destination_pixel)[channel] =
-          static_cast<uint8_t>(std::clamp(std::lround(value), 0l, 255l));
-    else if (pixel_bytes == 8)
-      static_cast<uint16_t*>(destination_pixel)[channel] =
-          static_cast<uint16_t>(std::clamp(std::lround(value), 0l, 32768l));
-    else
-      static_cast<float*>(destination_pixel)[channel] = static_cast<float>(value);
+  const aexcompat::sampling::World world{source, rowbytes, width, height};
+  if (pixel_bytes == 4) {
+    const auto value = aexcompat::sampling::subpixel<uint8_t>(world, fixed_x, fixed_y);
+    std::memcpy(destination_pixel, value.data(), sizeof(value));
+  } else if (pixel_bytes == 8) {
+    const auto value = aexcompat::sampling::subpixel<uint16_t>(world, fixed_x, fixed_y);
+    std::memcpy(destination_pixel, value.data(), sizeof(value));
+  } else {
+    const auto value = aexcompat::sampling::subpixel<float>(world, fixed_x, fixed_y);
+    std::memcpy(destination_pixel, value.data(), sizeof(value));
   }
   return finish_callback(Callback::Sampling, 0);
 }
@@ -290,14 +220,12 @@ int32_t area_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x
   if (!sampling_params || !destination_pixel)
     return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::InvalidArguments);
   int32_t fixed_radius_x{}, fixed_radius_y{}, fixed_area{};
-  uint32_t edge_behavior{};
   void* source_world{};
   const auto* params = static_cast<const std::byte*>(sampling_params);
   std::memcpy(&fixed_radius_x, params, sizeof(fixed_radius_x));
   std::memcpy(&fixed_radius_y, params + 4, sizeof(fixed_radius_y));
   std::memcpy(&fixed_area, params + 8, sizeof(fixed_area));
   std::memcpy(&source_world, params + 16, sizeof(source_world));
-  std::memcpy(&edge_behavior, params + 24, sizeof(edge_behavior));
   const double radius_x = fixed_radius_x / 65536.0;
   const double radius_y = fixed_radius_y / 65536.0;
   // Which term refused, with the plug-in's value (the #1032
@@ -322,17 +250,8 @@ int32_t area_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x
   // three plug-ins AE renders (issue #1033). `nearest`/`subpixel` above
   // already read only `src` out of the same struct on the same reasoning.
   (void)fixed_area;
-  // Out-of-image samples follow the PF_SampleEdgeBehav values the SDK header
-  // documents - ZERO, and the commented-out REPEAT (clamp to nearest edge)
-  // and WRAP the header marks "not supported". Clamp/wrap is this host's
-  // reading of those doc lines, not observed AE behavior; AE may treat both
-  // as ZERO, which issue #1039 exists to measure. Anything else (BallAction,
-  // GlueGun, MrSmoothie and Smear pass uninitialized garbage here, and AE
-  // renders all four) is read as ZERO rather than refused: the field plainly
-  // is not validated by AE, and it only steers where out-of-bounds samples
-  // read from.
-  constexpr uint32_t kEdgeZero = 0, kEdgeRepeat = 1, kEdgeWrap = 2;
-  const uint32_t edge = edge_behavior <= kEdgeWrap ? edge_behavior : kEdgeZero;
+  // AE CPU/Software ignores samp_behave, including the SDK's unsupported
+  // REPEAT/WRAP values. Every sampler contributes zero outside the world.
   if (radius_x <= 0.0) return denied(0, "x_radius_nonpositive", fixed_radius_x);
   if (radius_y <= 0.0) return denied(1, "y_radius_nonpositive", fixed_radius_y);
   if (radius_x >= 128.0) return denied(2, "x_radius_over_128", fixed_radius_x);
@@ -341,66 +260,16 @@ int32_t area_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x
   int32_t rowbytes{}, width{}, height{};
   if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height))
     return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::MissingWorld);
-  const double center_x = fixed_x / 65536.0;
-  const double center_y = fixed_y / 65536.0;
-  const double left = center_x - radius_x, right = center_x + radius_x;
-  const double top = center_y - radius_y, bottom = center_y + radius_y;
-  const double footprint = (right - left) * (bottom - top);
-  double weighted_alpha = 0.0;
-  std::array<double, 3> weighted_color{};
-  const double maximum = pixel_bytes == 4 ? 255.0 : (pixel_bytes == 8 ? 32768.0 : 1.0);
-  // ZERO clips the walk to the image, so pixels outside contribute nothing.
-  // REPEAT and WRAP walk the whole footprint (bounded by the radius check
-  // above, not by the image) and map each coordinate into the image below;
-  // on an empty world there is nothing to clamp or wrap a sample to, so both
-  // degrade to the clipped walk, which is then empty.
-  const bool clip_to_image = edge == kEdgeZero || width <= 0 || height <= 0;
-  const int32_t span_first_x = static_cast<int32_t>(std::floor(left - 0.5));
-  const int32_t span_last_x = static_cast<int32_t>(std::ceil(right + 0.5));
-  const int32_t span_first_y = static_cast<int32_t>(std::floor(top - 0.5));
-  const int32_t span_last_y = static_cast<int32_t>(std::ceil(bottom + 0.5));
-  const int32_t first_x = clip_to_image ? std::max(0, span_first_x) : span_first_x;
-  const int32_t last_x = clip_to_image ? std::min(width - 1, span_last_x) : span_last_x;
-  const int32_t first_y = clip_to_image ? std::max(0, span_first_y) : span_first_y;
-  const int32_t last_y = clip_to_image ? std::min(height - 1, span_last_y) : span_last_y;
-  const auto edge_mapped = [&](int32_t value, int32_t extent) {
-    if (edge == kEdgeRepeat) return std::clamp(value, 0, extent - 1);
-    return ((value % extent) + extent) % extent;
-  };
-  for (int32_t y = first_y; y <= last_y; ++y) {
-    const double overlap_y = std::max(0.0, std::min(bottom, y + 0.5) - std::max(top, y - 0.5));
-    for (int32_t x = first_x; x <= last_x; ++x) {
-      const double overlap_x = std::max(0.0, std::min(right, x + 0.5) - std::max(left, x - 0.5));
-      const double weight = overlap_x * overlap_y;
-      if (weight == 0.0) continue;
-      const int32_t sample_x = clip_to_image ? x : edge_mapped(x, width);
-      const int32_t sample_y = clip_to_image ? y : edge_mapped(y, height);
-      const auto* pixel = source + static_cast<std::size_t>(sample_y) * rowbytes +
-          static_cast<std::size_t>(sample_x) * pixel_bytes;
-      const auto read_channel = [&](int channel) {
-        return pixel_bytes == 4 ? static_cast<double>(pixel[channel]) :
-            (pixel_bytes == 8 ? static_cast<double>(reinterpret_cast<const uint16_t*>(pixel)[channel]) :
-                                static_cast<double>(reinterpret_cast<const float*>(pixel)[channel]));
-      };
-      const double alpha = read_channel(0) / maximum;
-      weighted_alpha += weight * alpha;
-      for (int channel = 0; channel < 3; ++channel)
-        weighted_color[channel] += weight * alpha * read_channel(channel + 1);
-    }
-  }
-  std::array<double, 4> result{};
-  result[0] = weighted_alpha / footprint * maximum;
-  for (int channel = 0; channel < 3; ++channel)
-    result[channel + 1] = weighted_alpha > 0.0 ? weighted_color[channel] / weighted_alpha : 0.0;
-  for (int channel = 0; channel < 4; ++channel) {
-    if (pixel_bytes == 4)
-      static_cast<uint8_t*>(destination_pixel)[channel] = static_cast<uint8_t>(
-          std::clamp(std::lround(result[channel]), 0l, 255l));
-    else if (pixel_bytes == 8)
-      static_cast<uint16_t*>(destination_pixel)[channel] = static_cast<uint16_t>(
-          std::clamp(std::lround(result[channel]), 0l, 32768l));
-    else
-      static_cast<float*>(destination_pixel)[channel] = static_cast<float>(result[channel]);
+  const aexcompat::sampling::World world{source, rowbytes, width, height};
+  if (pixel_bytes == 4) {
+    const auto value = aexcompat::sampling::area<uint8_t>(world, fixed_x, fixed_y, fixed_radius_x, fixed_radius_y);
+    std::memcpy(destination_pixel, value.data(), sizeof(value));
+  } else if (pixel_bytes == 8) {
+    const auto value = aexcompat::sampling::area<uint16_t>(world, fixed_x, fixed_y, fixed_radius_x, fixed_radius_y);
+    std::memcpy(destination_pixel, value.data(), sizeof(value));
+  } else {
+    const auto value = aexcompat::sampling::area<float>(world, fixed_x, fixed_y, fixed_radius_x, fixed_radius_y);
+    std::memcpy(destination_pixel, value.data(), sizeof(value));
   }
   return finish_callback(Callback::Sampling, 0);
 }

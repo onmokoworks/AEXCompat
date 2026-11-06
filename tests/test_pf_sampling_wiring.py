@@ -71,6 +71,8 @@ def test_sampling_accepts_a_null_effect_ref_and_the_utility_slots_are_wired(tmp_
     assert completed.returncode == 0, completed.stderr
     report = json.loads(completed.stdout)
     assert report["pf_sampling_wiring_selftest"] == "passed"
+    assert report["oracle_callbacks"] == 16653
+    assert report["oracle_words"] == 66612
     sampling = report["callback_diagnostics"]["sampling"]
     assert sampling["calls"] == sampling["successes"] + sampling["failures"]
     assert sampling["denials"]["invalid_arguments"] >= 2

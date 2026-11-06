@@ -21,6 +21,7 @@
 #include "worker_callback_diagnostics.hpp"
 #include "worker_effect_bootstrap.hpp"
 #include "worker_pf_sampling_runtime.hpp"
+#include "sampling_oracle_fixture.hpp"
 #include "worker_pf_suites_internal.hpp"
 #include "worker_pf_utility_callback_table.hpp"
 #include "worker_suite_registry.hpp"
@@ -270,16 +271,9 @@ void the_utility_table_is_wired_one_to_one() {
         "composite_rect sits between end_sampling and blend");
 }
 
-// PF_AREA_SAMPLE's field handling as issue #1033 settled it. The measured
-// corpus passes zero, negative and garbage in `area` and uninitialized garbage
-// in `samp_behave`, and AE renders all of it, so `area` is not validated (the
-// footprint is computed from the radii) and an out-of-enum edge behavior reads
-// as ZERO. At the edges: ZERO samples nothing outside the image; REPEAT clamps
-// to the nearest edge pixel and WRAP wraps, which is the host's reading of the
-// SDK header's commented-out doc lines for those values ("not supported"
-// there), pending AE oracle evidence (issue #1039). The radii stay validated -
-// they bound the sampling walk.
-void area_sample_edge_behaviors_follow_the_sdk_and_lax_fields_pass() {
+// Real AE CPU/Software observes ZERO behavior for every edge mode. The
+// unvalidated fields remain accepted; radius/world protection is unchanged.
+void area_sample_ignores_edge_modes_and_lax_fields_pass() {
   PfSamplingHostHooks hooks{};
   hooks.resolve_world = &resolve_world;
   configure_pf_sampling_runtime(hooks);
@@ -316,8 +310,7 @@ void area_sample_edge_behaviors_follow_the_sdk_and_lax_fields_pass() {
     check(destination[1] == 10, "in-image sample reads the pixel under the center");
   }
 
-  // Center one pixel left of the image: ZERO answers transparent, REPEAT the
-  // clamped edge pixel (0,0), WRAP the wrapped pixel (1,0). -1 in 16.16.
+  // Center one pixel left: all three modes answer transparent.
   auto zero_params = params_with(65536, 0);
   destination.fill(1);
   check(area_sample8(nullptr, -65536, 0, zero_params.data(), destination.data()) == 0,
@@ -327,21 +320,20 @@ void area_sample_edge_behaviors_follow_the_sdk_and_lax_fields_pass() {
   destination.fill(1);
   check(area_sample8(nullptr, -65536, 0, repeat_params.data(), destination.data()) == 0,
         "area_sample8 samples outside the image under REPEAT");
-  check(destination[0] == 255 && destination[1] == 10,
-        "REPEAT clamps the sample to the nearest edge pixel");
+  check(destination == std::array<unsigned char, 4>{},
+        "unsupported REPEAT agrees with ZERO");
   auto wrap_params = params_with(65536, 2);
   destination.fill(1);
   check(area_sample8(nullptr, -65536, 0, wrap_params.data(), destination.data()) == 0,
         "area_sample8 samples outside the image under WRAP");
-  check(destination[0] == 255 && destination[1] == 20,
-        "WRAP wraps the sample around the image");
-  // More than one extent out (-3 on width 2): the double-modulo mapping, not
-  // a single subtraction, is what lands it back inside.
+  check(destination == std::array<unsigned char, 4>{},
+        "unsupported WRAP agrees with ZERO");
+  // A center more than one extent outside still answers transparent.
   destination.fill(1);
   check(area_sample8(nullptr, -3 * 65536, 0, wrap_params.data(), destination.data()) == 0,
         "area_sample8 samples far outside the image under WRAP");
-  check(destination[0] == 255 && destination[1] == 20,
-        "WRAP maps a center more than one extent out back into the image");
+  check(destination == std::array<unsigned char, 4>{},
+        "unsupported WRAP also agrees with ZERO far outside");
 
   // The radius checks are load-bearing (they bound the walk) and must survive
   // the relaxation above.
@@ -513,34 +505,8 @@ bool resolve_numeric_world(void* world, int32_t pixel_bytes, unsigned char*& pix
   return true;
 }
 
-// The original double algorithm is the independent numeric oracle. Deliberately
-// retain floor, per-channel neighbor traversal, lround and the depth clamp.
 template <typename Component, int Maximum>
-void reference_subpixel(NumericWorld& world, int32_t fixed_x, int32_t fixed_y,
-                        std::size_t destination) {
-  const double x = fixed_x / 65536.0, y = fixed_y / 65536.0;
-  const int32_t x0 = static_cast<int32_t>(std::floor(x));
-  const int32_t y0 = static_cast<int32_t>(std::floor(y));
-  const double fx = x - x0, fy = y - y0;
-  for (int channel = 0; channel < 4; ++channel) {
-    double value = 0;
-    for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
-      const int32_t sx = x0 + dx, sy = y0 + dy;
-      if (sx < 0 || sy < 0 || sx >= world.width || sy >= world.height) continue;
-      Component sample{};
-      std::memcpy(&sample, world.storage.data() + world.offset + sy * world.rowbytes +
-          sx * world.pixel_bytes + channel * sizeof(Component), sizeof(sample));
-      value += sample * ((dx ? fx : 1.0 - fx) * (dy ? fy : 1.0 - fy));
-    }
-    const Component result = static_cast<Component>(std::clamp(std::lround(value), 0l,
-                                                               static_cast<long>(Maximum)));
-    std::memcpy(world.storage.data() + destination + channel * sizeof(Component),
-                &result, sizeof(result));
-  }
-}
-
-template <typename Component, int Maximum>
-void integer_subpixel_matches_double(SampleFn callback) {
+void integer_subpixel_preserves_guards_and_aliases(SampleFn callback) {
   PfSamplingHostHooks hooks{};
   hooks.resolve_world = &resolve_numeric_world;
   configure_pf_sampling_runtime(hooks);
@@ -580,12 +546,67 @@ void integer_subpixel_matches_double(SampleFn callback) {
         actual.offset + sizeof(Component), actual.offset + actual.pixel_bytes - sizeof(Component)};
     const auto destination = destinations[test % 4];
     auto expected = actual;
-    reference_subpixel<Component, Maximum>(expected, x, y, destination);
+    std::array<unsigned char, 16> nonaliased{};
+    auto expected_params = sampling_params(&expected);
+    check(callback(nullptr, x, y, expected_params.data(), nonaliased.data()) == 0,
+          "nonaliased control sample succeeds");
+    std::memcpy(expected.storage.data() + destination, nonaliased.data(), actual.pixel_bytes);
     auto params = sampling_params(&actual);
     check(callback(nullptr, x, y, params.data(), actual.storage.data() + destination) == 0,
           "integer subpixel accepts a bounded numeric world");
     check(actual.storage == expected.storage,
-          "integer subpixel exactly matches double including aliasing and padding");
+          "integer subpixel preserves guards and agrees with its nonaliased result");
+  }
+}
+
+int oracle_callbacks = 0;
+int oracle_words = 0;
+void saved_ae_oracle_is_word_exact() {
+  PfSamplingHostHooks hooks{};
+  hooks.resolve_world = &resolve_numeric_world;
+  configure_pf_sampling_runtime(hooks);
+  const SampleFn callbacks[3][3]{
+      {nearest_sample8, subpixel_sample8, area_sample8},
+      {nearest_sample16, subpixel_sample16, area_sample16},
+      {nearest_sample_float, subpixel_sample_float, area_sample_float}};
+  for (const auto& sample : sampling_oracle::samples) {
+    const auto& input = sampling_oracle::sources[sample.source];
+    NumericWorld world;
+    world.width = input.width;
+    world.height = input.height;
+    world.pixel_bytes = input.depth == 8 ? 4 : (input.depth == 16 ? 8 : 16);
+    world.rowbytes = world.width * world.pixel_bytes + 7;
+    world.storage.assign(world.offset + world.height * world.rowbytes + 16, 0xa5);
+    for (int y = 0; y < world.height; ++y) for (int x = 0; x < world.width; ++x)
+      for (int c = 0; c < 4; ++c)
+        std::memcpy(world.storage.data() + world.offset + y*world.rowbytes + x*world.pixel_bytes + c*world.pixel_bytes/4,
+                    &input.words[y*world.width+x][c], world.pixel_bytes/4);
+    const auto before = world.storage;
+    auto params = sampling_params(&world);
+    std::memcpy(params.data(), &sample.rx, 4);
+    std::memcpy(params.data()+4, &sample.ry, 4);
+    std::memcpy(params.data()+8, &sample.area, 4);
+    std::memcpy(params.data()+24, &sample.mode, 4);
+    std::array<unsigned char, 18> output;
+    output.fill(0x5a);
+    const auto callback = callbacks[input.depth == 8 ? 0 : input.depth == 16 ? 1 : 2][sample.method];
+    check(callback(nullptr, sample.x, sample.y, params.data(), output.data()+1) == 0,
+          "saved oracle callback succeeds");
+    for (int c = 0; c < 4; ++c) {
+      uint32_t word = 0;
+      std::memcpy(&word, output.data()+1+c*world.pixel_bytes/4, world.pixel_bytes/4);
+      if (word != sample.words[c]) {
+        if (failures < 10) std::fprintf(stderr,
+            "oracle depth=%d method=%d mode=%d xy=%d,%d radius=%d,%d c=%d expected=%u actual=%u\n",
+            input.depth,sample.method,sample.mode,sample.x,sample.y,sample.rx,sample.ry,c,sample.words[c],word);
+        ++failures;
+      }
+    }
+    check(world.storage == before, "sampling does not write source or row padding");
+    check(output[0] == 0x5a && std::all_of(output.begin()+1+world.pixel_bytes, output.end(),
+          [](unsigned char v) { return v == 0x5a; }), "sampling preserves destination guards");
+    oracle_callbacks += sample.repeats;
+    oracle_words += 4*sample.repeats;
   }
 }
 
@@ -594,15 +615,17 @@ void integer_subpixel_matches_double(SampleFn callback) {
 int main() {
   aexcompat::callback_diagnostics::reset();
   a_null_effect_ref_still_samples();
-  area_sample_edge_behaviors_follow_the_sdk_and_lax_fields_pass();
+  area_sample_ignores_edge_modes_and_lax_fields_pass();
   the_utility_table_is_wired_one_to_one();
   get_callback_addr_is_typed_bounded_and_clears_failures();
   production_utility_builder_is_offset_indexed();
   unwired_installed_slots_are_named_by_their_generated_offset();
-  integer_subpixel_matches_double<uint8_t, 255>(&subpixel_sample8);
-  integer_subpixel_matches_double<uint16_t, 32768>(&subpixel_sample16);
+  integer_subpixel_preserves_guards_and_aliases<uint8_t, 255>(&subpixel_sample8);
+  integer_subpixel_preserves_guards_and_aliases<uint16_t, 32768>(&subpixel_sample16);
+  saved_ae_oracle_is_word_exact();
   if (failures == 0)
     std::cout << "{\"pf_sampling_wiring_selftest\":\"passed\",\"callback_diagnostics\":"
-              << aexcompat::callback_diagnostics::snapshot_json() << "}\n";
+              << aexcompat::callback_diagnostics::snapshot_json() << ",\"oracle_callbacks\":"
+              << oracle_callbacks << ",\"oracle_words\":" << oracle_words << "}\n";
   return failures == 0 ? 0 : 1;
 }
