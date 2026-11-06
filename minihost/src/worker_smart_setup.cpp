@@ -322,6 +322,16 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
   }
   auto& smart_state = smart::state();
   smart_state.hosted_layers.clear();
+  smart_state.unassigned_layer_slots.clear();
+  for (std::size_t slot = 1; slot < definitions.size(); ++slot) {
+    const auto& record = runtime.records[slot - 1];
+    const bool externally_bound = request.external_layers &&
+        std::any_of(request.external_layers->begin(), request.external_layers->end(),
+            [slot](const auto& layer) { return layer.slot == static_cast<int32_t>(slot); });
+    if (record.type == 0 && record.layer_default == 0 && !externally_bound &&
+        static_cast<int32_t>(slot) != smart_state.secondary_layer_slot)
+      smart_state.unassigned_layer_slots.push_back(static_cast<int32_t>(slot));
+  }
   if (request.external_layers) {
     for (std::size_t layer_index = 0;
          layer_index < request.external_layers->size(); ++layer_index) {

@@ -162,6 +162,7 @@ void State::clear_transient() {
   // otherwise carry the previous one's declared count into the range
   // `pre_checkout_layer` accepts.
   param_count = 0;
+  unassigned_layer_slots.clear();
   gpu_render_dispatched = false;
 }
 
@@ -241,7 +242,18 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   // WIDE_TIME_INPUT describes a cache dependency; it cannot conjure pixels for
   // another time. Serve an exact hosted frame (or a time-invariant layer), but
   // never alias the current input world for an unavailable temporal request.
-  if (!current_time && hosted == runtime.hosted_layers.end()) {
+  const bool unassigned = index > 0 && index <= runtime.param_count &&
+      index != runtime.secondary_layer_slot &&
+      std::find(runtime.unassigned_layer_slots.begin(),
+                runtime.unassigned_layer_slots.end(), index) !=
+          runtime.unassigned_layer_slots.end() &&
+      std::none_of(runtime.hosted_layers.begin(), runtime.hosted_layers.end(),
+                   [index](const auto& layer) { return layer.slot == index; });
+  // AE 25.1 returns the same successful null contract at current, past and
+  // future times for a truly unassigned parameter (#1748). No footage exists
+  // to fetch. A typed per-dispatch classification keeps missing real frames
+  // and unknown/non-layer parameters behind the temporal refusal.
+  if (!current_time && hosted == runtime.hosted_layers.end() && !unassigned) {
     ++runtime.rejected_temporal_checkouts;
     return finish_callback(
         Callback::PreCheckoutLayer, 4, Reason::TemporalCheckoutDenied);
@@ -786,6 +798,49 @@ bool checkout_intersection_self_test() {
                               empty_result.data()) == 0 &&
       pre_checkout_layer(nullptr, 10, 23, nullptr, 7, 1, 30,
                          empty_result.data()) == 4 && passed;
+  // Temporal NONE is independent of WIDE_TIME_INPUT and of the timestamp.
+  // Classification is typed, not merely an in-range parameter index.
+  runtime.unassigned_layer_slots = {5};
+  for (const bool wide : {false, true}) {
+    runtime.wide_time_checkout_allowed = wide;
+    for (const int32_t time : {-5, 7, 8, 12}) {
+      const auto denials = runtime.rejected_temporal_checkouts;
+      passed = pre_checkout_layer(nullptr, 5, 31, nullptr, time, 1, 30,
+                                  empty_result.data()) == 0 &&
+          checkout_pixels(nullptr, 31, &checked_out) == 0 && !checked_out &&
+          checkin_pixels(nullptr, 31) == 0 &&
+          checkin_pixels(nullptr, 31) == 4 &&
+          runtime.rejected_temporal_checkouts == denials && passed;
+    }
+  }
+  // A configured secondary, non-layer, primary and out-of-range index remain
+  // refused. Supplying another timestamp must not become an empty success,
+  // even if a stale classification entry were present.
+  for (const int32_t slot : {0, 6, 7, 10})
+    passed = pre_checkout_layer(nullptr, slot, 32, nullptr, 8, 1, 30,
+                                empty_result.data()) == 4 && passed;
+  runtime.hosted_layers.push_back({5, 9, 30, true, 640, 360, -1,
+      input_world.data(), input_view.data(), {-1, -1, -1, -1}});
+  passed = pre_checkout_layer(nullptr, 5, 32, nullptr, 8, 1, 30,
+                              empty_result.data()) == 4 &&
+      pre_checkout_layer(nullptr, 5, 32, nullptr, 7, 1, 30,
+                         empty_result.data()) == 4 &&
+      pre_checkout_layer(nullptr, 5, 32, nullptr, 9, 1, 30,
+                         empty_result.data()) == 0 &&
+      checkout_pixels(nullptr, 32, &checked_out) == 0 &&
+      checked_out == input_view.data() && checkin_pixels(nullptr, 32) == 0 && passed;
+  runtime.hosted_layers.clear();
+  const std::array<int32_t, 4> malformed{4, 0, 3, 2};
+  passed = pre_checkout_layer(nullptr, 5, 33, malformed.data(), 8, 1, 30,
+                              empty_result.data()) == 4 &&
+      pre_checkout_layer(nullptr, 5, 33, nullptr, 8, 1, 30, nullptr) == 4 &&
+      pre_checkout_layer(nullptr, 5, 33, nullptr, 8, 1, 0,
+                         empty_result.data()) == 4 && passed;
+  // Refusals above must not erase an earlier valid registration.
+  passed = checkout_pixels(nullptr, 31, &checked_out) == 0 && !checked_out &&
+      checkin_pixels(nullptr, 31) == 0 && pixel_checkouts_balanced() && passed;
+  runtime.clear_transient();
+  passed = runtime.unassigned_layer_slots.empty() && passed;
   return passed;
 }
 

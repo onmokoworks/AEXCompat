@@ -69,6 +69,9 @@ struct State {
   // answered with an empty rect (issue #898); anything outside it is still an
   // unknown layer.
   int32_t param_count{};
+  // Typed NONE parameters with no external binding, rebuilt for each dispatch.
+  // A missing timed frame or configured secondary is never in this set.
+  std::vector<int32_t> unassigned_layer_slots;
   uint32_t empty_layer_param_checkouts{};
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};

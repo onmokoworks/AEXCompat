@@ -13,6 +13,8 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <new>
 
 namespace {
@@ -27,6 +29,7 @@ using Words = std::array<uint32_t, kWordCount>;
 struct Snapshot {
   PF_Err map_pre_error = PF_Err_NONE;
   PF_CheckoutResult map_pre{};
+  bool pixels = false;
 };
 
 void DeleteSnapshot(void* pointer) { delete static_cast<Snapshot*>(pointer); }
@@ -102,6 +105,27 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
     return PF_Err_BAD_CALLBACK_PARAM;
   auto* snapshot = new (std::nothrow) Snapshot;
   if (!snapshot) return PF_Err_OUT_OF_MEMORY;
+  A_long controls[3]{};
+  for (A_long i = 0; i < 3; ++i) {
+    PF_ParamDef parameter{};
+    PF_Err control_error = PF_CHECKOUT_PARAM(
+        in_data, i + 2, in_data->current_time, in_data->time_step,
+        in_data->time_scale, &parameter);
+    if (!control_error) {
+      controls[i] = i == 1 ? parameter.u.sd.value : parameter.u.pd.value;
+      control_error = PF_CHECKIN_PARAM(in_data, &parameter);
+    }
+    if (control_error) {
+      delete snapshot;
+      return control_error;
+    }
+  }
+  if (controls[0] < 1 || controls[0] > 2 || controls[1] < -5 ||
+      controls[1] > 5 || controls[2] < 1 || controls[2] > 2) {
+    delete snapshot;
+    return PF_Err_BAD_CALLBACK_PARAM;
+  }
+  snapshot->pixels = controls[2] == 2;
   PF_CheckoutResult primary{};
   PF_RenderRequest request = extra->input->output_request;
   const PF_Err err = extra->cb->checkout_layer(
@@ -111,9 +135,19 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
     delete snapshot;
     return err;
   }
-  snapshot->map_pre_error = extra->cb->checkout_layer(
-      in_data->effect_ref, kMapSlot, kMapId, &request, in_data->current_time,
-      in_data->time_step, in_data->time_scale, &snapshot->map_pre);
+  // Reuse checkpoint d2a5cbca's bounded time arithmetic, with runtime controls
+  // so one installed binary covers primary/secondary and current/future cells.
+  const int64_t map_time = static_cast<int64_t>(in_data->current_time) +
+      static_cast<int64_t>(controls[1]) * in_data->time_step;
+  if (map_time < std::numeric_limits<A_long>::min() ||
+      map_time > std::numeric_limits<A_long>::max()) {
+    snapshot->map_pre_error = PF_Err_BAD_CALLBACK_PARAM;
+  } else {
+    snapshot->map_pre_error = extra->cb->checkout_layer(
+        in_data->effect_ref, controls[0] == 1 ? kMapSlot : 0, kMapId, &request,
+        static_cast<A_long>(map_time), in_data->time_step, in_data->time_scale,
+        &snapshot->map_pre);
+  }
   // Even a failed optional-layer checkout is data to encode, not a reason to
   // suppress SmartRender. Primary geometry keeps the output non-empty.
   extra->output->result_rect = primary.result_rect;
@@ -190,7 +224,28 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
       extra->cb->checkin_layer_pixels(in_data->effect_ref, kMapId);
     return output_format_err ? output_format_err : PF_Err_BAD_CALLBACK_PARAM;
   }
-  if (output_format == PF_PixelFormat_ARGB32)
+  PF_Err paint_error = PF_Err_NONE;
+  if (snapshot->pixels) {
+    // Pixel mode is only defined for a successful, same-geometry checkout.
+    // Never turn an absent or refused world into invented transparent pixels.
+    const A_long pixel_bytes = output_format == PF_PixelFormat_ARGB32 ? 4 :
+        output_format == PF_PixelFormat_ARGB64 ? 8 :
+        output_format == PF_PixelFormat_ARGB128 ? 16 : 0;
+    if (snapshot->map_pre_error || map_err || !map || !map->data ||
+        map_format_err || map_format != output_format || !pixel_bytes ||
+        map->width != output->width || map->height != output->height ||
+        map->rowbytes < static_cast<int64_t>(map->width) * pixel_bytes ||
+        output->rowbytes < static_cast<int64_t>(output->width) * pixel_bytes) {
+      paint_error = PF_Err_BAD_CALLBACK_PARAM;
+    } else {
+      for (A_long y = 0; y < output->height; ++y)
+        std::memcpy(reinterpret_cast<A_u_char*>(output->data) +
+                        static_cast<size_t>(y) * output->rowbytes,
+                    reinterpret_cast<const A_u_char*>(map->data) +
+                        static_cast<size_t>(y) * map->rowbytes,
+                    static_cast<size_t>(output->width) * pixel_bytes);
+    }
+  } else if (output_format == PF_PixelFormat_ARGB32)
     Paint<PF_Pixel8, A_u_char>(output, words, 255);
   else if (output_format == PF_PixelFormat_ARGB64)
     Paint<PF_Pixel16, A_u_short>(output, words, 32768);
@@ -206,14 +261,20 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
   const PF_Err input_checkin = extra->cb->checkin_layer_pixels(in_data->effect_ref, kInputId);
   const PF_Err map_checkin = !map_pixels_attempted || map_err ? PF_Err_NONE
       : extra->cb->checkin_layer_pixels(in_data->effect_ref, kMapId);
-  return input_checkin ? input_checkin : map_checkin;
+  return paint_error ? paint_error : input_checkin ? input_checkin : map_checkin;
 }
 
 PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data) {
   PF_ParamDef def{};
   AEFX_CLR_STRUCT(def);
   PF_ADD_LAYER("Optional Map", PF_LayerDefault_NONE, kMapSlot);
-  out_data->num_params = kMapSlot + 1;
+  AEFX_CLR_STRUCT(def);
+  PF_ADD_POPUP("Checkout Target", 2, 1, "Secondary|Primary", 2);
+  AEFX_CLR_STRUCT(def);
+  PF_ADD_SLIDER("Time Step Offset", -5, 5, -5, 5, 0, 3);
+  AEFX_CLR_STRUCT(def);
+  PF_ADD_POPUP("Probe Output", 2, 1, "Contract|Checked Pixels", 4);
+  out_data->num_params = 5;
   return PF_Err_NONE;
 }
 
@@ -225,7 +286,8 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
   switch (cmd) {
     case PF_Cmd_GLOBAL_SETUP:
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
-      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE;
+      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE |
+                            PF_OutFlag_WIDE_TIME_INPUT;
       out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |
                              PF_OutFlag2_FLOAT_COLOR_AWARE;
       return PF_Err_NONE;
