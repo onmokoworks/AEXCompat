@@ -14,6 +14,16 @@ namespace aexcompat::pf_world_transform::copy_sampling {
 constexpr int64_t unit = 65536;
 using Pixel = std::array<double, 4>;
 
+// Preserve the oracle's round points on targets that can contract multiply/add.
+template <typename T> inline T product(T a, T b) {
+  volatile T value = a * b;
+  return value;
+}
+template <typename T> inline T sum(T a, T b) {
+  volatile T value = a + b;
+  return value;
+}
+
 struct Source {
   const unsigned char* data;
   int32_t rowbytes, width, height, component_bytes;
@@ -44,9 +54,9 @@ inline int64_t floor_fixed(int64_t value) {
 
 inline float add4(const std::array<float, 4>& v) {
   // Keep single-precision round points; do not contract products with sums.
-  const float a = v[0] + v[1];
-  const float b = a + v[2];
-  return b + v[3];
+  const float a = sum(v[0], v[1]);
+  const float b = sum(a, v[2]);
+  return sum(b, v[3]);
 }
 
 inline Pixel bilinear(const Source& src, int64_t x, int64_t y, bool raw) {
@@ -58,13 +68,13 @@ inline Pixel bilinear(const Source& src, int64_t x, int64_t y, bool raw) {
   if (src.component_bytes == 4) {
     const float xf = static_cast<float>(fx) / 65536.0f;
     const float yf = static_cast<float>(fy) / 65536.0f;
-    const float br = xf * yf, tr = xf - br, bl = yf - br;
-    const float rest1 = 1.0f - tr, rest2 = rest1 - bl;
-    const std::array<float, 4> weights{rest2 - br, tr, bl, br};
+    const float br = product(xf, yf), tr = sum(xf, -br), bl = sum(yf, -br);
+    const float rest1 = sum(1.0f, -tr), rest2 = sum(rest1, -bl);
+    const std::array<float, 4> weights{sum(rest2, -br), tr, bl, br};
     std::array<float, 4> alpha{};
     bool same = true;
     for (int i = 0; i < 4; ++i) {
-      alpha[i] = static_cast<float>(p[i][0]) * weights[i];
+      alpha[i] = product(static_cast<float>(p[i][0]), weights[i]);
       same = same && p[i][0] == p[0][0];
     }
     float a = same ? static_cast<float>(p[0][0]) : add4(alpha);
@@ -73,10 +83,10 @@ inline Pixel bilinear(const Source& src, int64_t x, int64_t y, bool raw) {
     for (int c = 1; c < 4; ++c) {
       std::array<float, 4> terms{};
       for (int i = 0; i < 4; ++i)
-        terms[i] = static_cast<float>(p[i][c]) *
-                   (same || a == 0 ? weights[i] : alpha[i]);
+        terms[i] = product(static_cast<float>(p[i][c]),
+                           same || a == 0 ? weights[i] : alpha[i]);
       float v = add4(terms);
-      if (!same && a != 0) v *= 1.0f / a;
+      if (!same && a != 0) v = product(v, 1.0f / a);
       out[c] = v;
     }
     return out;
@@ -124,8 +134,9 @@ inline Pixel area(const Source& src, int64_t x, int64_t y, int64_t step_x,
         for (int c = 0; c < 4; ++c)
           sums[c] += std::floor(p[c] * weight / 16777216.0);
       } else {
-        sums[0] += p[0] * weight;
-        for (int c = 1; c < 4; ++c) sums[c] += p[c] * p[0] * weight;
+        sums[0] = sum(sums[0], product(p[0], weight));
+        for (int c = 1; c < 4; ++c)
+          sums[c] = sum(sums[c], product(product(p[c], p[0]), weight));
       }
     }
   }

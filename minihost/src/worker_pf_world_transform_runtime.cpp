@@ -1220,6 +1220,14 @@ bool verify_copy_cpu_oracle() {
                           ? &private_copy_world_premultiplied
                           : &private_copy_world_area8;
     const auto before_source = source, before_destination = destination;
+    // A registered operand mutated after admission must still fail closed on
+    // every COPY route and depth, without touching either allocation.
+    ++sw.height;
+    const auto malformed = copy(nullptr, &sw, target, nullptr, nullptr);
+    --sw.height;
+    if (malformed != kPfErrBadCallbackParam || source != before_source ||
+        destination != before_destination)
+      return false;
     if (copy(nullptr, &sw, target, cell.has_sr ? &cell.sr : nullptr,
              cell.has_dr ? &cell.dr : nullptr))
       return false;
