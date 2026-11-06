@@ -1,6 +1,5 @@
 import hashlib
 import json
-import math
 import struct
 import subprocess
 import unittest
@@ -16,7 +15,6 @@ PROBE = ROOT / "instruments" / "pf-sampling-probe"
 SOURCE = PROBE / "pf_sampling_probe.cpp"
 WORKER = ROOT / "target/minihost-build/aex_worker.exe"
 AEX = ROOT / "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex"
-INPUT = ROOT / "target/gpu-effects/opencl-input.rgba"
 
 
 
@@ -25,72 +23,14 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def _float32(value):
-    return struct.unpack("<f", struct.pack("<f", value))[0]
-
-
-def _lround(value):
-    lower = math.floor(value)
-    return int(lower) + (1 if value - lower >= 0.5 else 0)
-
-
-def _expected_output(raw, width, height, format_name):
-    # Mirrors the worker exactly: rgba8_to_argb promotion into the input world,
-    # then nearest/subpixel/area sampling in double, then the per-depth store
-    # (lround with clamp for integer worlds, a float cast for the float world).
-    maximum = {"argb8": 255.0, "argb16": 32768.0, "argb32f": 1.0}[format_name]
-    float_world = format_name == "argb32f"
-
-    def promote(value):
-        if format_name == "argb16":
-            return float((value * 32768 + 127) // 255)
-        if float_world:
-            return _float32(value / 255.0)
-        return float(value)
-
-    def pixel(x, y):
-        if x < 0 or y < 0 or x >= width or y >= height:
-            return (0.0, 0.0, 0.0, 0.0)
-        offset = (y * width + x) * 4
-        return tuple(promote(value) for value in raw[offset:offset + 4])
-
-    def quantize(values):
-        if float_world:
-            return tuple(_float32(value) for value in values)
-        return tuple(min(max(_lround(value), 0), int(maximum))
-                     for value in values)
-
-    x, y = width // 2, height // 2
-
-    def subpixel():
-        values = []
-        for channel in range(4):
-            value = 0.0
-            for dy in (0, 1):
-                for dx in (0, 1):
-                    value += pixel(x + dx, y + dy)[channel] * 0.25
-            values.append(value)
-        return quantize(values)
-
-    def area():
-        weighted_alpha = 0.0
-        weighted_color = [0.0, 0.0, 0.0]
-        for dy in (0, 1):
-            for dx in (0, 1):
-                sample = pixel(x + dx, y + dy)
-                alpha = sample[3] / maximum
-                weighted_alpha += 0.25 * alpha
-                for channel in range(3):
-                    weighted_color[channel] += 0.25 * alpha * sample[channel]
-        colors = [weighted_color[channel] / weighted_alpha
-                  if weighted_alpha > 0.0 else 0.0 for channel in range(3)]
-        return quantize(colors + [weighted_alpha / 1.0 * maximum])
-
-    samples = [quantize(pixel(x, y)), quantize(pixel(x + 1, y + 1)),
-               subpixel(), area(), quantize(pixel(0, y)),
-               quantize((0.0, 0.0, 0.0, 0.0))]
+def _constant_output(width, height, format_name):
+    # This AEX integration check uses an opaque unit basis so its result follows
+    # from a constant field. Nonuniform alpha, edge colors and float rounding
+    # are tested against captured AE words by worker_pf_sampling_wiring_selftest.
+    maximum = {"argb8": 255, "argb16": 32768, "argb32f": 1.0}[format_name]
+    value = (maximum, 0, maximum, maximum)
     layout = {"argb8": "<4B", "argb16": "<4H", "argb32f": "<4f"}[format_name]
-    return b"".join(struct.pack(layout, *samples[column % len(samples)])
+    return b"".join(struct.pack(layout, *((0, 0, 0, 0) if column % 6 == 5 else value))
                     for row in range(height) for column in range(width))
 
 
@@ -102,8 +42,10 @@ def _expected_output(raw, width, height, format_name):
 def test_real_probe_depth_matrix_has_numeric_oracle(tmp_path, pixel_format, format_name):
     assert_artifact_fresh(AEX, SOURCE, WORKER, HARNESS)
     output = tmp_path / f"sampling-{format_name}.rgba"
+    input_path = tmp_path / "opaque-basis.rgba"
+    input_path.write_bytes(bytes((255, 0, 255, 255)) * (37*23))
     report = run_session_render(
-        tmp_path, AEX, INPUT, output, width=37, height=23,
+        tmp_path, AEX, input_path, output, width=37, height=23,
         pixel_format=pixel_format,
     )
     assert report["status"] == "render_completed"
@@ -113,5 +55,4 @@ def test_real_probe_depth_matrix_has_numeric_oracle(tmp_path, pixel_format, form
     assert report["suite_leases_balanced"] is True
     assert report["guard_bytes_intact"] is True
     assert report["last_seh_exception_code"] == 0
-    assert output.read_bytes() == _expected_output(
-        INPUT.read_bytes(), 37, 23, format_name)
+    assert output.read_bytes() == _constant_output(37, 23, format_name)

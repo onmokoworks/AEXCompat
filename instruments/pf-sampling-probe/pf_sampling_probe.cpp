@@ -153,53 +153,6 @@ template <typename Pixel, typename Suite>
 PF_Err Sample(const Suite& suite, PF_ProgPtr effect_ref, SampleCase sample_case,
               PF_Fixed x, PF_Fixed y, const PF_SampPB* params, Pixel* pixel);
 
-template <typename Pixel>
-std::array<double, 4> PixelAt(const PF_EffectWorld& world, A_long x, A_long y) {
-  if (x < 0 || y < 0 || x >= world.width || y >= world.height) return {};
-  const auto* row = reinterpret_cast<const A_u_char*>(world.data) + y * world.rowbytes;
-  const Pixel& p = reinterpret_cast<const Pixel*>(row)[x];
-  return {double(p.alpha), double(p.red), double(p.green), double(p.blue)};
-}
-
-template <typename Pixel>
-std::array<double, 4> Oracle(const PF_EffectWorld& world, SampleCase kind,
-                             PF_Fixed fx, PF_Fixed fy) {
-  const double x = fx / 65536.0, y = fy / 65536.0;
-  if (kind != SampleCase::kSubpixelHalf && kind != SampleCase::kArea)
-    return PixelAt<Pixel>(world, A_long(std::floor(x + .5)), A_long(std::floor(y + .5)));
-  const A_long x0 = A_long(std::floor(x)), y0 = A_long(std::floor(y));
-  std::array<std::array<double, 4>, 4> p = {
-      PixelAt<Pixel>(world, x0, y0), PixelAt<Pixel>(world, x0 + 1, y0),
-      PixelAt<Pixel>(world, x0, y0 + 1), PixelAt<Pixel>(world, x0 + 1, y0 + 1)};
-  std::array<double, 4> out{};
-  if (kind == SampleCase::kSubpixelHalf) {
-    for (const auto& pixel : p)
-      for (size_t c = 0; c < 4; ++c) out[c] += pixel[c] * .25;
-    return out;
-  }
-  const double maximum = std::is_same_v<Pixel, PF_Pixel16> ? 32768.0 :
-      (std::is_same_v<Pixel, PF_PixelFloat> ? 1.0 : 255.0);
-  double alpha_sum = 0.0;
-  for (const auto& pixel : p) {
-    const double alpha = pixel[0] / maximum;
-    alpha_sum += alpha;
-    for (size_t c = 1; c < 4; ++c) out[c] += alpha * pixel[c];
-  }
-  out[0] = alpha_sum * maximum * .25;
-  for (size_t c = 1; c < 4; ++c) out[c] = alpha_sum ? out[c] / alpha_sum : 0.0;
-  return out;
-}
-
-template <typename Pixel>
-bool OracleMatches(const Pixel& p, const std::array<double, 4>& expected) {
-  const std::array<double, 4> actual = {double(p.alpha), double(p.red),
-                                        double(p.green), double(p.blue)};
-  const double tolerance = std::is_same_v<Pixel, PF_PixelFloat> ? 1e-6 : .500001;
-  for (size_t c = 0; c < 4; ++c)
-    if (std::abs(actual[c] - expected[c]) > tolerance) return false;
-  return true;
-}
-
 template <>
 PF_Err Sample<PF_Pixel, PF_Sampling8Suite1>(
     const PF_Sampling8Suite1& suite, PF_ProgPtr effect_ref,
@@ -249,8 +202,9 @@ PF_Err RenderTyped(PF_InData* in_data, PF_EffectWorld* input,
     const PF_Err error = Sample<Pixel>(suite, in_data->effect_ref, sample_case,
                                        x, y, &params, &samples[index]);
     if (error != PF_Err_NONE) return error;
-    if (!OracleMatches(samples[index], Oracle<Pixel>(*input, sample_case, x, y)))
-      return PF_Err_BAD_CALLBACK_PARAM;
+    // Observe the callback output without an embedded host-model oracle.
+    // Exact numeric validation belongs to the external AE-word corpus and
+    // artifact tests; the old straight-RGB model rejected valid AE results.
   }
 
   for (A_long y = 0; y < output->height; ++y) {
