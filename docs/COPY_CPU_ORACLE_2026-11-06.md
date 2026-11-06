@@ -64,6 +64,7 @@ SDK/plug-in bytesは含めない。異なるstrideと前後guardを付けて全a
 
 - Release worker / bad_callback self-test / private callback self-test: 成功。
 - portable compiled `test_pf_bad_callback_param.py`: 1 passed。
+- `test_pf_sampling_wiring.py`: 1 passed、既存sampling oracle 66,612 wordも一致。
 - broker integration `trusted_worker_stage`: 10 passed。
 - Rust workspace lib: 437 passed / 3 ignored（内訳1+395+33+8）、deep chain: 2 passed。
 - focused Python worker/color/parameter: 39 passed。全tracked Rustのrustfmt成功。
@@ -73,6 +74,9 @@ SDK/plug-in bytesは含めない。異なるstrideと前後guardを付けて全a
 実装とは別工程の慎重な自己レビューを実施した。別担当レビューではない。
 未知quality/modeとdiagnostic routingの前工程の修正を再確認し、今回float積和の非contract化と
 登録後geometry拒否のbehavioral testを追加した。修正後の全diffを再レビューし、受理済み未対応指摘0。
+初回CIはsampling配線テストがid9 q1/m0の旧overlap返却先を期待して1件失敗した。
+実測規則に合わせて6 quality/modeと未知値fallbackのdispatch検査へ更新し、portable link用の
+typed stand-inも追加した。製品処理は変更せず、修正後diffを再レビューしRelease build/testに成功。
 
 ## identityと再現
 

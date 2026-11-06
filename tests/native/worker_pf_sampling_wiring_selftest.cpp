@@ -41,11 +41,20 @@ namespace boot = aexcompat::worker_runtime::effect_bootstrap;
 
 #ifndef _WIN32
 // The macOS-local selftest links only the sampling and table owners. COPY's
-// behavior has its own tests; this stand-in supplies the same typed symbol so
+// behavior has its own tests; these stand-ins supply the typed symbols so
 // get_callback_addr's address selection can be exercised without pulling in
 // the full render/world graph.
 namespace aexcompat::pf_world_transform {
 int32_t copy_world8(void*, void*, void*, const LegacyRect*, const LegacyRect*) {
+  return 4;
+}
+int32_t private_copy_world_area8(void*, void*, void*, const LegacyRect*, const LegacyRect*) {
+  return 4;
+}
+int32_t private_copy_world_nearest(void*, void*, void*, const LegacyRect*, const LegacyRect*) {
+  return 4;
+}
+int32_t private_copy_world_premultiplied(void*, void*, void*, const LegacyRect*, const LegacyRect*) {
   return 4;
 }
 }  // namespace aexcompat::pf_world_transform
@@ -353,13 +362,31 @@ void get_callback_addr_is_typed_bounded_and_clears_failures() {
   for (const auto [id, expected] : std::array{
            std::pair{2, reinterpret_cast<void*>(&subpixel_sample8)},
            std::pair{3, reinterpret_cast<void*>(&area_sample8)},
-           std::pair{9, reinterpret_cast<void*>(&copy_world8)},
+           std::pair{9, reinterpret_cast<void*>(&private_copy_world_premultiplied)},
            std::pair{31, reinterpret_cast<void*>(&subpixel_sample16)},
            std::pair{32, reinterpret_cast<void*>(&area_sample16)}}) {
     void* callback = reinterpret_cast<void*>(1);
     check(get_callback_addr(nullptr, 1, 0, id, &callback) == 0,
           "get_callback_addr accepts a supported callback id");
     check(callback == expected, "get_callback_addr returns the typed callback");
+  }
+  struct CopyRoute { int32_t quality; uint32_t mode; void* expected; };
+  const CopyRoute copy_routes[]{
+      {0, 0, reinterpret_cast<void*>(&private_copy_world_nearest)},
+      {0, 1, reinterpret_cast<void*>(&private_copy_world_nearest)},
+      {0, 2, reinterpret_cast<void*>(&private_copy_world_nearest)},
+      {1, 0, reinterpret_cast<void*>(&private_copy_world_premultiplied)},
+      {1, 1, reinterpret_cast<void*>(&private_copy_world_area8)},
+      {1, 2, reinterpret_cast<void*>(&private_copy_world_premultiplied)},
+      {-1, 1, reinterpret_cast<void*>(&copy_world8)},
+      {2, 1, reinterpret_cast<void*>(&copy_world8)},
+      {1, 3, reinterpret_cast<void*>(&copy_world8)},
+  };
+  for (const auto& route : copy_routes) {
+    void* selected = nullptr;
+    check(get_callback_addr(nullptr, route.quality, route.mode, 9, &selected) == 0 &&
+              selected == route.expected,
+          "COPY selects the oracle quality/mode route or unknown-value fallback");
   }
   void* callback = reinterpret_cast<void*>(1);
   check(get_callback_addr(nullptr, 1, 0, 999, &callback) == 516,
