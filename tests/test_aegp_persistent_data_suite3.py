@@ -10,8 +10,11 @@ blob handle and its refusal of a foreign one, the documented default
 write-through on a missing key, the documented buffer-too-small answer from
 ``AEGP_GetString``, the "stored value is not this big, so the default is used"
 answer from ``AEGP_GetData``, the caller-owned handle from
-``AEGP_GetDataHandle`` and its NULL for a zero-sized value, section/key
-enumeration, and deletion emptying a section out of the walk.
+``AEGP_GetDataHandle`` and its NULL/error3 for an empty value (including the
+default-write side effect), zero-filled string tails, bounded output guards,
+prefs UTF-16 termination without a trailing separator, section/key enumeration,
+and deletion emptying a section out of the walk. Zero-capacity string refusal
+is a defined host safety policy for an AE-crash input, not an AE return value.
 """
 
 from pathlib import Path
