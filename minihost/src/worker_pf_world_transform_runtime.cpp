@@ -1925,6 +1925,20 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
     *result = static_cast<int>(floored);
     return true;
   };
+  // An axis-aligned reduction covers a source rectangle, not just the four
+  // taps around its centre. Integrate that footprint with transparent borders.
+  // Non-reduced axes retain the unit-width (bilinear) footprint. This is
+  // independent of the consumer, font, scale factor and destination size.
+  const bool axis_aligned_reduction = quality == 1 &&
+      sampling_matrix[1] == 0.0 && sampling_matrix[3] == 0.0 &&
+      sampling_matrix[2] == 0.0 && sampling_matrix[5] == 0.0 &&
+      std::abs(sampling_matrix[8]) >= 1e-12 &&
+      (std::abs(sampling_matrix[0] / sampling_matrix[8]) > 1.0 ||
+       std::abs(sampling_matrix[4] / sampling_matrix[8]) > 1.0);
+  const double footprint_x = axis_aligned_reduction ?
+      (std::max)(1.0, std::abs(sampling_matrix[0] / sampling_matrix[8])) : 1.0;
+  const double footprint_y = axis_aligned_reduction ?
+      (std::max)(1.0, std::abs(sampling_matrix[4] / sampling_matrix[8])) : 1.0;
   for (int32_t y = bounds.top; y < bounds.bottom; ++y) {
     if ((field == 1 && (y & 1)) || (field == 2 && !(y & 1))) continue;
     for (int32_t x = bounds.left; x < bounds.right; ++x) {
@@ -1937,6 +1951,41 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
             floor_to_sample_coord(source_y + 0.5, &sy)) {
           for (int channel = 0; channel < 4; ++channel)
             sampled[channel] = read(sx, sy, channel);
+        }
+      } else if (axis_aligned_reduction) {
+        const double left = mapped[0] - footprint_x * 0.5;
+        const double right = mapped[0] + footprint_x * 0.5;
+        const double top = mapped[1] - footprint_y * 0.5;
+        const double bottom = mapped[1] + footprint_y * 0.5;
+        if (std::isfinite(left) && std::isfinite(right) &&
+            std::isfinite(top) && std::isfinite(bottom) &&
+            right > 0.0 && bottom > 0.0 &&
+            left < source_info.width && top < source_info.height) {
+          // Clip before converting to integers, and normalize by the original
+          // footprint so out-of-world coverage remains transparent.
+          const int x0 = static_cast<int>(std::floor((std::max)(0.0, left)));
+          const int x1 = static_cast<int>(std::ceil((std::min)(double(source_info.width), right)));
+          const int y0 = static_cast<int>(std::floor((std::max)(0.0, top)));
+          const int y1 = static_cast<int>(std::ceil((std::min)(double(source_info.height), bottom)));
+          for (int sy = y0; sy < y1; ++sy) {
+            const double wy = ((std::min)(bottom, double(sy + 1)) -
+                               (std::max)(top, double(sy))) / footprint_y;
+            for (int sx = x0; sx < x1; ++sx) {
+              const double wx = ((std::min)(right, double(sx + 1)) -
+                                 (std::max)(left, double(sx))) / footprint_x;
+              const double weight = wx * wy;
+              const double alpha = read(sx, sy, 0);
+              sampled[0] += alpha * weight;
+              for (int channel = 1; channel < 4; ++channel) {
+                double value = read(sx, sy, channel);
+                if (mode_flags == 1) value *= alpha / maximum;
+                sampled[channel] += value * weight;
+              }
+            }
+          }
+          if (mode_flags == 1 && sampled[0] > 0.0)
+            for (int channel = 1; channel < 4; ++channel)
+              sampled[channel] /= sampled[0] / maximum;
         }
       } else {
         int x0 = 0, y0 = 0;
@@ -2169,7 +2218,71 @@ bool verify_transform_world_foreign_operand(bool admitted) {
       denied_for(trace, "both_worlds_unresolved");
 }
 
+namespace {
+template <typename T, uint32_t Format>
+bool verify_transform_reduction() {
+  // Four distinct colours, including a transparent coloured pixel. A 3:1
+  // reduction must integrate the edge pixels that centre-only filtering misses.
+  // Inputs are exactly representable; float expectations use the final rounded
+  // analytic value rather than a tolerance.
+  constexpr T unit = std::is_same_v<T, float> ? T(1) :
+      (sizeof(T) == 1 ? T(192) : T(24576));
+  std::array<T, 5 * 4> pixels{{unit,0,0,unit,
+      unit/T(2),unit,0,0, 0,unit,unit,0, unit,0,unit,0,
+      T(17),T(17),T(17),T(17)}};
+  std::array<T, 8> result{};
+  LocalEffectWorld source{}, destination{};
+  source.data = pixels.data(); source.width = 4; source.height = 1;
+  source.rowbytes = static_cast<int32_t>(pixels.size() * sizeof(T));
+  destination.data = result.data(); destination.width = 1; destination.height = 1;
+  destination.rowbytes = static_cast<int32_t>(result.size() * sizeof(T));
+  std::array<std::byte, 12> composite{};
+  composite[8] = std::byte{255};
+  const uint16_t opacity16 = 32768;
+  std::memcpy(composite.data() + 10, &opacity16, sizeof(opacity16));
+  const auto original = pixels;
+  const auto run = [&](std::array<double, 9> matrix, uint32_t mode,
+                       std::array<T, 4> expected, int quality = 1) {
+    DispatchWorldFormatScope formats;
+    if (!formats.register_world(&source, Format) ||
+        !formats.register_world(&destination, Format)) return false;
+    result.fill(T(17));
+    const int32_t err = transform_world(&source, quality, mode, 0, &source,
+        composite.data(), nullptr, matrix.data(), 1, 0, nullptr, &destination);
+    return err == 0 && std::equal(expected.begin(), expected.end(), result.begin()) &&
+        std::all_of(result.begin() + 4, result.end(), [](T x) { return x == T(17); }) &&
+        pixels == original;
+  };
+  // Average alpha=unit/2; straight RGB=(unit/3,0,2*unit/3).
+  // For float these divisions round once at the callback's final store.
+  if (!run({3,0,0, 0,1,0, 0,0,1}, 1,
+           {unit/T(2),unit/T(3),0,T(double(unit)*2.0/3.0)}) ||
+      !run({3,0,0, 0,1,0, 0,0,1}, 0,
+           {unit/T(2),T(double(unit)*2.0/3.0),unit/T(3),unit/T(3)}) ||
+      !run({-3,0,0, 0,1,0, 3,0,1}, 1,
+           {unit/T(2),unit/T(3),0,T(double(unit)*2.0/3.0)}) ||
+      !run({3,0,0, 0,1,0, .5,0,1}, 1,
+           {unit/T(2),unit/T(3),unit/T(3),unit/T(3)})) return false;
+  // The same footprint with a vertical source exercises the other axis.
+  source.width = 1; source.height = 4;
+  source.rowbytes = static_cast<int32_t>(4 * sizeof(T));
+  const bool vertical = run({1,0,0, 0,3,0, 0,.5,1}, 1,
+      {unit/T(2),unit/T(3),unit/T(3),unit/T(3)});
+  source.width = 4; source.height = 1;
+  source.rowbytes = static_cast<int32_t>(pixels.size() * sizeof(T));
+  if (!vertical) return false;
+  // Transparent border is part of the denominator (no edge renormalization).
+  if (!run({2,0,0, 0,1,0, -1,0,1}, 0, {unit/T(2),0,0,unit/T(2)}) ||
+      !run({3,0,0, 0,1,0, 1e100,0,1}, 0, {0,0,0,0}) ||
+      !run({3,0,0, 0,1,0, 0,0,1}, 1, {unit/T(2),unit,0,0}, 0)) return false;
+  return true;
+}
+}  // namespace
+
 bool verify_world_transform_affine() {
+  if (!verify_transform_reduction<uint8_t, kPixelFormatArgb32>() ||
+      !verify_transform_reduction<uint16_t, kPixelFormatArgb64>() ||
+      !verify_transform_reduction<float, kPixelFormatArgb128>()) return false;
   DispatchWorldFormatScope formats;
   std::array<uint8_t, 3 * 2 * 4> source_pixels{};
   std::array<uint8_t, 4 * 3 * 4> destination_pixels{};
