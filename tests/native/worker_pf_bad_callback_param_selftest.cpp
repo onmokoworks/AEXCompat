@@ -39,6 +39,7 @@ int main() {
   if (!aexcompat::pf_world_transform::verify_world_transform_blend()) return 1;
   if (!aexcompat::pf_world_transform::verify_bad_callback_param_contract()) return 2;
   if (!aexcompat::pf_world_transform::verify_copy_world_clipping()) return 3;
+  if (!aexcompat::pf_world_transform::verify_copy_cpu_oracle()) return 11;
   if (!aexcompat::pf_world_transform::verify_world_transform_affine()) return 4;
   // TRANSFORM_WORLD shares that fallback (issue #1289): the admitting side
   // here, the gate below.

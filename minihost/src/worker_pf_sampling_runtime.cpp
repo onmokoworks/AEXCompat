@@ -108,7 +108,9 @@ int32_t __cdecl get_callback_addr(void*, int32_t quality, uint32_t mode_flags, i
     case 3: *callback = reinterpret_cast<void*>(&area_sample8); break;
     case 9:
       *callback = reinterpret_cast<void*>(
-          quality == 1 && mode_flags == 1 ? &private_copy_world_area8 : &copy_world8);
+          (quality != 0 && quality != 1) || mode_flags > 2 ? &copy_world8 :
+          quality == 0 ? &private_copy_world_nearest :
+          mode_flags == 1 ? &private_copy_world_area8 : &private_copy_world_premultiplied);
       break;
     case 31: *callback = reinterpret_cast<void*>(&subpixel_sample16); break;
     case 32: *callback = reinterpret_cast<void*>(&area_sample16); break;
