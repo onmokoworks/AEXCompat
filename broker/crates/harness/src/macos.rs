@@ -2587,6 +2587,10 @@ pub fn render_fixture_headless(
     }
     let loaded = load_render_fixture(fixture_path)
         .map_err(|error| format!("load declarative fixture: {error}"))?;
+    loaded
+        .document
+        .validate_render_platform()
+        .map_err(|error| error.to_string())?;
     if loaded.document.schema_version == 1 {
         return render_single_fixture_headless(
             repository,
@@ -4139,6 +4143,60 @@ mod tests {
                 {"id":"param_3","slot":3,"kind":"point3d","value":[1.5,2.5,3.5]}
             ])
         );
+    }
+
+    #[test]
+    fn masked_fixture_is_rejected_before_guest_launch_or_output_staging() {
+        let directory = std::env::temp_dir().join(format!(
+            "aexcompat-macos-mask-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let fixture_path = directory.join("fixture.json");
+        let output = directory.join("output");
+        // V2 hashes the asset while loading; rendering must reject masks before
+        // trying to decode these bytes or load the deliberately absent plug-in.
+        std::fs::write(directory.join("primary.png"), b"asset identity").unwrap();
+        for version in [1, 2] {
+            for masks in [
+                json!([]),
+                json!([{"open":false,"vertices":[
+                    {"x":0,"y":0},{"x":16,"y":0},{"x":0,"y":16}
+                ]}]),
+            ] {
+                let fixture = json!({
+                    "schema":"aexcompat.render_fixture","schema_version":version,
+                    "primary_layer":"primary.png","parameters":[],
+                    "pixel_format":"argb8","render_path":"smart","premultiplication":"straight",
+                    "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+                    "final_artifact":"raw","checkpoints":[{"id":"output","stage":"smart-output"}],
+                    "mask_scene":{"masks":masks}
+                });
+                std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+                let error = render_fixture_headless(
+                    &directory,
+                    &directory.join("absent.aex"),
+                    &fixture_path,
+                    &output,
+                )
+                .unwrap_err();
+                assert!(
+                    error.contains("fixture mask_scene is unsupported on this platform"),
+                    "{error}"
+                );
+                assert!(!output.exists());
+                assert_eq!(
+                    std::fs::read_dir(&directory).unwrap().count(),
+                    2,
+                    "unexpected staged output"
+                );
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -32,6 +32,11 @@ and within -32768..32768; the encoded transport is limited to 8192 bytes.
 Unknown mask, vertex, and tangent fields are rejected. An empty `masks` array
 is valid. Masks and `parameters[].layer_path` images can be used together on
 Windows classic and SmartFX paths at argb8, argb16, and argb32f.
+The schema and mask validation are identical on every platform. On non-Windows
+hosts, rendering a fixture with `mask_scene` (even an empty `masks` array) fails
+explicitly with an unsupported-platform error before worker launch or output
+staging; masks are never silently omitted. Fixtures without a mask scene retain
+their existing behavior on every platform.
 
 The fixture digest remains SHA-256 of the original JSON bytes, so mask data is
 included without changing existing fixture digests. Mask-bearing v1 fixtures

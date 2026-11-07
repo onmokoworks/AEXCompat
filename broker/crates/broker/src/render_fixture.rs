@@ -144,7 +144,7 @@ pub struct DeclarativeRenderFixture {
     pub parameters: Vec<InteractiveParameter>,
     pub matrix: Option<Vec<FixtureMatrixAxis>>,
     pub worlds: Option<FixtureWorlds>,
-    pub mask_scene: Option<crate::render_request::MaskScene>,
+    pub mask_scene: Option<crate::mask_scene::MaskScene>,
     pub pixel_format: FixturePixelFormat,
     pub render_path: String,
     pub premultiplication: String,
@@ -154,6 +154,18 @@ pub struct DeclarativeRenderFixture {
 }
 
 impl DeclarativeRenderFixture {
+    /// Check execution support separately from the platform-independent schema.
+    pub fn validate_render_platform(&self) -> io::Result<()> {
+        if !cfg!(windows) && self.mask_scene.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "fixture mask_scene is unsupported on this platform: host mask transport requires Windows",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
     pub(crate) fn host_context(&self) -> Option<crate::render_request::HostContext> {
         self.mask_scene
             .clone()
@@ -386,9 +398,9 @@ fn validate_parameter_schema(document: &Value) -> io::Result<()> {
 }
 
 fn validate_fixture(fixture: &DeclarativeRenderFixture) -> io::Result<()> {
-    if let Some(context) = fixture.host_context() {
+    if let Some(scene) = &fixture.mask_scene {
         // Reuse both request geometry limits and its encoded transport bound.
-        crate::render_request::encode_mask_context(&context)?;
+        crate::mask_scene::encode_mask_scene(scene)?;
     }
     if fixture.schema != "aexcompat.render_fixture" || !matches!(fixture.schema_version, 1 | 2) {
         return Err(invalid(
@@ -643,6 +655,31 @@ mod tests {
     }
 
     #[test]
+    fn fixture_mask_platform_support_is_separate_from_schema_validation() {
+        let mut fixture: DeclarativeRenderFixture = serde_json::from_value(mask_fixture()).unwrap();
+        for masks in [
+            fixture.mask_scene.clone(),
+            Some(crate::mask_scene::MaskScene { masks: Vec::new() }),
+            None,
+        ] {
+            fixture.mask_scene = masks;
+            validate_fixture(&fixture).unwrap();
+            let result = fixture.validate_render_platform();
+            if cfg!(windows) || fixture.mask_scene.is_none() {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("host mask transport requires Windows")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fixture_loader_rejects_duplicate_fields() {
         let directory = std::env::temp_dir().join(format!(
             "fixture-duplicate-fields-{:032x}",
@@ -712,14 +749,22 @@ mod tests {
             value["parameters"] = json!([layer]);
             let fixture: DeclarativeRenderFixture = serde_json::from_value(value.clone()).unwrap();
             validate_fixture(&fixture).unwrap();
-            let context = fixture.host_context().unwrap();
-            let request: crate::render_request::HostContext =
-                serde_json::from_value(json!({"mask_scene":value["mask_scene"]})).unwrap();
-            let encoded = crate::render_request::encode_mask_context(&context).unwrap();
-            assert_eq!(
-                encoded,
-                crate::render_request::encode_mask_context(&request).unwrap()
-            );
+            let encoded =
+                crate::mask_scene::encode_mask_scene(fixture.mask_scene.as_ref().unwrap()).unwrap();
+            #[cfg(windows)]
+            {
+                let context = fixture.host_context().unwrap();
+                let request: crate::render_request::HostContext =
+                    serde_json::from_value(json!({"mask_scene":value["mask_scene"]})).unwrap();
+                assert_eq!(
+                    encoded,
+                    crate::render_request::encode_mask_context(&context).unwrap()
+                );
+                assert_eq!(
+                    encoded,
+                    crate::render_request::encode_mask_context(&request).unwrap()
+                );
+            }
             assert_eq!(
                 encoded,
                 "v2|0:16,16,0,0,2,-3/80,16,0,0,0,0/80,48,0,0,0,0/16,48,0,0,0,0"
@@ -798,7 +843,7 @@ mod tests {
             let legacy_bytes = serde_json::to_vec(&value).unwrap();
             fs::write(&path, &legacy_bytes).unwrap();
             let legacy = load_render_fixture(&path).unwrap();
-            assert!(legacy.document.host_context().is_none());
+            assert!(legacy.document.mask_scene.is_none());
             assert_eq!(
                 legacy.sha256,
                 format!("{:x}", Sha256::digest(&legacy_bytes))

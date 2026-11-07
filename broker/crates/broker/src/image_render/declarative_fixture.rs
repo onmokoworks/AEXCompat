@@ -172,6 +172,7 @@ pub fn render_declarative_fixture(
         ));
     }
     let loaded = load_render_fixture(fixture_path)?;
+    loaded.document.validate_render_platform()?;
     let cases = expand_fixture_cases(&loaded);
     if loaded.document.schema_version == 1 {
         return render_single_declarative_fixture(
