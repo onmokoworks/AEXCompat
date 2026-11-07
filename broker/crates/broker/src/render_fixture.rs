@@ -570,7 +570,9 @@ pub fn load_render_fixture(path: &Path) -> io::Result<LoadedRenderFixture> {
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
     let value: Value = serde_json::from_slice(&bytes)?;
     validate_parameter_schema(&value)?;
-    let document: DeclarativeRenderFixture = serde_json::from_value(value)?;
+    // Parse the original bytes, not Value, so the shared structs reject duplicate
+    // fields. Value is only for the preceding parameter-schema checks.
+    let document: DeclarativeRenderFixture = serde_json::from_slice(&bytes)?;
     validate_fixture(&document)?;
     let base = path
         .parent()
@@ -638,6 +640,65 @@ mod tests {
                 {"x":80,"y":16},{"x":80,"y":48},{"x":16,"y":48}
             ]}]}
         })
+    }
+
+    #[test]
+    fn fixture_loader_rejects_duplicate_fields() {
+        let directory = std::env::temp_dir().join(format!(
+            "fixture-duplicate-fields-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("fixture.json");
+        let mut fixture = mask_fixture();
+        fixture["parameters"] = json!([parameter()]);
+        let original = serde_json::to_string(&fixture).unwrap();
+        fs::write(&path, &original).unwrap();
+        let loaded = load_render_fixture(&path).unwrap();
+        assert_eq!(
+            loaded.sha256,
+            format!("{:x}", Sha256::digest(original.as_bytes()))
+        );
+        for (field, original_field, duplicate_fields) in [
+            ("x", r#""x":16"#, r#""x":40000,"x":16"#),
+            ("x", r#""x":2"#, r#""x":40000,"x":2"#),
+            ("masks", r#""masks":["#, r#""masks":[],"masks":["#),
+            (
+                "mask_scene",
+                r#""mask_scene":{"#,
+                r#""mask_scene":null,"mask_scene":{"#,
+            ),
+            (
+                "schema_version",
+                r#""schema_version":1"#,
+                r#""schema_version":0,"schema_version":1"#,
+            ),
+            (
+                "current_time",
+                r#""current_time":0"#,
+                r#""current_time":-1,"current_time":0"#,
+            ),
+            ("value", r#""value":50.0"#, r#""value":-1,"value":50.0"#),
+            ("id", r#""id":"out""#, r#""id":"other","id":"out""#),
+        ] {
+            let duplicated = original.replacen(original_field, duplicate_fields, 1);
+            assert_ne!(
+                duplicated, original,
+                "test did not inject duplicate {field}"
+            );
+            fs::write(&path, duplicated).unwrap();
+            let result = load_render_fixture(&path);
+            assert!(result.is_err(), "loader accepted duplicate {field}");
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains(&format!("duplicate field `{field}`")),
+                "expected duplicate-field diagnostic for {field}"
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
