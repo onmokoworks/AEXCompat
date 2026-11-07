@@ -265,20 +265,20 @@ pub struct RationalScale {
     pub denominator: u32,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaskScene {
     pub masks: Vec<MaskShape>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaskShape {
     pub open: bool,
     pub vertices: Vec<MaskPoint>,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Debug, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaskPoint {
     pub x: f64,
@@ -289,7 +289,7 @@ pub struct MaskPoint {
     pub tangent_out: Option<MaskTangent>,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Debug, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaskTangent {
     pub x: f64,

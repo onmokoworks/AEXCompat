@@ -144,12 +144,30 @@ pub struct DeclarativeRenderFixture {
     pub parameters: Vec<InteractiveParameter>,
     pub matrix: Option<Vec<FixtureMatrixAxis>>,
     pub worlds: Option<FixtureWorlds>,
+    pub mask_scene: Option<crate::render_request::MaskScene>,
     pub pixel_format: FixturePixelFormat,
     pub render_path: String,
     pub premultiplication: String,
     pub timing: FixtureTiming,
     pub final_artifact: FixtureFinalArtifact,
     pub checkpoints: Vec<FixtureCheckpoint>,
+}
+
+impl DeclarativeRenderFixture {
+    pub(crate) fn host_context(&self) -> Option<crate::render_request::HostContext> {
+        self.mask_scene
+            .clone()
+            .map(|mask_scene| crate::render_request::HostContext {
+                mask_scene,
+                spatial: None,
+                active_camera: None,
+                scene_layers: Vec::new(),
+                render_environment: None,
+                smart_output_request_rect: None,
+                aux_channels: Vec::new(),
+                alpha_as_coverage_params: Vec::new(),
+            })
+    }
 }
 
 pub struct LoadedRenderFixture {
@@ -368,6 +386,10 @@ fn validate_parameter_schema(document: &Value) -> io::Result<()> {
 }
 
 fn validate_fixture(fixture: &DeclarativeRenderFixture) -> io::Result<()> {
+    if let Some(context) = fixture.host_context() {
+        // Reuse both request geometry limits and its encoded transport bound.
+        crate::render_request::encode_mask_context(&context)?;
+    }
     if fixture.schema != "aexcompat.render_fixture" || !matches!(fixture.schema_version, 1 | 2) {
         return Err(invalid(
             "render fixture schema must be aexcompat.render_fixture v1 or v2",
@@ -602,6 +624,144 @@ fn hash_asset_file(path: &Path) -> io::Result<[u8; 32]> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn mask_fixture() -> Value {
+        json!({
+            "schema":"aexcompat.render_fixture", "schema_version":1,
+            "primary_layer":"primary.png", "parameters":[],
+            "pixel_format":"argb8", "render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw", "checkpoints":[{"id":"out","stage":"classic-output"}],
+            "mask_scene":{"masks":[{"open":false,"vertices":[
+                {"x":16,"y":16,"tangent_out":{"x":2,"y":-3}},
+                {"x":80,"y":16},{"x":80,"y":48},{"x":16,"y":48}
+            ]}]}
+        })
+    }
+
+    #[test]
+    fn masks_and_layer_images_share_request_validation_and_encoding() {
+        for version in [1, 2] {
+            let mut value = mask_fixture();
+            value["schema_version"] = json!(version);
+            let mut layer = parameter();
+            layer["kind"] = json!("layer");
+            layer["layer_path"] = json!("source.png");
+            value["parameters"] = json!([layer]);
+            let fixture: DeclarativeRenderFixture = serde_json::from_value(value.clone()).unwrap();
+            validate_fixture(&fixture).unwrap();
+            let context = fixture.host_context().unwrap();
+            let request: crate::render_request::HostContext =
+                serde_json::from_value(json!({"mask_scene":value["mask_scene"]})).unwrap();
+            let encoded = crate::render_request::encode_mask_context(&context).unwrap();
+            assert_eq!(
+                encoded,
+                crate::render_request::encode_mask_context(&request).unwrap()
+            );
+            assert_eq!(
+                encoded,
+                "v2|0:16,16,0,0,2,-3/80,16,0,0,0,0/80,48,0,0,0,0/16,48,0,0,0,0"
+            );
+            assert_eq!(
+                fixture.parameters[0].layer_path.as_deref(),
+                Some(Path::new("source.png"))
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_fixture_masks_are_rejected_by_shared_limits() {
+        let base: DeclarativeRenderFixture = serde_json::from_value(mask_fixture()).unwrap();
+        let mask = base.mask_scene.as_ref().unwrap().masks[0].clone();
+        for count in [0, 1, 2, 65] {
+            let mut fixture = base.clone();
+            fixture.mask_scene.as_mut().unwrap().masks[0].vertices = vec![mask.vertices[0]; count];
+            assert!(
+                validate_fixture(&fixture).is_err(),
+                "closed vertex count {count}"
+            );
+        }
+        for count in [9, 33] {
+            let mut fixture = base.clone();
+            fixture.mask_scene.as_mut().unwrap().masks = vec![mask.clone(); count];
+            assert!(validate_fixture(&fixture).is_err());
+        }
+        let mut fixture = base.clone();
+        let scene = fixture.mask_scene.as_mut().unwrap();
+        scene.masks = vec![mask.clone(); 3];
+        for mask in &mut scene.masks {
+            mask.vertices = vec![mask.vertices[0]; 43];
+        }
+        assert!(validate_fixture(&fixture).is_err()); // 129 total, each mask valid
+        for coordinate in [f64::NAN, f64::INFINITY, -32769.0, 32769.0] {
+            let mut fixture = base.clone();
+            fixture.mask_scene.as_mut().unwrap().masks[0].vertices[0].x = coordinate;
+            assert!(validate_fixture(&fixture).is_err());
+            let mut fixture = base.clone();
+            fixture.mask_scene.as_mut().unwrap().masks[0].vertices[0]
+                .tangent_out
+                .as_mut()
+                .unwrap()
+                .y = coordinate;
+            assert!(validate_fixture(&fixture).is_err());
+        }
+        let mut fixture = base.clone();
+        fixture.mask_scene.as_mut().unwrap().masks[0].open = true;
+        fixture.mask_scene.as_mut().unwrap().masks[0]
+            .vertices
+            .truncate(2);
+        validate_fixture(&fixture).unwrap();
+        fixture.mask_scene.as_mut().unwrap().masks[0]
+            .vertices
+            .truncate(1);
+        assert!(validate_fixture(&fixture).is_err());
+        fixture.mask_scene.as_mut().unwrap().masks.clear();
+        validate_fixture(&fixture).unwrap();
+        let mut unknown = mask_fixture();
+        unknown["mask_scene"]["masks"][0]["vertices"][0]["extra"] = json!(true);
+        assert!(serde_json::from_value::<DeclarativeRenderFixture>(unknown).is_err());
+    }
+
+    #[test]
+    fn mask_fixture_identity_preserves_legacy_digest_and_binds_masks() {
+        let directory =
+            std::env::temp_dir().join(format!("fixture-mask-{:032x}", rand::random::<u128>()));
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("primary.png"), b"asset identity").unwrap();
+        let path = directory.join("fixture.json");
+        for version in [1, 2] {
+            let mut value = mask_fixture();
+            value["schema_version"] = json!(version);
+            let scene = value.as_object_mut().unwrap().remove("mask_scene").unwrap();
+            let legacy_bytes = serde_json::to_vec(&value).unwrap();
+            fs::write(&path, &legacy_bytes).unwrap();
+            let legacy = load_render_fixture(&path).unwrap();
+            assert!(legacy.document.host_context().is_none());
+            assert_eq!(
+                legacy.sha256,
+                format!("{:x}", Sha256::digest(&legacy_bytes))
+            );
+            let identity = |loaded: &LoadedRenderFixture| {
+                fixture_case_identity(loaded, &expand_fixture_cases(loaded)[0], &"11".repeat(32))
+                    .unwrap()
+            };
+            let old_identity = identity(&legacy);
+            value["mask_scene"] = scene;
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let masked = load_render_fixture(&path).unwrap();
+            assert_ne!(legacy.sha256, masked.sha256);
+            assert_ne!(old_identity.sha256, identity(&masked).sha256);
+            value["mask_scene"]["masks"][0]["vertices"][0]["x"] = json!(17);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let moved = load_render_fixture(&path).unwrap();
+            assert_ne!(identity(&masked).sha256, identity(&moved).sha256);
+            value["mask_scene"]["masks"][0]["vertices"] = json!([]);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(load_render_fixture(&path).is_err());
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     fn parameter() -> Value {
         json!({

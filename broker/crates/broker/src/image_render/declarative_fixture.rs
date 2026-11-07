@@ -180,7 +180,15 @@ pub fn render_declarative_fixture(
             approved_sha256,
             &loaded,
             &cases[0].parameters,
-            None,
+            loaded
+                .document
+                .mask_scene
+                .as_ref()
+                .map(|_| {
+                    let observed = format!("{:x}", FixtureSha256::digest(fs::read(plugin_path)?));
+                    fixture_case_identity(&loaded, &cases[0], &observed)
+                })
+                .transpose()?,
             output_directory,
         );
     }
@@ -386,7 +394,8 @@ fn render_single_declarative_fixture(
             secondary_layouts,
             captures.clone(),
         )?;
-        let rendered = render_experimental_artifact_at_time(
+        let host_context = fixture.host_context();
+        let rendered = render_experimental_artifact_at_time_with_context(
             repository,
             plugin_path,
             approved_sha256,
@@ -397,6 +406,7 @@ fn render_single_declarative_fixture(
             smart,
             format,
             kind,
+            host_context.as_ref(),
         );
         let report = rendered?;
         let final_metadata = report
