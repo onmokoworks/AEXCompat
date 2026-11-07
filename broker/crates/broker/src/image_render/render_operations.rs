@@ -916,6 +916,34 @@ pub fn render_experimental_artifact_at_time(
     pixel_format: RenderPixelFormat,
     artifact_kind: RenderArtifactKind,
 ) -> io::Result<Value> {
+    render_experimental_artifact_at_time_with_context(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_directory,
+        parameters,
+        timing,
+        smart,
+        pixel_format,
+        artifact_kind,
+        None,
+    )
+}
+
+fn render_experimental_artifact_at_time_with_context(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_directory: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    artifact_kind: RenderArtifactKind,
+    host_context: Option<&crate::render_request::HostContext>,
+) -> io::Result<Value> {
     if artifact_kind == RenderArtifactKind::Float32Exr && pixel_format != RenderPixelFormat::Argb32f
     {
         return Err(invalid("render-exr requires argb32f"));
@@ -932,7 +960,7 @@ pub fn render_experimental_artifact_at_time(
         output_directory,
         Some(encode_interactive_payload(parameters)?),
         Some(parameters),
-        None,
+        host_context,
         timing,
         smart,
         pixel_format,
