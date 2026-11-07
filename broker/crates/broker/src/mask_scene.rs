@@ -97,5 +97,71 @@ pub(crate) fn encode_mask_scene(scene: &MaskScene) -> io::Result<String> {
 }
 
 fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message)
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mask_validation_preserves_invalid_data_errors() {
+        let point = MaskPoint {
+            x: 0.0,
+            y: 0.0,
+            tangent_in: None,
+            tangent_out: None,
+        };
+        let shape = |count| MaskShape {
+            open: false,
+            vertices: vec![point; count],
+        };
+        let mut nonfinite = shape(3);
+        nonfinite.vertices[0].x = f64::NAN;
+        let mut long = shape(64);
+        for vertex in &mut long.vertices {
+            vertex.x = 0.1234567890123456;
+            vertex.y = 0.1234567890123456;
+            vertex.tangent_in = Some(MaskTangent {
+                x: vertex.x,
+                y: vertex.y,
+            });
+            vertex.tangent_out = vertex.tangent_in;
+        }
+        for (masks, message) in [
+            (vec![shape(3); 9], "host mask count exceeds 8"),
+            (
+                vec![nonfinite],
+                "host mask coordinate is outside bounded range",
+            ),
+            (
+                vec![shape(65)],
+                "host mask vertex count outside enabled range",
+            ),
+            (
+                vec![shape(2)],
+                "host mask vertex count outside enabled range",
+            ),
+            (
+                vec![shape(64); 3],
+                "host mask total vertex count exceeds 128",
+            ),
+            (vec![long; 2], "host mask transport exceeds 8192 bytes"),
+        ] {
+            let scene = MaskScene { masks };
+            let error = encode_mask_scene(&scene).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{message}");
+            assert_eq!(error.to_string(), message);
+            // Also exercise the existing request entry point on Windows.
+            #[cfg(windows)]
+            {
+                let mut context: crate::render_request::HostContext =
+                    serde_json::from_str(r#"{"mask_scene":{"masks":[]}}"#).unwrap();
+                context.mask_scene = scene;
+                let error = crate::render_request::encode_mask_context(&context).unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{message}");
+                assert_eq!(error.to_string(), message);
+            }
+        }
+    }
 }
