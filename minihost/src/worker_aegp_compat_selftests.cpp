@@ -622,6 +622,37 @@ bool verify_camera_case(bool smart_case) {
   return ok;
 }
 
+// SDK Artie_CreateDefaultCamera places the camera at the comp centre and
+// negative focal distance. Consume the public row-vector matrix: rays through
+// the image-plane corners/centre must land on those same comp pixels at Z=0.
+// An identity matrix, a transposed translation, or a reversed Z fails here.
+bool verify_default_camera_image_plane(const AegpMatrix4& matrix,
+    double distance, int16_t width, int16_t height) {
+  if (!std::isfinite(distance) || distance <= 0 || width <= 0 || height <= 0)
+    return false;
+  const double cx = width / 2.0, cy = height / 2.0;
+  const std::array<std::array<double, 2>, 5> pixels{{
+      {{0, 0}}, {{static_cast<double>(width), 0}},
+      {{0, static_cast<double>(height)}},
+      {{static_cast<double>(width), static_cast<double>(height)}}, {{cx, cy}}}};
+  for (const auto& pixel : pixels) {
+    const std::array<double, 4> eye{{pixel[0] - cx, pixel[1] - cy, distance, 1}};
+    const std::array<double, 4> expected{{pixel[0], pixel[1], 0, 1}};
+    for (std::size_t column = 0; column < 4; ++column) {
+      double world = 0;
+      for (std::size_t row = 0; row < 4; ++row)
+        world += eye[row] * matrix.mat[row][column];
+      if (!std::isfinite(world) || std::abs(world - expected[column]) > 1e-9) {
+        std::fprintf(stderr, "Default camera image-plane mismatch: "
+            "component=%zu actual=%.9g expected=%.9g\n",
+            column, world, expected[column]);
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 bool verify_matrix_case(bool smart_case) {
   if (!g_hooks.get_camera_matrix || !g_hooks.get_dimensions ||
       !g_hooks.set_dimensions || !g_hooks.set_camera_index ||
@@ -654,9 +685,7 @@ bool verify_matrix_case(bool smart_case) {
   bool ok = g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
       &width, &height) == 0 && distance == expected_width &&
       width == expected_width && height == expected_height;
-  for (std::size_t row = 0; row < 4; ++row)
-    for (std::size_t column = 0; column < 4; ++column)
-      ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
+  ok = ok && verify_default_camera_image_plane(matrix, distance, width, height);
 
   spatial.downsample_x = {1, 2};
   spatial.downsample_y = {1, 2};
@@ -668,9 +697,15 @@ bool verify_matrix_case(bool smart_case) {
   ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
       &width, &height) == 0 && distance == expected_width &&
       width == expected_width && height == expected_height;
-  for (std::size_t row = 0; row < 4; ++row)
-    for (std::size_t column = 0; column < 4; ++column)
-      ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
+  ok = ok && verify_default_camera_image_plane(matrix, distance, width, height);
+
+  // Odd fixture dimensions retain the half-pixel centre; downsampling does not
+  // change the full-resolution camera geometry.
+  g_hooks.set_dimensions(161, 121);
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) == 0 && width == 161 && height == 121 &&
+      verify_default_camera_image_plane(matrix, distance, width, height);
+  g_hooks.set_dimensions(expected_width, expected_height);
 
   spatial.pixel_aspect_ratio.denominator = 0;
   AegpMatrix4 sentinel{};
@@ -1080,6 +1115,11 @@ bool verify_authored_camera_transport_case() {
   const suite_abi::AegpTime before{29, 30};
   camera = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
   ok = ok && g_hooks.get_camera(g_hooks.effect, &before, &camera) == 0 && !camera;
+  // Outside an authored camera's active span, use the same default view as a
+  // camera-less comp, rather than its inactive transform or an identity.
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &before, &matrix, &zoom,
+      &width, &height) == 0 &&
+      verify_default_camera_image_plane(matrix, zoom, width, height);
 
   scene.authored_camera_live = false;
   scene.active_camera_layer_index = -1;

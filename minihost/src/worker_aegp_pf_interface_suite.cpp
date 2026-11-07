@@ -224,6 +224,16 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
         zoom_type != kStreamTypeOneD || !std::isfinite(zoom_value.one_d) ||
         zoom_value.one_d <= 0.0) return 4;
     resolved_distance = zoom_value.one_d;
+  } else {
+    // A camera-less comp still has a perspective view, not a camera located
+    // on its Z=0 image plane. Follow the SDK Artie_CreateDefaultCamera geometry
+    // (Examples/AEGP/Artie/Artie.cpp): centre X/Y and translate Z by -focal
+    // distance. Public A_Matrix4 uses row vectors, with translation in row 3.
+    // Retain this host's existing default lens distance; Z=0 then projects
+    // back to the original full-resolution comp pixels at unit scale.
+    result.mat[3][0] = static_cast<double>(width) / 2.0;
+    result.mat[3][1] = static_cast<double>(height) / 2.0;
+    result.mat[3][2] = -resolved_distance;
   }
   *camera_matrix = result;
   *distance_to_image_plane = resolved_distance;
