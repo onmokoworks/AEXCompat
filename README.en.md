@@ -53,7 +53,7 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
 4. Press **Render** (**Render preview** on Windows)
 5. Compare input and output
 
-Inputs can be PNG, JPEG, BMP, TIFF, or WebP (the Mac GUI currently takes PNG only); 8 bpc output is PNG (see the GUI guide for 16/32 bpc formats). Multiple layers are supported. Time and FPS, mono float32 audio, downsampling, pixel aspect ratio, and sequence state are currently in the Windows GUI only. See the [GUI guide](docs/GUI_GUIDE.md) for details.
+Inputs can be PNG, JPEG, BMP, TIFF, or WebP (the Mac GUI currently takes PNG only); 8 bpc output is PNG (see the GUI guide for 16/32 bpc formats). Multiple layers are supported. Time and FPS, mono float32 audio, downsampling, pixel aspect ratio, and the sequence-state check are currently in the Windows GUI only. See the [GUI guide](docs/GUI_GUIDE.md) for details.
 
 ## Limitations
 
@@ -77,7 +77,7 @@ uv run python -m pytest -q
 | `guest/` | Worker that runs Windows x64 AEX on Apple Silicon |
 | `instruments/` | AEX that measure SDK ABI and Suites |
 | `tests/` | Tests |
-| `analysis/` | Reference results from After Effects |
+| `analysis/` | After Effects reference results and verification records |
 
 SDK-dependent tests and CI conditions are in [Build Requirements](docs/BUILD_REQUIREMENTS.md); contribution rules are in [Contributing](CONTRIBUTING.md). Do not post private or commercial AEX, the Adobe SDK, memory dumps, or personal file paths in issues or pull requests.
 

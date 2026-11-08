@@ -53,7 +53,7 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
 4. **Render**を押す（Windowsは**Render preview**）
 5. 入力と出力を見比べる
 
-入力はPNG、JPEG、BMP、TIFF、WebP（MacのGUIは今のところPNGのみ）、8 bpcの出力はPNGです（16/32 bpcの保存形式はGUIガイドにあります）。複数レイヤーも使えます。時間とFPS、モノラルのfloat32音声、ダウンサンプル、ピクセルアスペクト比、シーケンス状態は、今のところWindowsのGUIだけです。詳しい操作は[GUIガイド](docs/GUI_GUIDE_JA.md)にあります。
+入力はPNG、JPEG、BMP、TIFF、WebP（MacのGUIは今のところPNGのみ）、8 bpcの出力はPNGです（16/32 bpcの保存形式はGUIガイドにあります）。複数レイヤーも使えます。時間とFPS、モノラルのfloat32音声、ダウンサンプル、ピクセルアスペクト比、シーケンス状態の検査は、今のところWindowsのGUIだけです。詳しい操作は[GUIガイド](docs/GUI_GUIDE_JA.md)にあります。
 
 ## できないこと
 
@@ -77,7 +77,7 @@ uv run python -m pytest -q
 | `guest/` | Apple SiliconでWindows x64 AEXを動かすworker |
 | `instruments/` | SDK ABIやSuiteを測るためのAEX |
 | `tests/` | テスト |
-| `analysis/` | After Effects実機の参照結果 |
+| `analysis/` | After Effects実機の参照結果と検証記録 |
 
 SDKを使うテストやCIの条件は[Build Requirements](docs/BUILD_REQUIREMENTS.md)、投稿のルールは[Contributing](CONTRIBUTING.md)にあります。非公開・市販のAEX、Adobe SDK、メモリダンプ、個人のファイルパスは、IssueやPRに載せないでください。
 
