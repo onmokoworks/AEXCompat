@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-After Effectsの`.aex`プラグインを、After Effectsなしで読み込んで描画・デバッグするためのツールです。
+Windows x64用のAfter Effectsプラグイン（`.aex`）を、After Effectsなしで読み込んで描画・デバッグするためのツールです。
 
 <p align="center">
   <img src="docs/images/aexcompat-gui.png" alt="AEXCompat GUI：解析ログ、Effect Controls、入力・出力ビューアー" width="1200">
@@ -10,8 +10,8 @@ After Effectsの`.aex`プラグインを、After Effectsなしで読み込んで
 
 - AEXを選ぶとEffect Controlsが出て、画像を入れて描画し、入力と出力を見比べられます
 - Classic Render、SmartFX、ARGB8/16/32Fに対応しています
-- 止まったり落ちたりした原因を、診断ログに残します
-- 複数のAEXを順に掛ける[エフェクトチェーン](docs/WINDOWS_GUI_EFFECT_CHAIN.md)も使えます（Windows）
+- 止まったり落ちたりしたときの状況を、診断ログに残します
+- 複数のAEXを順に掛ける[エフェクトチェーン](docs/GUI_GUIDE_JA.md#エフェクトを連続して適用する)も使えます
 
 ## 試す
 
@@ -25,11 +25,11 @@ cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
 
-AEXを描画するには、`minihost/`のworkerもビルドします（CMakeが必要）。手順は[Build Requirements](docs/BUILD_REQUIREMENTS.md)にあります。
+AEXを読み込む・描画するには、`minihost/`のworkerもビルドします（CMakeが必要）。手順は[Build Requirements](docs/BUILD_REQUIREMENTS.md)にあります。
 
 ### Apple Silicon Mac
 
-Windows x64のAEXを、Unicornでエミュレートして動かします。準備はRust/Cargoだけでできます。
+Windows x64のAEXを、Unicornでエミュレートして動かします。次のコマンドで、arm64 workerのDMGをビルドして確かめられます（Rust/Cargoだけでできます）。MacでGUIを動かす手順は[GUIガイド](docs/GUI_GUIDE_JA.md#apple-silicon-mac)にあります。
 
 ```sh
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -50,16 +50,16 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
 1. AEXを選ぶ
 2. Effect Controlsが出る
 3. 入力画像とパラメーターを決める
-4. **Render current frame**か**Render and save PNG**を押す
+4. **Render**を押す（Windowsは**Render preview**）
 5. 入力と出力を見比べる
 
-入力はPNG、JPEG、BMP、TIFF、WebP、出力はPNGです。複数レイヤー、時間、ダウンサンプル、モノラルのfloat32音声も扱えます。詳しい操作は[GUIガイド](docs/GUI_GUIDE_JA.md)にあります。
+入力はPNG、JPEG、BMP、TIFF、WebP（MacのGUIは今のところPNGのみ）、出力はPNGです。複数レイヤー、時間とFPS、ダウンサンプル、ピクセルアスペクト比、シーケンス状態、モノラルのfloat32音声も扱えます。詳しい操作は[GUIガイド](docs/GUI_GUIDE_JA.md)にあります。
 
 ## できないこと
 
 - 未対応のSuiteや、エフェクト固有のホストへの依存で止まることがあります
 - 描画できても、After Effectsと同じ絵になるとは限りません
-- カスタムUI、GPU、ピクセル深度、複数入力の扱いは、AEXによって動いたり動かなかったりします
+- カスタムUI、GPU、ピクセル深度、複数入力、シーケンス処理の扱いは、AEXによって動いたり動かなかったりします
 - After Effects全体やAEGPホストの再実装は目指していません
 
 ## 開発
@@ -90,7 +90,7 @@ SDKを使うテストやCIの条件は[Build Requirements](docs/BUILD_REQUIREMEN
 | 方針とロードマップ | [Project Direction](docs/PROJECT_DIRECTION.md) |
 | Macでの検証結果 | [macOS Unicorn Corpus Metrics](docs/MACOS_UNICORN_CORPUS_METRICS.md) |
 | AEXの移植・解析 | [AEX Porting Dossier](docs/aex-porting-dossier.md) |
-| Windowsでの実行の安全性 | [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md) |
+| Windowsネイティブ実行の安全性強化 | [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md) |
 | 別のマシンでAE参照結果を取る | [AE Oracle Cross-Machine Runbook](docs/AE_ORACLE_CROSS_MACHINE_RUNBOOK_2026-07-18.md) |
 | 公開範囲と第三者の成果物 | [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) |
 | 脆弱性の報告 | [Security Policy](SECURITY.md) |

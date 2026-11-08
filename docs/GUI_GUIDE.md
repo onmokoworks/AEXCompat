@@ -128,7 +128,7 @@ For a bug report, record the OS, AEXCompat commit, AEX version, input dimensions
 | No Mac output view at 16/32 bpc | Check for `Completed: render artifact` or `Completed: effect chain artifact` and the Output destination. Deep previews are not implemented |
 | Chain fails partway through | Inspect the named stage and try it alone. Check depth support in every stage |
 | Destination exists or writing fails | Choose a new name in a writable directory. Check the raw sidecar destination too |
-| Windows render times out | The default is 30 seconds per frame. If needed, set `$env:AEXCOMPAT_FRAME_DEADLINE_MS="120000"` before launch. The allowed range is 1000–600000 ms |
+| Windows render times out | The default is 30 seconds per frame. If needed, set `$env:AEXCOMPAT_FRAME_DEADLINE_MS="120000"` before launch. The allowed range is 1000–600000 ms. `render-video-batch` uses it when the request has no `frame_deadline_ms`; `--render-differential`, `--render-performance-diagnostics`, and `--render-memory-diagnostics` stay at 30 seconds |
 | Unsupported suite, selector, output size, or checksum error | Record the error and reproduction conditions. Do not disable validation to accept the output |
 
 ## Remaining Windows / Mac differences

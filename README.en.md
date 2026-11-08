@@ -2,7 +2,7 @@
 
 [日本語](README.md)
 
-A tool for loading, rendering, and debugging After Effects `.aex` plug-ins without After Effects.
+A tool for loading, rendering, and debugging Windows x64 After Effects plug-ins (`.aex`) without After Effects.
 
 <p align="center">
   <img src="docs/images/aexcompat-gui.png" alt="AEXCompat GUI: analysis log, Effect Controls, and input/output viewers" width="1200">
@@ -10,8 +10,8 @@ A tool for loading, rendering, and debugging After Effects `.aex` plug-ins witho
 
 - Pick an AEX, get its Effect Controls, render an image, and compare input and output
 - Supports Classic Render, SmartFX, and ARGB8/16/32F
-- Records why a plug-in stopped or crashed in a diagnostic log
-- Applies several AEX in order as an [effect chain](docs/WINDOWS_GUI_EFFECT_CHAIN.md) (Windows)
+- Records diagnostics when a plug-in hangs or crashes
+- Applies several AEX in order as an [effect chain](docs/GUI_GUIDE.md#apply-effects-in-sequence)
 
 ## Try it
 
@@ -25,11 +25,11 @@ cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
 
-To render an AEX, also build the `minihost/` workers (needs CMake). See [Build Requirements](docs/BUILD_REQUIREMENTS.md).
+To load or render an AEX, also build the `minihost/` workers (needs CMake). See [Build Requirements](docs/BUILD_REQUIREMENTS.md).
 
 ### Apple Silicon Mac
 
-Runs Windows x64 AEX under Unicorn emulation. Setup needs only Rust/Cargo.
+Runs Windows x64 AEX under Unicorn emulation. The command below builds and checks the arm64 worker DMG (Rust/Cargo only). To launch the GUI on a Mac, see the [GUI guide](docs/GUI_GUIDE.md#apple-silicon-mac).
 
 ```sh
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -50,16 +50,16 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
 1. Pick an AEX
 2. Its Effect Controls appear
 3. Set the input image and parameters
-4. Press **Render current frame** or **Render and save PNG**
+4. Press **Render** (**Render preview** on Windows)
 5. Compare input and output
 
-Inputs can be PNG, JPEG, BMP, TIFF, or WebP; output is PNG. Multiple layers, time, downsampling, and mono float32 audio are also supported. See the [GUI guide](docs/GUI_GUIDE.md) for details.
+Inputs can be PNG, JPEG, BMP, TIFF, or WebP (the Mac GUI currently takes PNG only); output is PNG. Multiple layers, time and FPS, downsampling, pixel aspect ratio, sequence state, and mono float32 audio are also supported. See the [GUI guide](docs/GUI_GUIDE.md) for details.
 
 ## Limitations
 
 - Unsupported Suites or effect-specific host assumptions can stop a plug-in
 - A successful render does not guarantee the same image as After Effects
-- Custom UI, GPU, pixel depth, and multiple inputs work for some AEX and not others
+- Custom UI, GPU, pixel depth, multiple inputs, and sequence handling work for some AEX and not others
 - Recreating all of After Effects or a full AEGP host is not a goal
 
 ## Development
@@ -90,7 +90,7 @@ SDK-dependent tests and CI conditions are in [Build Requirements](docs/BUILD_REQ
 | Direction and roadmap | [Project Direction](docs/PROJECT_DIRECTION.md) |
 | Results on macOS | [macOS Unicorn Corpus Metrics](docs/MACOS_UNICORN_CORPUS_METRICS.md) |
 | Porting and analyzing an AEX | [AEX Porting Dossier](docs/aex-porting-dossier.md) |
-| Safety of native Windows execution | [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md) |
+| Windows native execution hardening | [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md) |
 | Capturing AE references on another machine | [AE Oracle Cross-Machine Runbook](docs/AE_ORACLE_CROSS_MACHINE_RUNBOOK_2026-07-18.md) |
 | Public scope and third-party material | [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) |
 | Reporting vulnerabilities | [Security Policy](SECURITY.md) |
@@ -101,4 +101,4 @@ More documents are listed in the [documentation index](docs/README.md).
 
 The parts owned by AEXCompat's developers are under the [Mozilla Public License 2.0](LICENSE). Third-party material, the Adobe SDK, and private AEX keep their own terms. Distribution terms for binaries that include Unicorn Engine are in [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md).
 
-Adobe, After Effects, and related product names are trademarks of their respective owners. This project is not affiliated with Adobe.
+Adobe, After Effects, and related product names are trademarks of their respective owners. This project is not an official Adobe project.
