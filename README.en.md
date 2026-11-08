@@ -53,7 +53,7 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
 4. Press **Render** (**Render preview** on Windows)
 5. Compare input and output
 
-Inputs can be PNG, JPEG, BMP, TIFF, or WebP (the Mac GUI currently takes PNG only); output is PNG (plus raw or EXR at 16/32 bpc). Multiple layers, downsampling, pixel aspect ratio, and sequence state are also supported. Time and FPS and mono float32 audio are Windows only. See the [GUI guide](docs/GUI_GUIDE.md) for details.
+Inputs can be PNG, JPEG, BMP, TIFF, or WebP (the Mac GUI currently takes PNG only); 8 bpc output is PNG (see the GUI guide for 16/32 bpc formats). Multiple layers are supported. Time and FPS, mono float32 audio, downsampling, pixel aspect ratio, and sequence state are currently in the Windows GUI only. See the [GUI guide](docs/GUI_GUIDE.md) for details.
 
 ## Limitations
 
