@@ -1,45 +1,23 @@
 # AEXCompat
 
-GUI instructions: [日本語 (primary)](docs/GUI_GUIDE_JA.md) · [English translation](docs/GUI_GUIDE.md)
+[日本語](README.md)
 
-**A compatibility host for loading, rendering, and debugging `.aex` plug-ins outside After Effects.**
-
-[日本語](README.md) · [Quick start](#quick-start) · [Documentation](#documentation) · [License](#license)
+A tool for loading, rendering, and debugging After Effects `.aex` plug-ins without After Effects.
 
 <p align="center">
-  <img src="docs/images/aexcompat-gui.png" alt="AEXCompat GUI with analysis logs, Effect Controls, and input/output viewers" width="1200">
+  <img src="docs/images/aexcompat-gui.png" alt="AEXCompat GUI: analysis log, Effect Controls, and input/output viewers" width="1200">
 </p>
 
-The Rust/egui GUI, which is being unified across Windows and Apple Silicon, combines AEX selection, Effect Controls, input/output comparison, and diagnostic logs in one workspace.
+- Pick an AEX, get its Effect Controls, render an image, and compare input and output
+- Supports Classic Render, SmartFX, and ARGB8/16/32F
+- Records why a plug-in stopped or crashed in a diagnostic log
+- Applies several AEX in order as an [effect chain](docs/WINDOWS_GUI_EFFECT_CHAIN.md) (Windows)
 
-## What is AEXCompat?
-
-AEXCompat is a clean-room compatibility host that feeds images or audio to Windows x64 `.aex` plug-ins and displays, saves, and diagnoses their output.
-
-- Rust desktop harness and C++/MSVC worker on Windows
-- arm64 Unicorn worker for Windows x64 guest execution on Apple Silicon
-- Effect Controls, Classic Render, SmartFX, and ARGB8/16/32F
-- Structured selector, Suite, parameter, crash, and hang diagnostics
-- Pixel comparison with reference output captured from After Effects
-
-It is not intended to recreate the complete After Effects application, an AEP editor, or a full AEGP host.
-
-| Platform | Execution route |
-|---|---|
-| Windows x64 | Desktop harness + native C++/MSVC worker |
-| Apple Silicon | arm64 Unicorn worker executing Windows x64 guest code |
-
-## Quick start
+## Try it
 
 ### Windows
 
-Requirements for building and launching the GUI from source:
-
-- Windows 10/11 x64
-- Rust/Cargo
-- Visual Studio or Build Tools with MSVC C++ and the Windows SDK
-
-Launch the GUI:
+Requires Windows 10/11 x64, Rust/Cargo, and Visual Studio or Build Tools (MSVC C++ and the Windows SDK).
 
 ```powershell
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -47,11 +25,11 @@ cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
 
-Inspecting or rendering an AEX also requires building the `minihost/` workers, which requires CMake in addition to the requirements above. The Adobe SDK is needed only when building probes or SDK fixtures. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for exact commands and toolsets.
+To render an AEX, also build the `minihost/` workers (needs CMake). See [Build Requirements](docs/BUILD_REQUIREMENTS.md).
 
-### Apple Silicon Mac (optional route)
+### Apple Silicon Mac
 
-With Rust/Cargo installed, a single command builds the arm64 Release worker, applies an ad-hoc signature, creates a DMG, mounts it, and verifies the package. Windows and Rosetta are not required.
+Runs Windows x64 AEX under Unicorn emulation. Setup needs only Rust/Cargo.
 
 ```sh
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -59,7 +37,7 @@ cd AEXCompat
 tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local.dmg
 ```
 
-To render a local AEX and PNG:
+To try your own AEX and PNG, pass absolute paths.
 
 ```sh
 AEXCOMPAT_SMOKE_AEX=/absolute/path/to/effect.aex \
@@ -67,44 +45,24 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
   tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local-smoke.dmg
 ```
 
-The AEX and input image are not included in the DMG. The standard path uses only the arm64 Unicorn worker. The optional Rosetta carrier is included only with `AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1` and is intended for trusted AEX plug-ins.
+## Usage
 
-## Workflow
+1. Pick an AEX
+2. Its Effect Controls appear
+3. Set the input image and parameters
+4. Press **Render current frame** or **Render and save PNG**
+5. Compare input and output
 
-1. Select an AEX.
-2. A background `PF_PARAMS_SETUP` run builds the Effect Controls.
-3. Select an input image and edit parameters.
-4. Run **Render current frame** or **Render and save PNG**.
-5. Compare the input and AEX output in the viewer.
+Inputs can be PNG, JPEG, BMP, TIFF, or WebP; output is PNG. Multiple layers, time, downsampling, and mono float32 audio are also supported. See the [GUI guide](docs/GUI_GUIDE.md) for details.
 
-Supported image input formats are PNG, JPEG, BMP, TIFF, and WebP; output is PNG. The host also models multiple Layer inputs, time/FPS, downsampling, pixel aspect ratio, sequence state, and mono float32 audio.
+## Limitations
 
-On Windows, each frame is cut off after 30 s by default. For effects whose frames take longer, set `AEXCOMPAT_FRAME_DEADLINE_MS` (in milliseconds, 1000 to 600000) before launching the GUI or CLI; `render-video-batch` uses this value when the request has no `frame_deadline_ms`. `--render-differential`, `--render-performance-diagnostics`, and `--render-memory-diagnostics` keep their fixed 30 s deadline.
+- Unsupported Suites or effect-specific host assumptions can stop a plug-in
+- A successful render does not guarantee the same image as After Effects
+- Custom UI, GPU, pixel depth, and multiple inputs work for some AEX and not others
+- Recreating all of After Effects or a full AEGP host is not a goal
 
-## Architecture
-
-```text
-Desktop Harness / CLI
-        ↓
-Rust Broker (validation, staging, provenance)
-        ↓
-Isolated Worker Process
-        ↓
-Clean-room Effect Host (selectors, PF worlds, Suites)
-        ↓
-AEX → image / audio / diagnostics
-```
-
-| Directory | Purpose |
-|---|---|
-| `broker/` | Rust broker, desktop harness, and isolated launch |
-| `minihost/` | C++ worker providing the AE Effect ABI and PF Suites |
-| `guest/` | Guest worker for Windows x64 AEX execution on Apple Silicon |
-| `instruments/` | Probe AEX projects for SDK ABI, Suite, and selector behavior |
-| `tests/` | Contract, boundary, regression, and fail-closed tests |
-| `analysis/` | AE oracle and runtime evidence |
-
-## Tests
+## Development
 
 ```powershell
 uv sync --locked
@@ -112,39 +70,35 @@ cargo test --manifest-path broker\Cargo.toml --workspace
 uv run python -m pytest -q
 ```
 
-SDK, checkout-built artifact, and machine-bound evidence tests require explicit opt-in. Public-repository and fork CI runs validate the source-only scope and do not fetch or redistribute the Adobe SDK. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for the complete matrix.
+| Directory | Contents |
+|---|---|
+| `broker/` | Rust broker and GUI |
+| `minihost/` | C++ worker that runs the AEX |
+| `guest/` | Worker that runs Windows x64 AEX on Apple Silicon |
+| `instruments/` | AEX that measure SDK ABI and Suites |
+| `tests/` | Tests |
+| `analysis/` | Reference results from After Effects |
 
-## Current limitations
-
-- Missing Suites and effect-specific host assumptions can prevent loading or rendering
-- Worker completion, image production, and AE pixel equivalence are separate milestones
-- Custom UI, GPU backends, pixel depths, multiple inputs, and sequence semantics vary by plug-in
+SDK-dependent tests and CI conditions are in [Build Requirements](docs/BUILD_REQUIREMENTS.md); contribution rules are in [Contributing](CONTRIBUTING.md). Do not post private or commercial AEX, the Adobe SDK, memory dumps, or personal file paths in issues or pull requests.
 
 ## Documentation
 
 | Topic | Document |
 |---|---|
-| Build, SDK, and CI requirements | [Build Requirements](docs/BUILD_REQUIREMENTS.md) |
+| Build and CI | [Build Requirements](docs/BUILD_REQUIREMENTS.md) |
 | Current compatibility | [Compatibility Status](docs/COMPATIBILITY_STATUS_2026-07-16.md) |
 | Direction and roadmap | [Project Direction](docs/PROJECT_DIRECTION.md) |
-| Mac AEX validation method and dated results | [macOS Unicorn Corpus Metrics](docs/MACOS_UNICORN_CORPUS_METRICS.md) |
-| AEX porting and analysis | [AEX Porting Dossier](docs/aex-porting-dossier.md) |
-| Windows native hardening | [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md) |
-| Cross-machine AE oracle capture | [AE Oracle Cross-Machine Runbook](docs/AE_ORACLE_CROSS_MACHINE_RUNBOOK_2026-07-18.md) |
-| Publication and third-party boundary | [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) |
-| Vulnerability reporting | [Security Policy](SECURITY.md) |
-| Development and submission rules | [Contributing](CONTRIBUTING.md) |
+| Results on macOS | [macOS Unicorn Corpus Metrics](docs/MACOS_UNICORN_CORPUS_METRICS.md) |
+| Porting and analyzing an AEX | [AEX Porting Dossier](docs/aex-porting-dossier.md) |
+| Safety of native Windows execution | [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md) |
+| Capturing AE references on another machine | [AE Oracle Cross-Machine Runbook](docs/AE_ORACLE_CROSS_MACHINE_RUNBOOK_2026-07-18.md) |
+| Public scope and third-party material | [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) |
+| Reporting vulnerabilities | [Security Policy](SECURITY.md) |
 
-The [documentation index](docs/README.md) lists additional design and validation documents.
-
-## Contributing
-
-Compatibility work starts with observed behavior from a real AEX, an SDK sample, or a self-authored probe. Changes should model the smallest general host capability rather than a fixture-specific branch, add focused boundary tests, and compare against an After Effects oracle where possible.
-
-Do not post proprietary AEX plug-ins, Adobe SDK content, DLLs, dumps, private assets/corpora, secrets, or personal paths in issues or pull requests.
+More documents are listed in the [documentation index](docs/README.md).
 
 ## License
 
-AEXCompat-authored material that contributors have the right to license is available under the [Mozilla Public License 2.0](LICENSE). Third-party material, the Adobe SDK, and private AEX plug-ins retain their own terms. See the [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) for Unicorn-linked binary distribution, dependency notices, and publication requirements.
+The parts owned by AEXCompat's developers are under the [Mozilla Public License 2.0](LICENSE). Third-party material, the Adobe SDK, and private AEX keep their own terms. Distribution terms for binaries that include Unicorn Engine are in [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md).
 
-Adobe, After Effects, and related product names are trademarks of their respective owners. AEXCompat is not an official Adobe project.
+Adobe, After Effects, and related product names are trademarks of their respective owners. This project is not affiliated with Adobe.
