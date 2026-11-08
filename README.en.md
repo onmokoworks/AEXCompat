@@ -10,7 +10,7 @@ A tool for loading, rendering, and debugging Windows x64 After Effects plug-ins 
 
 - Pick an AEX, get its Effect Controls, render an image, and compare input and output
 - Supports Classic Render, SmartFX, and ARGB8/16/32F
-- Records diagnostics when a plug-in hangs or crashes
+- Records diagnostics when a render hangs or a plug-in crashes
 - Applies several AEX in order as an [effect chain](docs/GUI_GUIDE.md#apply-effects-in-sequence)
 
 ## Try it
@@ -25,11 +25,11 @@ cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
 
-To load or render an AEX, also build the `minihost/` workers (needs CMake). See [Build Requirements](docs/BUILD_REQUIREMENTS.md).
+To load or render an AEX, also build the `minihost/` worker (needs CMake). See [Build Requirements](docs/BUILD_REQUIREMENTS.md).
 
 ### Apple Silicon Mac
 
-Runs Windows x64 AEX under Unicorn emulation. The command below builds and checks the arm64 worker DMG (Rust/Cargo only). To launch the GUI on a Mac, see the [GUI guide](docs/GUI_GUIDE.md#apple-silicon-mac).
+Runs Windows x64 AEX under Unicorn emulation. Requires Rust/Cargo, Xcode Command Line Tools, and CMake (no spaces or colons in the repository path). The command below builds and checks the arm64 worker DMG. To launch the GUI on a Mac, see the [GUI guide](docs/GUI_GUIDE.md#apple-silicon-mac).
 
 ```sh
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -53,7 +53,7 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
 4. Press **Render** (**Render preview** on Windows)
 5. Compare input and output
 
-Inputs can be PNG, JPEG, BMP, TIFF, or WebP (the Mac GUI currently takes PNG only); output is PNG. Multiple layers, time and FPS, downsampling, pixel aspect ratio, sequence state, and mono float32 audio are also supported. See the [GUI guide](docs/GUI_GUIDE.md) for details.
+Inputs can be PNG, JPEG, BMP, TIFF, or WebP (the Mac GUI currently takes PNG only); output is PNG (plus raw or EXR at 16/32 bpc). Multiple layers, downsampling, pixel aspect ratio, and sequence state are also supported. Time and FPS and mono float32 audio are Windows only. See the [GUI guide](docs/GUI_GUIDE.md) for details.
 
 ## Limitations
 

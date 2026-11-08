@@ -10,7 +10,7 @@ Windows x64用のAfter Effectsプラグイン（`.aex`）を、After Effectsな�
 
 - AEXを選ぶとEffect Controlsが出て、画像を入れて描画し、入力と出力を見比べられます
 - Classic Render、SmartFX、ARGB8/16/32Fに対応しています
-- 止まったり落ちたりしたときの状況を、診断ログに残します
+- 描画が止まったときや落ちたときの状況を、診断ログに残します
 - 複数のAEXを順に掛ける[エフェクトチェーン](docs/GUI_GUIDE_JA.md#エフェクトを連続して適用する)も使えます
 
 ## 試す
@@ -29,7 +29,7 @@ AEXを読み込む・描画するには、`minihost/`のworkerもビルドしま
 
 ### Apple Silicon Mac
 
-Windows x64のAEXを、Unicornでエミュレートして動かします。次のコマンドで、arm64 workerのDMGをビルドして確かめられます（Rust/Cargoだけでできます）。MacでGUIを動かす手順は[GUIガイド](docs/GUI_GUIDE_JA.md#apple-silicon-mac)にあります。
+Windows x64のAEXを、Unicornでエミュレートして動かします。Rust/Cargo、Xcode Command Line Tools、CMakeが必要です（リポジトリのパスに空白やコロンを含めない）。次のコマンドで、arm64 workerのDMGをビルドして確かめられます。MacでGUIを動かす手順は[GUIガイド](docs/GUI_GUIDE_JA.md#apple-silicon-mac)にあります。
 
 ```sh
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -53,7 +53,7 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
 4. **Render**を押す（Windowsは**Render preview**）
 5. 入力と出力を見比べる
 
-入力はPNG、JPEG、BMP、TIFF、WebP（MacのGUIは今のところPNGのみ）、出力はPNGです。複数レイヤー、時間とFPS、ダウンサンプル、ピクセルアスペクト比、シーケンス状態、モノラルのfloat32音声も扱えます。詳しい操作は[GUIガイド](docs/GUI_GUIDE_JA.md)にあります。
+入力はPNG、JPEG、BMP、TIFF、WebP（MacのGUIは今のところPNGのみ）、出力はPNG（16/32 bpcではrawやEXRも）です。複数レイヤー、ダウンサンプル、ピクセルアスペクト比、シーケンス状態も扱えます。時間とFPS、モノラルのfloat32音声はWindowsだけです。詳しい操作は[GUIガイド](docs/GUI_GUIDE_JA.md)にあります。
 
 ## できないこと
 
