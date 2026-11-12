@@ -1077,6 +1077,10 @@ struct FrameDone {
     kind: String,
     frame_index: u32,
     #[serde(default)]
+    case_cleanup: Option<bool>,
+    #[serde(default)]
+    case_report: Option<Value>,
+    #[serde(default)]
     performance: Option<WorkerFramePerformance>,
     status: String,
     #[serde(default)]
@@ -1140,6 +1144,9 @@ pub struct RenderSession {
     total_time: i32,
     frame_deadline: Duration,
     invalidation: Option<SessionInvalidation>,
+    independent_cases: bool,
+    last_case_report: Option<Value>,
+    response_limit: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     last_output_generation: u32,
     frames_ok: u32,
     frames_errored: u32,
@@ -2193,6 +2200,8 @@ impl RenderSession {
         let (sender, receiver) = mpsc::channel::<SessionEvent>();
         let response_handle = response_read.take() as usize;
         let reader_sender = sender.clone();
+        let response_limit = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(MAX_MESSAGE_BYTES));
+        let reader_limit = response_limit.clone();
         thread::spawn(move || {
             let handle = response_handle as HANDLE;
             let _owner = match OwnedHandle::new(handle) {
@@ -2207,7 +2216,7 @@ impl RenderSession {
                     return;
                 }
                 let length = u32::from_le_bytes(prefix) as usize;
-                if length == 0 || length > MAX_MESSAGE_BYTES {
+                if length == 0 || length > reader_limit.load(std::sync::atomic::Ordering::Acquire) {
                     let _ = reader_sender.send(SessionEvent::ReaderViolation);
                     return;
                 }
@@ -2248,6 +2257,9 @@ impl RenderSession {
             total_time: request.total_time,
             frame_deadline: request.frame_deadline,
             invalidation: None,
+            independent_cases: false,
+            last_case_report: None,
+            response_limit,
             last_output_generation: 0,
             frames_ok: 0,
             frames_errored: 0,
@@ -2638,6 +2650,77 @@ impl RenderSession {
         parameters: Option<&[InteractiveParameter]>,
         ui_action: Option<&RenderUiAction>,
     ) -> io::Result<FrameOutcome> {
+        self.render_instance_frame(frame_index, current_time, rgba, parameters, ui_action, false)
+    }
+
+    /// Negotiate before sending any independent request. Older workers fail
+    /// explicitly without being asked to interpret a new render message.
+    pub fn require_independent_cases(&mut self) -> io::Result<()> {
+        if self.invalidation.is_some() {
+            return Err(invalid("render session is invalidated"));
+        }
+        let sent = self.transport.send_message(r#"{"v":1,"type":"capabilities"}"#);
+        if sent {
+            if let FrameWait::Message(body) =
+                self.await_frame_response(Instant::now() + self.frame_deadline)
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Capabilities {
+                    v: u32,
+                    #[serde(rename = "type")]
+                    kind: String,
+                    render_case: u32,
+                }
+                if serde_json::from_slice::<Capabilities>(&body).is_ok_and(|value| {
+                    value.v == 1 && value.kind == "capabilities" && value.render_case == 1
+                }) {
+                    self.independent_cases = true;
+                    self.response_limit.store(4 * 1024 * 1024, std::sync::atomic::Ordering::Release);
+                    return Ok(());
+                }
+            }
+        }
+        Err(self.invalidate(
+            "independent_cases_unsupported",
+            "worker did not advertise render_case v1".into(),
+            true,
+            POST_TERMINATION_COLLECT_TIMEOUT,
+        ))
+    }
+
+    pub fn render_case(
+        &mut self,
+        case_index: u32,
+        current_time: i32,
+        rgba: &[u8],
+        parameters: &[InteractiveParameter],
+    ) -> io::Result<FrameOutcome> {
+        if !self.independent_cases {
+            return Err(invalid("render_case capability has not been negotiated"));
+        }
+        self.render_instance_frame(case_index, current_time, rgba, Some(parameters), None, true)
+    }
+
+    pub fn take_case_report(&mut self) -> Option<Value> {
+        self.last_case_report.take()
+    }
+
+    pub fn worker_sha256(&self) -> Option<String> {
+        self.process.as_ref().map(|process| process.worker_sha256().iter()
+            .map(|byte| format!("{byte:02x}")).collect())
+    }
+
+    fn render_instance_frame(
+        &mut self,
+        frame_index: u32,
+        current_time: i32,
+        rgba: &[u8],
+        parameters: Option<&[InteractiveParameter]>,
+        ui_action: Option<&RenderUiAction>,
+        fresh_case: bool,
+    ) -> io::Result<FrameOutcome> {
+        self.last_case_report = None;
         if let Some(invalidation) = &self.invalidation {
             return Err(invalid(format!(
                 "render session is invalidated ({}): {}",
@@ -2680,7 +2763,7 @@ impl RenderSession {
         if rgba.len() != self.geometry.input_slot_bytes() {
             return Err(invalid("input frame byte count does not match the session"));
         }
-        if self.still_primary_sha256.is_some_and(|expected| {
+        if !fresh_case && self.still_primary_sha256.is_some_and(|expected| {
             let actual: [u8; 32] = Sha256::digest(rgba).into();
             actual != expected
         }) {
@@ -2718,7 +2801,7 @@ impl RenderSession {
         } else {
             let mut message_value = json!({
                 "v": 2,
-                "type": "render_frame",
+                "type": if fresh_case { "render_case" } else { "render_frame" },
                 "frame_index": frame_index,
                 "current_time": {"value": current_time, "scale": self.time_scale},
             });
@@ -2829,8 +2912,12 @@ impl RenderSession {
                 }
             };
             if done.v != PROTOCOL_VERSION
-                || done.kind != "frame_done"
+                || done.kind != if fresh_case { "case_done" } else { "frame_done" }
                 || done.frame_index != frame_index
+                || (fresh_case && done.status != "resize_needed" && done.case_cleanup != Some(true))
+                || (!fresh_case && done.case_cleanup.is_some())
+                || (!fresh_case && done.case_report.is_some())
+                || (fresh_case && done.status == "ok" && !done.case_report.as_ref().is_some_and(Value::is_object))
             {
                 return Err(self.invalidate(
                     "frame_done_mismatch",
@@ -2841,6 +2928,9 @@ impl RenderSession {
                     true,
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
+            }
+            if fresh_case && done.status != "resize_needed" {
+                self.last_case_report = done.case_report.take();
             }
             // The top-level width/height fields belong only to a resize_needed
             // response; deny_unknown_fields treats them as known for every status,

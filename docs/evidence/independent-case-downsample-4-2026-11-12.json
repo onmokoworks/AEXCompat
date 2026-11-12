@@ -1,0 +1,202 @@
+{
+  "schema": "aexcompat.independent_case_qualification",
+  "schema_version": 1,
+  "host": "Windows-10-10.0.26300-SP0",
+  "native_ae": false,
+  "dimensions": [
+    97,
+    61
+  ],
+  "repetitions": 1,
+  "cases_per_batch": 6,
+  "downsample": 4,
+  "only": "OLMBlur",
+  "harness_sha256": "3f6f1e8fc4247cf746f9d62de721bc49f9fa622474aa27fcdbb402bfc7de6de4",
+  "worker_sha256": "48aaed530d5e1f8b8c01e6b9f366aca1b86a9bd651cd65b44bd0b0e8699244ba",
+  "timing_scope": "CLI wall time including discovery, input/output, launch and close; warm filesystem, alternating order",
+  "rows": [
+    {
+      "plugin": "OLMBlur",
+      "plugin_sha256": "f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b",
+      "route": "smart8",
+      "edited_slot": 1,
+      "edited_value": 6.0,
+      "batch_median_s": 1.281442600000446,
+      "single_median_s": 2.83685560000049,
+      "speedup": 2.2137984175018866,
+      "byte_identical": true,
+      "samples": [
+        {
+          "batch_s": 1.281442600000446,
+          "single_total_s": 2.83685560000049,
+          "worker_pid": 48164,
+          "worker_exited": true,
+          "cases": [
+            {
+              "source": 0,
+              "artifacts_sha256": {
+                ".png": "c286d6fe913c2f18f7919d61a0fac0f0151b95e225c76871d16b18d929f64267"
+              }
+            },
+            {
+              "source": 1,
+              "artifacts_sha256": {
+                ".png": "399b895c7d9ebe54a5b11c5b8823c88ef7ea7ffdc26864f2780841e13ac16efc"
+              }
+            },
+            {
+              "source": 0,
+              "artifacts_sha256": {
+                ".png": "c286d6fe913c2f18f7919d61a0fac0f0151b95e225c76871d16b18d929f64267"
+              }
+            },
+            {
+              "source": 2,
+              "artifacts_sha256": {
+                ".png": "e17d7c3756fee34fe4eb763dc2fda148fed5088eb2985c9aff076fcae6b280ae"
+              }
+            },
+            {
+              "source": 1,
+              "artifacts_sha256": {
+                ".png": "399b895c7d9ebe54a5b11c5b8823c88ef7ea7ffdc26864f2780841e13ac16efc"
+              }
+            },
+            {
+              "source": 0,
+              "artifacts_sha256": {
+                ".png": "c286d6fe913c2f18f7919d61a0fac0f0151b95e225c76871d16b18d929f64267"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "plugin": "OLMBlur",
+      "plugin_sha256": "f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b",
+      "route": "smart16",
+      "edited_slot": 1,
+      "edited_value": 6.0,
+      "batch_median_s": 1.5599880999998277,
+      "single_median_s": 3.7839073999984976,
+      "speedup": 2.4256001696416245,
+      "byte_identical": true,
+      "samples": [
+        {
+          "batch_s": 1.5599880999998277,
+          "single_total_s": 3.7839073999984976,
+          "worker_pid": 58140,
+          "worker_exited": true,
+          "cases": [
+            {
+              "source": 0,
+              "artifacts_sha256": {
+                ".png": "c286d6fe913c2f18f7919d61a0fac0f0151b95e225c76871d16b18d929f64267",
+                ".rgba16le": "071694931ab37740a0512b60e040984b8855e719e61fad5349ff096ad4864d5a"
+              }
+            },
+            {
+              "source": 1,
+              "artifacts_sha256": {
+                ".png": "00015233a4d5fc79003185c5596c554d68f4db1d18cd1ec78e901403828a991b",
+                ".rgba16le": "1275a12da040ab726decdb378097c9b2677ac7d8c6a8efa9580a3698416609e9"
+              }
+            },
+            {
+              "source": 0,
+              "artifacts_sha256": {
+                ".png": "c286d6fe913c2f18f7919d61a0fac0f0151b95e225c76871d16b18d929f64267",
+                ".rgba16le": "071694931ab37740a0512b60e040984b8855e719e61fad5349ff096ad4864d5a"
+              }
+            },
+            {
+              "source": 2,
+              "artifacts_sha256": {
+                ".png": "213751aa1607589cf5d679e5f7f9f277a104f4323ff7e49ad9d98dba69eb1fe9",
+                ".rgba16le": "92579542315524c1e69e8f8538b1d2d71b862688631524e32f03d482a57c4be7"
+              }
+            },
+            {
+              "source": 1,
+              "artifacts_sha256": {
+                ".png": "00015233a4d5fc79003185c5596c554d68f4db1d18cd1ec78e901403828a991b",
+                ".rgba16le": "1275a12da040ab726decdb378097c9b2677ac7d8c6a8efa9580a3698416609e9"
+              }
+            },
+            {
+              "source": 0,
+              "artifacts_sha256": {
+                ".png": "c286d6fe913c2f18f7919d61a0fac0f0151b95e225c76871d16b18d929f64267",
+                ".rgba16le": "071694931ab37740a0512b60e040984b8855e719e61fad5349ff096ad4864d5a"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "plugin": "OLMBlur",
+      "plugin_sha256": "f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b",
+      "route": "smart32",
+      "edited_slot": 1,
+      "edited_value": 6.0,
+      "batch_median_s": 1.161967399999412,
+      "single_median_s": 2.9530043000013393,
+      "speedup": 2.541383088719041,
+      "byte_identical": true,
+      "samples": [
+        {
+          "batch_s": 1.161967399999412,
+          "single_total_s": 2.9530043000013393,
+          "worker_pid": 42428,
+          "worker_exited": true,
+          "cases": [
+            {
+              "source": 0,
+              "artifacts_sha256": {
+                ".png": "c286d6fe913c2f18f7919d61a0fac0f0151b95e225c76871d16b18d929f64267",
+                ".rgba32f-le": "f19d6f0baeff2dbf63d13d17dff9e66b079bf57db20a8b2685003ca5bf29617a"
+              }
+            },
+            {
+              "source": 1,
+              "artifacts_sha256": {
+                ".png": "399b895c7d9ebe54a5b11c5b8823c88ef7ea7ffdc26864f2780841e13ac16efc",
+                ".rgba32f-le": "94c35899d6a7a525cfdd4aa45333e1500597523eb8859a3065b1f5ef6ce964f2"
+              }
+            },
+            {
+              "source": 0,
+              "artifacts_sha256": {
+                ".png": "c286d6fe913c2f18f7919d61a0fac0f0151b95e225c76871d16b18d929f64267",
+                ".rgba32f-le": "f19d6f0baeff2dbf63d13d17dff9e66b079bf57db20a8b2685003ca5bf29617a"
+              }
+            },
+            {
+              "source": 2,
+              "artifacts_sha256": {
+                ".png": "e17d7c3756fee34fe4eb763dc2fda148fed5088eb2985c9aff076fcae6b280ae",
+                ".rgba32f-le": "9bf82f95fac38da454be3e328a3f29e398cd4f0227c46c56897178a853d8e7fe"
+              }
+            },
+            {
+              "source": 1,
+              "artifacts_sha256": {
+                ".png": "399b895c7d9ebe54a5b11c5b8823c88ef7ea7ffdc26864f2780841e13ac16efc",
+                ".rgba32f-le": "94c35899d6a7a525cfdd4aa45333e1500597523eb8859a3065b1f5ef6ce964f2"
+              }
+            },
+            {
+              "source": 0,
+              "artifacts_sha256": {
+                ".png": "c286d6fe913c2f18f7919d61a0fac0f0151b95e225c76871d16b18d929f64267",
+                ".rgba32f-le": "f19d6f0baeff2dbf63d13d17dff9e66b079bf57db20a8b2685003ca5bf29617a"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

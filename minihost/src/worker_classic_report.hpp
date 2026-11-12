@@ -1,4 +1,5 @@
 #pragma once
+#include <iostream>
 #include "worker_output_coverage.hpp"
 
 #include "worker_parameter_runtime.hpp"
@@ -80,6 +81,6 @@ struct ClassicCompletionInputs {
   std::array<int32_t, 2> context_extent{};
 };
 
-void emit_classic_completion_report(const ClassicCompletionInputs& inputs);
+void emit_classic_completion_report(const ClassicCompletionInputs& inputs, std::ostream& stream = std::cout);
 
 }  // namespace aexcompat::l2_detail

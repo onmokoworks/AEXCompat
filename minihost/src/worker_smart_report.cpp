@@ -64,7 +64,7 @@ std::size_t mask_open_count();
 std::size_t mask_tangent_vertex_count();
 bool mask_lifetimes_balanced();
 
-void emit_smart_completion_report(const SmartCompletionInputs& in) {
+void emit_smart_completion_report(const SmartCompletionInputs& in, std::ostream& stream) {
   namespace report = aexcompat::worker_render_report;
   namespace gpu_transport = aexcompat::gpu_runtime::memory_world_transport;
   namespace opencl = aexcompat::gpu_runtime::opencl;
@@ -75,7 +75,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   const auto& arbitrary = worker_runtime::parameters::state().arbitrary;
   const auto& checkout = worker_runtime::parameters::state().checkout;
   const auto mask_report = aexcompat::mask_runtime::snapshot();
-  report::ReportSnapshot report_snapshot(std::cout);
+  report::ReportSnapshot report_snapshot(stream);
   const auto& host_telemetry = aexcompat::worker_runtime::smart::host_telemetry();
   // In a session the caller receives the slot, not the plug-in's own world: a
   // plug-in dispatched at another depth than the session renders into a world
@@ -268,7 +268,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       requested_value(*in.requested_parameters, L"mix"),
       static_cast<int32_t>(requested_value(*in.requested_parameters, L"invert_map")),
       !in.nop_render_advertised, worker_runtime::module_audit_json()});
-  report::emit(report_snapshot, std::cout);
+  report::emit(report_snapshot, stream);
 }
 
 }  // namespace aexcompat::l2_detail

@@ -24,6 +24,62 @@ fn render_with_artifact(
     artifact_kind: Option<RenderArtifactKind>,
     native_input: Option<&NativeImageInput>,
 ) -> io::Result<Value> {
+    render_with_artifact_using(
+        repository,
+        plugin_id,
+        plugin_path,
+        plugin_sha256,
+        timeout_ms,
+        input_path,
+        output_path,
+        payload_override,
+        interactive_parameters,
+        host_context,
+        timing,
+        smart,
+        pixel_format,
+        gpu_backend,
+        custom_ui_action,
+        audio_sidecar,
+        parameter_animation,
+        timed_layers,
+        dependencies,
+        explicit_dependency_search_dirs,
+        gpu_runtime_policy,
+        deep_png_output,
+        artifact_kind,
+        native_input,
+        None,
+    )
+}
+
+fn render_with_artifact_using(
+    repository: &Path,
+    plugin_id: &str,
+    plugin_path: &Path,
+    plugin_sha256: &str,
+    timeout_ms: u64,
+    input_path: &Path,
+    output_path: &Path,
+    payload_override: Option<String>,
+    interactive_parameters: Option<&[InteractiveParameter]>,
+    host_context: Option<&crate::render_request::HostContext>,
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    gpu_backend: RenderGpuBackend,
+    custom_ui_action: Option<RenderUiAction>,
+    audio_sidecar: Option<&Path>,
+    parameter_animation: Option<&[ParameterAnimation]>,
+    timed_layers: Option<&[TimedLayerImage]>,
+    dependencies: Vec<ApprovedImageArtifact>,
+    explicit_dependency_search_dirs: Vec<PathBuf>,
+    gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
+    deep_png_output: bool,
+    artifact_kind: Option<RenderArtifactKind>,
+    native_input: Option<&NativeImageInput>,
+    independent: Option<&mut IndependentCaseBatch>,
+) -> io::Result<Value> {
     if !smart && host_context.is_some_and(|context| context.smart_output_request_rect.is_some()) {
         return Err(invalid(
             "explicit output request requires SmartFX rendering",
@@ -473,7 +529,7 @@ fn render_with_artifact(
             Some((source, cleanup)) => (Some(source), Some(cleanup)),
             None => (None, None),
         };
-        let session_outcome = render_classic_via_length_one_session(&SessionWrapperRequest {
+        let prepared = SessionWrapperRequest {
             repository,
             plugin_id,
             plugin_path,
@@ -521,7 +577,11 @@ fn render_with_artifact(
             // attempt, and ignores it entirely below float32 or on classic.
             gpu_runtime_policy,
             artifact_kind,
-        });
+        };
+        let session_outcome = match independent {
+            Some(batch) => batch.execute(&prepared),
+            None => render_classic_via_length_one_session(&prepared),
+        };
         match session_outcome {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),

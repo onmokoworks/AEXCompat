@@ -479,6 +479,12 @@ target_link_libraries(worker_aegp_compute_cache_selftest PRIVATE
 
 add_library(worker_session_detach_fixture SHARED
   ../tests/native/worker_session_detach_fixture.cpp)
+add_library(worker_independent_case_fixture MODULE
+  ../tests/native/worker_independent_case_fixture.cpp
+  ../tests/native/worker_discovery_handle_fixture.rc)
+target_include_directories(worker_independent_case_fixture PRIVATE src)
+target_compile_features(worker_independent_case_fixture PRIVATE cxx_std_17)
+set_target_properties(worker_independent_case_fixture PROPERTIES PREFIX "" SUFFIX ".aex")
 target_compile_features(worker_session_detach_fixture PRIVATE cxx_std_17)
 target_compile_definitions(worker_session_detach_fixture PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

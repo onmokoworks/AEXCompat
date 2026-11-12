@@ -223,7 +223,7 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
     let typed_conformance_request = args.get(1).is_some_and(|command| {
         matches!(
             command.to_string_lossy().as_ref(),
-            "--render-experimental-request"
+            "--render-request-batch" | "--render-experimental-request"
                 | "--render-experimental-smart-request"
                 | "--render-experimental-request-16"
                 | "--render-experimental-smart-request-16"
@@ -318,6 +318,11 @@ fn cli_contract() -> serde_json::Value {
                 "name": "--render-experimental-request",
                 "argv": ["--render-experimental-request|--render-experimental-smart-request|--render-experimental-request-16|--render-experimental-smart-request-16|--render-experimental-request-32|--render-experimental-smart-request-32-cpu", "<aex>", "<input-image>", "<output-image>", "<debug-request.json>"],
                 "result": "render-report-json"
+            },
+            {
+                "name": "--render-request-batch",
+                "argv": ["--render-request-batch", "<manifest.json>"],
+                "result": "independent-case-batch-json"
             },
             {
                 "name": "--render-experimental-session",
@@ -659,7 +664,7 @@ fn required_plugin_parameters(
 
 fn print_cli_help() {
     println!(
-        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-experimental-smart-32-gpu-auto-policy <aex> <input> <output> opencl\n  --render-differential <aex> <input> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-performance-diagnostics <aex> <classic|smart> <argb8|argb16|argb32f>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --render-request-batch <manifest.json>\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-experimental-smart-32-gpu-auto-policy <aex> <input> <output> opencl\n  --render-differential <aex> <input> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-performance-diagnostics <aex> <classic|smart> <argb8|argb16|argb32f>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
     );
 }
 
@@ -725,6 +730,21 @@ fn main() -> eframe::Result {
         }
     }
     let repository = repository_root(&args);
+    if args.len() == 3 && args[1] == "--render-request-batch" {
+        match run_independent_case_batch(&repository, Path::new(&args[2])) {
+            Ok(report) => {
+                let passed = report["passed"] == true;
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+                if !passed { std::process::exit(1); }
+            }
+            Err(error) => {
+                println!("{}", serde_json::json!({"schema":"aexcompat.independent_case_batch",
+                    "schema_version":1,"passed":false,"classification":"validation_error","error":error}));
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 5 && args[1] == "--render-fixture" {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);

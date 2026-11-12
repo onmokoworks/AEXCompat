@@ -2,6 +2,11 @@
 
 #include "worker_bee_scene_facade.hpp"
 #include "worker_effect_bootstrap.hpp"
+#include "worker_fresh_case.hpp"
+#include "worker_classic_report.hpp"
+#include "worker_smart_report.hpp"
+#include <functional>
+#include <sstream>
 
 #include <windows.h>
 
@@ -229,7 +234,7 @@ SessionChannels::ReadResult SessionChannels::read_message(std::string& payload) 
 }
 
 bool SessionChannels::write_message(const std::string& payload) {
-  if (!response_pipe_ || payload.empty() || payload.size() > kMaxMessageBytes)
+  if (!response_pipe_ || payload.empty() || payload.size() > max_write_bytes_)
     return false;
   const uint32_t length = static_cast<uint32_t>(payload.size());
   const unsigned char prefix[4] = {
@@ -473,6 +478,7 @@ void apply_session_ui_action(const SessionUiAction* action) {
 // reports its result in this shape so the transport, message grammar, and
 // fail-closed decisions stay identical across both session flavors.
 struct SessionFrameOutput {
+  std::function<std::string()> report;
   int32_t frame_error{0};
   bool gpu_float32_transport{false};
   // True only when a Smart selector returned success but the host's guarded
@@ -507,6 +513,45 @@ struct SessionFrameOutput {
   // false and a zero dimension stays an invariant failure.
   bool empty_result{false};
 };
+
+template <typename Report>
+void independent_report_context(Report& report,
+    const std::array<std::byte, kInSize>& input,
+    const RequestedAssignments* parameters, uint32_t flags, uint32_t flags2,
+    int32_t pixel_bytes, int32_t dispatch_bytes) {
+  namespace abi = aexcompat::abi::x86_64_windows;
+  report.global_error = 0; // bootstrap succeeded before entering the session
+  report.params_error = 0; // declarations were validated during bootstrap
+  report.setdown_error = -1; // global setdown is pending until batch close
+  report.parameter_count_contract_valid = true;
+  report.arbitrary_defaults_disposed = false; // declaration defaults live until global close
+  report.depth_supported = true;
+  report.advertised_depth_supported = dispatch_bytes == pixel_bytes;
+  report.dispatch_pixel_bytes = dispatch_bytes;
+  report.session_pixel_bytes = pixel_bytes;
+  report.advertised_out_flags = flags;
+  report.advertised_out_flags2 = flags2;
+  report.image_render_supported = (flags & (1u << 31)) == 0;
+  report.nop_render_advertised = (flags & (1u << 18)) != 0;
+  report.input_write_advertised = (flags & (1u << 11)) != 0;
+  report.request_mode = true;
+  report.requested_parameters = parameters;
+  report.case_id = "request";
+  report.downsample_x = {read<int32_t>(input, abi::IN_DOWNSAMPLE_X_OFFSET),
+                         read<int32_t>(input, abi::IN_DOWNSAMPLE_X_OFFSET + 4)};
+  report.downsample_y = {read<int32_t>(input, abi::IN_DOWNSAMPLE_Y_OFFSET),
+                         read<int32_t>(input, abi::IN_DOWNSAMPLE_Y_OFFSET + 4)};
+  report.pixel_aspect_ratio = {read<int32_t>(input, abi::IN_PIXEL_ASPECT_RATIO_OFFSET),
+                               read<int32_t>(input, abi::IN_PIXEL_ASPECT_RATIO_OFFSET + 4)};
+  report.resolution = {read<int32_t>(input, 252), read<int32_t>(input, 256)};
+  report.context_head = {read<int32_t>(input, abi::IN_QUALITY_OFFSET),
+      read<int32_t>(input, abi::IN_NUM_PARAMS_OFFSET), read<int32_t>(input, 236),
+      read<int32_t>(input, 244), read<int32_t>(input, 248), read<int32_t>(input, 400)};
+  report.context_zoom = report.resolution;
+  report.context_origin = {read<int32_t>(input, 392), read<int32_t>(input, 396)};
+  report.context_extent = {read<int32_t>(input, abi::IN_OUTPUT_ORIGIN_X_OFFSET),
+                           read<int32_t>(input, abi::IN_OUTPUT_ORIGIN_Y_OFFSET)};
+}
 
 // Resident render session frame loop (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
 // SEQUENCE_SETUP is hoisted once around per-frame renders following the
@@ -694,6 +739,10 @@ void run_session_frame_loop(
   write_session_static_fields();
   bool sequence_attempted = false;
   bool sequence_started = false;
+  const auto instance_defaults = worker_runtime::parameters::state().records;
+  bool independent_mode = false;
+  bool persistent_mode = false;
+  bool case_capability_negotiated = false;
   // Cluster-session swap state (closure-session design §4.1): the manifest
   // index of the plug-in currently loaded, and whether its GLOBAL_SETUP /
   // PARAMS_SETUP failed (plug-in-local; frames get the
@@ -791,6 +840,17 @@ void run_session_frame_loop(
         outcome.protocol_violation = true;
       break;
     }
+    if (type == "capabilities") {
+      if (version != 1 || !json_exact_keys(object, {"v", "type"}) ||
+          !channels.write_message(
+              "{\"v\":1,\"type\":\"capabilities\",\"render_case\":1}")) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      case_capability_negotiated = true;
+      channels.allow_case_reports();
+      continue;
+    }
     // Cluster-session plug-in swap (closure-session design §4.1): only an
     // authenticated manifest index travels here; the path/hash stay with the
     // launch-time trust decision. Without a cluster hook the message type is
@@ -881,6 +941,7 @@ void run_session_frame_loop(
     // least one must be present; a v:2 with neither is a protocol violation
     // (senders use v:1 for a plain frame). The exact-key set is built from the
     // present optionals so unknown keys stay rejected.
+    const bool fresh_case = type == "render_case" && version == 2;
     const bool with_attributes =
         version == static_cast<int32_t>(wrs::kRenderFrameParametersVersion);
     const bool has_parameters = json_member(object, "parameters") != nullptr;
@@ -902,12 +963,54 @@ void run_session_frame_loop(
     } else {
       exact_keys = json_exact_keys(object, {"v", "type", "frame_index", "current_time"});
     }
-    if (type != "render_frame" || !exact_keys ||
+    if ((type != "render_frame" && !fresh_case) || !exact_keys ||
+        (fresh_case && (!case_capability_negotiated || !has_parameters || has_ui_action || persistent_mode || swap_hook || audio_passthrough || dispatch_bytes != pixel_bytes)) ||
+        (!fresh_case && independent_mode) ||
         !json_i32(object, "frame_index", frame_index) || frame_index < 0 ||
         !time_value || !std::holds_alternative<JsonValue::Object>(time_value->value)) {
       outcome.protocol_violation = true;
       break;
     }
+    independent_mode = independent_mode || fresh_case;
+    persistent_mode = persistent_mode || !fresh_case;
+    worker_runtime::FreshCase instance(instance_defaults);
+    bool case_active = false;
+    bool case_clean = true;
+    const auto substituted_before_case =
+        worker_runtime::selector_dispatch_telemetry().substituted_selector_failures;
+    std::string case_report;
+    const auto finish_case = [&]() {
+      if (!case_active) return case_clean;
+      case_active = false;
+      if (sequence_started) {
+        const int32_t error = invoke_sequence_selector(
+            entry, kSequenceSetdown, input.data(), output.data());
+        if (outcome.setdown_error <= 0) outcome.setdown_error = error;
+        case_clean = error == 0;
+      }
+      write<void*>(input, kInSequenceData, nullptr);
+      write<void*>(output, kOutSequenceData, nullptr);
+      sequence_started = false;
+      aexcompat::pf_ae_channel::reclaim_layer_channels();
+      deactivate_external_aux();
+      case_clean = instance.finish() && case_clean &&
+          worker_runtime::selector_dispatch_telemetry().substituted_selector_failures == substituted_before_case &&
+          !worker_runtime::selector_dispatch_telemetry().frame_fault.captured;
+      if (!case_clean) outcome.invariant_failure = true;
+      return case_clean;
+    };
+    const auto write_reply = [&](std::string reply) {
+      if (fresh_case) {
+        const auto position = reply.find("frame_done");
+        if (position == std::string::npos) return false;
+        reply.replace(position, 10, "case_done");
+        if (!case_report.empty()) {
+          reply.pop_back();
+          reply += ",\"case_report\":" + case_report + "}";
+        }
+      }
+      return channels.write_message(reply);
+    };
     // Each frame starts with no message: what the plug-in said about a previous
     // frame is not this frame's diagnosis (issue #707).
     aexcompat::worker_runtime::reset_selector_return_message();
@@ -1003,6 +1106,7 @@ void run_session_frame_loop(
     // metadata to report (protocol §4.3).
     const auto respond_error = [&](int32_t frame_error,
                                    bool smart_output_untouched = false) {
+      if (fresh_case && !finish_case()) frame_error = kSessionSequenceSetupFailed;
       std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
           std::to_string(frame_index) + ",\"status\":\"error\",\"render_error\":" +
           std::to_string(frame_error);
@@ -1060,13 +1164,15 @@ void run_session_frame_loop(
             ",\"display_requested\":" +
             (telemetry.return_message.display_requested ? "true" : "false") + "}";
       }
+      if (fresh_case) reply += ",\"case_cleanup\":" + std::string(case_clean ? "true" : "false");
       reply += "}";
-      return channels.write_message(reply);
+      return write_reply(reply);
     };
     const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,
                                 int32_t frame_rowbytes, std::size_t packed_bytes,
                                 int32_t frame_origin_x, int32_t frame_origin_y,
                                 int32_t captured_pixel_bytes) {
+      if (fresh_case && !finish_case()) return respond_error(kSessionSequenceSetupFailed);
       std::string reply;
       reply.reserve(256);
       reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
@@ -1106,14 +1212,16 @@ void run_session_frame_loop(
       reply += ",\"guards_intact\":true},\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
       append_performance(reply);
+      if (fresh_case) reply += ",\"case_cleanup\":true";
       reply += "}";
-      return channels.write_message(reply);
+      return write_reply(reply);
     };
     // A SmartFX frame whose PreRender returned a legally empty result_rect (#278):
     // no pixels were rendered. Report a valid zero-dimension ok frame carrying
     // an explicit "empty_result":true so the broker accepts the empty geometry
     // (a zero dimension without this flag stays a dimension invariant failure).
     const auto respond_empty = [&]() {
+      if (fresh_case && !finish_case()) return respond_error(kSessionSequenceSetupFailed);
       std::string reply;
       reply.reserve(256);
       reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
@@ -1125,8 +1233,9 @@ void run_session_frame_loop(
       reply += "\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
       append_performance(reply);
+      if (fresh_case) reply += ",\"case_cleanup\":true";
       reply += "}";
-      return channels.write_message(reply);
+      return write_reply(reply);
     };
     // A resize-output effect whose result overruns the launch output slot: the
     // worker cannot write it here, so it reports the required dimensions and the
@@ -1139,7 +1248,7 @@ void run_session_frame_loop(
           std::to_string(frame_index) + ",\"status\":\"resize_needed\",\"width\":" +
           std::to_string(frame_width) + ",\"height\":" + std::to_string(frame_height) +
           ",\"render_error\":0}";
-      return channels.write_message(reply);
+      return write_reply(reply);
     };
     if (static_cast<uint32_t>(current_scale) != time_scale) {
       // Frame-local diagnostic: the session continues, the broker decides.
@@ -1179,6 +1288,16 @@ void run_session_frame_loop(
       continue;
     }
     outcome.frames_attempted += 1;
+    if (fresh_case) {
+      case_active = true;
+      write<int32_t>(input, 224, current_time);
+      if (!instance.begin()) {
+        outcome.invariant_failure = true;
+        respond_error(kSessionSequenceSetupFailed);
+        break;
+      }
+      write_session_static_fields();
+    }
     if (!sequence_started) {
       write<int32_t>(input, 224, current_time);
       sequence_attempted = true;
@@ -1259,8 +1378,14 @@ void run_session_frame_loop(
     // at open, so only the bytes may differ; a short read is the same
     // fail-closed protocol violation it is at open.
     if (!refresh_dynamic_layers(session_layers)) {
+      finish_case();
       outcome.protocol_violation = true;
       break;
+    }
+    if (fresh_case) {
+      for (auto& layer : session_layers) {
+        if (layer.slot == 0) layer.rgba = frame_rgba;
+      }
     }
     const auto render_started = std::chrono::steady_clock::now();
     worker_setup_ns = static_cast<uint64_t>(
@@ -1268,7 +1393,7 @@ void run_session_frame_loop(
             render_started - setup_started).count());
     const SessionFrameOutput frame =
         render_frame(entry, current_time, frame_rgba, captured, frame_layers,
-                     frame_override, frame_ui, dispatch_bytes);
+                     frame_override, frame_ui, dispatch_bytes, fresh_case);
     render_completed = std::chrono::steady_clock::now();
     worker_render_ns = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1277,6 +1402,16 @@ void run_session_frame_loop(
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.
     aexcompat::pf_ae_channel::reclaim_layer_channels();
+    if (fresh_case && !finish_case()) {
+      respond_error(kSessionSequenceSetupFailed);
+      break;
+    }
+    if (fresh_case && frame.report) {
+      case_report = frame.report();
+      const auto end = case_report.find_last_of('}');
+      if (end != std::string::npos)
+        case_report.insert(end, ",\"worker_pid\":" + std::to_string(GetCurrentProcessId()));
+    }
     outcome.width = frame.width;
     outcome.height = frame.height;
     // The slot's geometry, not the plug-in's. A frame that does not reach the
@@ -1489,7 +1624,7 @@ RenderSessionOutcome run_render_session(
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>* frame_layers,
           const RequestedAssignments* frame_override,
-          const SessionUiAction* frame_ui, int32_t dispatch_bytes) {
+          const SessionUiAction* frame_ui, int32_t dispatch_bytes, bool fresh_case) {
         apply_session_ui_action(frame_ui);
         SessionFrameOutput frame;
         // Initialized true so it means "finalize observed corruption" when
@@ -1507,6 +1642,29 @@ RenderSessionOutcome run_render_session(
         frame.guard_violation = !frame_guards;
         frame.output_validation_failed = classic_output.validation_failed;
         frame.output_coverage = classic_output.output_coverage;
+        if (fresh_case) {
+          ClassicCompletionInputs facts;
+          independent_report_context(facts, input, frame_override, advertised_out_flags,
+              advertised_out_flags2, pixel_bytes, dispatch_bytes);
+          facts.render_error = frame.frame_error;
+          facts.guards_intact = frame_guards;
+          facts.output_coverage = frame.output_coverage;
+          facts.input_hash = frame.input_hash;
+          facts.output_hash = frame.output_hash;
+          facts.render_width = frame.width;
+          facts.render_height = frame.height;
+          facts.render_rowbytes = frame.rowbytes;
+          facts.persistent_sequence = true;
+          facts.persistent_sequence_setup_error = 0;
+          facts.persistent_sequence_setdown_error = 0;
+          facts.expand_buffer_advertised = (advertised_out_flags & (1u << 9)) != 0;
+          facts.shrink_buffer_advertised = (advertised_out_flags & (1u << 12)) != 0;
+          frame.report = [facts]() {
+            std::ostringstream stream;
+            emit_classic_completion_report(facts, stream);
+            return stream.str();
+          };
+        }
         // Sign conversion, not a copy: `ClassicFrameOutput::input_origin_*` is
         // PF_OutData::origin, and this field is the layer-relative origin the
         // smart path feeds from `result_rect[0]`. The rule itself lives in
@@ -1575,7 +1733,11 @@ SmartRenderSessionOutcome run_smart_render_session(
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>* frame_layers,
           const RequestedAssignments* frame_override,
-          const SessionUiAction* frame_ui, int32_t dispatch_bytes) {
+          const SessionUiAction* frame_ui, int32_t dispatch_bytes, bool fresh_case) {
+        if (fresh_case) {
+          temporal_layers.clear();
+          temporal_bytes = 0;
+        }
         apply_session_ui_action(frame_ui);
         // Drop a stale world for a repeated timestamp before constructing the
         // hosted-world set. The new input is still recorded after this frame.
@@ -1747,6 +1909,24 @@ SmartRenderSessionOutcome run_smart_render_session(
         frame.smart_output_untouched = frame_result.selector_error == 0 &&
             frame_result.pre_error == 0 && frame_result.render_error == -6 &&
             frame_result.output_untouched && !frame_result.empty_result_rect;
+        if (fresh_case) {
+          SmartCompletionInputs facts;
+          independent_report_context(facts, input, frame_override, advertised_out_flags,
+              advertised_out_flags2, pixel_bytes, dispatch_bytes);
+          facts.smart_render_supported = (advertised_out_flags2 & (1u << 10)) != 0;
+          facts.session_mode = true;
+          facts.session_frames_attempted = 1;
+          facts.session_sequence_setup_error = 0;
+          facts.session_sequence_setdown_error = 0;
+          facts.session_render_error = 0;
+          facts.external_size = {max_width, max_height};
+          frame.report = [facts, frame_result]() mutable {
+            facts.smart = &frame_result;
+            std::ostringstream stream;
+            emit_smart_completion_report(facts, stream);
+            return stream.str();
+          };
+        }
         temporal_layers.resize(history_count);
         if (frame_rgba.size() <= kMaxTemporalHistoryBytes) {
           // A later dispatch may reuse a time with new input pixels. Keep only

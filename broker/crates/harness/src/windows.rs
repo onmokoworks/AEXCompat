@@ -3,6 +3,7 @@
 include!("windows/ui.rs");
 include!("windows/preflight.rs");
 include!("windows/render_contract.rs");
+include!("windows/independent_cases.rs");
 include!("windows/live_session.rs");
 include!("windows/app.rs");
 include!("windows/effect_chain.rs");

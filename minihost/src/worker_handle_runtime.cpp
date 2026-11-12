@@ -253,6 +253,16 @@ Statistics statistics() {
   return result;
 }
 
+std::vector<std::uintptr_t> live_identities() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  std::vector<std::uintptr_t> result;
+  result.reserve(g_handles.size());
+  for (const auto* handle : g_handles)
+    result.push_back(reinterpret_cast<std::uintptr_t>(handle));
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
 void record_automatic_pre_render_disposal() {
   std::lock_guard<std::mutex> lock(g_mutex);
   ++g_statistics.automatic_pre_render_disposals;
