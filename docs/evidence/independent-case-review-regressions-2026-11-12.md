@@ -1,5 +1,7 @@
 # Independent case review regression record
 
+> Superseded completion status: the re-review of 067df6c..78d71a5 found P1-2 incomplete and an audio-cleanup regression. See [the correction record](independent-case-rereview-regressions-2026-11-12.md). Measurements below remain evidence for their recorded worker hash only.
+
 The independent owner review of `067df6c996c25f05681aea2b4c72b2bdbb9bb986` found five blocking issues. All five findings were accepted; none were rejected. This revision addresses them as follows:
 
 | Finding | Regression / required check | Before fix | After fix |

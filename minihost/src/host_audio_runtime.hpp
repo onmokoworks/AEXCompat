@@ -52,6 +52,7 @@ class Runtime {
                std::int32_t* channels, std::int32_t* format);
   void automatic_checkin();
   bool lifetimes_balanced() const;
+  std::vector<std::uintptr_t> live_handle_identities() const;
   const Telemetry& telemetry() const noexcept { return telemetry_; }
 
  private:

@@ -25,6 +25,21 @@ struct Handles { Handle(__cdecl* create)(uint64_t); void*(__cdecl* lock)(Handle)
 const Handles* handles{};
 int global_setups{};
 Handle declaration_default{};
+
+int32_t scene_case(const Basic* basic, void* effect_ref, bool balanced) {
+  const void* pf{}; const void* effects{};
+  if (basic->acquire("AEGP PF Interface Suite",1,&pf) ||
+      basic->acquire("AEGP Effect Suite",4,&effects)) return 101;
+  auto p = static_cast<void* const*>(pf);
+  auto e = static_cast<void* const*>(effects);
+  void* effect{};
+  auto error = reinterpret_cast<int32_t(__cdecl*)(int32_t,void*,void**)>(p[1])(7,effect_ref,&effect);
+  if (!error && balanced)
+    error = reinterpret_cast<int32_t(__cdecl*)(void*)>(e[8])(effect);
+  basic->release("AEGP Effect Suite",4);
+  basic->release("AEGP PF Interface Suite",1);
+  return error ? 100 + error : 0;
+}
 }
 
 #ifdef INDEPENDENT_SMART_FIXTURE
@@ -167,6 +182,18 @@ extern "C" __declspec(dllexport) int32_t __cdecl EffectMain(
       basic->release("PF Path Data Suite",1);
       basic->release("PF Path Query Suite",1);
       return error ? error : 7;
+    }
+    if (time == 27 || time == 28) {
+      const auto error = scene_case(basic,get<void*>(input,abi::IN_EFFECT_REF_OFFSET),
+          time == 28);
+      if (error) return error;
+    }
+    if (time == 29) {
+      const auto checkout = get<int32_t(__cdecl*)(void*,int32_t,int32_t,int32_t,uint32_t,uint32_t,int32_t,int32_t,int32_t,void**)>(input,abi::INTER_CHECKOUT_LAYER_AUDIO_OFFSET);
+      void* audio{};
+      const auto error = checkout(get<void*>(input,abi::IN_EFFECT_REF_OFFSET),0,0,1,30,44100u<<16,2,1,1,&audio);
+      if (error || !audio) return 102;
+      // Classic render cleanup owns the automatic check-in.
     }
     const auto arbitrary = get<Handle>(params[2],72);
     auto* owned = static_cast<int*>(handles->lock(arbitrary));

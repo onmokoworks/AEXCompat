@@ -509,6 +509,7 @@ target_link_libraries(worker_session_contained_exit_selftest PRIVATE
 
 add_executable(worker_aegp_scene_model_selftest
   ../tests/native/worker_aegp_scene_model_selftest.cpp
+  src/worker_aegp_scene_runtime.cpp
   src/worker_aegp_scene_model.cpp
   src/worker_aegp_scene_transaction.cpp
 )

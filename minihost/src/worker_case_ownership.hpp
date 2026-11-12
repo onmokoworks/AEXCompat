@@ -19,6 +19,7 @@ namespace aexcompat::extended_inter { aexcompat::worker_runtime::CaseOwnership c
 namespace aexcompat::color_settings { aexcompat::worker_runtime::CaseOwnership case_profile_ownership(); }
 namespace aexcompat::l2_detail { aexcompat::worker_runtime::CaseOwnership case_drawbot_ownership(); }
 namespace aexcompat::l2_detail { aexcompat::worker_runtime::CaseOwnership case_mask_ownership(); }
+namespace aexcompat::scene_runtime { aexcompat::worker_runtime::CaseOwnership case_scene_ownership(); }
 namespace aexcompat::worker_runtime::compute_cache { aexcompat::worker_runtime::CaseOwnership case_cache_ownership(); }
 namespace aexcompat::aegp_async_layer { aexcompat::worker_runtime::CaseOwnership case_async_ownership(); }
 namespace aexcompat::host_audio { aexcompat::worker_runtime::CaseOwnership case_audio_ownership(); }
@@ -37,6 +38,7 @@ inline std::vector<CaseOwnership> case_ownership() {
       aexcompat::color_settings::case_profile_ownership(),
       aexcompat::l2_detail::case_drawbot_ownership(),
       aexcompat::l2_detail::case_mask_ownership(),
+      aexcompat::scene_runtime::case_scene_ownership(),
       aexcompat::worker_runtime::compute_cache::case_cache_ownership(),
       aexcompat::aegp_async_layer::case_async_ownership(),
       aexcompat::host_audio::case_audio_ownership(),

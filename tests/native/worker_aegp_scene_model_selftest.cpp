@@ -1,5 +1,7 @@
 #include "worker_aegp_scene_model.hpp"
 #include "worker_aegp_scene_transaction.hpp"
+#include "worker_aegp_scene_runtime.hpp"
+#include "worker_case_ownership.hpp"
 
 #include <algorithm>
 #include <array>
@@ -54,6 +56,48 @@ bool aligned_token(void* handle) {
 }  // namespace
 
 int main() {
+  {
+    using namespace aexcompat::scene_runtime;
+    auto& state = scene_runtime_state();
+    const auto saved = state;
+    const auto empty = case_scene_ownership();
+    state.effect_live = true;
+    const auto baseline = case_scene_ownership();
+    assert(baseline != empty); // A globally retained effect is a valid baseline.
+    state.effect_leases[0].live = true;
+    state.effect_leases[0].generation = 11;
+    assert(case_scene_ownership() != baseline);
+    state.effect_leases[0].live = false; // Retained generation is not ownership.
+    assert(case_scene_ownership() == baseline);
+    const auto check_stream = [&](auto& stream) {
+      stream.identity.object_id = 42;
+      stream.identity.generation = 7;
+      stream.live = true;
+      const auto live = case_scene_ownership();
+      assert(live != baseline);
+      ++stream.identity.generation;
+      assert(case_scene_ownership() != live);
+      stream.live = false;
+      assert(case_scene_ownership() == baseline);
+      stream.value_identity.object_id = 43;
+      stream.value_identity.generation = 8;
+      stream.value_live = true; // Value remains visible even without live parent.
+      const auto value = case_scene_ownership();
+      assert(value != baseline);
+      ++stream.value_identity.generation;
+      assert(case_scene_ownership() != value);
+      stream.value_live = false;
+      assert(case_scene_ownership() == baseline);
+    };
+    check_stream(state.transform_stream);
+    for (auto& stream : state.legacy_effect_streams) check_stream(stream);
+    state.selection.live = true;
+    assert(case_scene_ownership() != baseline);
+    state.selection.live = false;
+    assert(case_scene_ownership() == baseline);
+    state = saved;
+    assert(case_scene_ownership() == empty);
+  }
   for (std::size_t rejected_position = 0; rejected_position < 6;
        ++rejected_position) {
     FixtureStorage rejected_storage{};

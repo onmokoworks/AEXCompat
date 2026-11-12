@@ -28,6 +28,12 @@ std::uint32_t Runtime::live_handle_count() const {
   return static_cast<std::uint32_t>(std::count_if(handles_.begin(), handles_.end(), [](const Handle& value) { return value.checked_out; }));
 }
 bool Runtime::lifetimes_balanced() const { return live_handle_count() == 0 && telemetry_.checkout_calls == telemetry_.checkin_calls + telemetry_.automatic_checkins; }
+std::vector<std::uintptr_t> Runtime::live_handle_identities() const {
+  std::vector<std::uintptr_t> result;
+  for (const auto& handle : handles_)
+    if (handle.checked_out) result.push_back(reinterpret_cast<std::uintptr_t>(&handle));
+  return result;
+}
 int Runtime::checkout(void* effect_ref, std::int32_t index, std::int32_t start_time, std::int32_t duration,
                       std::uint32_t time_scale, std::uint32_t rate, std::int32_t bytes_per_sample,
                       std::int32_t channels, std::int32_t format, void** audio) {
@@ -115,7 +121,8 @@ namespace aexcompat::host_audio {
 aexcompat::worker_runtime::CaseOwnership case_audio_ownership() {
   aexcompat::worker_runtime::CaseOwnership result;
   const auto& t = runtime().telemetry();
-  result.emplace_back(0, t.checkout_calls - t.checkin_calls);
+  for (const auto identity : runtime().live_handle_identities())
+    result.emplace_back(identity, 1);
   result.emplace_back(1, t.invalid_operations);
   std::sort(result.begin(), result.end());
   return result;

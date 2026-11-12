@@ -315,3 +315,50 @@ fn pf_path_checkout_and_preparation_leaks_invalidate_next_case() {
         }
     }
 }
+
+#[test]
+fn scene_effect_leak_rejects_next_case() {
+    let input = vec![255; 8 * 4 * 4];
+    let mut session = open();
+    session.require_independent_cases().unwrap();
+    let result = session.render_case(0, 27, &input, &[]);
+    assert!(result.is_err(), "undetected effect lease: {result:?}");
+    assert!(session.invalidation().is_some());
+    assert!(session.render_case(1, 28, &input, &[]).is_err());
+    assert_ne!(session.close()["session_clean"], true);
+}
+
+#[test]
+fn balanced_scene_effect_cases_can_reacquire() {
+    let input = vec![255; 8 * 4 * 4];
+    let mut session = open();
+    session.require_independent_cases().unwrap();
+    for index in 0..3 {
+        assert_eq!(
+            pixel(session.render_case(index, 28, &input, &[]).unwrap().status),
+            [1, 17, 1, 255]
+        );
+    }
+    assert_eq!(session.close()["session_clean"], true);
+}
+
+#[test]
+fn automatic_audio_cleanup_allows_successful_next_case() {
+    let input = vec![255; 8 * 4 * 4];
+    let mut session = open();
+    session.require_independent_cases().unwrap();
+    for index in 0..2 {
+        assert_eq!(
+            pixel(session.render_case(index, 29, &input, &[]).unwrap().status),
+            [1, 17, 1, 255]
+        );
+        let report = session.take_case_report().unwrap();
+        assert_eq!(report["automatic_audio_checkins"], index + 1, "{report}");
+        assert_eq!(report["audio_lifetimes_balanced"], true, "{report}");
+    }
+    assert_eq!(
+        pixel(session.render_case(2, 0, &input, &[]).unwrap().status),
+        [1, 17, 1, 255]
+    );
+    assert_eq!(session.close()["session_clean"], true);
+}

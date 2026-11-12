@@ -1,4 +1,5 @@
 #include "worker_aegp_scene_runtime.hpp"
+#include "worker_case_ownership.hpp"
 
 #include "worker_aegp_scene_model.hpp"
 #include <cmath>
@@ -77,6 +78,36 @@ SceneRuntimeState::SceneRuntimeState() noexcept {
 SceneRuntimeState& scene_runtime_state() noexcept {
   static SceneRuntimeState state{};
   return state;
+}
+
+worker_runtime::CaseOwnership case_scene_ownership() {
+  // Sample at the quiescent instance boundary. Scene objects/retired identity
+  // records persist, but only outstanding plug-in leases belong to the case.
+  const auto& state = scene_runtime_state();
+  worker_runtime::CaseOwnership result;
+  if (state.effect_live)
+    result.emplace_back(reinterpret_cast<uintptr_t>(&state.effect), 1);
+  for (const auto& lease : state.effect_leases) {
+    if (!lease.live) continue;
+    result.emplace_back(reinterpret_cast<uintptr_t>(lease.handle), lease.generation);
+  }
+  const auto record_stream = [&](const auto& stream) {
+    if (stream.live) {
+      result.emplace_back(reinterpret_cast<uintptr_t>(&stream), stream.identity.object_id);
+      result.emplace_back(reinterpret_cast<uintptr_t>(stream.handle), stream.identity.generation);
+    }
+    // Values are independently owned; do not hide one behind its parent's live flag.
+    if (stream.value_live) {
+      result.emplace_back(reinterpret_cast<uintptr_t>(&stream.value_identity), stream.value_identity.object_id);
+      result.emplace_back(reinterpret_cast<uintptr_t>(&stream.value_live), stream.value_identity.generation);
+    }
+  };
+  record_stream(state.transform_stream);
+  for (const auto& stream : state.legacy_effect_streams) record_stream(stream);
+  if (state.selection.live)
+    result.emplace_back(reinterpret_cast<uintptr_t>(&state.selection), 1);
+  std::sort(result.begin(), result.end());
+  return result;
 }
 
 void* composition_item_handle() noexcept {

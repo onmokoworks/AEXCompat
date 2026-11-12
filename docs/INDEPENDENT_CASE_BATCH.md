@@ -80,7 +80,10 @@ AEGP worlds, render options and receipts, GPU allocations/worlds/exclusive
 access, extended-inter allocations, color-profile references, Drawbot/progress
 objects, masks/streams/values/keyframe transactions, compute-cache receipts
 and computations, asynchronous layer requests, audio checkouts and legacy
-sampling sessions. Auxiliary chunks are reclaimed before certification.
+sampling sessions. SceneRuntimeState effect handles/leases, transform and
+legacy effect streams and their value leases, and selection collections also
+have ownership baselines. Audio certification reads actual outstanding handles
+after automatic cleanup. Auxiliary chunks are reclaimed before certification.
 Module-owned compute-cache values and host facade/tombstone metadata remain
 resident; they are not outstanding instance checkouts. Existing
 pixel bounds, guard, output coverage and shared output-validation gates apply.
