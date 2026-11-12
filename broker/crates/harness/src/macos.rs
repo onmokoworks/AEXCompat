@@ -4535,8 +4535,7 @@ mod tests {
                 .contains("resident responses exceeded")
         );
 
-        messages[..4]
-            .copy_from_slice(&((MAX_RESIDENT_RESPONSE_BYTES + 1) as u32).to_le_bytes());
+        messages[..4].copy_from_slice(&((MAX_RESIDENT_RESPONSE_BYTES + 1) as u32).to_le_bytes());
         assert!(
             read_control_message(&mut &messages[..])
                 .unwrap_err()
