@@ -4,6 +4,7 @@
 #include "worker_parameter_execution.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_classic_execution.hpp"
+#include "worker_smart_dispatch.hpp"
 #include "extended_inter_memory.hpp"
 #include <windows.h>
 #include <algorithm>
@@ -33,6 +34,7 @@ bool verify() {
     CHECK(configure(trial ? L"v1|3f9a|11111" : L"v1|0012|11111"));
     CHECK(!configure(L"v1|ff|11111"));
     CHECK(parameter_execution::verify_declared_defaults());
+    CHECK(smart_dispatch::verify_video_frame_memory_fill());
     for (int depth : {4, 8, 16}) {
       const int row = 3 * depth + 16;
       std::vector<unsigned char> input(row * 4 + 8, 0x6d);
@@ -74,12 +76,36 @@ bool verify() {
       if (depth == 4) observed[trial] = packed;
     }
     for (int type : {1, 4, 7, 10, 11}) {
-      std::array<unsigned char, 176> param; param.fill(0x69);
-      parameter(param.data(), type);
-      deliberate_reads[trial][Parameter] = param.back();
+      auto& records = parameters::state().records;
+      const auto saved = records;
+      parameters::ParamRecord record{};
+      record.index = 1; record.type = type; record.name = "fill parameter";
+      record.has_numeric = true; record.valid_min = 1; record.valid_max = 100;
+      record.default_value = 101; // normalized only in the dispatched definition
+      record.raw.fill(std::byte{0x69});
+      std::memcpy(record.raw.data() + 12, &type, sizeof(type));
+      auto expected = record.raw;
+      if (type == 10) {
+        const double value = 100.0;
+        std::memcpy(expected.data() + 56, &value, sizeof(value));
+      } else if (type != 11) {
+        const int32_t value = type == 4 ? 1 : 100;
+        std::memcpy(expected.data() + 56, &value, sizeof(value));
+      }
+      records = {record};
+      parameter_execution::Definitions definitions(2);
+      definitions[0].fill(std::byte{0x37});
+      const auto primary = definitions[0];
+      parameter_execution::initialize_parameter_definitions(definitions, 23, 17);
+      const auto& param = definitions[1];
+      deliberate_reads[trial][Parameter] = static_cast<unsigned char>(param.back());
       const std::size_t active = type == 1 || type == 10 ? 88 : type == 11 ? 32 : 16;
-      for (std::size_t i = 0; i < 56 + active; ++i) CHECK(param[i] == 0x69);
-      for (std::size_t i = 56 + active; i < param.size(); ++i) CHECK(param[i] == byte(i));
+      for (std::size_t i = 0; i < 56 + active; ++i) CHECK(param[i] == expected[i]);
+      for (std::size_t i = 56 + active; i < param.size(); ++i) CHECK(param[i] == std::byte{byte(i)});
+      CHECK(definitions[0] == primary);
+      CHECK(records[0].raw == record.raw && records[0].default_value == 101);
+      if (type != 11) CHECK(records[0].has_current && records[0].current_value == (type == 4 ? 1 : 100));
+      records = saved;
     }
     h = handles::new_handle(12);
     auto* data = static_cast<unsigned char*>(handles::lock_handle(h));
@@ -134,6 +160,7 @@ bool verify() {
   for (int scope = 0; scope < Count; ++scope)
     CHECK(deliberate_reads[0][scope] != deliberate_reads[1][scope]);
   config = {};
+  CHECK(smart_dispatch::verify_video_frame_memory_fill());
   std::vector<unsigned char> after(48);
   CHECK(output_coverage::seed(after.data(), after.size(), 3, 4, 12, 4));
   CHECK(after == baseline);

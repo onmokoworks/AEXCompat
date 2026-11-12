@@ -88,6 +88,7 @@ bool verify_pr_gpu_route_admission();
 
 /// Synthetic export/mapping probe for the 2025 and 2026 VideoFrame ABI.
 bool verify_video_frame_runtime_abi();
+bool verify_video_frame_memory_fill();
 
 /// Whether the active plug-in exports the Premiere GPU-filter entry
 /// (`xGPUFilterEntry`), i.e. the dispatch has a Premiere GPU-filter route to

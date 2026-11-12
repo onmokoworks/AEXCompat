@@ -20,6 +20,14 @@ The synchronous request scope does not affect parameter discovery or unrelated
 threads. This contract applies to CPU Classic/SmartFX typed image requests;
 audio, resident batches and GPU allocations are not qualified by this change.
 
+CPU SmartFX can substitute VideoFrame-backed worlds for the host transport
+buffers. On that adapter path, `world_padding` and `fresh_output_pixels` report
+`unsupported`: active input copying does not transfer host row tails, and the
+plug-in's output is a separate, opaque VideoFrame allocation. Earlier host-buffer
+`applied` events remain factual allocation records, but do not establish coverage
+of the exposed worlds; the scope summary is unsupported. The adapter does not
+modify VideoFrame-owned bytes or relax output/ownership validation.
+
 `pattern_hex` is required and contains 1–64 bytes (2–128 hex digits, case
 insensitive). Each omitted scope defaults to false. Unknown/duplicate diagnostic
 fields, null objects, non-boolean flags and invalid patterns are rejected.
@@ -93,6 +101,16 @@ each scope while preserving initialized inputs/parameters, zero flags, resize
 prefixes, sentinels and balanced ownership. An injected padding overrun is
 detected at 8/16/32 bpc. The Python journal test checks normal, failing and
 terminated owned processes without loading an AEX.
+
+Parameter tests build `ParamRecord`s and invoke the production
+`initialize_parameter_definitions()` for every supported masked variant. They
+check patterned tails, full active-member preservation except the expected
+normalized value, unchanged declaration/default bytes, and an untouched primary
+definition. Removing the production fill hook must fail this test.
+The VideoFrame adapter test substitutes external export functions, exercises
+the actual CPU creation/copy/accessor path, and checks that separate allocations
+remain untouched while the report says unsupported even after host-buffer fills.
+It runs with both patterns and with diagnostics absent, without Adobe DLLs.
 
 The external original campaign uses one baseline and two repetitions each of
 `00000000` and `3f3f3f3f`, all scopes enabled, fresh contained workers. It compares
