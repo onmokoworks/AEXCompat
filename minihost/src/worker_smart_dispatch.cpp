@@ -1,4 +1,5 @@
 #include "worker_smart_dispatch.hpp"
+#include "worker_memory_fill.hpp"
 
 #include "generated/aex_abi_contract.hpp"
 #include "gpu_memory_world_transport.hpp"
@@ -262,6 +263,7 @@ class VideoFrameCpuWorlds {
   using HostWorld = aexcompat::world_safety::EffectWorldStorage;
 
   static bool verify_create_gpu_frame_source_ref();
+  static bool verify_memory_fill_boundary();
 
   bool available() {
     // Cache the full resolution result, not a re-derived subset: an earlier
@@ -428,7 +430,11 @@ class VideoFrameCpuWorlds {
       output_gpu_ = create_gpu(output_, output_live_, width, height, framework);
       return output_gpu_;
     }
-    return create_cpu(output_, output_live_, width, height);
+    if (!create_cpu(output_, output_live_, width, height)) return false;
+    // The plug-in sees VideoFrame's allocation, not the seeded host transport.
+    // Its initialization/ownership contract is opaque; do not poison it.
+    memory_fill::unavailable(memory_fill::Output, "VideoFrame_CPU_output");
+    return true;
   }
 
   World& input() { return input_; }
@@ -689,6 +695,9 @@ class VideoFrameCpuWorlds {
     void** ppix = new_ppix_(mapping.data());
     if (!ppix) return false;
     std::memcpy(world.data() + 64, &ppix, sizeof(ppix));
+    // copy_pixels transfers active pixels only. Host row-tail fills do not
+    // cover this independently allocated world (input or output).
+    memory_fill::unavailable(memory_fill::Padding, "VideoFrame_CPU_world");
     return true;
   }
 
@@ -967,6 +976,73 @@ bool VideoFrameCpuWorlds::verify_create_gpu_frame_source_ref() {
              uint32_t{144}, nullptr, int32_t{0}, uint64_t{0}, uint64_t{0},
              uint64_t{0}, uint64_t{0}, &no_recycled_memory) == 0 &&
          probe.valid;
+}
+
+bool VideoFrameCpuWorlds::verify_memory_fill_boundary() {
+  // Substitute only external VF exports. Exercise the same create/copy/accessor
+  // path used to hand CPU SmartFX its worlds, without loading Adobe DLLs.
+  static int live_allocations;
+  live_allocations = 0;
+  std::array<unsigned char, 96> source_pixels{};
+  if (!output_coverage::seed(source_pixels.data(), source_pixels.size(), 2, 2, 48, 16))
+    return false; // Host transport already has applied events when selected.
+  const auto original_source = source_pixels;
+  const auto padding_before = memory_fill::unsupported[memory_fill::Padding];
+  const auto output_before = memory_fill::unsupported[memory_fill::Output];
+  HostWorld source{};
+  if (!render::prepare_world_layout(source, {16, 2, 2, 48}, source_pixels.data()))
+    return false;
+  bool ok = true;
+  {
+    VideoFrameCpuWorlds adapter;
+    adapter.resolved_ = adapter.available_ = true;
+    adapter.par_ctor_ = +[](void* p, uint32_t, uint32_t) -> void* { return p; };
+    adapter.create_ = +[](uint32_t width, uint32_t height, uint64_t,
+                          const void*, void* raw) -> bool {
+      if (width != 2 || height != 2) return false;
+      auto* data = new unsigned char[96];
+      std::memset(data, 0xa6, 96);
+      auto* world = static_cast<std::byte*>(raw);
+      const int32_t rowbytes = 48;
+      std::memcpy(world + 24, &data, sizeof(data));
+      std::memcpy(world + 32, &rowbytes, 4);
+      std::memcpy(world + 36, &width, 4);
+      std::memcpy(world + 40, &height, 4);
+      ++live_allocations;
+      return true;
+    };
+    adapter.dispose_ = +[](void* raw) {
+      unsigned char* data{};
+      std::memcpy(&data, static_cast<std::byte*>(raw) + 24, sizeof(data));
+      delete[] data;
+      --live_allocations;
+    };
+    adapter.get_mapping_ = +[](void* mapping, void*) -> void* { return mapping; };
+    adapter.new_ppix_ = +[](void*) -> void** { static void* token{}; return &token; };
+    ok = adapter.create_input(2, 2, source, false, 0) &&
+        adapter.create_output(2, 2, false, 0);
+    if (ok) {
+      const auto* input = static_cast<const unsigned char*>(world_pixels(adapter.input()));
+      const auto* output = static_cast<const unsigned char*>(world_pixels(adapter.output()));
+      ok = input != source_pixels.data() && output != source_pixels.data() && input != output;
+      for (int y = 0; y < 2; ++y) for (int x = 0; x < 48; ++x)
+        ok = ok && input[y * 48 + x] == (x < 32 ? source_pixels[y * 48 + x] : 0xa6)
+            && output[y * 48 + x] == 0xa6;
+    }
+  }
+  ok = ok && live_allocations == 0 && source_pixels == original_source;
+  ok = ok && memory_fill::unsupported[memory_fill::Padding] == padding_before +
+      (memory_fill::selected(memory_fill::Padding) ? 2 : 0);
+  ok = ok && memory_fill::unsupported[memory_fill::Output] == output_before +
+      (memory_fill::selected(memory_fill::Output) ? 1 : 0);
+  // Partial host-buffer fills must not leave the scope classified as applied.
+  const auto report = memory_fill::report();
+  for (auto scope : {memory_fill::Padding, memory_fill::Output}) {
+    if (memory_fill::selected(scope))
+      ok = ok && report.find(std::string("\"") + memory_fill::names[scope] +
+          "\":{\"selected\":true,\"status\":\"unsupported\"") != std::string::npos;
+  }
+  return ok;
 }
 
 template <typename T, std::size_t N>
@@ -2308,6 +2384,10 @@ bool verify_video_frame_runtime_abi() {
       probe.current_calls == 1 &&
       VideoFrameCpuWorlds::verify_create_gpu_frame_source_ref() &&
       pr_host::verify_frame_extent_suite_contract();
+}
+
+bool verify_video_frame_memory_fill() {
+  return VideoFrameCpuWorlds::verify_memory_fill_boundary();
 }
 
 bool dispatch(const Request& request, const Hooks& hooks,

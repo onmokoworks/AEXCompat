@@ -2290,6 +2290,34 @@ mod tests {
     }
 
     #[test]
+    fn memory_fill_keeps_render_defaults_and_assignments_identical() {
+        let originals = vec![parameter(1, "integer"), parameter(2, "color")];
+        let plain = serde_json::json!({"schema_version":1,"assignments":[{"slot":1,"value":1.0}]});
+        let mut expected = originals.clone();
+        apply_typed_render_assignments(&mut expected, &plain, None).unwrap();
+        for pattern in ["00000000", "3f3f3f3f"] {
+            let mut document = plain.clone();
+            document["diagnostics"] = serde_json::json!({"memory_fill":{
+                "pattern_hex":pattern,"parameter_unused_storage":true}});
+            assert!(
+                aexcompat_broker::memory_fill::parse_request(
+                    &serde_json::to_vec(&document).unwrap()
+                )
+                .unwrap()
+                .is_some()
+            );
+            let mut actual = originals.clone();
+            apply_typed_render_assignments(&mut actual, &document, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            // Other assignment consumers must not silently accept render diagnostics.
+            assert!(apply_typed_assignments(&mut actual, &document, None).is_err());
+        }
+    }
+
+    #[test]
     fn typed_render_preserves_unassigned_defaults_without_weakening_edits() {
         let mut gain = parameter(5, "float");
         gain.minimum = 1.0;

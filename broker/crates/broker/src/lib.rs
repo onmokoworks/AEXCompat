@@ -15,6 +15,7 @@ pub mod installed_runtime_roots;
 pub mod l2;
 pub mod mask_scene;
 pub mod memory_diagnostics;
+pub mod memory_fill;
 pub mod minidump_policy;
 pub mod observability;
 pub mod opencl_icd_adapter_binding;

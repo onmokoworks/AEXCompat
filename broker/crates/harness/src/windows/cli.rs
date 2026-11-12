@@ -1645,6 +1645,19 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         });
         let parameter_metadata = inspection_diagnostics["parameter_metadata"].clone();
+        let memory_fill = aexcompat_broker::memory_fill::parse_request(&request_bytes)
+            .unwrap_or_else(|error| {
+                emit_host_request_validation_failure(&error, &parameter_metadata);
+                std::process::exit(1);
+            });
+        let mut _memory_fill_scope =
+            aexcompat_broker::memory_fill::RequestScope::install(memory_fill);
+        _memory_fill_scope
+            .attach_log(&repository)
+            .unwrap_or_else(|error| {
+                emit_host_request_validation_failure(&error.to_string(), &parameter_metadata);
+                std::process::exit(1);
+            });
         let timing = typed_request_timing(&document).unwrap_or_else(|error| {
             emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);

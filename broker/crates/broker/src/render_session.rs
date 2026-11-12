@@ -1995,6 +1995,14 @@ impl RenderSession {
         if request.output_checksum_detail {
             args_after_plugin.extend(["--output-checksum-detail-v1".to_owned(), "1".to_owned()]);
         }
+        if let Some(fill) = crate::memory_fill::current() {
+            args_after_plugin.extend(["--memory-fill-v1".to_owned(), fill]);
+            if let Some((handle, _)) = crate::memory_fill::current_log() {
+                args_after_plugin
+                    .extend(["--memory-fill-log-handle-v1".to_owned(), handle.to_string()]);
+                capture_handles.push(handle as HANDLE);
+            }
+        }
         if let Some(layout) = &diagnostic_layout {
             args_after_plugin.extend(["--render-diagnostic-layout-v1".to_owned(), layout.clone()]);
         }

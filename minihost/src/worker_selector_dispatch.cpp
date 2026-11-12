@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #include "worker_selector_dispatch.hpp"
 
 #include <windows.h>
@@ -1324,6 +1325,7 @@ const char* set_host_callback_timeline_selector(
     const char* selector) noexcept {
   const char* previous = g_host_callback_selector;
   g_host_callback_selector = selector;
+  aexcompat::memory_fill::selector = selector;
   return previous;
 }
 

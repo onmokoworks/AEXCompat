@@ -587,6 +587,25 @@ pub(crate) fn isolated_worker_diagnostics(
         .as_object_mut()
         .expect("worker_diagnostics returns an object");
     object.insert("kill_reason".into(), json!(isolated.kill_reason));
+    if let Some(request) = crate::memory_fill::current() {
+        // Survives a missing final JSON report after a worker crash/timeout.
+        // This is partial captured evidence; never infer not_present from it.
+        let events: Vec<Value> = isolated
+            .stderr
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("memory_fill:"))
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        object.insert(
+            "memory_fill_partial".into(),
+            json!({
+                "request": request, "complete": false,
+                "journal": crate::memory_fill::current_log().map(|(_, name)| name),
+                "stderr_truncated": isolated.stderr_truncated, "events": events,
+            }),
+        );
+    }
+
     // The worker's own trace, when the operator asked for one. Everything above
     // is derived from this stream, and a derivation only answers the questions
     // it was written for: a plug-in failing inside a selector leaves its account

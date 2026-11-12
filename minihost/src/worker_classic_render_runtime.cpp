@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #include <windows.h>
 
 #include "generated/aex_abi_contract.hpp"
@@ -680,6 +681,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   dump_world_snapshot("classic-input", logical_source.data(), width, height, input_pixel_bytes);
   const bool input_write_advertised =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
+  aexcompat::memory_fill::padding(source.data(), static_cast<std::size_t>(input_rowbytes) * height,
+      width, height, input_rowbytes, input_pixel_bytes, "classic_input");
   if (!source.set_plugin_writable(input_write_advertised)) return -3;
   OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
   if (!guarded) return -3;
@@ -766,8 +769,9 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                         pixels.data(), layer.width, layer.height, layer_pixel_bytes);
     const int32_t packed_rowbytes = layer.width * layer_pixel_bytes;
     const int32_t layer_rowbytes = packed_rowbytes +
-        (layer.has_world_layout ? layer.row_padding : 0);
-    if (layer.has_world_layout && layer.row_padding != 0) {
+        (layer.has_world_layout && layer.row_padding ? layer.row_padding :
+         aexcompat::memory_fill::selected(aexcompat::memory_fill::Padding) ? 16 : 0);
+    if (layer_rowbytes != packed_rowbytes) {
       std::vector<unsigned char> strided(
           static_cast<std::size_t>(layer_rowbytes) * layer.height,
           layer.padding_byte);
@@ -776,6 +780,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                     pixels.data() + static_cast<std::size_t>(y) * packed_rowbytes,
                     packed_rowbytes);
       pixels.swap(strided);
+      aexcompat::memory_fill::padding(pixels.data(), pixels.size(), layer.width, layer.height, layer_rowbytes, layer_pixel_bytes, "classic_secondary");
     }
     auto& world = hosted_worlds[layer_index];
     if (!aexcompat::render::prepare_world_layout(

@@ -586,7 +586,11 @@ fn apply_typed_render_assignments(
     document: &serde_json::Value,
     request_path: Option<&Path>,
 ) -> Result<(), String> {
-    let assigned_slots = apply_typed_assignments(parameters, document, request_path)?;
+    let mut assignments_document = document.clone();
+    if let Some(object) = assignments_document.as_object_mut() {
+        object.remove("diagnostics");
+    }
+    let assigned_slots = apply_typed_assignments(parameters, &assignments_document, request_path)?;
     // This is the one-shot render transport, not the editable UI inventory.
     // Untouched discovery values are defaults, not explicit user edits.
     *parameters = parameters
@@ -1273,6 +1277,7 @@ fn typed_failure_document(message: &str) -> Option<serde_json::Value> {
         "failure_stage",
         "exit_code",
         "elapsed_ms",
+        "memory_fill_partial",
         "plugin_kind",
         "missing_suites",
         "suite_timeline",

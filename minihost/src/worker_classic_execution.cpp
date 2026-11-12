@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #include "worker_classic_execution.hpp"
 namespace aexcompat::worker_runtime::classic_execution {
 LifecycleResult begin_lifecycle(void* host, const LifecycleHooks& h) {
@@ -90,7 +91,9 @@ int finalize(Context& c, const Hooks& h) {
   bool padding = true;
   for (int32_t y = 0; padding && y < c.height; ++y)
     for (int32_t x = c.width * c.pixel_bytes; x < c.rowbytes; ++x)
-      if (c.destination[y * c.rowbytes + x] != 0xCC) { padding = false; break; }
+      if (c.destination[y * c.rowbytes + x] !=
+          (aexcompat::memory_fill::selected(aexcompat::memory_fill::Padding)
+              ? aexcompat::memory_fill::byte(static_cast<std::size_t>(y) * c.rowbytes + x) : 0xCC)) { padding = false; break; }
   if (c.guards_intact) *c.guards_intact = padding && c.sentinels_intact;
   if (h.set_pixel_format) h.set_pixel_format(
       c.pixel_bytes == 16 ? "argb32f" : (c.pixel_bytes == 8 ? "argb16" : "argb8"));

@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #include "worker_report.hpp"
 
 #include <algorithm>
@@ -100,6 +101,6 @@ std::string serialize_l2_report(const L2ReportContext& c) {
   // the module audit carried by the session's own epoch/final report instead
   // (closure-session design §4.2); an empty module_audit_json omits the key.
   if (!c.module_audit_json.empty()) out += ",\"module_audit\":" + c.module_audit_json;
-  return out + "}\n";
+  return out + aexcompat::memory_fill::report() + "}\n";
 }
 }  // namespace aexcompat::worker_report

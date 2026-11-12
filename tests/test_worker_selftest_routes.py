@@ -444,3 +444,8 @@ def test_pixel_depth_conform_on_all_workers() -> None:
         "--self-test-pixel-depth-conform", "pixel_depth_conform"
     ):
         pass
+
+
+def test_memory_fill_preserves_initialized_bytes_and_detects_reads():
+    for _ in _all_workers("--self-test-memory-fill", "memory_fill"):
+        pass
