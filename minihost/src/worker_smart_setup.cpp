@@ -467,6 +467,8 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
   {
     std::lock_guard<std::mutex> lock(checkout.mutex);
     checkout.live.clear();
+    checkout.completed.clear();
+    checkout.redundant_checkins = 0;
     checkout.checkout_calls = checkout.checkin_calls = checkout.invalid_checkins = 0;
     checkout.automatic_checkins = 0;
     checkout.last_index = -1;

@@ -46,7 +46,7 @@ int g_checkout_token{};
 int g_selector_result{};
 int g_cleanup_result{};
 bool g_explicit_checkin{};
-bool g_invalid_double_checkin{};
+bool g_redundant_checkin{};
 int g_frame_setup_geometry_render_observations{};
 int32_t g_frame_setup_offered_width{};
 int32_t g_frame_setup_offered_height{};
@@ -118,7 +118,7 @@ int render_with_parameter_checkout(void*) {
   if (!context) return 4;
   context->record_checkout(&g_checkout_token, 1, 0, 1, 24);
   if (g_explicit_checkin && context->checkin(&g_checkout_token) != 0) return 4;
-  if (g_invalid_double_checkin) return context->checkin(&g_checkout_token);
+  if (g_redundant_checkin) return context->checkin(&g_checkout_token);
   return g_selector_result;
 }
 
@@ -454,7 +454,7 @@ int main() {
   g_selector_result = 37;
   g_cleanup_result = 41;
   g_explicit_checkin = false;
-  g_invalid_double_checkin = false;
+  g_redundant_checkin = false;
   Request leaked_checkout_request{
       nullptr,
       {&render_with_parameter_checkout, &cleanup_after_parameter_checkout,
@@ -482,12 +482,13 @@ int main() {
   reset_selector_diagnostic();
   g_cleanup_result = 0;
   g_explicit_checkin = true;
-  g_invalid_double_checkin = true;
-  if (dispatch(leaked_checkout_request) != 4) return 38;
-  const auto invalid_checkin = diagnostics();
-  if (invalid_checkin.checkout_calls != 1 || invalid_checkin.checkin_calls != 1 ||
-      invalid_checkin.automatic_checkins != 0 ||
-      invalid_checkin.invalid_checkins != 1 || invalid_checkin.balanced)
+  g_redundant_checkin = true;
+  if (dispatch(leaked_checkout_request) != 0) return 38;
+  const auto redundant_checkin = diagnostics();
+  if (redundant_checkin.checkout_calls != 1 || redundant_checkin.checkin_calls != 1 ||
+      redundant_checkin.automatic_checkins != 0 ||
+      redundant_checkin.invalid_checkins != 0 || redundant_checkin.redundant_checkins != 1 ||
+      !redundant_checkin.balanced)
     return 39;
 
   // Exercise the shipping render_once boundary: FRAME_SETUP must observe the

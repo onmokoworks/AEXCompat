@@ -2,6 +2,9 @@
 
 #include "parameter_animation_transport.hpp"
 
+#include "worker_param_checkout_key.hpp"
+
+#include <set>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -99,11 +102,13 @@ struct UiState {
 struct CheckoutState {
   std::map<int32_t, Definition> definitions;
   std::mutex mutex;
-  std::unordered_map<void*, uint32_t> live;
+  std::map<ParamCheckoutKey, uint32_t> live;
+  std::set<ParamCheckoutKey> completed;
   uint32_t checkout_calls{};
   uint32_t checkin_calls{};
   uint32_t automatic_checkins{};
   uint32_t invalid_checkins{};
+  uint32_t redundant_checkins{};
   uint32_t rejected_temporal{};
   bool wide_time_allowed{};
   int32_t current_time{};

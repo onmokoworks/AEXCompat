@@ -53,6 +53,7 @@ struct SimpleHooks {
   bool (*pf_utils_composite_rect)(){};
   bool (*pf_utils_gaussian_kernel)(){};
   bool (*checkout_param_beyond_table)(){};
+  bool (*redundant_param_checkin)(){};
   bool (*pf_private_callbacks)(){};
   bool (*bee_scene_facade)(){};
   bool (*pf_progress_info)(){};

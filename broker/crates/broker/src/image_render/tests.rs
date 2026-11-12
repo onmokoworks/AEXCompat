@@ -296,6 +296,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn redundant_param_checkins_are_retained_in_image_reports() {
+        let report = build_interactive_image_report(
+            &json!({"param_checkouts_balanced": true, "redundant_param_checkins": 3}),
+            audio_report_facts(None),
+        );
+        assert_eq!(report["redundant_param_checkins"], 3);
+        assert_eq!(report["param_checkouts_balanced"], true);
+    }
+
     /// The session route synthesizes the public report from its own final
     /// report, so the audio telemetry must be projected from the same facts the
     /// one-shot uses. Before issue #339 the session passed `None` here and the

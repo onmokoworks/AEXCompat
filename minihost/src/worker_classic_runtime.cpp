@@ -64,6 +64,7 @@ Context::~Context() {
     g_diagnostics.checkin_calls += diagnostics_.checkin_calls;
     g_diagnostics.automatic_checkins += diagnostics_.automatic_checkins;
     g_diagnostics.invalid_checkins += diagnostics_.invalid_checkins;
+    g_diagnostics.redundant_checkins += diagnostics_.redundant_checkins;
     if (diagnostics_.last_index >= 0) {
       g_diagnostics.last_index = diagnostics_.last_index;
       g_diagnostics.last_time = diagnostics_.last_time;
@@ -155,8 +156,10 @@ bool Context::checkout_time_allowed(int32_t time, uint32_t time_scale) noexcept 
 }
 
 void Context::record_checkout(void* definition, int32_t index, int32_t time,
-                              int32_t time_step, uint32_t time_scale) {
-  ++live_checkouts_[definition];
+                              int32_t time_step, uint32_t time_scale, void* effect) {
+  const auto key = param_checkout_key(effect, definition);
+  completed_checkouts_.erase(key);
+  ++live_checkouts_[key];
   ++diagnostics_.checkout_calls;
   diagnostics_.last_index = index;
   diagnostics_.last_time = time;
@@ -164,14 +167,21 @@ void Context::record_checkout(void* definition, int32_t index, int32_t time,
   diagnostics_.last_time_scale = time_scale;
 }
 
-int32_t Context::checkin(void* definition) {
-  if (!definition || live_checkouts_.empty()) {
+int32_t Context::checkin(void* definition, void* effect) {
+  const auto key = param_checkout_key(effect, definition);
+  auto found = live_checkouts_.find(key);
+  if (definition && found == live_checkouts_.end() && completed_checkouts_.count(key)) {
+    ++diagnostics_.redundant_checkins;
+    return 0;
+  }
+  if (!definition || found == live_checkouts_.end()) {
     ++diagnostics_.invalid_checkins;
     return 4;
   }
-  auto found = live_checkouts_.find(definition);
-  if (found == live_checkouts_.end()) found = live_checkouts_.begin();
-  if (--found->second == 0) live_checkouts_.erase(found);
+  if (--found->second == 0) {
+    completed_checkouts_.insert(key);
+    live_checkouts_.erase(found);
+  }
   ++diagnostics_.checkin_calls;
   return 0;
 }
@@ -210,6 +220,10 @@ void reset_selector_diagnostic() noexcept {
   g_diagnostics = {};
   g_diagnostics.last_index = -1;
   g_diagnostics.balanced = true;
+}
+void reset_case_redundant_checkins() noexcept {
+  std::lock_guard<std::mutex> lock(g_diagnostics_mutex);
+  g_diagnostics.redundant_checkins = 0;
 }
 bool dispatch_active() noexcept {
   return g_dispatch_count.load(std::memory_order_acquire) != 0;

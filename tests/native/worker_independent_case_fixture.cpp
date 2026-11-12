@@ -188,6 +188,18 @@ extern "C" __declspec(dllexport) int32_t __cdecl EffectMain(
           time == 28);
       if (error) return error;
     }
+    if (time == 12) {
+      // One duplicate in this fresh Classic instance, without leaking a checkout.
+      std::array<std::byte,176> definition{};
+      const auto effect = get<void*>(input,abi::IN_EFFECT_REF_OFFSET);
+      const auto checkout = get<int32_t(__cdecl*)(void*,int32_t,int32_t,int32_t,uint32_t,void*)>(
+          input,abi::IN_INTER_OFFSET + abi::INTER_CHECKOUT_PARAM_OFFSET);
+      const auto checkin = get<int32_t(__cdecl*)(void*,void*)>(
+          input,abi::IN_INTER_OFFSET + abi::INTER_CHECKIN_PARAM_OFFSET);
+      if (const auto error = checkout(effect,1,time,1,30,definition.data())) return error;
+      if (const auto error = checkin(effect,definition.data())) return error;
+      if (const auto error = checkin(effect,definition.data())) return error;
+    }
     if (time == 29) {
       const auto checkout = get<int32_t(__cdecl*)(void*,int32_t,int32_t,int32_t,uint32_t,uint32_t,int32_t,int32_t,int32_t,void**)>(input,abi::INTER_CHECKOUT_LAYER_AUDIO_OFFSET);
       void* audio{};
