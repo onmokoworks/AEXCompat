@@ -31,7 +31,7 @@ NATIVE_BROKER_TARGETS = {
     "resident_session_live",
     "smart_cpu_sealed_render",
 }
-NATIVE_HARNESS_TARGETS = {"artifact_cli", "independent_cases_cli"}
+NATIVE_HARNESS_TARGETS = {"artifact_cli", "independent_cases_cli", "many_parameters_cli"}
 INDEPENDENT_BROKER_TARGETS = {
     "cli_operation_aliases",
     "cuda_compute_probe",
