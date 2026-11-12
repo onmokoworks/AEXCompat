@@ -2290,6 +2290,89 @@ mod tests {
     }
 
     #[test]
+    fn typed_render_preserves_unassigned_defaults_without_weakening_edits() {
+        let mut gain = parameter(5, "float");
+        gain.minimum = 1.0;
+        gain.maximum = 100.0;
+        gain.value = 0.1f32 as f64;
+        let ramp = parameter(14, "arbitrary_data");
+        let mut printable_ramp = parameter(20, "arbitrary_data");
+        printable_ramp.debug_summary = Some("debug summary is not persisted state".into());
+        let originals = vec![gain, ramp, printable_ramp];
+        let mut parameters = originals.clone();
+        apply_typed_render_assignments(
+            &mut parameters,
+            &serde_json::json!({"schema_version":1,"assignments":[]}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(parameters.len(), 1);
+        assert!(parameters[0].use_declared_default);
+        assert_eq!(
+            aexcompat_broker::image_render::encode_interactive_payload(&parameters).unwrap(),
+            "v7|param_5@5:f64=default"
+        );
+        // The editable inventory still exposes every discovered value.
+        let mut inventory = originals.clone();
+        assert!(
+            apply_typed_assignments(
+                &mut inventory,
+                &serde_json::json!({"schema_version":1,"assignments":[]}),
+                None
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            serde_json::to_value(&inventory).unwrap(),
+            serde_json::to_value(&originals).unwrap()
+        );
+        for value in [0.1f32 as f64, 101.0] {
+            let mut parameters = originals.clone();
+            assert_eq!(apply_typed_render_assignments(&mut parameters,
+                &serde_json::json!({"schema_version":1,"assignments":[{"slot":5,"value":value}]}),
+                None).unwrap_err(), "parameter slot 5 value is out of range");
+            assert_eq!(
+                serde_json::to_value(&parameters).unwrap(),
+                serde_json::to_value(&originals).unwrap()
+            );
+        }
+        let mut parameters = originals.clone();
+        apply_typed_render_assignments(
+            &mut parameters,
+            &serde_json::json!({"schema_version":1,"assignments":[
+                {"slot":5,"value":2.0},{"slot":14,"text":"edited ramp"}]}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(parameters.len(), 2);
+        assert!(!parameters[0].use_declared_default);
+        assert_eq!(parameters[0].value, 2.0);
+        assert_eq!(parameters[1].debug_summary.as_deref(), Some("edited ramp"));
+        assert_eq!(
+            aexcompat_broker::image_render::encode_interactive_payload(&parameters).unwrap(),
+            "v5|param_5@5:f64=2;param_14@14:arbhex=6564697465642072616d70"
+        );
+        for text in [String::new(), "embedded\0nul".into(), "x".repeat(4097)] {
+            let mut parameters = originals.clone();
+            assert_eq!(
+                apply_typed_render_assignments(
+                    &mut parameters,
+                    &serde_json::json!({"schema_version":1,"assignments":[
+                    {"slot":5,"value":2.0},{"slot":14,"text":text}]}),
+                    None
+                )
+                .unwrap_err(),
+                "parameter slot 14 requires bounded text"
+            );
+            assert_eq!(
+                serde_json::to_value(&parameters).unwrap(),
+                serde_json::to_value(&originals).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn typed_assignment_document_is_strict_typed_and_atomic() {
         let mut parameters = vec![
             parameter(1, "integer"),
