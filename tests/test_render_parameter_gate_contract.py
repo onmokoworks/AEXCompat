@@ -19,7 +19,12 @@ class RenderParameterGateContractTests(unittest.TestCase):
             schema["allOf"][0]["then"]["properties"]["assignments"]["additionalProperties"],
             {"type": "number"},
         )
-        self.assertEqual(assignments["maxProperties"], 64)
+        validator = Draft202012Validator(schema)
+        for count in (1025, 1623, 4096):
+            request = {"schema_version": 4, "plugin_id": "large", "host_context": {"mask_scene": {"masks": []}}, "assignments": {f"p{i}": 17 for i in range(count)}}
+            validator.validate(request)
+        request["assignments"]["overflow"] = 17
+        self.assertTrue(list(validator.iter_errors(request)))
         self.assertIn("propertyNames", assignments)
         self.assertNotIn("properties", assignments)
         host_context = schema["properties"]["host_context"]
@@ -36,7 +41,13 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn("native_dispatch_permitted", required)
         self.assertIn("native_process_started", required)
         self.assertFalse(schema["properties"]["native_process_started"]["const"])
-        self.assertEqual(schema["properties"]["assignment_count"]["maximum"], 64)
+        validator = Draft202012Validator(schema)
+        report = {"schema_version": 1, "gate": "pre_dispatch_parameter_validation", "plugin_id": "large",
+                  "assignment_count": 4096, "accepted": False, "native_dispatch_permitted": False,
+                  "native_process_started": False, "errors": [{"code": "parameter_out_of_range", "parameter": "p4096", "valid_min": 0, "valid_max": 1}]}
+        validator.validate(report)
+        report["assignment_count"] = 4097
+        self.assertTrue(list(validator.iter_errors(report)))
 
     def test_parameterized_execution_contract_separates_rejection_and_native_success(self):
         schema = json.loads((ROOT / "contracts/aex/parameterized_classic_render_report.schema.json").read_text(encoding="utf-8"))

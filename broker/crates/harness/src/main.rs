@@ -4,6 +4,8 @@ mod licenses;
 
 mod shared_ui;
 
+#[cfg(any(target_os = "macos", test))]
+mod guest_parameter_transport;
 mod gui_state;
 #[cfg(any(target_os = "macos", test))]
 mod shared_descriptor;

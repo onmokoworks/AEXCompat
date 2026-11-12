@@ -1,0 +1,205 @@
+#![cfg(windows)]
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+fn invoke(repo: &Path, args: &[&Path]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_aexcompat-harness"))
+        .arg("--headless")
+        .args(args)
+        .env("AEXCOMPAT_REPOSITORY_ROOT", repo)
+        .output()
+        .unwrap()
+}
+fn require_ok(result: &std::process::Output) {
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+struct Scratch(PathBuf);
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+#[test]
+fn inspect_typed_and_batch_preserve_every_large_parameter() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let scratch = Scratch(std::env::temp_dir().join(format!("aex-many-{}", std::process::id())));
+    std::fs::create_dir(&scratch.0).unwrap();
+    let input = scratch.0.join("input.png");
+    image::RgbaImage::from_pixel(3, 2, image::Rgba([1u8, 2, 3, 255]))
+        .save(&input)
+        .unwrap();
+    for count in [1025u32, 1623, 4096] {
+        let plugin = repo.join(format!(
+            "target/minihost-build/worker_many_parameters_{count}.aex"
+        ));
+        let inspected = invoke(&repo, &[Path::new("--inspect-experimental"), &plugin]);
+        require_ok(&inspected);
+        let inspection: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+        assert_eq!(inspection.as_array().unwrap().len(), count as usize);
+        let mut cases = Vec::new();
+        for (index, all) in [true, false, true].into_iter().enumerate() {
+            let assignments = if all {
+                (1..=count)
+                    .map(|slot| json!({"slot":slot,"value":slot%251}))
+                    .collect::<Vec<_>>()
+            } else {
+                vec![json!({"slot":count,"value":123})]
+            };
+            let request = scratch.0.join(format!("{count}-{index}.json"));
+            let document =
+                serde_json::to_vec(&json!({"schema_version":1,"assignments":assignments})).unwrap();
+            if all {
+                assert!(document.len() > 16384);
+            }
+            std::fs::write(&request, document).unwrap();
+            let single = scratch.0.join(format!("single-{count}-{index}.png"));
+            let rendered = invoke(
+                &repo,
+                &[
+                    Path::new("--render-experimental-request"),
+                    &plugin,
+                    &input,
+                    &single,
+                    &request,
+                ],
+            );
+            require_ok(&rendered);
+            let sum = (1..=count)
+                .map(|slot| {
+                    slot * if all {
+                        slot % 251
+                    } else if slot == count {
+                        123
+                    } else {
+                        17
+                    }
+                })
+                .sum::<u32>();
+            let expected = [sum as u8, (sum >> 8) as u8, (sum >> 16) as u8, 255];
+            assert!(
+                image::open(&single)
+                    .unwrap()
+                    .to_rgba8()
+                    .pixels()
+                    .all(|p| p.0 == expected)
+            );
+            cases.push(
+                json!({"id":index.to_string(),"input":input,"request":request,
+                "output":scratch.0.join(format!("batch-{count}-{index}.png"))}),
+            );
+        }
+        let manifest = scratch.0.join("manifest.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({"schema":"aexcompat.independent_case_batch",
+            "schema_version":1,"plugin":plugin,"route":"classic8","isolation":"fresh_sequence",
+            "frame_deadline_ms":10000,"cases":cases}))
+            .unwrap(),
+        )
+        .unwrap();
+        let batch = invoke(&repo, &[Path::new("--render-request-batch"), &manifest]);
+        require_ok(&batch);
+        let report: Value = serde_json::from_slice(&batch.stdout).unwrap();
+        assert_eq!(report["complete"], true);
+        for index in 0..3 {
+            assert_eq!(report["cases"][index]["evidence_valid"], true, "{report}");
+            let single = image::open(scratch.0.join(format!("single-{count}-{index}.png")))
+                .unwrap()
+                .to_rgba8();
+            let batch = image::open(scratch.0.join(format!("batch-{count}-{index}.png")))
+                .unwrap()
+                .to_rgba8();
+            assert_eq!(single, batch);
+        }
+    }
+    let plugin = repo.join("target/minihost-build/worker_many_parameters_4097.aex");
+    let rejected = invoke(&repo, &[Path::new("--inspect-experimental"), &plugin]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("inspection"));
+}
+
+fn declared_color_defaults(batch: bool) {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("aex-defaults-{}-{batch}", std::process::id())));
+    std::fs::create_dir(&scratch.0).unwrap();
+    let input = scratch.0.join("input.png");
+    image::RgbaImage::from_pixel(4, 8, image::Rgba([1u8, 2, 3, 255]))
+        .save(&input)
+        .unwrap();
+    let plugin = repo.join("target/minihost-build/worker_declared_defaults_fixture.aex");
+    let edits = [
+        json!([]),
+        json!([{"slot":1,"color":[255,91,83,47]}]),
+        json!([]),
+        json!([{"slot":2,"value":23}]),
+    ];
+    let expected = [
+        [19, 37, 73, 255],
+        [91, 83, 47, 255],
+        [19, 37, 73, 255],
+        [25, 37, 73, 255],
+    ];
+    let mut cases = Vec::new();
+    for (index, assignments) in edits.into_iter().enumerate() {
+        let request = scratch.0.join(format!("request-{index}.json"));
+        let output = scratch.0.join(format!("output-{index}.png"));
+        std::fs::write(
+            &request,
+            serde_json::to_vec(&json!({"schema_version":1,"assignments":assignments})).unwrap(),
+        )
+        .unwrap();
+        if !batch {
+            require_ok(&invoke(
+                &repo,
+                &[
+                    Path::new("--render-experimental-request"),
+                    &plugin,
+                    &input,
+                    &output,
+                    &request,
+                ],
+            ));
+        }
+        cases.push(json!({"id":index.to_string(),"input":input,"request":request,"output":output}));
+    }
+    if batch {
+        let manifest = scratch.0.join("batch.json");
+        std::fs::write(&manifest,serde_json::to_vec(&json!({"schema":"aexcompat.independent_case_batch","schema_version":1,"plugin":plugin,"route":"classic8","isolation":"fresh_sequence","frame_deadline_ms":10000,"cases":cases})).unwrap()).unwrap();
+        let result = invoke(&repo, &[Path::new("--render-request-batch"), &manifest]);
+        require_ok(&result);
+        let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["complete"], true);
+        for case in report["cases"].as_array().unwrap() {
+            assert_eq!(case["evidence_valid"], true);
+        }
+    }
+    for (index, pixel) in expected.into_iter().enumerate() {
+        let image = image::open(scratch.0.join(format!("output-{index}.png")))
+            .unwrap()
+            .to_rgba8();
+        assert!(
+            image.pixels().all(|p| p.0 == pixel),
+            "case {index}: expected {pixel:?}, got {:?}",
+            image.get_pixel(0, 0)
+        );
+    }
+}
+#[test]
+fn sparse_declared_color_defaults_single_pixels() {
+    declared_color_defaults(false);
+}
+#[test]
+fn sparse_declared_color_defaults_fresh_batch_pixels() {
+    declared_color_defaults(true);
+}

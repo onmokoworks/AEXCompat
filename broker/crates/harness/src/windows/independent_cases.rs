@@ -121,7 +121,10 @@ fn run_independent_case_batch(repository: &Path, path: &Path) -> Result<serde_js
                 );
             }
         }
-        let bytes = read_batch_document(&case.request, 64 * 1024)?;
+        let bytes = read_batch_document(
+            &case.request,
+            aexcompat_broker::parameter_limits::MAX_PARAMETER_DOCUMENT_BYTES as u64,
+        )?;
         let document = serde_json::from_slice::<BatchJsonValue>(&bytes)
             .map_err(|e| e.to_string())?
             .0;

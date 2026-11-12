@@ -1249,3 +1249,24 @@ def test_captured_oracle_is_compared_per_depth(tmp_path):
     assert {item["oracle"]["state"] for item in report["results"]} == {"captured"}
     assert {item["oracle"]["exact"] for item in report["results"]} == {True}
 
+
+
+def test_large_typed_request_sidecar_preserves_high_slots(tmp_path):
+    runner = load_runner_module()
+    manifest = json.loads((ROOT / "tests/fixtures/conformance/basic-manifest.json").read_text(encoding="utf-8"))
+    for count in (1025, 1623, 4096):
+        manifest["execution"]["parameters"] = [
+            {"index": slot, "type": "slider", "value": 17}
+            for slot in range(1, count + 1)
+        ]
+        destination = tmp_path / f"request-{count}.json"
+        runner.write_request_sidecar(manifest, "argb8", destination)
+        encoded = destination.read_bytes()
+        assert len(encoded) > (64 * 1024 if count >= 1623 else 16 * 1024)
+        assignments = json.loads(encoded)["assignments"]
+        assert len(assignments) == count
+        assert assignments[-1] == {"slot": count, "value": 17}
+    manifest["execution"]["parameters"] = [{"index": 1, "type": "arbitrary", "value": "x" * (7 * 1024 * 1024)}]
+    with pytest.raises(ValueError, match="document size limit"):
+        runner.write_request_sidecar(manifest, "argb8", tmp_path / "oversized.json")
+    assert not (tmp_path / "oversized.json").exists()

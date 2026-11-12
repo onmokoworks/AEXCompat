@@ -412,7 +412,20 @@ fn validate_fixture(fixture: &DeclarativeRenderFixture) -> io::Result<()> {
             "fixture v1 does not support matrix or world layouts",
         ));
     }
+    if fixture.parameters.len() > crate::parameter_limits::MAX_PARAMETERS as usize {
+        return Err(invalid("fixture parameter count exceeds limit (4096)"));
+    }
+    let mut slots = std::collections::HashSet::new();
     for parameter in &fixture.parameters {
+        if parameter.slot == 0
+            || parameter.slot > crate::parameter_limits::MAX_PARAMETERS
+            || !slots.insert(parameter.slot)
+        {
+            return Err(invalid(
+                "fixture parameter slot must be unique and in 1..=4096",
+            ));
+        }
+
         if parameter.kind == "popup"
             && (parameter.choices.is_empty()
                 || parameter.choices.len() > 64
@@ -652,6 +665,36 @@ mod tests {
                 {"x":80,"y":16},{"x":80,"y":48},{"x":16,"y":48}
             ]}]}
         })
+    }
+
+    #[test]
+    fn fixture_parameter_capacity_is_bounded_without_truncation() {
+        for count in [1025, 1623, 4096] {
+            let mut fixture: DeclarativeRenderFixture =
+                serde_json::from_value(mask_fixture()).unwrap();
+            let p: InteractiveParameter = serde_json::from_value(parameter()).unwrap();
+            fixture.parameters = (1..=count)
+                .map(|slot| {
+                    let mut p = p.clone();
+                    p.slot = slot;
+                    p
+                })
+                .collect();
+            validate_fixture(&fixture).unwrap();
+            assert_eq!(fixture.parameters.last().unwrap().slot, count);
+            fixture.parameters.push(fixture.parameters[0].clone());
+            assert!(validate_fixture(&fixture).is_err());
+        }
+        let mut fixture: DeclarativeRenderFixture = serde_json::from_value(mask_fixture()).unwrap();
+        let mut p: InteractiveParameter = serde_json::from_value(parameter()).unwrap();
+        p.slot = 4097;
+        fixture.parameters.push(p);
+        assert!(
+            validate_fixture(&fixture)
+                .unwrap_err()
+                .to_string()
+                .contains("4096")
+        );
     }
 
     #[test]

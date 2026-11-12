@@ -173,6 +173,10 @@ fn inspection_result_from_report(
         .get("parameters")
         .and_then(Value::as_array)
         .ok_or_else(|| invalid("inspection report has no parameters"))?;
+    if rows.len() > MAX_PARAMETERS as usize {
+        return Err(invalid("inspection parameter count exceeds limit (4096)"));
+    }
+    let mut seen_slots = HashSet::new();
     let mut parameters = Vec::new();
     let mut parameter_metadata = Vec::new();
     let custom_ui_events = report
@@ -188,8 +192,11 @@ fn inspection_result_from_report(
         let observed_index = row
             .get("index")
             .and_then(Value::as_u64)
-            .filter(|value| *value <= u64::from(u16::MAX))
+            .filter(|value| *value > 0 && *value <= u64::from(MAX_PARAMETERS))
             .ok_or_else(|| invalid("inspection parameter has no bounded index"))?;
+        if !seen_slots.insert(observed_index) {
+            return Err(invalid("inspection contains duplicate parameter slots"));
+        }
         let default = row.get("default").and_then(Value::as_f64).unwrap_or(0.0);
         let ui_flags = row.get("ui_flags").and_then(Value::as_u64).unwrap_or(0);
         let default_color = row.get("default_color");
@@ -1484,6 +1491,13 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
             )
         })
         .collect::<Vec<_>>();
+    if parameters.len() > MAX_PARAMETERS as usize {
+        return Err(invalid("parameter count exceeds limit (4096)"));
+    }
+    let mut slots = HashSet::new();
+    if parameters.iter().any(|item| !slots.insert(item.slot)) {
+        return Err(invalid("duplicate parameter slot"));
+    }
     let mut payload = if parameters.iter().any(|item| item.use_declared_default) {
         "v7|".to_owned()
     } else if parameters.iter().any(|item| item.color_float.is_some()) {
@@ -1598,8 +1612,10 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
             _ => return Err(invalid("unsupported interactive parameter kind")),
         }
     }
-    if payload.len() > 16384 {
-        return Err(invalid("interactive parameter payload is too large"));
+    if payload.len() > crate::parameter_limits::MAX_PARAMETER_PAYLOAD_BYTES {
+        return Err(invalid(
+            "interactive parameter payload exceeds 1048576 bytes",
+        ));
     }
     Ok(payload)
 }

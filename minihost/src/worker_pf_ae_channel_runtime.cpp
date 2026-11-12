@@ -1,3 +1,4 @@
+#include "worker_parameter_limits.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
 
 #include "strict_json.hpp"
@@ -332,7 +333,7 @@ bool parse_alpha_coverage_params(const wchar_t* text) {
     try {
       std::size_t used = 0;
       const long slot = std::stol(token, &used);
-      if (used != token.size() || slot < 0 || slot > 1024 ||
+      if (used != token.size() || slot < 0 || slot > static_cast<int32_t>(aexcompat::worker_runtime::parameters::kMaxParameterCount) ||
           std::find(parsed.begin(), parsed.end(), static_cast<int32_t>(slot)) != parsed.end())
         return false;
       parsed.push_back(static_cast<int32_t>(slot));

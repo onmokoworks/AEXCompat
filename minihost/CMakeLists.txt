@@ -829,3 +829,18 @@ target_compile_features(worker_cluster_manifest_path_probe PRIVATE cxx_std_17)
 target_compile_definitions(worker_cluster_manifest_path_probe PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_cluster_manifest_path_probe PRIVATE src)
+
+foreach(count 1025 1623 4096 4097)
+  add_library(worker_many_parameters_${count} MODULE
+    ../tests/native/worker_many_parameters_fixture.cpp
+    ../tests/native/worker_discovery_handle_fixture.rc)
+  target_include_directories(worker_many_parameters_${count} PRIVATE src)
+  target_compile_features(worker_many_parameters_${count} PRIVATE cxx_std_17)
+  target_compile_definitions(worker_many_parameters_${count} PRIVATE MANY_PARAMETER_COUNT=${count})
+  set_target_properties(worker_many_parameters_${count} PROPERTIES PREFIX "" SUFFIX ".aex")
+endforeach()
+
+add_library(worker_declared_defaults_fixture MODULE ../tests/native/worker_declared_defaults_fixture.cpp ../tests/native/worker_discovery_handle_fixture.rc)
+target_include_directories(worker_declared_defaults_fixture PRIVATE src)
+target_compile_features(worker_declared_defaults_fixture PRIVATE cxx_std_17)
+set_target_properties(worker_declared_defaults_fixture PROPERTIES PREFIX "" SUFFIX ".aex")

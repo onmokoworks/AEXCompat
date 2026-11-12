@@ -22,7 +22,7 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-const REQUEST_LIMIT: u64 = 16 * 1024;
+const REQUEST_LIMIT: u64 = crate::parameter_limits::MAX_PARAMETER_DOCUMENT_BYTES as u64;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

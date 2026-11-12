@@ -1156,8 +1156,8 @@ impl HarnessApp {
         };
         let result = (|| {
             let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-            if bytes.len() > 64 * 1024 {
-                return Err("assignment document exceeds 64 KiB".to_owned());
+            if bytes.len() > aexcompat_broker::parameter_limits::MAX_PARAMETER_DOCUMENT_BYTES {
+                return Err("assignment document exceeds parameter document size limit".to_owned());
             }
             let document: serde_json::Value =
                 serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;

@@ -21,7 +21,7 @@
         "workers": {"type": "array", "maxItems": 3, "uniqueItems": true, "items": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"}}
       }
     },
-    "parameters": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/parameter_metadata"}},
+    "parameters": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/parameter_metadata"}},
     "results": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"$ref": "#/$defs/depth_result"}}
   },
   "$defs": {
@@ -50,7 +50,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["index", "type", "initial_value", "host_range", "user_range"],
       "properties": {
-        "index": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "index": {"type": "integer", "minimum": 0, "maximum": 4096},
         "type": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_ -]+$"},
         "initial_value": {"oneOf": [{"$ref": "conformance-manifest.schema.json#/$defs/json_value"}, {"type": "null"}]},
         "host_range": {"$ref": "#/$defs/range"},

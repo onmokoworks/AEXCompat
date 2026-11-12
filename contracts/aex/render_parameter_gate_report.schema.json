@@ -11,13 +11,13 @@
     "schema_version": {"const": 1},
     "gate": {"const": "pre_dispatch_parameter_validation"},
     "plugin_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
-    "assignment_count": {"type": "integer", "minimum": 0, "maximum": 64},
+    "assignment_count": {"type": "integer", "minimum": 0, "maximum": 4096},
     "accepted": {"type": "boolean"},
     "native_dispatch_permitted": {"type": "boolean"},
     "native_process_started": {"const": false},
     "errors": {
       "type": "array",
-      "maxItems": 64,
+      "maxItems": 4096,
       "items": {
         "type": "object",
         "additionalProperties": false,

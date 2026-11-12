@@ -13,9 +13,12 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
-const MAX_CONTROL_RESPONSE_BYTES: usize = 512 * 1024;
-const MAX_PARAMETER_PAYLOAD_BYTES: usize = 16 * 1024;
+// Mirror broker::parameter_limits: host budgets, not an Adobe maximum.
+const MAX_PARAMETERS: usize = 4096;
+const MAX_PARAMETER_PAYLOAD_BYTES: usize = MAX_PARAMETERS * 256;
+const MAX_CONTROL_MESSAGE_BYTES: usize = MAX_PARAMETER_PAYLOAD_BYTES + 64 * 1024;
+// Setup/close responses include the complete descriptor inventory.
+const MAX_CONTROL_RESPONSE_BYTES: usize = MAX_PARAMETER_PAYLOAD_BYTES * 6 + 64 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -911,7 +914,7 @@ fn parse_parameter_payload(
 ) -> Result<Vec<ParameterValue>, SessionError> {
     if !payload.is_ascii() || payload.len() > MAX_PARAMETER_PAYLOAD_BYTES {
         return Err(SessionError::Protocol(
-            "parameter payload must be bounded ASCII".into(),
+            "parameter payload must be ASCII and at most 1048576 bytes".into(),
         ));
     }
     let (body, component_payload) = if let Some(body) = payload.strip_prefix("v2|") {
@@ -946,6 +949,11 @@ fn parse_parameter_payload(
         let slot = slot_text
             .parse::<usize>()
             .map_err(|_| SessionError::Protocol("parameter slot is invalid".into()))?;
+        if slot == 0 || slot > MAX_PARAMETERS {
+            return Err(SessionError::Protocol(
+                "parameter slot must be in 1..4096".into(),
+            ));
+        }
         if id != format!("param_{slot}") || !seen_slots.insert(slot) {
             return Err(SessionError::Protocol(
                 "parameter identity or uniqueness is invalid".into(),
@@ -1143,6 +1151,119 @@ mod tests {
         MAX_FAILURE_CRASH_SNAPSHOT_BYTES, MAX_FAILURE_SUITE_REQUEST_BYTES, MAX_FAILURE_TEXT_BYTES,
     };
 
+    fn large_parameter_setup(count: usize) -> SetupReport {
+        let mut setup = SetupReport {
+            schema_version: 1,
+            execution_backend: "fixture",
+            global_setup_error: 0,
+            params_setup_error: 0,
+            advertised_num_params: 2,
+            out_flags: 0,
+            out_flags2: 0,
+            custom_ui: None,
+            parameters: vec![crate::classic::ParameterReport {
+                slot: 1,
+                index: 1,
+                param_type: 10,
+                name: "Amount".into(),
+                ui_flags: 0,
+                flags: 0,
+                ui_width: 0,
+                ui_height: 0,
+                choices: None,
+                default_value: Some(5.0),
+                valid_min: Some(0.0),
+                valid_max: Some(100.0),
+                slider_min: Some(0.0),
+                slider_max: Some(100.0),
+                precision: Some(2),
+                current_color: None,
+                default_color: None,
+                current_components: None,
+                default_components: None,
+            }],
+            suite_requests: Vec::new(),
+            unsupported_suite_calls: Vec::new(),
+            dropped_unsupported_suite_calls: 0,
+        };
+        let template = setup.parameters[0].clone();
+        setup.parameters = (1..=count)
+            .map(|slot| {
+                let mut p = template.clone();
+                p.slot = slot;
+                p.index = slot as i32;
+                p.param_type = 1;
+                p.name = format!("Value {slot}");
+                p
+            })
+            .collect();
+        setup.advertised_num_params = (count + 1) as i32;
+        setup
+    }
+    #[test]
+    fn resident_large_setup_response_preserves_inventory() {
+        let setup = large_parameter_setup(4096);
+        let value = serde_json::json!({"setup":setup});
+        let mut framed = Vec::new();
+        write_message(&mut framed, &value).unwrap();
+        assert!(framed.len() > 512 * 1024);
+        let decoded: Value = serde_json::from_slice(&framed[4..]).unwrap();
+        assert_eq!(
+            decoded["setup"]["parameters"].as_array().unwrap().len(),
+            4096
+        );
+    }
+    #[test]
+    fn large_resident_parameter_payload_preserves_all_slots() {
+        for count in [1025, 1623, 4096] {
+            let payload = format!(
+                "v2|{}",
+                (1..=count)
+                    .map(|slot| format!("param_{slot}@{slot}:i32=23"))
+                    .collect::<Vec<_>>()
+                    .join(";")
+            );
+            assert!(payload.len() > 16384);
+            let values = parse_parameter_payload(&payload, &large_parameter_setup(count)).unwrap();
+            assert_eq!(values.len(), count);
+            assert_eq!(values[count - 1].slot, Some(count));
+            assert!(values.iter().all(|v| v.value == Some(23.0)));
+        }
+    }
+    #[test]
+    fn resident_parameter_payload_exact_budget_and_overflow() {
+        let payload = format!(
+            "v2|param_1@1:i32={}23",
+            "0".repeat(1048576 - "v2|param_1@1:i32=23".len())
+        );
+        assert_eq!(payload.len(), 1048576);
+        assert_eq!(
+            parse_parameter_payload(&payload, &large_parameter_setup(1)).unwrap()[0].value,
+            Some(23.0)
+        );
+        assert!(
+            parse_parameter_payload(&(payload + "0"), &large_parameter_setup(1))
+                .unwrap_err()
+                .to_string()
+                .contains("1048576")
+        );
+        assert!(
+            parse_parameter_payload("v2|param_4097@4097:i32=23", &large_parameter_setup(4097))
+                .unwrap_err()
+                .to_string()
+                .contains("4096")
+        );
+    }
+    #[test]
+    fn resident_large_request_framing_is_exact_and_bounded() {
+        for length in [65537usize, 1048576 + 65536] {
+            let payload = vec![b' '; length];
+            let mut bytes = (length as u32).to_le_bytes().to_vec();
+            bytes.extend_from_slice(&payload);
+            assert_eq!(read_message(&mut bytes.as_slice()).unwrap(), Some(payload));
+        }
+        assert!(read_message(&mut &((1048576 + 65536 + 1) as u32).to_le_bytes()[..]).is_err());
+    }
     #[test]
     fn user_changed_request_has_an_exact_positive_slot_contract() {
         let setup = SetupReport {

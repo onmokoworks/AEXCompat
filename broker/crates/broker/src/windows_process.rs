@@ -21,6 +21,10 @@ use windows_sys::Win32::System::JobObjects::{
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject,
 };
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MapViewOfFile, PAGE_READWRITE,
+    UnmapViewOfFile,
+};
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::StationsAndDesktops::{
     CreateDesktopW, GetProcessWindowStation, GetThreadDesktop, GetUserObjectInformationW, HDESK,
@@ -1284,6 +1288,70 @@ fn launch_isolated_session_with_desktop_policy(
     )
 }
 
+fn map_parameter_arguments(args: &[String]) -> io::Result<(Vec<String>, Vec<OwnedHandle>)> {
+    use windows_sys::Win32::Foundation::DuplicateHandle;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut mapped = Vec::with_capacity(args.len());
+    let mut handles = Vec::new();
+    for arg in args {
+        let parameter = matches!(
+            arg.as_bytes().get(..3),
+            Some(b"v2|" | b"v3|" | b"v4|" | b"v5|" | b"v6|" | b"v7|")
+        );
+        if !parameter || arg.len() <= 8192 {
+            mapped.push(arg.clone());
+            continue;
+        }
+        if arg.len() > crate::parameter_limits::MAX_PARAMETER_PAYLOAD_BYTES || !arg.is_ascii() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "parameter payload exceeds 1048576 bytes or is not ASCII",
+            ));
+        }
+        let section = OwnedHandle::new(unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                null(),
+                PAGE_READWRITE,
+                0,
+                arg.len() as u32,
+                null(),
+            )
+        })?;
+        let view = unsafe { MapViewOfFile(section.raw(), FILE_MAP_WRITE, 0, 0, arg.len()) };
+        if view.Value.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(arg.as_ptr(), view.Value.cast(), arg.len());
+            UnmapViewOfFile(view);
+        }
+        let mut read_handle = null_mut();
+        if unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                section.raw(),
+                GetCurrentProcess(),
+                &mut read_handle,
+                FILE_MAP_READ,
+                1,
+                0,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let read_handle = OwnedHandle::new(read_handle)?;
+        mapped.push(format!(
+            "param-map:v1|{},{}",
+            read_handle.raw() as usize,
+            arg.len()
+        ));
+        handles.push(read_handle);
+    }
+    Ok((mapped, handles))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn launch_isolated_impl(
     program: &Path,
@@ -1295,6 +1363,9 @@ fn launch_isolated_impl(
     launch_environment: &LaunchEnvironment,
     process_memory_limit: usize,
 ) -> io::Result<LaunchedIsolatedProcess> {
+    // Large parameter documents cannot travel through CreateProcessW's command
+    // line. Pass an anonymous, read-only inherited mapping instead of a path.
+    let (args, parameter_mappings) = map_parameter_arguments(args)?;
     let trace_file = crate::trace_policy::create_trace_file_for_launch()?;
     let mut minidump_file = repository
         .map(|repository| {
@@ -1355,6 +1426,7 @@ fn launch_isolated_impl(
     }
     let _attribute_guard = AttributeGuard(attribute_list);
     let mut inherited = vec![stdout_write.raw(), stderr_write.raw()];
+    inherited.extend(parameter_mappings.iter().map(OwnedHandle::raw));
     if let Some(trace_file) = trace_file.as_ref() {
         inherited.push(trace_file.raw());
     }
@@ -1406,7 +1478,7 @@ fn launch_isolated_impl(
         };
     let program_text = program_launch.as_os_str().to_string_lossy();
     let mut command = quote(&program_text);
-    for arg in args {
+    for arg in &args {
         command.push(' ');
         command.push_str(&quote(arg));
     }
@@ -1591,6 +1663,32 @@ mod tests {
         }
         truncated |= finish_capture(&mut collected, limit, retention);
         (collected.bytes, truncated)
+    }
+
+    #[test]
+    fn large_parameter_mapping_is_exact_read_only_and_bounded() {
+        let payload = format!(
+            "v5|{}",
+            "a".repeat(crate::parameter_limits::MAX_PARAMETER_PAYLOAD_BYTES - 3)
+        );
+        let (args, mappings) =
+            map_parameter_arguments(&["--mode".into(), payload.clone()]).unwrap();
+        assert_eq!(args[0], "--mode");
+        assert!(args[1].starts_with("param-map:v1|"));
+        assert_eq!(mappings.len(), 1);
+        let view = unsafe { MapViewOfFile(mappings[0].raw(), FILE_MAP_READ, 0, 0, payload.len()) };
+        assert!(!view.Value.is_null());
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(view.Value.cast::<u8>(), payload.len()) },
+            payload.as_bytes()
+        );
+        unsafe {
+            UnmapViewOfFile(view);
+        }
+        let writable =
+            unsafe { MapViewOfFile(mappings[0].raw(), FILE_MAP_WRITE, 0, 0, payload.len()) };
+        assert!(writable.Value.is_null(), "child must not get write access");
+        assert!(map_parameter_arguments(&[format!("{payload}x")]).is_err());
     }
 
     /// A stream inside the bound is kept whole and reports no truncation,

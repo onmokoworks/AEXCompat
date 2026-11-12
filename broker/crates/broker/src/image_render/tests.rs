@@ -2643,7 +2643,7 @@ mod tests {
             "error=0 reason=params_setup",
             "error=3 reason=requested_assignment slot=1 kind=integer param_type=15",
             "error=3 reason=requested_assignment slot=0 kind=integer param_type=15 assignment_reason=kind_mismatch",
-            "error=3 reason=requested_assignment slot=1025 kind=integer param_type=15 assignment_reason=kind_mismatch",
+            "error=3 reason=requested_assignment slot=4097 kind=integer param_type=15 assignment_reason=kind_mismatch",
             "error=3 reason=requested_assignment slot=1 kind=C:\\private\\file param_type=15 assignment_reason=kind_mismatch",
             "error=3 reason=requested_assignment slot=1 kind=integer param_type=C:\\private\\file assignment_reason=kind_mismatch",
             "error=3 reason=requested_assignment slot=1 kind=integer param_type=2147483648 assignment_reason=kind_mismatch",

@@ -1083,3 +1083,29 @@ def test_baseline_comparison_rejects_malformed_success_contract(malformation):
         SWEEP.SweepError, match="identity is invalid|milestones are invalid|output SHA-256 is invalid"
     ):
         SWEEP.compare_baseline(current, baseline)
+
+
+def test_large_guest_setup_response_roundtrip(monkeypatch):
+    import io
+    setup=_setup_message();setup["advertised_num_params"]=4097
+    setup["parameters"]=[{"slot":i,"index":i,"param_type":1,"name":"Value "+str(i),"ui_flags":0,"flags":0,"ui_width":0,"ui_height":0,"default_value":23,"valid_min":0,"valid_max":100,"slider_min":0,"slider_max":100,"precision":0} for i in range(1,4097)]
+    value={"v":1,"type":"session_ready","worker_pid":42,"setup":setup}
+    payload=json.dumps(value,separators=(",",":")).encode()
+    assert len(payload)>512*1024
+    stream=io.BytesIO(struct.pack("<I",len(payload))+payload)
+    monkeypatch.setattr(SWEEP,"_read_exact_timeout",lambda stream,size,deadline:stream.read(size))
+    received=SWEEP.read_message(stream,1);SWEEP.validate_ready(received,42)
+    assert received==value
+    assert len(received["setup"]["parameters"])==4096
+
+@pytest.mark.parametrize("length",[65537,1048576+65536,1048576+65536+1])
+def test_guest_sweep_request_boundary_no_partial_write(length):
+    import io
+    value={"parameters":"x"*(length-17)};out=io.BytesIO()
+    assert len(json.dumps(value,separators=(",",":")).encode())==length
+    if length>1048576+65536:
+        with pytest.raises(SWEEP.SweepError):SWEEP.write_message(out,value)
+        assert out.getvalue()==b""
+    else:
+        SWEEP.write_message(out,value);data=out.getvalue()
+        assert struct.unpack("<I",data[:4])[0]==length and json.loads(data[4:])==value

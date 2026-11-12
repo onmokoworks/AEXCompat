@@ -173,3 +173,48 @@ def test_synthetic_main_publishes_schema_valid_redacted_gap_and_private_mapping(
     assert "ntsc-rs" not in encoded and "private-name" not in encoded and "case-000001" not in encoded and "0.5" not in encoded
     assert json.loads((private/"gap-map.json").read_text(encoding="utf-8"))["mapping"][0]["case_ids"]==["case-000001"]
     assert corpus.hashlib.sha256(next((public/"evidence").glob("*.json")).read_bytes()).hexdigest()==gaps["records"][0]["evidence"]["sha256"]
+
+
+def large_parameter_matrix(count):
+    return {"schema_version":1,"render_paths":["classic","smartfx"],"depths":["argb8","argb16","argb32f"],"times":[{"value":0,"scale":1}],"parameter_sets":[[{"index":i,"type":"integer","value":23} for i in range(1,count+1)]]}
+
+def large_parameter_row():
+    return {"case_id":"case-000001","classification":"loader_error","render_path":"classic","depth":"argb8","time":{"value":0,"scale":1},"parameter_set_index":0,"selector_error_code":None,"missing_suites":[],"identities":{"input":{"role":"input","sha256":"a"*64,"size_bytes":1},"runner":{"role":"runner","sha256":"b"*64,"size_bytes":1},"workers":[{"role":"worker-000","sha256":"c"*64,"size_bytes":1}]}}
+
+@pytest.mark.parametrize("count",[1025,1623,4096,4097])
+def test_large_corpus_matrix_validation_and_evidence_generation(tmp_path,count):
+    matrix=large_parameter_matrix(count);path=tmp_path/"matrix.json";path.write_text(json.dumps(matrix),encoding="utf-8")
+    if count>4096:
+        with pytest.raises(ValidationError):corpus.load_validated(path,"real-aex-matrix.schema.json")
+        with pytest.raises(ValidationError):corpus.gap_records([large_parameter_row()],matrix,tmp_path)
+        assert not (tmp_path/"evidence").exists()
+        return
+    loaded=corpus.load_validated(path,"real-aex-matrix.schema.json")
+    records,mapping=corpus.gap_records([large_parameter_row()],loaded,tmp_path)
+    evidence=corpus.strict_json(tmp_path/records[0]["evidence"]["path"])
+    assert len(evidence["parameter_shape"])==count and evidence["parameter_shape"][-1]["index"]==count
+    assert mapping[0]["case_ids"]==["case-000001"]
+    gaps={"schema_version":1,"corpus_shape":{"aex_count":5,"supplier_count":3},"matrix_shape":{"render_path_count":2,"depth_count":3,"time_count":1,"parameter_shape_count":1},"records":records,"missing_suite_aggregation":[]}
+    Draft202012Validator(corpus.strict_json(ROOT/"schemas/real-aex-gaps.schema.json")).validate(gaps)
+
+@pytest.mark.parametrize("count",[1025,1623,4096,4097])
+@pytest.mark.parametrize("version",[1,2])
+def test_large_public_evidence_shape_boundaries(tmp_path,count,version):
+    records,_=corpus.gap_records([large_parameter_row()],large_parameter_matrix(1),tmp_path)
+    evidence=corpus.strict_json(tmp_path/records[0]["evidence"]["path"])
+    evidence["schema_version"]=version
+    if version==1:evidence["host_identities"]["workers"]=[{"role":f"worker-{i:03d}","sha256":"c"*64,"size_bytes":1} for i in range(3)]
+    evidence["parameter_shape"]=[{"index":i,"type":"integer"} for i in range(1,count+1)]
+    schema="real-aex-public-evidence"+('-v2' if version==2 else '')+'.schema.json'
+    validator=Draft202012Validator(corpus.strict_json(ROOT/"schemas"/schema))
+    if count>4096:
+        with pytest.raises(ValidationError):validator.validate(evidence)
+    else:validator.validate(evidence)
+    evidence["parameter_shape"]=[{"index":4097,"type":"integer"}]
+    with pytest.raises(ValidationError):validator.validate(evidence)
+
+def test_corpus_matrix_and_gap_slot_overflow_rejected(tmp_path):
+    matrix=large_parameter_matrix(1);matrix["parameter_sets"][0][0]["index"]=4097
+    validator=Draft202012Validator(corpus.strict_json(ROOT/"schemas/real-aex-matrix.schema.json"))
+    with pytest.raises(ValidationError):validator.validate(matrix)
+    with pytest.raises(ValidationError):corpus.gap_records([large_parameter_row()],matrix,tmp_path)

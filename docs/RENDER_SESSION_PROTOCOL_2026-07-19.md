@@ -175,7 +175,7 @@ auxiliary フック (`parse_l2_alpha_coverage`) でこれを parse し、launch 
 alpha-coverage provider をグローバルへ publish する。classic render runtime が
 毎フレームこれを読むため、session の「一度設定して全フレーム再利用」ライフタイムに
 一致し、worker 側の変更は不要。broker open は one-shot と同一の値域検証 (sort・重複
-禁止・slot <= 1024) を launch 前に行う。#211 で aux channels
+禁止・slot <= 4096) を launch 前に行う。#211 で aux channels
 (`host_context.aux_channels`) も session に載った: wrapper は one-shot と同じ
 `prepare_aux_transport` で aux channels を検証し、broker 所有の
 `target/image-transport` 配下に sidecar (`.f32le`) と `aux-manifest-v1` 形式の
@@ -296,8 +296,9 @@ one-shot との差分:
 
 ### 4.1 フレーミング
 
-u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (制御情報
-のみでピクセルは載らないため十分。超過は fail-closed でセッション無効化)。
+u32 LE の長さ接頭辞 + UTF-8 JSON 本文。画像renderの1メッセージ上限は
+1 MiB + 64 KiB (parameter payloadと制御情報。ピクセルは載らない。
+超過は fail-closed でセッション無効化)。音声の上限は引き続き64 KiB。
 応答パイプの読取は broker 側で per-frame deadline を張る (§7)。
 
 ### 4.2 broker → worker
@@ -353,7 +354,7 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   パラメーター更新と UI イベントを 1 往復で運べる — GUI ライブ操作向け)。
   未知キーは従来どおりプロトコル違反 (§7)。`close` は v:1 のみ。
 - **`parameters`**: launch argv payload と同一の符号化
-  (`encode_interactive_payload` が生成する `v2|`〜`v5|` 形式、上限 16384
+  (`encode_interactive_payload` が生成する `v2|`〜`v7|` 形式、上限 1048576
   バイト、ASCII のみ)。意味論は**そのフレーム限りの完全置換**: メッセージ内の
   割当が launch 時 payload の割当を丸ごと置き換える (overlay ではない。
   載っていない slot はプラグイン既定値に戻る)。後続の v:1 フレームは launch 時

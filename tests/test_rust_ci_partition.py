@@ -34,6 +34,7 @@ def metadata(runner, *, extra_broker_target: str | None = None):
                 "targets": [
                     {"name": "artifact_cli", "kind": ["test"]},
                     {"name": "independent_cases_cli", "kind": ["test"]},
+                    {"name": "many_parameters_cli", "kind": ["test"]},
                     {"name": "description_cli", "kind": ["test"]},
                     {"name": "render_fixture_cli", "kind": ["test"]},
                 ],
@@ -50,7 +51,7 @@ def test_partitions_are_disjoint_complete_and_fail_closed_on_stale_native_target
     assert independent[runner.BROKER] == runner.INDEPENDENT_BROKER_TARGETS
     assert native[runner.BROKER] == runner.NATIVE_BROKER_TARGETS
     assert independent[runner.HARNESS] == {"description_cli", "render_fixture_cli"}
-    assert native[runner.HARNESS] == {"artifact_cli", "independent_cases_cli"}
+    assert native[runner.HARNESS] == {"artifact_cli", "independent_cases_cli", "many_parameters_cli"}
 
     with pytest.raises(SystemExit, match="unclassified"):
         runner.partitions(metadata(runner, extra_broker_target="new_target"))

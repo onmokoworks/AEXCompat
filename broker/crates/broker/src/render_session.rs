@@ -68,10 +68,10 @@ const PROTOCOL_VERSION: u32 = 1;
 /// the header check (in both directions) instead of reading the wrong bytes.
 const SESSION_HEADER_VERSION: u32 = 3;
 const NATIVE_INPUT_HEADER_VERSION: u32 = 4;
-const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_MESSAGE_BYTES: usize = crate::parameter_limits::MAX_PARAMETER_MESSAGE_BYTES;
 /// A discovery session's `inspect_done` carries the full parameter report, so
 /// its reader allows 4 MiB frames (design §4); every other session flavor
-/// stays under the 64 KiB cap.
+/// uses the separately bounded parameter-message budget.
 const MAX_DISCOVERY_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 /// Fail-closed cap on the whole section for pathological configurations
 /// (protocol §6); ordinary full-HD sessions stay far below it.
@@ -160,7 +160,7 @@ const FRAME_WIDTH_OFFSET: usize = 32;
 const FRAME_HEIGHT_OFFSET: usize = 36;
 
 const MAX_BATCH_FRAMES: usize = 10_000;
-const MAX_REQUEST_BYTES: u64 = 64 * 1024;
+const MAX_REQUEST_BYTES: u64 = crate::parameter_limits::MAX_PARAMETER_DOCUMENT_BYTES as u64;
 const CLOSE_COLLECT_TIMEOUT: Duration = Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS);
 
 /// How long a close-handshake write failure waits for the process object to
@@ -1507,7 +1507,7 @@ impl RenderSession {
                     || layer.dynamic
                     || layer.width != request.width
                     || layer.height != request.height))
-                || layer.slot > 1024
+                || layer.slot > crate::parameter_limits::MAX_PARAMETERS
                 || layer.width == 0
                 || layer.height == 0
                 || layer.width > MAX_DIMENSION
@@ -1619,8 +1619,10 @@ impl RenderSession {
         // the limit the worker's parser is written against.
         let payload = match request.payload_override {
             Some(payload) => {
-                if payload.len() > 16384 {
-                    return Err(invalid("interactive parameter payload is too large"));
+                if payload.len() > crate::parameter_limits::MAX_PARAMETER_PAYLOAD_BYTES {
+                    return Err(invalid(
+                        "interactive parameter payload exceeds 1048576 bytes",
+                    ));
                 }
                 payload.to_owned()
             }
@@ -1915,13 +1917,15 @@ impl RenderSession {
         // opaque worker exit on the first frame.
         if !request.alpha_as_coverage_params.is_empty() {
             // Same validation and encoding as the one-shot path
-            // (image_render.rs): sorted, unique, slot <= 1024. The worker's
+            // (image_render.rs): sorted, unique, slot <= MAX_PARAMETERS. The worker's
             // shared auxiliary hook parses this identically for the session and
             // one-shot Render entries.
             let mut slots = request.alpha_as_coverage_params.to_vec();
             slots.sort_unstable();
             if slots.windows(2).any(|pair| pair[0] == pair[1])
-                || slots.iter().any(|slot| *slot > 1024)
+                || slots
+                    .iter()
+                    .any(|slot| *slot > crate::parameter_limits::MAX_PARAMETERS)
             {
                 return Err(invalid("alpha-as-coverage parameter slots are invalid"));
             }
@@ -2848,8 +2852,8 @@ impl RenderSession {
             }
             serde_json::to_string(&message_value).map_err(|error| invalid(error.to_string()))?
         };
-        // The encoder's 16 KiB payload cap keeps every message far below the
-        // protocol's 64 KiB framing limit today, but the bound is enforced
+        // The payload budget reserves additional space for frame metadata,
+        // but the complete message bound is still enforced
         // here regardless: an oversized message must be a caller error before
         // any transport mutation, never a send failure that kills a healthy
         // session.
@@ -4388,7 +4392,9 @@ pub fn run_video_batch(
 ) -> io::Result<bool> {
     let metadata = fs::metadata(request_path)?;
     if metadata.len() > MAX_REQUEST_BYTES {
-        return Err(invalid("batch request document exceeds 64 KiB"));
+        return Err(invalid(
+            "batch request document exceeds parameter document size limit",
+        ));
     }
     let request: VideoBatchRequest = serde_json::from_slice(&fs::read(request_path)?)
         .map_err(|error| invalid(format!("batch request is invalid: {error}")))?;

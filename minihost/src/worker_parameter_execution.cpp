@@ -752,7 +752,11 @@ void initialize_parameter_definitions(
       record.current_value = record.default_value != 0 ? 1.0 : 0.0;
     }
     else if (record.type == 2) {
-      const auto encoded = to_fixed(default_value);
+      // Fixed sliders use the full signed 16.16 range, including the fractional
+      // interval above 32767. Geometry's narrower clamp must not discard it.
+      const auto encoded = static_cast<int32_t>(std::round(std::clamp(
+          default_value * 65536.0, static_cast<double>(INT32_MIN),
+          static_cast<double>(INT32_MAX))));
       write<int32_t>(definitions[i + 1], 56, encoded);
       record.has_current = true;
       record.current_value = encoded / 65536.0;
@@ -763,8 +767,11 @@ void initialize_parameter_definitions(
       record.current_value = default_value;
     }
     else if (record.type == 5) {
-      std::memcpy(record.current_color.data(), record.raw.data() + 56,
-                  record.current_color.size());
+      // PARAMS_SETUP may initialize value independently from dephault. A fresh
+      // instance must materialize the declaration before sparse edits apply.
+      record.current_color = record.default_color;
+      std::memcpy(definitions[i + 1].data() + 56, record.default_color.data(),
+                  record.default_color.size());
       for (std::size_t channel = 0; channel < 4; ++channel)
         record.current_float_color[channel] =
             record.current_color[channel] / 255.0f;

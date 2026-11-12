@@ -7,7 +7,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-const MANIFEST_LIMIT: u64 = 64 * 1024;
+const MANIFEST_LIMIT: u64 = crate::parameter_limits::MAX_PARAMETER_DOCUMENT_BYTES as u64;
 
 #[derive(Clone, Copy)]
 pub struct ManifestPolicy {
@@ -93,7 +93,7 @@ pub fn load(
             .all(|byte| byte.is_ascii_hexdigit())
         || manifest.source.receipt_id.is_empty()
         || manifest.descriptors.is_empty()
-        || manifest.descriptors.len() > 1024
+        || manifest.descriptors.len() > crate::parameter_limits::MAX_PARAMETERS as usize
     {
         return Err(invalid("descriptor manifest identity invalid"));
     }
@@ -190,4 +190,46 @@ pub fn load(
         receipt_id: manifest.source.receipt_id,
         observed_descriptor_count: manifest.descriptors.len(),
     })
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn large_descriptor_manifest_retains_every_slot_and_rejects_overflow() {
+        let root =
+            std::env::temp_dir().join(format!("aex-descriptors-{:032x}", rand::random::<u128>()));
+        fs::create_dir(&root).unwrap();
+        let policy = ManifestPolicy {
+            path: "manifest.json",
+        };
+        for count in [1025, 1623, 4096, 4097] {
+            let descriptors = (1..=count)
+                .map(|slot| {
+                    json!({
+                        "slot": slot, "observed_type": 1, "display_name": format!("Value {slot}"),
+                        "assignable": true, "id": format!("p{slot}"), "kind": "integer",
+                        "minimum": 0, "maximum": 255, "default": 17,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let bytes = serde_json::to_vec(&json!({"schema_version": 1, "plugin_id": "large",
+                "source": {"stage": "L2", "plugin_sha256": "a".repeat(64), "receipt_id": "record"},
+                "descriptors": descriptors}))
+            .unwrap();
+            assert!(bytes.len() > 64 * 1024);
+            fs::write(root.join(policy.path), bytes).unwrap();
+            let loaded = load(&root, "large", policy);
+            if count <= 4096 {
+                let loaded = loaded.unwrap();
+                assert_eq!(loaded.observed_descriptor_count, count as usize);
+                assert_eq!(loaded.profile.descriptors.last().unwrap().slot, count);
+            } else {
+                assert!(loaded.is_err());
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }
