@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #pragma once
 
 #include <algorithm>
@@ -22,7 +23,7 @@ struct Result {
   int32_t max_column_run{};
 };
 
-inline unsigned char pattern_byte(int32_t x, int32_t y, int32_t pixel_bytes,
+inline unsigned char base_pattern_byte(int32_t x, int32_t y, int32_t pixel_bytes,
                                   int32_t byte_index) {
   // In little-endian ARGB32F, byte 3 of each channel contains the exponent.
   // 0x3F keeps every sentinel channel finite instead of confusing partial
@@ -37,6 +38,13 @@ inline unsigned char pattern_byte(int32_t x, int32_t y, int32_t pixel_bytes,
   state = (state ^ (state >> 27)) * 0x94d049bb133111ebULL;
   const auto value = static_cast<unsigned char>((state ^ (state >> 31)) >> 56);
   return value == 0xCC ? 0xCD : value;
+}
+
+inline unsigned char pattern_byte(int32_t x, int32_t y, int32_t pixel_bytes, int32_t b) {
+  auto value = base_pattern_byte(x, y, pixel_bytes, b);
+  if (aexcompat::memory_fill::selected(aexcompat::memory_fill::Output))
+    value ^= aexcompat::memory_fill::byte(static_cast<std::size_t>(x) * pixel_bytes + b);
+  return value;
 }
 
 inline bool seed_geometry_valid(const unsigned char* pixels, std::size_t size,
@@ -59,7 +67,12 @@ inline bool seed(unsigned char* pixels, std::size_t size, int32_t width,
       for (int32_t b = 0; b < pixel_bytes; ++b)
         pixels[static_cast<std::size_t>(y) * rowbytes +
                static_cast<std::size_t>(x) * pixel_bytes + b] =
-            pattern_byte(x, y, pixel_bytes, b);
+            base_pattern_byte(x, y, pixel_bytes, b);
+  const auto diagnostic_id = aexcompat::memory_fill::allocation_id();
+  aexcompat::memory_fill::fill(aexcompat::memory_fill::Output, pixels, size, 0,
+      static_cast<std::size_t>(width) * pixel_bytes, height, rowbytes,
+      "output_coverage_seed", diagnostic_id, false, true);
+  aexcompat::memory_fill::padding(pixels, size, width, height, rowbytes, pixel_bytes, "output_world", diagnostic_id);
   return true;
 }
 

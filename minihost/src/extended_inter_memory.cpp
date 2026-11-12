@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #include "extended_inter_memory.hpp"
 
 #include <algorithm>
@@ -48,6 +49,8 @@ int32_t __cdecl allocate(void** out, std::size_t size) {
     std::free(allocation);
     return 4;
   }
+  aexcompat::memory_fill::fill(aexcompat::memory_fill::Suite, allocation, size,
+      0, size, 1, 0, "ExtendedSuite_calloc", 0, true);
   *out = allocation;
   return 0;
 }

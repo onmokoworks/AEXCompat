@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #include "worker_render_report.hpp"
 #include "worker_callback_diagnostics.hpp"
 #include "runtime_module_audit.hpp"
@@ -224,6 +225,7 @@ void append_classic_frame(ReportSnapshot& report, const ClassicReport::Frame& va
 void append_output_coverage(
     ReportSnapshot& report,
     const aexcompat::worker_runtime::output_coverage::Result& coverage) {
+  report.stream() << aexcompat::memory_fill::report();
   report.stream() << ",\"output_coverage\":{"
       << "\"inspected\":" << (coverage.geometry_valid ? "true" : "false")
       << ",\"promised_pixels\":" << coverage.promised_pixels

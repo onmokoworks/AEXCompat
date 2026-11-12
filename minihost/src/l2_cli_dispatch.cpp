@@ -1,7 +1,31 @@
+#include "worker_memory_fill.hpp"
 #include "l2_cli_dispatch.h"
 
 #include <cwchar>
 #include <string>
+
+#include <windows.h>
+namespace aexcompat::memory_fill {
+namespace { HANDLE journal{}; }
+bool configure_journal(const wchar_t* value) {
+  if (!value || !*value || journal) return false;
+  uint64_t number{};
+  for (const wchar_t* p = value; *p; ++p) {
+    if (*p < L'0' || *p > L'9' || number > (UINT64_MAX - (*p - L'0')) / 10) return false;
+    number = number * 10 + (*p - L'0');
+  }
+  auto handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(number));
+  if (!handle || handle == INVALID_HANDLE_VALUE || GetFileType(handle) != FILE_TYPE_DISK) return false;
+  journal = handle;
+  journal_write = [](const std::string& event) {
+    const auto line = event + '\n';
+    DWORD written{};
+    if (!WriteFile(journal, line.data(), static_cast<DWORD>(line.size()), &written, nullptr) ||
+        written != line.size() || !FlushFileBuffers(journal)) journal_failed = true;
+  };
+  return true;
+}
+}
 
 namespace aexcompat::l2cli {
 namespace {
@@ -39,12 +63,18 @@ AuxiliaryOptionResult strip_auxiliary_options(
   bool saw_plugin_data_selector = false;
   bool saw_render_diagnostic_layout = false;
   bool saw_scene_camera = false;
+  bool saw_memory_fill = false;
   int world_capture_count = 0;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
     bool accepted = false;
-    if (equals(flag, L"--dump-worlds-v1") && !saw_dump_worlds) {
+    if (equals(flag, L"--memory-fill-log-handle-v1")) {
+      accepted = aexcompat::memory_fill::configure_journal(value);
+    } else if (equals(flag, L"--memory-fill-v1") && !saw_memory_fill) {
+      accepted = aexcompat::memory_fill::configure(value);
+      saw_memory_fill = accepted;
+    } else if (equals(flag, L"--dump-worlds-v1") && !saw_dump_worlds) {
       accepted = hooks.set_dump_worlds_dir(hooks.context, value);
       saw_dump_worlds = accepted;
     } else if (equals(flag, L"--output-checksum-detail-v1") && !saw_checksum_detail) {

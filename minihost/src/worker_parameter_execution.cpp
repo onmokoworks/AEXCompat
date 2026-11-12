@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_parameter_limits.hpp"
 
@@ -736,6 +737,7 @@ void initialize_parameter_definitions(
     auto& record = staged_records[i];
     const double default_value = effective_default(record);
     definitions[i + 1] = record.raw;
+    aexcompat::memory_fill::parameter(definitions[i + 1].data(), record.type);
     if (record.type == 0)
       std::memset(definitions[i + 1].data() + 56, 0, 40);
     else if (record.type == 1 || record.type == 7) {
