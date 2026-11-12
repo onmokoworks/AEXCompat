@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) const MAX_DIMENSION: u32 = 4096;
 pub(crate) const MAX_PIXELS: u64 = 16_777_216;
-const MAX_PARAMETERS: u32 = 1024;
+use crate::parameter_limits::MAX_PARAMETERS;
 pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 /// Overrides the interactive frame deadline for one process (issue #1769):
 /// a plug-in whose first frame legitimately outlasts 30 s otherwise has no
@@ -932,7 +932,7 @@ fn launch_validation_failure(stderr: &str) -> Value {
                 }
                 "requested_assignment" if fields.len() == 6 => {
                     let slot = fields.get("slot")?.parse::<u32>().ok()?;
-                    if !(1..=1024).contains(&slot) {
+                    if !(1..=MAX_PARAMETERS).contains(&slot) {
                         return None;
                     }
                     let param_type = fields.get("param_type")?.parse::<i32>().ok()?;

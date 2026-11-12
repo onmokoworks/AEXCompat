@@ -427,8 +427,8 @@ fn apply_typed_assignments(
         .get("assignments")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "assignment document has no assignments array".to_owned())?;
-    if assignments.len() > 1024 {
-        return Err("assignment count exceeds the parameter limit".into());
+    if assignments.len() > aexcompat_broker::parameter_limits::MAX_PARAMETERS as usize {
+        return Err("assignment count exceeds the parameter limit (4096)".into());
     }
     let mut updated = parameters.clone();
     let mut assigned_slots = Vec::new();
@@ -593,21 +593,7 @@ fn apply_typed_render_assignments(
     let assigned_slots = apply_typed_assignments(parameters, &assignments_document, request_path)?;
     // This is the one-shot render transport, not the editable UI inventory.
     // Untouched discovery values are defaults, not explicit user edits.
-    *parameters = parameters
-        .iter()
-        .cloned()
-        .flat_map(|item| {
-            if assigned_slots.contains(&item.slot) {
-                vec![item]
-            } else if item.kind == "arbitrary_data" {
-                // PRINT text is an export/debug summary, not persisted state.
-                // Keep the worker's COPY of the plug-in-owned default instead.
-                Vec::new()
-            } else {
-                aexcompat_broker::image_render::normalize_default_interactive_parameters(&[item])
-            }
-        })
-        .collect();
+    parameters.retain(|item| assigned_slots.contains(&item.slot));
     Ok(())
 }
 

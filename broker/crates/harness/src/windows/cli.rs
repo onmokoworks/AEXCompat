@@ -1643,8 +1643,8 @@ fn main() -> eframe::Result {
             eprintln!("assignment document could not be read: {error}");
             std::process::exit(1);
         });
-        if request_bytes.len() > 64 * 1024 {
-            eprintln!("assignment document exceeds 64 KiB");
+        if request_bytes.len() > aexcompat_broker::parameter_limits::MAX_PARAMETER_DOCUMENT_BYTES {
+            eprintln!("assignment document exceeds parameter document size limit");
             std::process::exit(1);
         }
         let document: serde_json::Value =
@@ -1746,8 +1746,8 @@ fn main() -> eframe::Result {
             eprintln!("assignment document could not be read: {error}");
             std::process::exit(1);
         });
-        if request_bytes.len() > 64 * 1024 {
-            eprintln!("assignment document exceeds 64 KiB");
+        if request_bytes.len() > aexcompat_broker::parameter_limits::MAX_PARAMETER_DOCUMENT_BYTES {
+            eprintln!("assignment document exceeds parameter document size limit");
             std::process::exit(1);
         }
         let document: serde_json::Value =
@@ -2375,8 +2375,8 @@ fn main() -> eframe::Result {
             eprintln!("assignment document could not be read: {error}");
             std::process::exit(1);
         });
-        if request_bytes.len() > 64 * 1024 {
-            eprintln!("assignment document exceeds 64 KiB");
+        if request_bytes.len() > aexcompat_broker::parameter_limits::MAX_PARAMETER_DOCUMENT_BYTES {
+            eprintln!("assignment document exceeds parameter document size limit");
             std::process::exit(1);
         }
         let document: serde_json::Value =

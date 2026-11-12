@@ -1,3 +1,4 @@
+#include "worker_parameter_limits.hpp"
 #include "worker_request_parser.hpp"
 
 #include <algorithm>
@@ -204,7 +205,7 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
             throw 1;
           }
           if (static_cast<std::size_t>(consumed) != field.size() ||
-              layer.slot < 0 || layer.slot > 1024 ||
+              layer.slot < 0 || layer.slot > static_cast<int32_t>(aexcompat::worker_runtime::parameters::kMaxParameterCount) ||
               (layer.slot == 0 && (kind != Kind::Smart || layer.timed ||
                   layer.dynamic || layer.has_world_layout ||
                   layer.width != invocation.width ||

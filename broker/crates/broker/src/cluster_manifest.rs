@@ -16,7 +16,7 @@ const TRANSPORT_DIRECTORY_ATTEMPTS: usize = 16;
 pub const MAX_CLUSTER_PLUGINS: usize = 256;
 pub const MAX_CLUSTER_MODULE_BOUND: u32 = 4096;
 pub const MAX_CLUSTER_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_CLUSTER_PAYLOAD_BYTES: usize = 16384;
+pub const MAX_CLUSTER_PAYLOAD_BYTES: usize = crate::parameter_limits::MAX_PARAMETER_PAYLOAD_BYTES;
 fn hex_sha256(digest: &[u8; 32]) -> String {
     let mut hex = String::with_capacity(64);
     for byte in digest {

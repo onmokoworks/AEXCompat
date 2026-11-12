@@ -19,6 +19,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <windows.h>
 
 // Broker payload parsers moved from worker_main (issue #165): the layer
 // transport key, mask/spatial/render-environment context payloads, and the
@@ -629,13 +630,44 @@ bool valid_parameter_id(const std::wstring& id) {
 
 bool parse_parameter_payload(const wchar_t* text, RequestedAssignments& output) {
   if (!text) return false;
+  if (std::wcsncmp(text, L"param-map:v1|", 13) == 0) {
+    const std::wstring token(text + 13);
+    const auto comma = token.find(L',');
+    if (comma == std::wstring::npos) return false;
+    uintptr_t handle_value{};
+    std::size_t length{};
+    try {
+      std::size_t used{};
+      handle_value = std::stoull(token.substr(0, comma), &used);
+      if (used != comma || !handle_value) return false;
+      length = std::stoull(token.substr(comma + 1), &used);
+      if (used != token.size() - comma - 1 || length < 3 ||
+          length > worker_runtime::parameters::kMaxParameterPayloadBytes) return false;
+    } catch (...) { return false; }
+    const auto handle = reinterpret_cast<HANDLE>(handle_value);
+    const auto* view = static_cast<const unsigned char*>(
+        MapViewOfFile(handle, FILE_MAP_READ, 0, 0, length));
+    if (!view) return false;
+    std::wstring payload;
+    payload.reserve(length);
+    bool valid = true;
+    for (std::size_t i = 0; i < length; ++i) {
+      if (view[i] < 0x20 || view[i] > 0x7e) { valid = false; break; }
+      payload.push_back(static_cast<wchar_t>(view[i]));
+    }
+    UnmapViewOfFile(view);
+    CloseHandle(handle);
+    // Do not permit nested mapping references.
+    return valid && payload[0] == L'v' && payload[2] == L'|' &&
+        parse_parameter_payload(payload.c_str(), output);
+  }
   const std::wstring encoded(text);
   const bool version7 = encoded.compare(0, 3, L"v7|") == 0;
   const bool version6 = version7 || encoded.compare(0, 3, L"v6|") == 0;
   const bool version5 = version6 || encoded.compare(0, 3, L"v5|") == 0;
   const bool version4 = encoded.compare(0, 3, L"v4|") == 0;
   const bool version3 = encoded.compare(0, 3, L"v3|") == 0;
-  if (encoded.size() < 3 || encoded.size() > 16384 ||
+  if (encoded.size() < 3 || encoded.size() > aexcompat::worker_runtime::parameters::kMaxParameterPayloadBytes ||
       (!version5 && !version4 && !version3 && encoded.compare(0, 3, L"v2|") != 0)) return false;
   const std::wstring payload = encoded.substr(3);
   if (payload.empty()) return true;

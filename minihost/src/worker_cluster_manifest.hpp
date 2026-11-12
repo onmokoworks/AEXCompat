@@ -1,4 +1,5 @@
 #pragma once
+#include "worker_parameter_limits.hpp"
 
 // In-place cluster session manifest (`cluster-manifest-v2`, #751/#816).
 
@@ -24,7 +25,7 @@ inline constexpr uint32_t kMaxModuleBound = 4096;
 inline constexpr uint64_t kMaxManifestBytes = 4 * 1024 * 1024;
 // A plug-in payload rides the same encoding and bound as the launch argv
 // payload (design §2.1): ASCII printables only.
-inline constexpr std::size_t kMaxPayloadBytes = 16384;
+inline constexpr std::size_t kMaxPayloadBytes = worker_runtime::parameters::kMaxParameterPayloadBytes;
 // In-place manifests (issue #751, `cluster-manifest-v2`): the bounded count
 // of dependency search directories, matching the broker's and the
 // `--dependency-dirs-v1` re-validation.

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io;
 
-const MAX_PARAMETERS: u32 = 1024;
+use crate::parameter_limits::MAX_PARAMETERS;
 const MAX_ANIMATION_KEYS_PER_PARAMETER: usize = 256;
 const MAX_ANIMATION_KEYS_TOTAL: usize = 4096;
 const MAX_ANIMATION_JSON_BYTES: usize = 1024 * 1024;
@@ -167,4 +167,37 @@ pub fn parameter_animation_sidecar_json(animations: &[ParameterAnimation]) -> io
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    #[test]
+    fn animation_slots_and_key_budget_cover_large_effects() {
+        for count in [1025, 1623, MAX_PARAMETERS] {
+            let mut animations = (1..=count)
+                .map(|slot| ParameterAnimation {
+                    slot,
+                    keys: vec![ParameterAnimationKey {
+                        time: AnimationTime {
+                            value: 0,
+                            scale: 30,
+                        },
+                        interpolation: AnimationInterpolation::Hold,
+                        value: AnimationValue::Scalar { value: 2.0 },
+                    }],
+                })
+                .collect::<Vec<_>>();
+            let bytes = parameter_animation_sidecar_json(&animations).unwrap();
+            let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(doc["parameters"].as_array().unwrap().len(), count as usize);
+            animations.last_mut().unwrap().slot = MAX_PARAMETERS + 1;
+            assert!(
+                parameter_animation_sidecar_json(&animations)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("range")
+            );
+        }
+    }
 }

@@ -45,6 +45,24 @@ class ConformanceBundleSchemaTests(unittest.TestCase):
             size = oracle_sizes.get(label, artifact["size_bytes"])
             self.materialize(artifact, (label.encode("ascii") * (size + len(label)))[:size])
 
+    def test_large_parameter_documents_validate_without_truncation(self):
+        for count in (1025, 1623, 4096):
+            manifest = copy.deepcopy(self.manifest)
+            manifest["execution"]["parameters"] = [
+                {"index": slot, "type": "slider", "value": 17}
+                for slot in range(1, count + 1)
+            ]
+            self.manifest_validator.validate(manifest)
+            report = self.valid_report()
+            template = report["parameters"][0]
+            report["parameters"] = [dict(template, index=slot) for slot in range(1, count + 1)]
+            self.report_validator.validate(report)
+            self.assertEqual(report["parameters"][-1]["index"], count)
+        manifest["execution"]["parameters"].append({"index": 4097, "type": "slider", "value": 17})
+        self.assertTrue(list(self.manifest_validator.iter_errors(manifest)))
+        report["parameters"].append(dict(template, index=4097))
+        self.assertTrue(list(self.report_validator.iter_errors(report)))
+
     def manifest_artifacts(self):
         yield "aex", self.manifest["plugin"]["aex"]
         for index, artifact in enumerate(self.manifest["plugin"]["dependencies"]):

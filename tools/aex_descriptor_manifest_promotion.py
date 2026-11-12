@@ -16,8 +16,10 @@ LAB_ROOT = Path(__file__).resolve().parents[1]
 L2_ROOT = LAB_ROOT / "target" / "l2-results"
 PROFILE_ROOT = LAB_ROOT / "profiles"
 OUTPUT_ROOT = LAB_ROOT / "target" / "descriptor-manifest-promotion"
-INPUT_LIMIT = 1024 * 1024
-MANIFEST_LIMIT = 64 * 1024
+# Mirrored from broker parameter_limits.rs.
+MAX_PARAMETERS = 4096
+INPUT_LIMIT = MAX_PARAMETERS * 256 * 6 + 64 * 1024
+MANIFEST_LIMIT = INPUT_LIMIT
 NUMERIC_TYPES = {1: "integer", 4: "integer", 7: "integer", 10: "float"}
 COLOR_TYPE = 5
 
@@ -107,6 +109,8 @@ def regenerate(report: dict[str, Any], promoted: dict[str, Any]) -> tuple[dict[s
     promoted_descriptors = promoted.get("descriptors")
     if not isinstance(promoted_descriptors, list) or not promoted_descriptors:
         raise ValueError("promoted manifest descriptors missing")
+    if len(promoted_descriptors) > MAX_PARAMETERS or len(observed) > MAX_PARAMETERS:
+        raise ValueError("descriptor count exceeds parameter limit (4096)")
     curation: dict[str, dict[str, Any]] = {}
     for descriptor in promoted_descriptors:
         if not isinstance(descriptor, dict) or not isinstance(descriptor.get("display_name"), str):

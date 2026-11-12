@@ -137,3 +137,26 @@ class DescriptorManifestPromotionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_large_descriptor_promotion_retains_slots_and_bounds(tmp_path):
+    import copy
+    import pytest
+    template = promoted_manifest()
+    descriptor = next(item for item in template["descriptors"] if item.get("assignable") and item["observed_type"] == 1)
+    for count in (1025, 1623, 4096):
+        manifest = copy.deepcopy(template)
+        manifest["descriptors"] = [dict(descriptor, slot=slot, id=f"p{slot}", display_name=f"Value {slot}") for slot in range(1, count + 1)]
+        path = tmp_path / "manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        assert path.stat().st_size > 64 * 1024
+        loaded = promotion.read_object(path, promotion.MANIFEST_LIMIT)
+        candidate, _ = promotion.regenerate(l2_report(loaded), loaded)
+        from jsonschema import Draft202012Validator
+        schema = json.loads((ROOT / "contracts/aex/parameter_descriptor_manifest.schema.json").read_text(encoding="utf-8"))
+        Draft202012Validator(schema).validate(candidate)
+        assert len(candidate["descriptors"]) == count
+        assert candidate["descriptors"][-1]["slot"] == count
+    manifest["descriptors"].append(dict(descriptor, slot=4097, id="p4097", display_name="Value 4097"))
+    with pytest.raises(ValueError, match="4096"):
+        promotion.regenerate(l2_report(manifest), manifest)

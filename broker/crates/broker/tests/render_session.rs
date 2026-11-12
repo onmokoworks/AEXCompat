@@ -1302,7 +1302,7 @@ mod windows_e2e {
             camera_trailer: None,
             render_environment_trailer: None,
             audio_trailer: None,
-            alpha_as_coverage_params: &[1025],
+            alpha_as_coverage_params: &[4097],
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),

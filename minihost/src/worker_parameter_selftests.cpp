@@ -11,6 +11,7 @@
 #include <cstring>
 namespace aexcompat::l2_detail {
 int32_t __cdecl add_param(void*, int32_t, void*);
+bool parse_parameter_payload(const wchar_t*, worker_runtime::parameters::RequestedAssignments&);
 }
 namespace aexcompat::parameter_selftests {
 namespace { Hooks g_hooks; }
@@ -341,6 +342,33 @@ bool verify_parameter_registry_capacity() {
        accepted.user_changed_param_slot == 1265 &&
        worker_runtime::invocation::parse_l2_modes(
            5, rejected_argv, rejected, mode_hooks) == 3;
+
+  for (const int count : {1025, 1623, 4096}) {
+    std::wstring payload = L"v2|";
+    for (int slot = 1; slot <= count; ++slot) {
+      if (slot > 1) payload += L";";
+      payload += L"param_" + std::to_wstring(slot) + L"@" + std::to_wstring(slot) + L":i32=23";
+    }
+    worker_runtime::parameters::RequestedAssignments parsed;
+    ok = aexcompat::l2_detail::parse_parameter_payload(payload.c_str(), parsed) &&
+         parsed.size() == static_cast<std::size_t>(count) && ok;
+  }
+  worker_runtime::parameters::RequestedAssignments invalid;
+  ok = !aexcompat::l2_detail::parse_parameter_payload(L"v2|p@4097:i32=1", invalid) && ok;
+  std::wstring oversized = L"v5|";
+  for (int slot = 1; slot <= 129; ++slot) {
+    if (slot > 1) oversized += L";";
+    oversized += L"p" + std::to_wstring(slot) + L"@" + std::to_wstring(slot) + L":arbhex=";
+    for (int byte = 0; byte < 4096; ++byte) oversized += L"61";
+    if (slot == 127) {
+      invalid.clear();
+      ok = aexcompat::l2_detail::parse_parameter_payload(oversized.c_str(), invalid) &&
+           invalid.size() == 127 && ok;
+    }
+  }
+  invalid.clear();
+  ok = oversized.size() > worker_runtime::parameters::kMaxParameterPayloadBytes &&
+       !aexcompat::l2_detail::parse_parameter_payload(oversized.c_str(), invalid) && ok;
 
   // Popup defaults are 1-based (issue #1253): a declared dephault of 0
   // (Reshape's Elasticity / Interpolation Method) registers as the first

@@ -33,7 +33,8 @@ from conformance_bundle_validator import (
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMAS = ROOT / "schemas"
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
-MAX_REQUEST_BYTES = 64 * 1024
+# Mirrored from broker parameter_limits.rs (JSON escaping plus context).
+MAX_REQUEST_BYTES = 4096 * 256 * 6 + 64 * 1024
 
 
 def strict_json_loads(text: str) -> Any:
@@ -824,7 +825,7 @@ def write_request_sidecar(manifest: dict[str, Any], depth: str, destination: Pat
     }
     encoded = (json.dumps(request, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(encoded) > MAX_REQUEST_BYTES:
-        raise ValueError("generated harness request exceeds 64 KiB")
+        raise ValueError("generated harness request exceeds parameter document size limit")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(encoded)
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "worker_parameter_limits.hpp"
 
 // Render session transport (issue #98, docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
 // Broker-created inherited handles only: two anonymous pipes carry
@@ -31,7 +32,7 @@ inline constexpr uint32_t kRenderFrameParametersVersion = 2;
 inline constexpr uint32_t kHeaderMagic = 0x53584541u;  // "AEXS" little-endian
 inline constexpr std::size_t kHeaderBytes = 4096;
 inline constexpr std::size_t kSlotAlignment = 4096;
-inline constexpr std::size_t kMaxMessageBytes = 64 * 1024;
+inline constexpr std::size_t kMaxMessageBytes = worker_runtime::parameters::kMaxParameterMessageBytes;
 // Discovery-session inspect_done carries the full parameter report and is the
 // only message allowed past kMaxMessageBytes (closure-session design §4).
 inline constexpr std::size_t kMaxInspectReportBytes = 4 * 1024 * 1024;

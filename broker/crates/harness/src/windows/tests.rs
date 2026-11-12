@@ -2318,6 +2318,73 @@ mod tests {
     }
 
     #[test]
+    fn typed_large_parameter_boundaries_and_sparse_defaults() {
+        use aexcompat_broker::{image_render::encode_interactive_payload, parameter_limits::*};
+        for count in [1025, 1623, MAX_PARAMETERS] {
+            let original = (1..=count)
+                .map(|slot| parameter(slot, "integer"))
+                .collect::<Vec<_>>();
+            let mut all = original.clone();
+            let assignments = (1..=count)
+                .map(|slot| serde_json::json!({"slot":slot,"value":1}))
+                .collect::<Vec<_>>();
+            apply_typed_render_assignments(
+                &mut all,
+                &serde_json::json!({"schema_version":1,"assignments":assignments}),
+                None,
+            )
+            .unwrap();
+            assert_eq!(all.len(), count as usize);
+            let payload = encode_interactive_payload(&all).unwrap();
+            assert!(payload.len() > 16384);
+            assert!(payload.ends_with(&format!("param_{count}@{count}:i32=1")));
+            let mut sparse = original;
+            apply_typed_render_assignments(
+                &mut sparse,
+                &serde_json::json!({"schema_version":1,"assignments":[{"slot":count,"value":1}]}),
+                None,
+            )
+            .unwrap();
+            assert_eq!(sparse.len(), 1);
+            assert_eq!(sparse[0].slot, count);
+        }
+        let mut too_many = (1..=MAX_PARAMETERS + 1)
+            .map(|slot| parameter(slot, "integer"))
+            .collect::<Vec<_>>();
+        let assignments = (1..=MAX_PARAMETERS + 1)
+            .map(|slot| serde_json::json!({"slot":slot,"value":1}))
+            .collect::<Vec<_>>();
+        assert!(
+            apply_typed_render_assignments(
+                &mut too_many,
+                &serde_json::json!({"schema_version":1,"assignments":assignments}),
+                None
+            )
+            .unwrap_err()
+            .contains("4096")
+        );
+        assert!(
+            encode_interactive_payload(&[parameter(MAX_PARAMETERS + 1, "integer")])
+                .unwrap_err()
+                .to_string()
+                .contains("range")
+        );
+        let mut arbitrary = (1..=129)
+            .map(|slot| parameter(slot, "arbitrary_data"))
+            .collect::<Vec<_>>();
+        for p in &mut arbitrary {
+            p.debug_summary = Some("x".repeat(4096));
+        }
+        assert!(
+            encode_interactive_payload(&arbitrary)
+                .unwrap_err()
+                .to_string()
+                .contains("1048576")
+        );
+        assert!(encode_interactive_payload(&arbitrary[..127]).unwrap().len() > 1024 * 1024 - 32768);
+    }
+
+    #[test]
     fn typed_render_preserves_unassigned_defaults_without_weakening_edits() {
         let mut gain = parameter(5, "float");
         gain.minimum = 1.0;
@@ -2334,11 +2401,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(parameters.len(), 1);
-        assert!(parameters[0].use_declared_default);
+        assert!(parameters.is_empty());
         assert_eq!(
             aexcompat_broker::image_render::encode_interactive_payload(&parameters).unwrap(),
-            "v7|param_5@5:f64=default"
+            "v2|"
         );
         // The editable inventory still exposes every discovered value.
         let mut inventory = originals.clone();
