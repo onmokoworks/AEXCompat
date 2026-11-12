@@ -2006,6 +2006,7 @@ pub(crate) fn build_interactive_image_report(
         "handle_lifetimes_balanced": worker_report.get("handle_lifetimes_balanced"),
         "world_lifetimes_balanced": worker_report.get("world_lifetimes_balanced"),
         "param_checkouts_balanced": worker_report.get("param_checkouts_balanced"),
+        "redundant_param_checkins": worker_report.get("redundant_param_checkins"),
         "gpu_device_setup_error": worker_report.get("gpu_device_setup_error"),
         "gpu_device_setdown_error": worker_report.get("gpu_device_setdown_error"),
         "gpu_device_setdown_exception_code": worker_report.get("gpu_device_setdown_exception_code"),

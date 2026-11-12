@@ -1,5 +1,8 @@
 #pragma once
 
+#include "worker_param_checkout_key.hpp"
+
+#include <set>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +30,7 @@ struct Diagnostics {
   uint32_t checkin_calls{};
   uint32_t automatic_checkins{};
   uint32_t invalid_checkins{};
+  uint32_t redundant_checkins{};
   int32_t last_index{-1};
   int32_t last_time{};
   int32_t last_time_step{};
@@ -65,8 +69,8 @@ class Context final {
     return diagnostics_.shutter_dependency_advertised;
   }
   void record_checkout(void* definition, int32_t index, int32_t time,
-                       int32_t time_step, uint32_t time_scale);
-  int32_t checkin(void* definition);
+                       int32_t time_step, uint32_t time_scale, void* effect = nullptr);
+  int32_t checkin(void* definition, void* effect = nullptr);
   bool checkouts_balanced() const noexcept;
   void automatic_checkin();
   void mark_selector_dispatched() noexcept;
@@ -77,7 +81,8 @@ class Context final {
   std::vector<TimedLayerDefinition> timed_layers_;
   std::map<int32_t, ParameterDefinition> definitions_;
   std::map<int32_t, ParameterDefinition> fallback_definitions_;
-  std::unordered_map<void*, uint32_t> live_checkouts_;
+  std::map<ParamCheckoutKey, uint32_t> live_checkouts_;
+  std::set<ParamCheckoutKey> completed_checkouts_;
   Diagnostics diagnostics_{};
   int32_t current_time_{};
   uint32_t current_time_scale_{1};
@@ -88,6 +93,8 @@ class Context final {
 Context* active_context() noexcept;
 bool last_selector_dispatched() noexcept;
 void reset_selector_diagnostic() noexcept;
+// Reset case-local telemetry without clearing accumulated lifecycle failures.
+void reset_case_redundant_checkins() noexcept;
 
 // Classic host-callback telemetry (issue #126 Phase D): counters recorded by
 // worker_main's PF utility and world-transform callbacks (quack,

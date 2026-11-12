@@ -449,3 +449,8 @@ def test_pixel_depth_conform_on_all_workers() -> None:
 def test_memory_fill_preserves_initialized_bytes_and_detects_reads():
     for _ in _all_workers("--self-test-memory-fill", "memory_fill"):
         pass
+
+
+def test_redundant_param_checkin_preserves_ownership_and_fresh_cases() -> None:
+    for _ in _all_workers("--self-test-redundant-param-checkin", "redundant_param_checkin"):
+        pass

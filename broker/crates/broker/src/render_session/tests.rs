@@ -426,6 +426,12 @@ fn final_report_clean_fails_closed_on_missing_or_dirty_fields() {
         "param_checkouts_balanced": true,
     });
     assert!(final_report_clean(&clean, false));
+    let mut redundant = clean.clone();
+    redundant["redundant_param_checkins"] = serde_json::json!(7);
+    assert!(final_report_clean(&redundant, false));
+    redundant["param_checkouts_balanced"] = serde_json::json!(false);
+    assert!(!final_report_clean(&redundant, false));
+
     for (key, dirty) in [
         // A protocol-violation or invariant-failure session loop ends
         // render_failed with render_error -1 even when the ledgers
