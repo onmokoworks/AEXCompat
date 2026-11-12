@@ -150,7 +150,7 @@ struct ClassicReport {
   } threads;
   struct Callbacks {
     bool param_checkouts_balanced{};
-    std::array<int64_t, 8> param{};
+    std::array<int64_t, 9> param{};
     std::string escaped_options_button_name;
     std::array<int64_t, 11> host{};
   } callbacks;
@@ -228,7 +228,7 @@ struct SmartReport {
     std::array<int32_t, 4> result_rect{};
     std::array<int32_t, 4> max_result_rect{};
     std::array<bool, 3> validity{};
-    std::array<int64_t, 4> parameter_checkouts{};
+    std::array<int64_t, 5> parameter_checkouts{};
     bool request_mode{};
     std::array<int32_t, 2> downsample_x{};
     std::array<int32_t, 2> downsample_y{};

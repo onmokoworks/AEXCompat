@@ -264,6 +264,7 @@ void append_classic_callbacks(ReportSnapshot& report, const ClassicReport::Callb
       << ",\"param_checkin_calls\":" << value.param[1]
       << ",\"automatic_param_checkins\":" << value.param[2]
       << ",\"invalid_param_checkins\":" << value.param[3]
+      << ",\"redundant_param_checkins\":" << value.param[8]
       << ",\"last_param_checkout_index\":" << value.param[4]
       << ",\"last_param_checkout_time\":" << value.param[5]
       << ",\"last_param_checkout_time_step\":" << value.param[6]
@@ -411,6 +412,7 @@ void append_smart_context(ReportSnapshot& report, const SmartReport::Context& v)
       << ",\"param_checkin_calls\":" << v.parameter_checkouts[1]
       << ",\"automatic_param_checkins\":" << v.parameter_checkouts[2]
       << ",\"invalid_param_checkins\":" << v.parameter_checkouts[3]
+      << ",\"redundant_param_checkins\":" << v.parameter_checkouts[4]
       << ",\"request_mode\":" << (v.request_mode ? "true" : "false")
       << ",\"downsample_x\":[" << v.downsample_x[0] << ',' << v.downsample_x[1] << ']'
       << ",\"downsample_y\":[" << v.downsample_y[0] << ',' << v.downsample_y[1] << ']'

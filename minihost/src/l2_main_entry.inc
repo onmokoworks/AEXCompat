@@ -1,3 +1,4 @@
+#include "worker_fresh_case.hpp"
 using namespace aexcompat::l2_detail;
 
 // verify_pf_color_suite / verify_pf_color_param_suite live in
@@ -1178,6 +1179,92 @@ bool verify_production_gaussian_kernel_callback() {
 // the checkout is recorded (the checkin balances instead of counting as
 // invalid), that an in-table slot still comes back with its definition, and
 // that a negative slot and an unpublished table stay refused.
+bool verify_redundant_param_checkin() {
+  namespace wr = aexcompat::worker_runtime;
+  namespace classic = wr::classic;
+  auto& hosted = wr::parameters::state().checkout;
+  bool passed = true;
+  auto check = [&](bool condition, const char* message) {
+    if (!condition) { passed = false; std::cerr << message << '\n'; }
+  };
+  int owner{}, foreign{};
+  wr::parameters::Definition first{}, other{}, unknown{};
+  auto reset = [&] {
+    hosted.live.clear(); hosted.completed.clear(); hosted.definitions.clear();
+    hosted.checkout_calls = hosted.checkin_calls = hosted.invalid_checkins = 0;
+    hosted.redundant_checkins = hosted.automatic_checkins = 0;
+    wr::parameters::state().records.assign(1, {});
+    wr::parameters::state().records[0].type = 1;
+    hosted.definitions[1] = {};
+  };
+  auto exercise = [&] {
+    check(checkout_param(&owner, 1, 0, 1, 30, first.data()) == 0, "first checkout");
+    check(checkin_param(&owner, first.data()) == 0, "first checkin");
+    const auto saved = first;
+    check(checkout_param(&owner, 1, 0, 1, 30, other.data()) == 0, "other checkout");
+    check(checkin_param(&owner, first.data()) == 0, "redundant with another live");
+    check(!param_checkouts_balanced(), "redundant must not consume another live checkout");
+    check(checkin_param(&owner, other.data()) == 0, "other checkin");
+    check(checkin_param(&owner, first.data()) == 0, "redundant with no live");
+    check(first == saved, "redundant must not touch parameter bytes");
+    check(param_checkouts_balanced(), "redundant must not fail balance");
+    check(checkout_param(&owner, 1, 0, 1, 30, first.data()) == 0, "reuse address");
+    check(checkout_param(&owner, 1, 0, 1, 30, first.data()) == 0, "nested checkout");
+    check(checkin_param(&owner, first.data()) == 0, "nested first checkin");
+    check(!param_checkouts_balanced(), "nested remaining checkout detected");
+    check(checkin_param(&owner, first.data()) == 0, "nested last checkin");
+    check(param_checkouts_balanced(), "nested checkout balances");
+  };
+  reset(); exercise();
+  check(hosted.redundant_checkins == 2 && hosted.checkout_calls == 4 &&
+        hosted.checkin_calls == 4 && hosted.invalid_checkins == 0, "hosted counters");
+  classic::reset_selector_diagnostic();
+  {
+    classic::Context context;
+    context.set_definition(1, {});
+    exercise();
+  }
+  const auto diag = classic::diagnostics();
+  check(diag.redundant_checkins == 2 && diag.checkout_calls == 4 &&
+        diag.checkin_calls == 4 && diag.balanced, "classic counters");
+  auto invalid = [&] {
+    check(checkout_param(&owner, 1, 0, 1, 30, first.data()) == 0, "negative setup");
+    check(checkin_param(&owner, unknown.data()) == 4, "unknown while live rejected");
+    check(checkin_param(&foreign, first.data()) == 4, "foreign live rejected");
+    check(checkin_param(&owner, nullptr) == 4, "null rejected");
+    check(checkin_param(&owner, first.data()) == 0, "negative checks retain live checkout");
+    check(checkin_param(&foreign, first.data()) == 4, "foreign completed rejected");
+    check(!param_checkouts_balanced(), "invalid calls still fail balance");
+  };
+  reset(); invalid();
+  check(hosted.invalid_checkins == 4 && hosted.checkin_calls == 1, "hosted invalid counts");
+  {
+    classic::Context context;
+    context.set_definition(1, {});
+    invalid();
+    { classic::Context nested; check(checkin_param(&owner, first.data()) == 4,
+                                    "nested context cannot inherit completed pointer"); }
+  }
+  reset();
+  const wr::FreshCase::Defaults defaults = wr::parameters::state().records;
+  wr::FreshCase first_case(defaults);
+  check(first_case.begin(), "fresh case begins");
+  hosted.definitions[1] = {};
+  exercise();
+  check(first_case.finish(), "redundant case is clean");
+  wr::FreshCase next_case(defaults);
+  check(next_case.begin(), "next case begins");
+  check(hosted.completed.empty() && hosted.redundant_checkins == 0,
+        "next case forgets completed addresses and redundant counter");
+  check(checkin_param(&owner, first.data()) == 4, "previous case address rejected");
+  hosted.definitions[1] = {};
+  check(checkout_param(&owner, 1, 0, 1, 30, first.data()) == 0, "leak setup");
+  check(!next_case.finish(), "fresh-case leak detected");
+  check(checkin_param(&owner, first.data()) == 0, "leak cleanup");
+  reset();
+  return passed;
+}
+
 bool verify_checkout_param_beyond_table() {
   namespace boot = aexcompat::worker_runtime::effect_bootstrap;
   namespace contract = aexcompat::abi::x86_64_windows;

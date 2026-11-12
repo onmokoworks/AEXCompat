@@ -201,6 +201,7 @@ bool verify_production_gaussian_kernel_callback();
 // Calls the production checkout_param / checkin_param slots through
 // in_data->inter for slots past the published table (issue #1251).
 bool verify_checkout_param_beyond_table();
+bool verify_redundant_param_checkin();
 // Calls AE's private get_callback_addr ids -5 / -2 through in_data->utils
 // (issue #985).
 bool verify_pf_private_callbacks();
@@ -680,6 +681,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_production_composite_rect_callback,
         &verify_production_gaussian_kernel_callback,
         &verify_checkout_param_beyond_table,
+        &verify_redundant_param_checkin,
         &verify_pf_private_callbacks,
         &verify_bee_scene_facade,
         &verify_pf_progress_info,

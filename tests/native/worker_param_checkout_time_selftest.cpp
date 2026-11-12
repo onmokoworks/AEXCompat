@@ -45,6 +45,8 @@ void seed_definition() {
   ledger.definitions.clear();
   ledger.definitions[kSlot] = {};
   ledger.live.clear();
+  ledger.completed.clear();
+  ledger.invalid_checkins = ledger.redundant_checkins = 0;
   ledger.checkout_calls = 0;
   ledger.checkin_calls = 0;
   ledger.rejected_temporal = 0;
@@ -54,8 +56,7 @@ int32_t checkout_at(int32_t what_time, params::Definition* result = nullptr) {
   params::Definition definition{};
   const int32_t status =
       aexcompat::l2_detail::checkout_param(nullptr, kSlot, what_time, 1, kScale,
-                                          definition.data());
-  if (result) *result = definition;
+                                          result ? result->data() : definition.data());
   return status;
 }
 

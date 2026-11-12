@@ -182,7 +182,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in, std::ostream&
       smart.result_rect, smart.max_result_rect,
       {smart.guards_intact, smart.output_pixels_valid, param_checkouts_balanced()},
       {checkout.checkout_calls, checkout.checkin_calls, checkout.automatic_checkins,
-       checkout.invalid_checkins}, in.request_mode,
+       checkout.invalid_checkins, checkout.redundant_checkins}, in.request_mode,
       {in.downsample_x[0], in.downsample_x[1]},
       {in.downsample_y[0], in.downsample_y[1]},
       {in.pixel_aspect_ratio[0], in.pixel_aspect_ratio[1]},

@@ -64,7 +64,7 @@ int32_t finish_param_callback(aexcompat::callback_diagnostics::Callback callback
 }
 }  // namespace
 
-int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t time_step,
+int32_t __cdecl checkout_param(void* effect, int32_t index, int32_t what_time, int32_t time_step,
                                uint32_t time_scale, void* definition) {
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
@@ -91,11 +91,13 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
                                  Reason::InvalidArguments);
   const auto record_checkout = [&] {
     if (classic_context) {
-      classic_context->record_checkout(definition, index, what_time, time_step, time_scale);
+      classic_context->record_checkout(definition, index, what_time, time_step, time_scale, effect);
       return;
     }
     std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-    ++g_live_param_checkouts[definition];
+    const auto key = aexcompat::worker_runtime::param_checkout_key(effect, definition);
+    g_parameter_runtime.checkout.completed.erase(key);
+    ++g_live_param_checkouts[key];
     ++g_param_checkout_calls;
     g_last_param_checkout_index = index;
     g_last_param_checkout_time = what_time;
@@ -169,26 +171,35 @@ void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
   g_wide_time_checkout_allowed = wide_time_allowed;
 }
 
-int32_t __cdecl checkin_param(void*, void* definition) {
+int32_t __cdecl checkin_param(void* effect, void* definition) {
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
   if (auto* context = aexcompat::worker_runtime::classic::active_context()) {
-    const int32_t result = context->checkin(definition);
+    const int32_t result = context->checkin(definition, effect);
     return finish_param_callback(Callback::CheckinParam, result,
         result == 0 ? Reason::None : Reason::NotCheckedOut);
   }
   if (aexcompat::worker_runtime::classic::dispatch_active())
     return finish_param_callback(Callback::CheckinParam, 4, Reason::NoActiveState);
   std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
-  if (!definition || g_live_param_checkouts.empty()) {
+  const auto key = aexcompat::worker_runtime::param_checkout_key(effect, definition);
+  auto found = g_live_param_checkouts.find(key);
+  // Released effects repeat a completed PF_CHECKIN_PARAM. AE tolerance is
+  // inferred from those effects working in AE, not a native AE measurement.
+  // This path consumes no live checkout and never touches the parameter bytes.
+  if (definition && found == g_live_param_checkouts.end() &&
+      g_parameter_runtime.checkout.completed.count(key)) {
+    ++g_parameter_runtime.checkout.redundant_checkins;
+    return finish_param_callback(Callback::CheckinParam, 0);
+  }
+  if (!definition || found == g_live_param_checkouts.end()) {
     ++g_invalid_param_checkins;
     return finish_param_callback(Callback::CheckinParam, 4, Reason::NotCheckedOut);
   }
-  auto found = g_live_param_checkouts.find(definition);
-  // PF_ParamDef is a value type. Wrappers may move the checked-out value before
-  // checkin, so its address is not a stable checkout identity.
-  if (found == g_live_param_checkouts.end()) found = g_live_param_checkouts.begin();
-  if (--found->second == 0) g_live_param_checkouts.erase(found);
+  if (--found->second == 0) {
+    g_parameter_runtime.checkout.completed.insert(key);
+    g_live_param_checkouts.erase(found);
+  }
   ++g_param_checkin_calls;
   return finish_param_callback(Callback::CheckinParam, 0);
 }
