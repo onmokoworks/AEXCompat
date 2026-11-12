@@ -327,9 +327,38 @@ bool production_extent_oracle_points() {
   layout=previous; g_extent_point=nullptr;
   return ok;
 }
+bool fixed_slider_omitted_matches_explicit_full_range() {
+  using namespace aexcompat::worker_runtime;
+  auto previous = parameters::state().records;
+  bool ok = true;
+  for (const double value : {32767.5, INT32_MAX / 65536.0, -32768.0, -32767.5}) {
+    parameters::state().records.assign(1, {});
+    auto& record = parameters::state().records[0];
+    record.type = 2; record.has_numeric = true;
+    record.valid_min = -32768.0; record.valid_max = INT32_MAX / 65536.0;
+    record.default_value = value;
+    parameter_execution::Definitions defaults(2);
+    parameter_execution::initialize_parameter_definitions(defaults);
+    int32_t omitted{}; std::memcpy(&omitted, defaults[1].data()+56, sizeof(omitted));
+    parameters::RequestedAssignment edit{};
+    edit.index=1; edit.kind=parameters::RequestedKind::Float; edit.value=value;
+    auto explicit_value=defaults;
+    const bool assigned=parameter_execution::apply_requested_assignments(explicit_value,{edit});
+    int32_t assigned_bits{}; std::memcpy(&assigned_bits, explicit_value[1].data()+56, sizeof(assigned_bits));
+    const auto expected=static_cast<int32_t>(value*65536.0);
+    if (!assigned || omitted != expected || assigned_bits != expected) {
+      std::cerr << "fixed_slider_omitted_matches_explicit_full_range: value=" << value
+                << " omitted=" << omitted << " explicit=" << assigned_bits << " expected=" << expected << "\n";
+      ok=false;
+    }
+  }
+  parameters::state().records=std::move(previous);
+  return ok;
+}
 }  // namespace
 
 int main() {
+  if (!fixed_slider_omitted_matches_explicit_full_range()) return 75;
   // PF_PROGRESS is an abort poll, not a validated ratio: AE-shipped effects
   // report current=-1 (PW, issue #1079), total=0 (Write-on, issue #1055), and
   // current>total (Wave Warp, issue #1037), and all render in AE. The host

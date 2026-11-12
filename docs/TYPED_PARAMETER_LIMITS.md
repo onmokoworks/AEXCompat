@@ -162,8 +162,10 @@ values of every omitted scalar/component kind, including float precision and
 percentage-to-pixel conversion; pixels expose colour and the integer edit.
 Both single and fresh-case batch tests run empty / explicit colour / empty /
 sparse integer requests. Thus they check default materialization, explicit edits
-and reset after an edit. The audit found no equivalent gap in those other kinds:
-integer/popup values use the clamped declaration, checkbox normalizes its declared
+and reset after an edit. The first audit covered ordinary fixture values, not all boundary cases. The
+second review found a fixed-slider boundary gap and other guest differences; see
+[the follow-up audit](PARAMETER_LIMIT_AUDIT_2026-11-13.md). Integer/popup values use
+the clamped declaration, checkbox normalizes its declared
 boolean, fixed/float sliders retain their native precision, and angle/points use
 declared components. Path values resolve declared mask indices, layer definitions
 are initialized separately, and non-value UI kinds do not carry assignments.
@@ -246,3 +248,19 @@ owned launches exited and their Jobs had zero active processes. A rejected local
 fixture setup attempt is retained separately. No AE was launched. No main merge,
 push or PR creation was performed. Full Python/SDK/AE and macOS end-to-end suites
 remain unrun; the complete guest workspace was tested on Windows.
+
+
+## Second-review corrections
+
+The review of `4d760b6e715281cd8179f601b50449a67265c10a` accepted the colour fix but
+found three remaining P2s: fixed-slider initialization lost upper fractional
+precision, corpus schemas still capped parameter counts at 1,024, and the macOS
+sweep still used obsolete framing. All three now have fail-before/pass-after
+coverage. The whole tracked-text audit also found and fixed the promotion-report
+64-descriptor schema. See [the audit and exact regression results](PARAMETER_LIMIT_AUDIT_2026-11-13.md).
+
+There is no claim of complete repository-wide alignment or universal default
+materialization equivalence. The audit explicitly lists remaining trace/Blender
+caps, independent resource budgets and guest POINT/noncanonical CHECKBOX/default
+edge differences. This pass does not merge main, push or claim a clean independent
+review boundary.

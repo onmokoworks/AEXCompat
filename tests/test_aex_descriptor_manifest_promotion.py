@@ -160,3 +160,44 @@ def test_large_descriptor_promotion_retains_slots_and_bounds(tmp_path):
     manifest["descriptors"].append(dict(descriptor, slot=4097, id="p4097", display_name="Value 4097"))
     with pytest.raises(ValueError, match="4096"):
         promotion.regenerate(l2_report(manifest), manifest)
+
+
+def generate_large_promotion_report(tmp_path,monkeypatch,count,renamed=False):
+    import copy
+    manifest=copy.deepcopy(promoted_manifest())
+    descriptor=next(item for item in manifest["descriptors"] if item.get("assignable") and item["observed_type"]==1)
+    manifest["descriptors"]=[dict(descriptor,slot=i,id=f"p{i}",display_name=f"Value {i}") for i in range(1,count+1)]
+    source=l2_report(manifest)
+    if renamed:
+        for p in source["worker_report"]["parameters"]:p["name"]="New "+p["name"]
+    for name in ["L2_ROOT","PROFILE_ROOT","OUTPUT_ROOT"]:
+        root=tmp_path/name;root.mkdir();monkeypatch.setattr(promotion,name,root)
+    input_path=promotion.L2_ROOT/"input.json";input_path.write_text(json.dumps(source),encoding="utf-8")
+    manifest_path=promotion.PROFILE_ROOT/"manifest.json";manifest_path.write_text(json.dumps(manifest),encoding="utf-8")
+    report_path=promotion.OUTPUT_ROOT/"report.json"
+    promotion.run(input_path,manifest_path,promotion.OUTPUT_ROOT/"candidate.json",report_path)
+    return json.loads(report_path.read_text(encoding="utf-8"))
+
+def test_large_promotion_generated_report_capacity(tmp_path,monkeypatch):
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import ValidationError
+    import pytest
+    validator=Draft202012Validator(json.loads((ROOT/"contracts/aex/descriptor_manifest_promotion_report.schema.json").read_text(encoding="utf-8")))
+    for count in (1025,1623,4096):
+        folder=tmp_path/str(count);folder.mkdir()
+        report=generate_large_promotion_report(folder,monkeypatch,count)
+        assert report["observed_descriptor_count"]==report["assignable_descriptor_count"]==count
+        validator.validate(report)
+    report["observed_descriptor_count"]=4097
+    with pytest.raises(ValidationError):validator.validate(report)
+
+def test_promotion_review_budget_covers_disjoint_inventories(tmp_path,monkeypatch):
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import ValidationError
+    import pytest
+    report=generate_large_promotion_report(tmp_path,monkeypatch,4096,True)
+    assert report["observed_descriptor_count"]==4096 and len(report["review_required"])==8192
+    validator=Draft202012Validator(json.loads((ROOT/"contracts/aex/descriptor_manifest_promotion_report.schema.json").read_text(encoding="utf-8")))
+    validator.validate(report)
+    report["review_required"].append("overflow")
+    with pytest.raises(ValidationError):validator.validate(report)
