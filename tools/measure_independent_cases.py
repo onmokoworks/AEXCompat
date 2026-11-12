@@ -39,6 +39,8 @@ def main():
     parser.add_argument('--originals', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--repetitions', type=int, default=3)
+    parser.add_argument('--cases-per-batch', type=int, choices=(2, 6), default=6,
+                        help='2 selects an edited/default smoke pair; 6 retains the full sequence')
     parser.add_argument('--downsample', type=int, choices=(1, 2, 4), default=1)
     parser.add_argument('--only', help='optional single plug-in name for a supplemental context check')
     args = parser.parse_args()
@@ -59,10 +61,11 @@ def main():
         raise ValueError('--only must name one of the ten OLM originals')
     summary = {'schema': 'aexcompat.independent_case_qualification', 'schema_version': 1,
                'host': platform.platform(), 'native_ae': False, 'dimensions': [97, 61],
-               'repetitions': args.repetitions, 'cases_per_batch': 6,
+               'repetitions': args.repetitions, 'cases_per_batch': args.cases_per_batch,
                'downsample': args.downsample, 'only': args.only,
                'harness_sha256': sha(exe), 'worker_sha256': sha(worker),
-               'timing_scope': 'CLI wall time including discovery, input/output, launch and close; warm filesystem, alternating order',
+               'timing_scope': 'CLI wall time including discovery, input/output, launch and close; warm filesystem; ' +
+                   ('batch first (single repetition)' if args.repetitions == 1 else 'alternating order'),
                'rows': []}
 
     def run(argv, log):
@@ -111,7 +114,7 @@ def main():
             request.write_text(json.dumps(document), encoding='utf-8')
             requests.append(request)
         # A / B / A / edited C / B / A: repeated A observes both pixel and edit leakage.
-        indices = [0, 1, 0, 2, 1, 0]
+        indices = [2, 0] if args.cases_per_batch == 2 else [0, 1, 0, 2, 1, 0]
         routes = ['classic8', 'classic16'] if name == 'OLMSmoother' else ['smart8', 'smart16', 'smart32']
         for route in routes:
             command = {'classic8': '--render-experimental-request',
@@ -181,7 +184,8 @@ def main():
                    'speedup': single_median / batch_median, 'byte_identical': True, 'samples': samples}
             summary['rows'].append(row)
             (out / 'measurement.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
-            print(f'{name} {route}: exact {6*args.repetitions}/{6*args.repetitions}, {row["speedup"]:.2f}x', flush=True)
+            comparisons = len(indices) * args.repetitions
+            print(f'{name} {route}: exact {comparisons}/{comparisons}, {row["speedup"]:.2f}x', flush=True)
 
 
 if __name__ == '__main__':

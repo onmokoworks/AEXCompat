@@ -102,6 +102,24 @@ DLL statics, TLS, global caches and allocator history remain shared. This is
 fresh effect-instance state, not process isolation. Corpus byte equivalence
 does not establish equivalence for every plug-in, nor native AE conformance.
 
+## Memory-fill diagnostics
+
+`diagnostics.memory_fill` is explicitly unsupported for independent batches.
+The complete manifest is checked before discovery or render-worker startup;
+a diagnostic request in any case rejects the whole batch without publishing
+preceding outputs. Its schema is validated with the single-request parser.
+Ordinary typed single-request routes retain memory-fill support.
+
+The worker also advertises `render_case:0` when memory-fill is configured,
+so direct session clients cannot bypass the CLI restriction. Configuration,
+counters, allocation IDs, selector context, journal and diagnostic world layout
+are worker-scoped; this implementation does not pretend they are case-local.
+The new IDs/clear flags are metadata in existing allocation records, and the
+bounded event journal is diagnostic state, not a new plug-in ownership registry.
+Fresh-case snapshots still cover the underlying handles, AEGP memory, worlds,
+GPU allocations and extended-inter allocations. Diagnostics-disabled workers
+retain their ordinary allocation layout and ownership checks.
+
 ## Reports and transport
 
 The worker advertises `render_case:1` in response to the v1 `capabilities`
@@ -165,3 +183,7 @@ The main matrix has 522 exact artifact comparisons; the supplemental OLMBlur
 matrix has 36. The records retain every completed sample and identify the
 worker/harness bytes. Wall-clock timings include workload variation on a
 machine without CPU affinity or machine-wide isolation.
+
+The post-merge smoke can be reproduced with `--repetitions 1 --cases-per-batch 2`:
+it selects edited-C followed by untouched-default A for each route/depth.
+See [the merge smoke record](evidence/independent-case-merge-smoke-2026-11-12.json).

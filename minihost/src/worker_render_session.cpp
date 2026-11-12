@@ -3,6 +3,7 @@
 #include "worker_bee_scene_facade.hpp"
 #include "worker_effect_bootstrap.hpp"
 #include "worker_fresh_case.hpp"
+#include "worker_memory_fill.hpp"
 #include "worker_classic_report.hpp"
 #include "worker_smart_report.hpp"
 #include <functional>
@@ -841,14 +842,18 @@ void run_session_frame_loop(
       break;
     }
     if (type == "capabilities") {
+      // Memory-fill configuration, journal and diagnostic world layouts are
+      // worker-scoped. Do not certify independent instances under that scope.
+      const bool independent_supported = !aexcompat::memory_fill::config.enabled;
       if (version != 1 || !json_exact_keys(object, {"v", "type"}) ||
           !channels.write_message(
-              "{\"v\":1,\"type\":\"capabilities\",\"render_case\":1}")) {
+              std::string("{\"v\":1,\"type\":\"capabilities\",\"render_case\":") +
+              (independent_supported ? "1}" : "0}"))) {
         outcome.protocol_violation = true;
         break;
       }
-      case_capability_negotiated = true;
-      channels.allow_case_reports();
+      case_capability_negotiated = independent_supported;
+      if (independent_supported) channels.allow_case_reports();
       continue;
     }
     // Cluster-session plug-in swap (closure-session design §4.1): only an

@@ -1,4 +1,5 @@
 #include "worker_case_ownership.hpp"
+#include "worker_memory_fill.hpp"
 #include "gpu_memory_world_transport.hpp"
 
 #include "gpu_cuda_backend.hpp"
@@ -186,6 +187,7 @@ int32_t __cdecl gpu_release_exclusive(void*, uint32_t index) {
 
 int32_t __cdecl gpu_allocate_device_memory(void*, uint32_t index,
                                             std::size_t size, void** memory) {
+  aexcompat::memory_fill::unavailable(aexcompat::memory_fill::Suite, "GPU_allocator");
   if (!directx::active() && !opencl::active() && !cuda_backend().active())
     return allocate_fallback(index, size, memory, g_device_memory);
   if (!allocation_request_valid(index, size, memory)) return 4;
@@ -259,6 +261,7 @@ int32_t __cdecl gpu_purge_memory(void*, uint32_t index, std::size_t,
 
 int32_t __cdecl gpu_allocate_host_memory(void*, uint32_t index,
                                           std::size_t size, void** memory) {
+  aexcompat::memory_fill::unavailable(aexcompat::memory_fill::Suite, "GPU_host_allocator");
   if (!cuda_backend().active())
     return allocate_fallback(index, size, memory, g_host_memory);
   if (!allocation_request_valid(index, size, memory)) return 4;

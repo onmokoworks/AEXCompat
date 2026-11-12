@@ -237,3 +237,83 @@ fn independent_cli_preflights_all_cases_then_preserves_failure_isolation() {
     );
     assert!(!scratch.0.join("rejected0.png").exists());
 }
+
+#[test]
+fn memory_fill_is_rejected_for_the_entire_independent_batch() {
+    let scratch = Scratch::new();
+    let repo = repository();
+    let plugin = repo.join("target/minihost-build/worker_independent_case_fixture.aex");
+    let input = scratch.0.join("input.png");
+    image::RgbaImage::from_pixel(8, 4, image::Rgba([255u8; 4]))
+        .save(&input)
+        .unwrap();
+    let plain = scratch.write("plain.json", &json!({"schema_version":1,"assignments":[]}));
+    let diagnostic = scratch.write(
+        "fill.json",
+        &json!({"schema_version":1,"assignments":[],
+        "diagnostics":{"memory_fill":{"pattern_hex":"3f3f3f3f","fresh_nonclear_handles":true}}}),
+    );
+    let first = scratch.0.join("first.png");
+    let second = scratch.0.join("second.png");
+    let value = manifest(
+        &plugin,
+        vec![
+            json!({"id":"plain","input":input,"request":plain,"output":first}),
+            json!({"id":"fill","input":input,"request":diagnostic,"output":second}),
+        ],
+    );
+    let (passed, report) = invoke(&scratch.write("manifest.json", &value), &repo);
+    assert!(!passed);
+    assert!(
+        report
+            .to_string()
+            .contains("diagnostics.memory_fill is unsupported"),
+        "{report}"
+    );
+    assert!(!first.exists() && !second.exists());
+    // Reject before discovery too; a missing plug-in must not hide this error.
+    let value = manifest(
+        &scratch.0.join("missing.aex"),
+        vec![json!({"id":"fill","input":input,"request":diagnostic,"output":second})],
+    );
+    let (_, report) = invoke(&scratch.write("manifest.json", &value), &repo);
+    assert!(
+        report
+            .to_string()
+            .contains("diagnostics.memory_fill is unsupported"),
+        "{report}"
+    );
+}
+
+#[test]
+fn memory_fill_remains_available_for_single_requests() {
+    let scratch = Scratch::new();
+    let repo = repository();
+    let plugin = repo.join("target/minihost-build/worker_independent_case_fixture.aex");
+    let input = scratch.0.join("input.png");
+    image::RgbaImage::from_pixel(8, 4, image::Rgba([255u8; 4]))
+        .save(&input)
+        .unwrap();
+    let request = scratch.write(
+        "fill.json",
+        &json!({"schema_version":1,"assignments":[],
+        "diagnostics":{"memory_fill":{"pattern_hex":"3f3f3f3f","fresh_nonclear_handles":true}}}),
+    );
+    let output = scratch.0.join("output.png");
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_aexcompat-harness"))
+        .args(["--headless", "--render-experimental-request"])
+        .args([&plugin, &input, &output, &request])
+        .env("AEXCOMPAT_REPOSITORY_ROOT", &repo)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(result.status.success(), "{report}");
+    assert_eq!(report["passed"], true, "{report}");
+    assert_eq!(report["memory_fill"]["pattern_hex"], "3f3f3f3f", "{report}");
+    assert_eq!(report["memory_fill"]["journal_failed"], false, "{report}");
+    assert_eq!(
+        report["memory_fill"]["scopes"]["fresh_nonclear_handles"]["status"], "applied",
+        "{report}"
+    );
+    assert!(output.exists());
+}

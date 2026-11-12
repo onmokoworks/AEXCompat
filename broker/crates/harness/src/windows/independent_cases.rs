@@ -121,12 +121,15 @@ fn run_independent_case_batch(repository: &Path, path: &Path) -> Result<serde_js
                 );
             }
         }
-        let document = serde_json::from_slice::<BatchJsonValue>(&read_batch_document(
-            &case.request,
-            64 * 1024,
-        )?)
-        .map_err(|e| e.to_string())?
-        .0;
+        let bytes = read_batch_document(&case.request, 64 * 1024)?;
+        let document = serde_json::from_slice::<BatchJsonValue>(&bytes)
+            .map_err(|e| e.to_string())?
+            .0;
+        if aexcompat_broker::memory_fill::parse_request(&bytes)?.is_some() {
+            return Err(
+                "diagnostics.memory_fill is unsupported for independent case batches".into(),
+            );
+        }
         dependencies.push(typed_request_dependencies(&document, &case.request)?);
         documents.push(document);
     }

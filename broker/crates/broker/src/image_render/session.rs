@@ -2162,6 +2162,9 @@ pub(crate) fn build_interactive_image_report(
             );
         }
     }
+    if let Some(fill) = worker_report.get("memory_fill") {
+        report_object.insert("memory_fill".into(), fill.clone());
+    }
     for field in [
         "downsample_x",
         "downsample_y",

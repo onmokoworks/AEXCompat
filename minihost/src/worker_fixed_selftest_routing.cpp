@@ -1,3 +1,4 @@
+namespace aexcompat::memory_fill { bool verify(); int journal_probe(int, wchar_t**); }
 #include "worker_fixed_selftest_routing.hpp"
 
 #include "l2_cli_dispatch.h"
@@ -277,7 +278,8 @@ int selftest_selector_fault_attribution(int, wchar_t**) {
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 16> host_commands{{
+  const std::array<selftest::HostCommand, 17> host_commands{{
+      {L"--self-test-memory-fill-journal", 4, &aexcompat::memory_fill::journal_probe},
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-selector-fault-unwind", 2, &selftest_selector_fault_unwind},
       {L"--self-test-selector-fault-attribution", 2,
@@ -312,7 +314,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 48> simple_commands{{
+  const std::array<selftest::SimpleCommand, 49> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -344,6 +346,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-pf-color-suite", "pf_color_suite", hooks.simple.pf_color_suite},
       {L"--self-test-pf-color-param-suite", "pf_color_param_suite",
        hooks.simple.pf_color_param_suite},
+      {L"--self-test-memory-fill", "memory_fill", aexcompat::memory_fill::verify},
       {L"--self-test-declared-defaults", "declared_defaults",
        parameter_execution::verify_declared_defaults},
       {L"--self-test-nonfinite-output", "nonfinite_output",

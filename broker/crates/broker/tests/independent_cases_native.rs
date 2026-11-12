@@ -362,3 +362,33 @@ fn automatic_audio_cleanup_allows_successful_next_case() {
     );
     assert_eq!(session.close()["session_clean"], true);
 }
+
+#[test]
+fn memory_fill_worker_does_not_advertise_independent_cases() {
+    let fill = aexcompat_broker::memory_fill::parse_request(
+        br#"{"diagnostics":{"memory_fill":{"pattern_hex":"3f","fresh_nonclear_handles":true}}}"#,
+    )
+    .unwrap();
+    let scope = aexcompat_broker::memory_fill::RequestScope::install(fill);
+    let mut session = open();
+    drop(scope); // Negotiation must inspect the worker configuration, not thread-local state.
+    assert!(session.require_independent_cases().is_err());
+    assert!(
+        session
+            .render_case(0, 0, &vec![255; 8 * 4 * 4], &[])
+            .is_err()
+    );
+    assert_ne!(session.close()["session_clean"], true);
+    let mut plain = open();
+    plain.require_independent_cases().unwrap();
+    assert_eq!(
+        pixel(
+            plain
+                .render_case(0, 0, &vec![255; 8 * 4 * 4], &[])
+                .unwrap()
+                .status
+        ),
+        [1, 17, 1, 255]
+    );
+    assert_eq!(plain.close()["session_clean"], true);
+}

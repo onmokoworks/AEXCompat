@@ -1,4 +1,5 @@
 #include "worker_case_ownership.hpp"
+#include "worker_memory_fill.hpp"
 #include "worker_world_registry.hpp"
 
 #include "worker_pf_world_facade.hpp"
@@ -181,7 +182,8 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
     ++g_invalid_operations;
     return 4;
   }
-  const uint64_t rowbytes64 = static_cast<uint64_t>(width) * pixel_bytes;
+  const uint64_t rowbytes64 = static_cast<uint64_t>(width) * pixel_bytes +
+      (aexcompat::memory_fill::selected(aexcompat::memory_fill::Padding) ? 16 : 0);
   const uint64_t size = rowbytes64 * static_cast<uint64_t>(height);
   if (rowbytes64 > static_cast<uint64_t>((std::numeric_limits<int32_t>::max)()) ||
       size > kMaxWorldBytes || g_live_bytes > kMaxWorldBytes - size) {
@@ -196,6 +198,13 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
     return 1;
   }
   std::memset(pixels, clear_pixels ? 0 : 0xcd, static_cast<std::size_t>(size));
+  const auto diagnostic_id = aexcompat::memory_fill::allocation_id();
+  aexcompat::memory_fill::fill(aexcompat::memory_fill::Suite, pixels, size,
+      0, size, 1, 0, "PF_NewWorld", diagnostic_id, clear_pixels != 0);
+  aexcompat::memory_fill::fill(aexcompat::memory_fill::Padding, pixels, size,
+      static_cast<std::size_t>(width) * pixel_bytes,
+      rowbytes64 - static_cast<std::size_t>(width) * pixel_bytes, height, rowbytes64,
+      "PF_NewWorld_padding", diagnostic_id, clear_pixels != 0);
   std::memset(world, 0, world_safety::kEffectWorldSize);
   auto* bytes = static_cast<std::byte*>(world);
   const int32_t flags = world_safety::world_flags_for_pixel_bytes(pixel_bytes);

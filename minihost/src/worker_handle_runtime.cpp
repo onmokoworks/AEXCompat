@@ -1,4 +1,5 @@
 #include "worker_case_ownership.hpp"
+#include "worker_memory_fill.hpp"
 #include "worker_handle_runtime.hpp"
 
 #include "trace_writer.hpp"
@@ -36,6 +37,7 @@ struct HandleRecord {
   // pointer, and callbacks recover the containing record from that address.
   void* data{};
   std::size_t size{};
+  uint64_t diagnostic_id{};
   std::uint32_t lock_count{};
 };
 
@@ -49,6 +51,8 @@ Statistics g_statistics;
 struct AegpMemoryRecord {
   std::vector<std::byte> bytes;
   std::int32_t plugin_id{};
+  uint64_t diagnostic_id{};
+  bool clear{};
   std::uint32_t lock_count{};
 };
 std::unordered_map<void*, std::unique_ptr<AegpMemoryRecord>> g_aegp_memory;
@@ -99,6 +103,9 @@ void** __cdecl new_handle(std::uint64_t size) {
   }
   if (record->data) std::memset(record->data, 0, static_cast<std::size_t>(size));
   record->size = static_cast<std::size_t>(size);
+  record->diagnostic_id = aexcompat::memory_fill::allocation_id();
+  aexcompat::memory_fill::fill(aexcompat::memory_fill::Handle, record->data, record->size,
+      0, record->size, 1, 0, "PF_NewHandle", record->diagnostic_id);
   g_handles.insert(record);
   ++g_statistics.created;
   g_statistics.live_bytes += size;
@@ -224,6 +231,9 @@ std::int32_t __cdecl resize_handle(std::uint64_t size, void*** handle) {
     std::memcpy(replacement, record->data,
                 (std::min)(record->size, static_cast<std::size_t>(size)));
   }
+  if (size > record->size)
+    aexcompat::memory_fill::fill(aexcompat::memory_fill::Handle, replacement, size,
+        record->size, size - record->size, 1, 0, "PF_ResizeHandle", record->diagnostic_id);
   ::operator delete(record->data);
   record->data = replacement;
   g_statistics.live_bytes = g_statistics.live_bytes - record->size + size;
@@ -302,6 +312,10 @@ std::int32_t __cdecl new_aegp_mem_handle(std::int32_t plugin_id, const char* wha
   record->plugin_id = plugin_id;
   record->bytes.resize(size);
   if ((flags & 1) == 0 && size) std::memset(record->bytes.data(), 0xcd, size);
+  record->diagnostic_id = aexcompat::memory_fill::allocation_id();
+  record->clear = (flags & 1) != 0;
+  aexcompat::memory_fill::fill(aexcompat::memory_fill::Suite, record->bytes.data(), size,
+      0, size, 1, 0, "AEGP_NewMemHandle", record->diagnostic_id, record->clear);
   void* key = record.get();
   g_aegp_memory.emplace(key, std::move(record));
   g_aegp_statistics.live_bytes += size;
@@ -367,6 +381,10 @@ std::int32_t __cdecl resize_aegp_mem_handle(const char* what, std::uint32_t size
   }
   const std::size_t old_size = found->second->bytes.size();
   found->second->bytes.resize(size);
+  if (size > old_size)
+    aexcompat::memory_fill::fill(aexcompat::memory_fill::Suite, found->second->bytes.data(), size,
+        old_size, size - old_size, 1, 0, "AEGP_ResizeMemHandle",
+        found->second->diagnostic_id, found->second->clear);
   g_aegp_statistics.live_bytes = g_aegp_statistics.live_bytes - old_size + size;
   return 0;
 }

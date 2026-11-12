@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #include "worker_smart_setup.hpp"
 
 #include "generated/aex_abi_contract.hpp"
@@ -226,6 +227,8 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
       }
     }
   }
+  aexcompat::memory_fill::padding(source.data(), static_cast<std::size_t>(plan.rowbytes) * plan.height,
+      plan.width, plan.height, plan.rowbytes, plan.input_pixel_bytes, "smart_input");
   if (!source.set_plugin_writable(input_write_advertised)) return false;
   *buffers.destination = buffers.output->data();
   if (!output_coverage::seed(*buffers.destination, buffers.output->size(),
@@ -371,7 +374,8 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
       // not just its origin and extent. Their transport bytes remain packed.
       const int32_t padding = layer.slot == 0
           ? plan.rowbytes - packed_rowbytes
-          : (layer.has_world_layout ? layer.row_padding : 0);
+          : (layer.has_world_layout && layer.row_padding ? layer.row_padding :
+             aexcompat::memory_fill::selected(aexcompat::memory_fill::Padding) ? 16 : 0);
       if (padding < 0 || padding > 256 || padding % layer_pixel_bytes != 0)
         return false;
       const unsigned char padding_byte = layer.slot == 0
@@ -387,6 +391,7 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
                       pixels.data() + static_cast<std::size_t>(y) * packed_rowbytes,
                       packed_rowbytes);
         pixels.swap(strided);
+        aexcompat::memory_fill::padding(pixels.data(), pixels.size(), layer.width, layer.height, layer_rowbytes, layer_pixel_bytes, "smart_secondary");
       }
       auto& world = prepared.hosted_worlds[layer_index];
       if (!render::prepare_world_layout(

@@ -1,3 +1,4 @@
+#include "worker_memory_fill.hpp"
 #include "render_subsystem.h"
 #include "render_pixel_transport.hpp"
 
@@ -35,6 +36,11 @@ bool valid_world_layout(const WorldLayout& layout) {
 
 DiagnosticWorldLayout& diagnostic_world_layout() {
   static DiagnosticWorldLayout layout;
+  if (aexcompat::memory_fill::selected(aexcompat::memory_fill::Padding)) {
+    layout.enabled = true;
+    if (!layout.input_row_padding) layout.input_row_padding = 16;
+    if (!layout.output_row_padding) layout.output_row_padding = 16;
+  }
   return layout;
 }
 
