@@ -105,3 +105,34 @@ Full Python, SDK fixture and AE oracle suites were not run. The enabled focused
 Python set, workspace library tests, harness unit tests and broker session
 integration are the selected regression coverage; no broader suite pass is
 claimed. Independent review and CI remain pending the requested pre-push handoff.
+
+
+## Independent review follow-up: Classic batch telemetry
+
+Independent review of `6d10d72884978626517be100c7b9cd17bf1fa423` found one
+P2: Classic merged redundant checkins into session diagnostics, so subsequent
+fresh cases reported earlier cases' counts. Ownership, memory safety and PR
+wording had no other reported findings.
+
+FreshCase begin now resets only Classic redundant-checkin telemetry under the
+diagnostics mutex. Accumulated invalid checkins, balance failures and lifecycle
+counters remain intact. The native behavioral route asserts that preservation
+with actual invalid calls and a prior redundant count.
+
+`classic_batch_redundant_checkins_are_case_local` runs three fresh Classic cases
+in one resident worker. The fixture duplicates a checkin in cases one and three,
+with no duplicate in case two. Before the fix it failed with `[1, 1, 2]`;
+after the fix it passes with `[1, 0, 1]`, all cases balanced and evidence valid.
+The earlier original-plugin measurements and executable hashes above describe
+the initial implementation; originals were not rerun for this telemetry fix.
+Post-fix independent review and CI remain pending the local-only handoff.
+
+Follow-up validation: native Release worker, parameter-checkout self-test and
+Classic runtime self-test targets built successfully; Classic self-test passed.
+Focused pytest passed 34 tests; batch CLI passed 6; broker library passed 405
+(3 existing ignored), independent native cases passed 12, and resident-session
+integration passed 80. Whole tracked-Rust rustfmt and diff whitespace checks
+passed. Session tests included
+`modal_ui_worker_uses_a_private_desktop_before_session_timeout`; native dispatch
+retained required private-desktop containment. No AE was launched. Local logs
+are retained under `.local-checkin/p2-*`. No full Python or SDK/AE suite was run.

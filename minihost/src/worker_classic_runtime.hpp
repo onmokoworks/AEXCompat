@@ -93,6 +93,8 @@ class Context final {
 Context* active_context() noexcept;
 bool last_selector_dispatched() noexcept;
 void reset_selector_diagnostic() noexcept;
+// Reset case-local telemetry without clearing accumulated lifecycle failures.
+void reset_case_redundant_checkins() noexcept;
 
 // Classic host-callback telemetry (issue #126 Phase D): counters recorded by
 // worker_main's PF utility and world-transform callbacks (quack,

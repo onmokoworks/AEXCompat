@@ -1248,7 +1248,18 @@ bool verify_redundant_param_checkin() {
   reset();
   const wr::FreshCase::Defaults defaults = wr::parameters::state().records;
   wr::FreshCase first_case(defaults);
+  const auto prior_classic = classic::diagnostics();
+  check(prior_classic.invalid_checkins > 0 && !prior_classic.balanced &&
+        prior_classic.redundant_checkins > 0, "classic failure and redundant reset setup");
   check(first_case.begin(), "fresh case begins");
+  const auto fresh_classic = classic::diagnostics();
+  check(fresh_classic.redundant_checkins == 0 &&
+        fresh_classic.invalid_checkins == prior_classic.invalid_checkins &&
+        fresh_classic.balanced == prior_classic.balanced &&
+        fresh_classic.checkout_calls == prior_classic.checkout_calls &&
+        fresh_classic.checkin_calls == prior_classic.checkin_calls &&
+        fresh_classic.automatic_checkins == prior_classic.automatic_checkins,
+        "fresh case resets only classic redundant telemetry, preserving lifecycle failures");
   hosted.definitions[1] = {};
   exercise();
   check(first_case.finish(), "redundant case is clean");

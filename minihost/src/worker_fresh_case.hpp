@@ -1,6 +1,7 @@
 #pragma once
 
 #include "worker_handle_runtime.hpp"
+#include "worker_classic_runtime.hpp"
 #include "worker_case_ownership.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_pf_state_runtime.hpp"
@@ -26,6 +27,7 @@ class FreshCase {
     state.checkout.definitions.clear();
     state.checkout.completed.clear();
     state.checkout.redundant_checkins = 0;
+    classic::reset_case_redundant_checkins();
     state.user_changed_parameters.clear();
     state.timelines.clear();
     const bool update = state.ui.update_advertised;

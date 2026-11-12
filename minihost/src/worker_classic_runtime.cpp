@@ -221,6 +221,10 @@ void reset_selector_diagnostic() noexcept {
   g_diagnostics.last_index = -1;
   g_diagnostics.balanced = true;
 }
+void reset_case_redundant_checkins() noexcept {
+  std::lock_guard<std::mutex> lock(g_diagnostics_mutex);
+  g_diagnostics.redundant_checkins = 0;
+}
 bool dispatch_active() noexcept {
   return g_dispatch_count.load(std::memory_order_acquire) != 0;
 }

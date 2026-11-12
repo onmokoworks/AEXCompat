@@ -317,3 +317,47 @@ fn memory_fill_remains_available_for_single_requests() {
     );
     assert!(output.exists());
 }
+
+#[test]
+fn classic_batch_redundant_checkins_are_case_local() {
+    let scratch = Scratch::new();
+    let repo = repository();
+    let plugin = repo.join("target/minihost-build/worker_independent_case_fixture.aex");
+    let input = scratch.0.join("input.png");
+    image::RgbaImage::from_pixel(8, 4, image::Rgba([255u8; 4]))
+        .save(&input)
+        .unwrap();
+    let cases = [12, 0, 12]
+        .into_iter()
+        .enumerate()
+        .map(|(index, frame)| {
+            let request = scratch.write(
+                &format!("request{index}.json"),
+                &json!({"schema_version":1,"assignments":[],
+                "timing":{"frame":frame,"fps":30,"duration_frames":30}}),
+            );
+            json!({"id":index.to_string(),"input":input,"request":request,
+            "output":scratch.0.join(format!("out{index}.png"))})
+        })
+        .collect();
+    let (passed, report) = invoke(
+        &scratch.write("manifest.json", &manifest(&plugin, cases)),
+        &repo,
+    );
+    assert!(passed && report["complete"] == true, "{report}");
+    let reports = report["cases"].as_array().unwrap();
+    let counts: Vec<_> = reports
+        .iter()
+        .map(|case| {
+            assert_eq!(case["passed"], true, "{case}");
+            assert_eq!(case["evidence_valid"], true, "{case}");
+            assert_eq!(case["param_checkouts_balanced"], true, "{case}");
+            assert_eq!(
+                case["worker_pid"], reports[0]["worker_pid"],
+                "same resident worker"
+            );
+            case["redundant_param_checkins"].as_u64().unwrap()
+        })
+        .collect();
+    assert_eq!(counts, [1, 0, 1], "Classic fresh-case counts");
+}
