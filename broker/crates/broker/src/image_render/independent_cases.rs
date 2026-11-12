@@ -287,9 +287,16 @@ impl IndependentCaseBatch {
                 timing: r.timing,
                 worker_classification: "resident_session".into(),
                 diagnostics: json!({"case_report":worker_report}),
-                gpu_fallback_used: false,
-                gpu_fallback_reason: None,
-                gpu_attempt: None,
+                gpu_fallback_used: worker_report["gpu_fallback_used"]
+                    .as_bool()
+                    .unwrap_or(false),
+                gpu_fallback_reason: worker_report["gpu_fallback_reason"]
+                    .as_str()
+                    .map(str::to_owned),
+                gpu_attempt: worker_report
+                    .get("gpu_attempt")
+                    .filter(|value| !value.is_null())
+                    .cloned(),
                 secondary_layers: json!(r
                     .layers
                     .iter()

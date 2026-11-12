@@ -1,6 +1,7 @@
 #pragma once
 
 #include "worker_handle_runtime.hpp"
+#include "worker_case_ownership.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_pf_state_runtime.hpp"
 #include "worker_suite_registry.hpp"
@@ -37,6 +38,7 @@ class FreshCase {
     invalid_arbitrary_ = state.arbitrary.invalid_operations;
     leases_ = suite_registry().snapshot();
     worlds_ = world_registry::statistics();
+    ownership_ = case_ownership();
     active_ = true;
     return true;
   }
@@ -47,7 +49,8 @@ class FreshCase {
     auto& state = parameters::state();
     const auto handles = handles::statistics();
     const auto worlds = world_registry::statistics();
-    const bool clean = state.checkout.live.empty() && state.keyframe_checkout_ledger.empty() &&
+    const bool clean = case_ownership() == ownership_ &&
+        state.checkout.live.empty() && state.keyframe_checkout_ledger.empty() &&
         handles::live_identities() == handles_ && handles.invalid_operations == invalid_handles_ &&
         state.arbitrary.invalid_operations == invalid_arbitrary_ &&
         suite_registry().snapshot().live_leases == leases_.live_leases &&
@@ -68,6 +71,7 @@ class FreshCase {
   uint32_t invalid_arbitrary_{};
   suite_runtime::SuiteLeaseSnapshot leases_;
   world_registry::Statistics worlds_;
+  std::vector<CaseOwnership> ownership_;
   bool active_{};
 };
 

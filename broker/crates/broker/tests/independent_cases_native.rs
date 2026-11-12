@@ -10,11 +10,23 @@ fn open() -> RenderSession {
 }
 
 fn open_deadline(deadline: Duration) -> RenderSession {
+    open_route(deadline, false)
+}
+
+fn open_route(deadline: Duration, smart: bool) -> RenderSession {
+    open_context(deadline, smart, None)
+}
+
+fn open_context(deadline: Duration, smart: bool, mask_trailer: Option<String>) -> RenderSession {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
         .unwrap();
-    let plugin = repository.join("target/minihost-build/worker_independent_case_fixture.aex");
+    let plugin = repository.join(if smart {
+        "target/minihost-build/worker_independent_smart_fixture.aex"
+    } else {
+        "target/minihost-build/worker_independent_case_fixture.aex"
+    });
     let hash = format!(
         "{:x}",
         Sha256::digest(std::fs::read(&plugin).expect("build native case fixture"))
@@ -29,7 +41,7 @@ fn open_deadline(deadline: Duration) -> RenderSession {
         aux_manifest: None,
         world_dump_dir: None,
         output_checksum_detail: false,
-        mask_trailer: None,
+        mask_trailer,
         spatial_trailer: None,
         camera_trailer: None,
         render_environment_trailer: None,
@@ -47,12 +59,67 @@ fn open_deadline(deadline: Duration) -> RenderSession {
         total_time: 30,
         time_scale: 30,
         frame_deadline: deadline,
-        smart: false,
+        smart,
         gpu_backend: RenderGpuBackend::Cpu,
         gpu_runtime_policy: None,
         launch_environment: Default::default(),
     })
     .unwrap()
+}
+
+#[test]
+fn independent_smart_error_is_not_retried() {
+    let mut session = open_route(Duration::from_secs(10), true);
+    session.require_independent_cases().unwrap();
+    let input = vec![255; 8 * 4 * 4];
+    for (index, (time, expected)) in [(0, 14), (22, 512), (23, 516)].into_iter().enumerate() {
+        let status = session
+            .render_case(index as u32, time, &input, &[])
+            .unwrap()
+            .status;
+        assert!(
+            matches!(status, FrameStatus::FrameError { render_error, .. } if render_error == expected),
+            "{status:?}"
+        );
+        let report = session.take_case_report().unwrap();
+        assert_eq!(report["smart_render_error"], expected, "{report}");
+        assert_eq!(report["session_render_error"], expected, "{report}");
+        assert_eq!(report["smart_render_attempts"], 1, "{report}");
+        assert_eq!(report["gpu_fallback_used"], false, "{report}");
+        assert_eq!(
+            report["missing_suites"],
+            serde_json::json!([{"name":"Independent smart selector 1","version":1}]),
+            "selector count: {report}"
+        );
+    }
+    let close = session.close();
+    assert_eq!(close["frames_errored"], 3, "{close}");
+}
+
+#[test]
+fn ordinary_smart_session_keeps_premiere_retry() {
+    let mut session = open_route(Duration::from_secs(10), true);
+    let input = vec![255; 8 * 4 * 4];
+    let status = session.render_frame(0, 22, &input).unwrap().status;
+    assert!(
+        matches!(
+            status,
+            FrameStatus::FrameError {
+                render_error: 7,
+                ..
+            }
+        ),
+        "{status:?}"
+    );
+    let close = session.close();
+    assert_eq!(
+        close["final_report"]["missing_suites"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "{close}"
+    );
 }
 
 fn pixel(status: FrameStatus) -> Vec<u8> {
@@ -153,4 +220,98 @@ fn persistent_frames_keep_sequence_and_failed_setdown_poison_cases() {
     assert!(session.invalidation().is_some());
     assert!(session.render_case(1, 0, &input, &[]).is_err());
     assert_ne!(session.close()["session_clean"], true);
+}
+
+#[test]
+fn aegp_memory_leak_invalidates_before_next_case() {
+    let mut session = open();
+    session.require_independent_cases().unwrap();
+    let input = vec![255; 8 * 4 * 4];
+    assert!(session.render_case(0, 20, &input, &[]).is_err());
+    assert!(session.invalidation().is_some());
+    assert!(session.render_case(1, 0, &input, &[]).is_err());
+    assert_ne!(session.close()["session_clean"], true);
+}
+
+#[test]
+fn compatibility_diagnostics_are_local_to_each_case() {
+    let mut session = open();
+    session.require_independent_cases().unwrap();
+    let input = vec![255; 8 * 4 * 4];
+    for index in 0..2 {
+        session.render_case(index * 2, 21, &input, &[]).unwrap();
+        let failed = session.take_case_report().unwrap();
+        assert!(
+            !failed["missing_suites"].as_array().unwrap().is_empty(),
+            "{failed}"
+        );
+        assert!(
+            !failed["unsupported_suite_calls"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{failed}"
+        );
+        assert_eq!(
+            pixel(
+                session
+                    .render_case(index * 2 + 1, 0, &input, &[])
+                    .unwrap()
+                    .status
+            ),
+            [1, 17, 1, 255]
+        );
+        let good = session.take_case_report().unwrap();
+        assert_eq!(good["missing_suites"], serde_json::json!([]), "{good}");
+        assert_eq!(
+            good["unsupported_suite_calls"],
+            serde_json::json!([]),
+            "{good}"
+        );
+    }
+    let close = session.close();
+    assert!(
+        !close["final_report"]["missing_suites"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{close}"
+    );
+    assert_eq!(
+        close["final_report"]["unsupported_suite_calls"][0]["call_count"], 2,
+        "{close}"
+    );
+}
+
+#[test]
+fn pf_path_checkout_and_preparation_leaks_invalidate_next_case() {
+    let input = vec![255; 8 * 4 * 4];
+    for time in [24, 25, 26] {
+        let mut session = open_context(
+            Duration::from_secs(10),
+            false,
+            Some("v2|0:0,0,0,0,0,0/7,0,0,0,0,0/7,3,0,0,0,0/0,3,0,0,0,0".into()),
+        );
+        session.require_independent_cases().unwrap();
+        let result = session.render_case(0, time, &input, &[]);
+        if time == 26 {
+            assert!(matches!(
+                result.unwrap().status,
+                FrameStatus::FrameError {
+                    render_error: 7,
+                    ..
+                }
+            ));
+            assert_eq!(
+                pixel(session.render_case(1, 0, &input, &[]).unwrap().status),
+                [1, 17, 1, 255]
+            );
+            assert_eq!(session.close()["session_clean"], true);
+        } else {
+            assert!(result.is_err(), "leaked path operation at {time}");
+            assert!(session.invalidation().is_some());
+            assert!(session.render_case(1, 0, &input, &[]).is_err());
+            assert_ne!(session.close()["session_clean"], true);
+        }
+    }
 }

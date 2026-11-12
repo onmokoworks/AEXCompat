@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_color_settings_runtime.hpp"
 #include "worker_cor_ace_profile.hpp"
 #include "worker_handle_runtime.hpp"
@@ -854,3 +855,14 @@ void reset_working_space_to_srgb() {
   g_working_color_space_icc.clear();
 }
 }  // namespace aexcompat::color_settings
+
+namespace aexcompat::color_settings {
+
+aexcompat::worker_runtime::CaseOwnership case_profile_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::lock_guard lock(g_color_settings_mutex);
+  for (const auto& [key, value] : g_color_profiles) if (value.live) result.emplace_back(reinterpret_cast<uintptr_t>(key), value.uses);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

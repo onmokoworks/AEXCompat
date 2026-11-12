@@ -223,7 +223,8 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
     let typed_conformance_request = args.get(1).is_some_and(|command| {
         matches!(
             command.to_string_lossy().as_ref(),
-            "--render-request-batch" | "--render-experimental-request"
+            "--render-request-batch"
+                | "--render-experimental-request"
                 | "--render-experimental-smart-request"
                 | "--render-experimental-request-16"
                 | "--render-experimental-smart-request-16"
@@ -735,11 +736,16 @@ fn main() -> eframe::Result {
             Ok(report) => {
                 let passed = report["passed"] == true;
                 println!("{}", serde_json::to_string_pretty(&report).unwrap());
-                if !passed { std::process::exit(1); }
+                if !passed {
+                    std::process::exit(1);
+                }
             }
             Err(error) => {
-                println!("{}", serde_json::json!({"schema":"aexcompat.independent_case_batch",
-                    "schema_version":1,"passed":false,"classification":"validation_error","error":error}));
+                println!(
+                    "{}",
+                    serde_json::json!({"schema":"aexcompat.independent_case_batch",
+                    "schema_version":1,"passed":false,"classification":"validation_error","error":error})
+                );
                 std::process::exit(1);
             }
         }

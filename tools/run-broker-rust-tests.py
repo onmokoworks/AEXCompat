@@ -58,6 +58,7 @@ SILENT_SKIP_PREREQUISITES = (
     # the discovery and classic executables used to cover separately.
     "target/minihost-build/aex_worker.exe",
     "target/minihost-build/worker_independent_case_fixture.aex",
+    "target/minihost-build/worker_independent_smart_fixture.aex",
     "target/minihost-build/worker_session_detach_fixture.dll",
     "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
     "target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex",

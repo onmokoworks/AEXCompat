@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <stdexcept>
 #include <windows.h>
 
@@ -26,10 +27,19 @@ int global_setups{};
 Handle declaration_default{};
 }
 
+#ifdef INDEPENDENT_SMART_FIXTURE
+// Availability alone enables the ordinary-session Premiere retry. Decline the
+// GPU route so its second PF selector invocation returns a different error.
+extern "C" __declspec(dllexport) int32_t __cdecl xGPUFilterEntry() { return 1; }
+#endif
+
 extern "C" __declspec(dllexport) int32_t __cdecl EffectMain(
     int32_t command, void* input, void* output, void** params, void* world, void* extra) {
   const auto* basic = get<const Basic*>(input, abi::IN_PICA_BASICP_OFFSET);
   if (command == 1) {
+#ifdef INDEPENDENT_SMART_FIXTURE
+    put<uint32_t>(output,abi::OUT_OUT_FLAGS2_OFFSET,(1u << 10) | (1u << 25));
+#endif
     const void* suite{};
     if (basic->acquire("PF Handle Suite",2,&suite)) return 4;
     handles = static_cast<const Handles*>(suite);
@@ -93,6 +103,22 @@ extern "C" __declspec(dllexport) int32_t __cdecl EffectMain(
     handles->dispose(get<Handle>(input,abi::IN_SEQUENCE_DATA_OFFSET));
     put<Handle>(output,abi::OUT_SEQUENCE_DATA_OFFSET,nullptr);
     if (get<int32_t>(input,224)==14) return 9;
+  } else if (command == 23) {
+    const auto pre_input = get<void*>(extra,abi::PRE_EXTRA_INPUT_OFFSET);
+    const auto pre_output = get<void*>(extra,abi::PRE_EXTRA_OUTPUT_OFFSET);
+    std::memcpy(static_cast<std::byte*>(pre_output)+abi::PRE_OUTPUT_RESULT_RECT_OFFSET,pre_input,16);
+    std::memcpy(static_cast<std::byte*>(pre_output)+abi::PRE_OUTPUT_MAX_RESULT_RECT_OFFSET,pre_input,16);
+  } else if (command == 24 || command == 31) {
+    const auto sequence = get<Handle>(input,abi::IN_SEQUENCE_DATA_OFFSET);
+    auto* state = static_cast<int*>(handles->lock(sequence));
+    const auto ordinal = ++*state;
+    handles->unlock(sequence);
+    const auto time = get<int32_t>(input,224);
+    char call_name[64]{};
+    std::snprintf(call_name,sizeof(call_name),"Independent smart selector %d",ordinal);
+    const void* unused{};
+    basic->acquire(call_name,1,&unused);
+    return ordinal == 1 ? (time == 22 ? 512 : time == 23 ? 516 : 14) : 7;
   } else if (command == 11) {
     const auto sequence = get<Handle>(input,abi::IN_SEQUENCE_DATA_OFFSET);
     auto* state = static_cast<int*>(handles->lock(sequence));
@@ -103,6 +129,45 @@ extern "C" __declspec(dllexport) int32_t __cdecl EffectMain(
     if (get<int32_t>(input,224)==16) Sleep(1000);
     if (get<int32_t>(input,224)==18) { (void)handles->create(4); return 7; }
     if (get<int32_t>(input,224)==19) throw std::runtime_error("independent case fixture");
+    if (get<int32_t>(input,224)==20) {
+      const void* memory{};
+      if (basic->acquire("AEGP Memory Suite",1,&memory)) return 4;
+      using NewMemory = int32_t(__cdecl*)(int32_t,const char*,uint32_t,int32_t,void**);
+      void* leaked{};
+      const auto error = (*static_cast<const NewMemory*>(memory))(0,"case leak",4,0,&leaked);
+      basic->release("AEGP Memory Suite",1);
+      return error ? error : 7;
+    }
+    if (get<int32_t>(input,224)==21) {
+      const void* suite{};
+      basic->acquire("Independent case missing suite",1,&suite);
+      if (!basic->acquire("AE Timecode Helper Suite",1,&suite)) {
+        (*static_cast<int32_t(__cdecl* const*)()>(suite))();
+        basic->release("AE Timecode Helper Suite",1);
+      }
+      return 7;
+    }
+    const auto time = get<int32_t>(input,224);
+    if (time >= 24 && time <= 26) {
+      const void* query{};
+      const void* data{};
+      if (basic->acquire("PF Path Query Suite",1,&query)) return 4;
+      if (basic->acquire("PF Path Data Suite",1,&data)) return 4;
+      auto q = static_cast<void* const*>(query);
+      auto d = static_cast<void* const*>(data);
+      auto effect = get<void*>(input,abi::IN_EFFECT_REF_OFFSET);
+      int32_t id{};
+      auto error = reinterpret_cast<int32_t(__cdecl*)(void*,int32_t,int32_t*)>(q[1])(effect,0,&id);
+      void* path{};
+      if (!error) error = reinterpret_cast<int32_t(__cdecl*)(void*,int32_t,int32_t,int32_t,uint32_t,void**)>(q[2])(effect,id,0,1,30,&path);
+      void* prep{};
+      if (!error && time != 24) error = reinterpret_cast<int32_t(__cdecl*)(void*,void*,int32_t,int32_t,void**)>(d[3])(effect,path,0,4,&prep);
+      if (!error && time == 26) error = reinterpret_cast<int32_t(__cdecl*)(void*,void*,int32_t,void**)>(d[7])(effect,path,0,&prep);
+      if (!error && time != 24) error = reinterpret_cast<int32_t(__cdecl*)(void*,int32_t,int32_t,void*)>(q[3])(effect,id,0,path);
+      basic->release("PF Path Data Suite",1);
+      basic->release("PF Path Query Suite",1);
+      return error ? error : 7;
+    }
     const auto arbitrary = get<Handle>(params[2],72);
     auto* owned = static_cast<int*>(handles->lock(arbitrary));
     if (!owned) return 4;

@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_pf_path_runtime.hpp"
 #include "worker_extended_diag.hpp"
 #include "worker_world_registry.hpp"
@@ -439,3 +440,16 @@ int32_t __cdecl mask_world_with_scene(void* effect, double fx, double fy,
   return 0;
 }
 } // namespace aexcompat::pf_path_runtime
+
+namespace aexcompat::pf_path_runtime {
+
+aexcompat::worker_runtime::CaseOwnership case_path_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::lock_guard lock(g_mutex);
+  for (const auto& [key, count] : g_checkouts) result.emplace_back(reinterpret_cast<uintptr_t>(key), count);
+  for (const auto& prep : g_preps) result.emplace_back(reinterpret_cast<uintptr_t>(&prep), 0);
+  result.emplace_back(0, g_report.invalid_operations);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

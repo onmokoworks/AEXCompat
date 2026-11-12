@@ -56,6 +56,33 @@ fn manifest(plugin: &Path, cases: Vec<Value>) -> Value {
 }
 
 #[test]
+fn classic_request_rejects_smart_effect_before_render_worker() {
+    let scratch = Scratch::new();
+    let repo = repository();
+    let plugin = repo.join("target/minihost-build/worker_independent_smart_fixture.aex");
+    let input = scratch.0.join("input.png");
+    image::RgbaImage::from_pixel(8, 4, image::Rgba([255u8; 4]))
+        .save(&input)
+        .unwrap();
+    let request = scratch.write(
+        "request.json",
+        &json!({"schema_version":1,"assignments":[]}),
+    );
+    let output = scratch.0.join("output.png");
+    let value = manifest(
+        &plugin,
+        vec![json!({"id":"A","input":input,"request":request,"output":output})],
+    );
+    let (passed, report) = invoke(&scratch.write("manifest.json", &value), &repo);
+    assert!(!passed, "{report}");
+    assert!(
+        report.to_string().contains("no fallback is permitted"),
+        "{report}"
+    );
+    assert!(!output.exists());
+}
+
+#[test]
 fn duplicate_destinations_and_duplicate_request_keys_fail_before_plugin_load() {
     let scratch = Scratch::new();
     let repo = repository();

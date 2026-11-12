@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_render_receipts.hpp"
 
 #include "worker_world_registry.hpp"
@@ -383,3 +384,17 @@ bool lifetimes_balanced() {
 }
 
 }  // namespace aexcompat::render_receipts
+
+namespace aexcompat::render_receipts {
+
+aexcompat::worker_runtime::CaseOwnership case_receipt_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::lock_guard lock(g_mutex);
+  for (const auto& [key, value] : g_receipts) result.emplace_back(reinterpret_cast<uintptr_t>(key), 1);
+  result.emplace_back(0, g_reserved_count);
+  result.emplace_back(1, g_reserved_bytes);
+  result.emplace_back(2, g_invalid_operations);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

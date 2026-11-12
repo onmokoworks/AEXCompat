@@ -2200,7 +2200,8 @@ impl RenderSession {
         let (sender, receiver) = mpsc::channel::<SessionEvent>();
         let response_handle = response_read.take() as usize;
         let reader_sender = sender.clone();
-        let response_limit = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(MAX_MESSAGE_BYTES));
+        let response_limit =
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(MAX_MESSAGE_BYTES));
         let reader_limit = response_limit.clone();
         thread::spawn(move || {
             let handle = response_handle as HANDLE;
@@ -2650,7 +2651,14 @@ impl RenderSession {
         parameters: Option<&[InteractiveParameter]>,
         ui_action: Option<&RenderUiAction>,
     ) -> io::Result<FrameOutcome> {
-        self.render_instance_frame(frame_index, current_time, rgba, parameters, ui_action, false)
+        self.render_instance_frame(
+            frame_index,
+            current_time,
+            rgba,
+            parameters,
+            ui_action,
+            false,
+        )
     }
 
     /// Negotiate before sending any independent request. Older workers fail
@@ -2659,7 +2667,9 @@ impl RenderSession {
         if self.invalidation.is_some() {
             return Err(invalid("render session is invalidated"));
         }
-        let sent = self.transport.send_message(r#"{"v":1,"type":"capabilities"}"#);
+        let sent = self
+            .transport
+            .send_message(r#"{"v":1,"type":"capabilities"}"#);
         if sent {
             if let FrameWait::Message(body) =
                 self.await_frame_response(Instant::now() + self.frame_deadline)
@@ -2676,7 +2686,8 @@ impl RenderSession {
                     value.v == 1 && value.kind == "capabilities" && value.render_case == 1
                 }) {
                     self.independent_cases = true;
-                    self.response_limit.store(4 * 1024 * 1024, std::sync::atomic::Ordering::Release);
+                    self.response_limit
+                        .store(4 * 1024 * 1024, std::sync::atomic::Ordering::Release);
                     return Ok(());
                 }
             }
@@ -2707,8 +2718,13 @@ impl RenderSession {
     }
 
     pub fn worker_sha256(&self) -> Option<String> {
-        self.process.as_ref().map(|process| process.worker_sha256().iter()
-            .map(|byte| format!("{byte:02x}")).collect())
+        self.process.as_ref().map(|process| {
+            process
+                .worker_sha256()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        })
     }
 
     fn render_instance_frame(
@@ -2763,10 +2779,12 @@ impl RenderSession {
         if rgba.len() != self.geometry.input_slot_bytes() {
             return Err(invalid("input frame byte count does not match the session"));
         }
-        if !fresh_case && self.still_primary_sha256.is_some_and(|expected| {
-            let actual: [u8; 32] = Sha256::digest(rgba).into();
-            actual != expected
-        }) {
+        if !fresh_case
+            && self.still_primary_sha256.is_some_and(|expected| {
+                let actual: [u8; 32] = Sha256::digest(rgba).into();
+                actual != expected
+            })
+        {
             return Err(invalid(
                 "still primary changed; reopen the session for a new source",
             ));
@@ -2912,12 +2930,19 @@ impl RenderSession {
                 }
             };
             if done.v != PROTOCOL_VERSION
-                || done.kind != if fresh_case { "case_done" } else { "frame_done" }
+                || done.kind
+                    != if fresh_case {
+                        "case_done"
+                    } else {
+                        "frame_done"
+                    }
                 || done.frame_index != frame_index
                 || (fresh_case && done.status != "resize_needed" && done.case_cleanup != Some(true))
                 || (!fresh_case && done.case_cleanup.is_some())
                 || (!fresh_case && done.case_report.is_some())
-                || (fresh_case && done.status == "ok" && !done.case_report.as_ref().is_some_and(Value::is_object))
+                || (fresh_case
+                    && done.status == "ok"
+                    && !done.case_report.as_ref().is_some_and(Value::is_object))
             {
                 return Err(self.invalidate(
                     "frame_done_mismatch",

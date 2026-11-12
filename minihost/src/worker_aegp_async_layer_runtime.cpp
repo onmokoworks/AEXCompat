@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_render_receipts.hpp"
 
@@ -104,3 +105,15 @@ Diagnostics diagnostics() { std::lock_guard<std::mutex> lock(g_mutex); return {
 bool balanced() { const auto d = diagnostics(); return d.live == 0 && d.reserved_bytes == 0 &&
   d.created == d.completed + d.canceled; }
 }  // namespace aexcompat::aegp_async_layer
+
+namespace aexcompat::aegp_async_layer {
+
+aexcompat::worker_runtime::CaseOwnership case_async_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::lock_guard lock(g_mutex);
+  for (const auto& [key, value] : g_requests) result.emplace_back(key, 1);
+  result.emplace_back(0, g_reserved_bytes);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

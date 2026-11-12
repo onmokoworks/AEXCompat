@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_handle_runtime.hpp"
 
 #include "trace_writer.hpp"
@@ -430,3 +431,15 @@ AegpMemorySuite g_aegp_memory_suite{
     &set_aegp_mem_reporting, &get_aegp_mem_stats};
 
 }  // namespace aexcompat::worker_runtime::handles
+
+namespace aexcompat::worker_runtime::handles {
+
+aexcompat::worker_runtime::CaseOwnership case_memory_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::lock_guard lock(g_aegp_memory_mutex);
+  for (const auto& [key, value] : g_aegp_memory) result.emplace_back(reinterpret_cast<uintptr_t>(key), value->lock_count);
+  result.emplace_back(0, g_aegp_statistics.invalid_operations);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

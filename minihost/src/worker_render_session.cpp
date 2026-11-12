@@ -1290,6 +1290,7 @@ void run_session_frame_loop(
     outcome.frames_attempted += 1;
     if (fresh_case) {
       case_active = true;
+      worker_runtime::suite_registry().begin_case_diagnostics();
       write<int32_t>(input, 224, current_time);
       if (!instance.begin()) {
         outcome.invariant_failure = true;
@@ -1407,7 +1408,9 @@ void run_session_frame_loop(
       break;
     }
     if (fresh_case && frame.report) {
+      worker_runtime::suite_registry().report_case_diagnostics(true);
       case_report = frame.report();
+      worker_runtime::suite_registry().report_case_diagnostics(false);
       const auto end = case_report.find_last_of('}');
       if (end != std::string::npos)
         case_report.insert(end, ",\"worker_pid\":" + std::to_string(GetCurrentProcessId()));
@@ -1765,7 +1768,9 @@ SmartRenderSessionOutcome run_smart_render_session(
         // read at the end is the one from the pass whose pixels are reported.
         worker_runtime::smart_execution::SessionFrame retry_frame{&captured};
         const worker_runtime::smart_execution::SessionFrame* verdict = &session_frame;
+        uint32_t render_attempts = 0;
         const auto render_attempt = [&](worker_runtime::smart_execution::SessionFrame* attempt_frame) {
+          ++render_attempts;
           // A retry's result replaces the first attempt's outright, so the
           // fault attribution restarts with it: the first attempt's 14 or
           // 512/516 (the codes the retries below key on) must not mark a
@@ -1789,7 +1794,7 @@ SmartRenderSessionOutcome run_smart_render_session(
         // does not separate those from CPU-capable effects, so the runtime 14 is
         // the only signal. The 14 arrives before the plug-in touches suites,
         // worlds, or checkouts, so re-run the frame once through the GPU transport.
-        if (frame_result.render_error == 14 &&
+        if (!fresh_case && frame_result.render_error == 14 &&
             (advertised_out_flags2 & (1u << 25)) != 0 &&
             !worker_runtime::smart_setup::force_gpu_retry_requested()) {
           const worker_runtime::smart_setup::ForceGpuRetryScope force_gpu;
@@ -1827,7 +1832,7 @@ SmartRenderSessionOutcome run_smart_render_session(
         // their own. Which of the two codes a GPU-only effect reaches the end
         // of its CPU path with is incidental; that it could not serve the
         // frame is the property this retry is for.
-        if (frame_result.selector_dispatched &&
+        if (!fresh_case && frame_result.selector_dispatched &&
             (frame_result.selector_error == 512 ||
              frame_result.selector_error == 516) &&
             !frame_result.selector_failure_substituted &&
@@ -1918,13 +1923,18 @@ SmartRenderSessionOutcome run_smart_render_session(
           facts.session_frames_attempted = 1;
           facts.session_sequence_setup_error = 0;
           facts.session_sequence_setdown_error = 0;
-          facts.session_render_error = 0;
+          facts.session_render_error = frame_result.render_error;
           facts.external_size = {max_width, max_height};
-          frame.report = [facts, frame_result]() mutable {
+          frame.report = [facts, frame_result, render_attempts]() mutable {
             facts.smart = &frame_result;
             std::ostringstream stream;
             emit_smart_completion_report(facts, stream);
-            return stream.str();
+            auto report = stream.str();
+            const auto end = report.find_last_of('}');
+            if (end != std::string::npos)
+              report.insert(end, ",\"smart_render_attempts\":" + std::to_string(render_attempts) +
+                  ",\"gpu_fallback_used\":" + (render_attempts > 1 ? "true" : "false"));
+            return report;
           };
         }
         temporal_layers.resize(history_count);

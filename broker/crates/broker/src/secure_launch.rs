@@ -288,7 +288,9 @@ pub struct SecureSessionProcess {
 #[cfg(windows)]
 impl SecureSessionProcess {
     /// Identity of the admitted, staged executable actually launched.
-    pub(crate) fn worker_sha256(&self) -> [u8; 32] { self.worker_sha256 }
+    pub(crate) fn worker_sha256(&self) -> [u8; 32] {
+        self.worker_sha256
+    }
 
     /// Records the freshness observation from local worker admission so it
     /// reaches the `finish` result (issue #729).

@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_world_registry.hpp"
 
 #include "worker_pf_world_facade.hpp"
@@ -908,3 +909,17 @@ void configure_gpu_fallback_bridge(
 }
 
 }  // namespace aexcompat::world_registry
+
+namespace aexcompat::world_registry {
+
+aexcompat::worker_runtime::CaseOwnership case_world_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  RegistryLock lock;
+  for (const auto& [key, value] : g_worlds) result.emplace_back(reinterpret_cast<uintptr_t>(key), value.size);
+  for (const auto& [key, value] : g_aegp_views) if (!value.borrowed) result.emplace_back(reinterpret_cast<uintptr_t>(key), 1);
+  for (const auto& [key, value] : g_platform_worlds) result.emplace_back(reinterpret_cast<uintptr_t>(key), 2);
+  result.emplace_back(0, g_live_owned_aegp_backings.load());
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

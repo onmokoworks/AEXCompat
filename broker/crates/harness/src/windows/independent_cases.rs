@@ -162,6 +162,7 @@ fn run_independent_case_batch(repository: &Path, path: &Path) -> Result<serde_js
         .ok_or("missing capability flags2")?;
     if inspection["image_render_supported"] != true
         || (smart && inspection["smart_render_advertised"] != true)
+        || (!smart && inspection["smart_render_advertised"] == true)
         || (format == RenderPixelFormat::Argb16 && flags & (1 << 25) == 0)
         || (format == RenderPixelFormat::Argb32f && flags2 & (1 << 12) == 0)
     {

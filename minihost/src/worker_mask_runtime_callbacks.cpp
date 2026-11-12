@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include <windows.h>
 
 #include "worker_pf_progress_info.hpp"
@@ -2270,3 +2271,16 @@ std::size_t mask_tangent_vertex_count() {
 }
 
 }  // namespace aexcompat::l2_detail
+
+namespace aexcompat::l2_detail {
+
+aexcompat::worker_runtime::CaseOwnership case_mask_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  for (const auto& mask : g_mask_scene) if (mask.mask_live) result.emplace_back(mask.id, 1);
+  for (const auto& stream : g_stream_refs) result.emplace_back(reinterpret_cast<uintptr_t>(&stream), stream.live_values);
+  for (const auto& [key, value] : g_stream_values) result.emplace_back(reinterpret_cast<uintptr_t>(key), 2);
+  for (const auto& transaction : g_add_keyframe_transactions) result.emplace_back(reinterpret_cast<uintptr_t>(&transaction), 3);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

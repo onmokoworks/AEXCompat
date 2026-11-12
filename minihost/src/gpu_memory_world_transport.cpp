@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "gpu_memory_world_transport.hpp"
 
 #include "gpu_cuda_backend.hpp"
@@ -551,3 +552,17 @@ std::array<void*, 15> gpu_device_suite1{
     reinterpret_cast<void*>(&gpu_get_world_device_index)};
 
 }  // namespace aexcompat::gpu_runtime::memory_world_transport
+
+namespace aexcompat::gpu_runtime::memory_world_transport {
+
+aexcompat::worker_runtime::CaseOwnership case_gpu_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::lock_guard lock(g_memory_mutex);
+  for (const auto& [key, size] : g_device_memory) result.emplace_back(reinterpret_cast<uintptr_t>(key), size);
+  for (const auto& [key, size] : g_host_memory) result.emplace_back(reinterpret_cast<uintptr_t>(key), size);
+  for (const auto& [key, refs] : g_created_worlds) result.emplace_back(reinterpret_cast<uintptr_t>(key), refs);
+  result.emplace_back(0, g_exclusive_access_depth);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_pf_sampling_runtime.hpp"
 #include "worker_pf_sampling_math.hpp"
 #include "worker_pf_suites_internal.hpp"
@@ -433,4 +434,12 @@ int32_t __cdecl subpixel_sample16(void* effect_ref, int32_t x, int32_t y,
 int32_t __cdecl subpixel_sample_float(void* effect_ref, int32_t x, int32_t y,
                                       const void* params, void* pixel) {
   return subpixel_sample_typed(16, effect_ref, x, y, params, pixel);
+}
+
+aexcompat::worker_runtime::CaseOwnership case_sampling_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::lock_guard lock(g_legacy_sampling_mutex);
+  for (const auto& [key, value] : g_legacy_sampling_sessions) result.emplace_back(reinterpret_cast<uintptr_t>(key), 1);
+  std::sort(result.begin(), result.end());
+  return result;
 }

@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_aegp_render_options.hpp"
 
 #include <atomic>
@@ -134,3 +135,15 @@ LAYER_I32(world_type,world_type,v>=1&&v<=3) LAYER_I32(matte,matte,v>=0&&v<=2)
 int32_t __cdecl set_layer_render_downsample(void*h,int16_t x,int16_t y){if(x<=0||y<=0){++g_layer_invalid;return 4;}return mutate_layer(h,[&](auto&o){o.downsample_x=x;o.downsample_y=y;});}
 int32_t __cdecl get_layer_render_downsample(void*h,int16_t*x,int16_t*y){LayerValue o{};if(!x||!y||!snapshot_layer(h,o)){++g_layer_invalid;return 4;}*x=o.downsample_x;*y=o.downsample_y;return 0;}
 }  // namespace aexcompat::render_options
+
+namespace aexcompat::render_options {
+
+aexcompat::worker_runtime::CaseOwnership case_options_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::scoped_lock lock(g_item_mutex, g_layer_mutex);
+  for (const auto& [key, value] : g_items) result.emplace_back(key, 1);
+  for (const auto& [key, value] : g_layers) result.emplace_back(key, 2);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

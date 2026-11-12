@@ -34,7 +34,8 @@ Parameter discovery retains its existing no-deadline policy.
 
 Routes are `smart8`, `smart16`, `smart32`, `classic8`, `classic16`, and
 `classic32`, all CPU. SmartFX and deep capabilities must be advertised by the
-plug-in. There is no automatic depth conversion, Classic fallback, or worker
+plug-in. Classic requests for SmartFX-declaring effects are rejected before
+opening the render worker. There is no automatic depth conversion, Classic fallback, or worker
 restart in this command. Choose the route appropriate to the effect; the OLM
 qualification uses SmartFX for nine effects and Classic for OLMSmoother.
 
@@ -73,14 +74,24 @@ Per-case boundaries clear parameter edits, checkout definitions, keyframe/UI
 instance state, PF effect state and primary temporal history. They compare
 live handle identities and suite lease identities/reference counts against the
 global baseline, check world counts/bytes and reject new invalid handle,
-arbitrary or world operations. Existing
+arbitrary or world operations. Independent ownership baselines also cover
+AEGP memory (including lock depth), PF path checkouts and preparations,
+AEGP worlds, render options and receipts, GPU allocations/worlds/exclusive
+access, extended-inter allocations, color-profile references, Drawbot/progress
+objects, masks/streams/values/keyframe transactions, compute-cache receipts
+and computations, asynchronous layer requests, audio checkouts and legacy
+sampling sessions. Auxiliary chunks are reclaimed before certification.
+Module-owned compute-cache values and host facade/tombstone metadata remain
+resident; they are not outstanding instance checkouts. Existing
 pixel bounds, guard, output coverage and shared output-validation gates apply.
 
 A recoverable render error is reported for its case after successful cleanup;
 later cases still run. Sequence failure, captured selector fault, deadline,
 worker death, malformed protocol, guard corruption or cleanup failure
 invalidates the worker. Remaining cases are `unattempted`. No silent
-per-process retry replaces the failed observation. A failure returns a nonzero
+per-process retry replaces the failed observation. Independent SmartFX cases
+also disable the ordinary session's error-14 GPU and error-512/516 Premiere
+retries: the first error and actual attempt count remain in the report. A failure returns a nonzero
 CLI exit code, including a batch that successfully continues after one failed
 case.
 
@@ -114,6 +125,9 @@ timelines explicitly have `lifecycle_telemetry_scope` of
 `process_cumulative_global_setup_pending_close`; a nonzero live global count
 in a case report is not falsely described as a case leak. Return-message and
 fault attribution reset at each case. Final `session_close` contains the
+process-wide missing-suite and unsupported-call evidence; those two diagnostic
+collections in each case report contain only that case, including repeated
+failures in separate cases. Final `session_close` also contains the
 process-wide lifecycle and module evidence. `evidence_valid` becomes true
 only after final global close validates; failed close revokes provisional
 case success. Artifacts already written remain available for diagnosis.

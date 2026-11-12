@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "host_audio_runtime.hpp"
 
 #include <algorithm>
@@ -108,3 +109,15 @@ int __cdecl checkin_layer_audio(void* e, void* a) { return runtime().checkin(e, 
 int __cdecl get_audio_data(void* e, void* a, void** d, std::int32_t* n, std::uint32_t* r, std::int32_t* b, std::int32_t* c, std::int32_t* f) { return runtime().get_data(e, a, d, n, r, b, c, f); }
 int cleanup_after_render(void*) { runtime().automatic_checkin(); return 0; }
 } // namespace aexcompat::host_audio
+
+namespace aexcompat::host_audio {
+
+aexcompat::worker_runtime::CaseOwnership case_audio_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  const auto& t = runtime().telemetry();
+  result.emplace_back(0, t.checkout_calls - t.checkin_calls);
+  result.emplace_back(1, t.invalid_operations);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

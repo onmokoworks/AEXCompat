@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "extended_inter_memory.hpp"
 
 #include <algorithm>
@@ -65,3 +66,14 @@ int32_t __cdecl release(void** ptr) {
 }
 
 }  // namespace aexcompat::extended_inter
+
+namespace aexcompat::extended_inter {
+
+aexcompat::worker_runtime::CaseOwnership case_inter_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::lock_guard lock(g_allocation_mutex);
+  for (const auto key : g_owned_allocations) result.emplace_back(reinterpret_cast<uintptr_t>(key), 1);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}
