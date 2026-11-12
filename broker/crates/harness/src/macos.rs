@@ -1,9 +1,12 @@
+use crate::guest_parameter_transport::{
+    FixtureParameterPayload, fixture_parameter_payload, write_control_message,
+};
 use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
@@ -52,8 +55,9 @@ const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
 const RESIDENT_CLOSE_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_RESPONSE_POLL: Duration = Duration::from_millis(10);
-const MAX_RESIDENT_RESPONSE_BYTES: usize = 512 * 1024;
-const MAX_RESIDENT_PROTOCOL_BYTES: usize = 1024 * 1024;
+const MAX_RESIDENT_RESPONSE_BYTES: usize =
+    aexcompat_broker::parameter_limits::MAX_PARAMETER_DOCUMENT_BYTES;
+const MAX_RESIDENT_PROTOCOL_BYTES: usize = MAX_RESIDENT_RESPONSE_BYTES * 2;
 
 struct RenderResult {
     report: String,
@@ -1380,18 +1384,6 @@ fn load_texture(
     Ok((texture, width, height))
 }
 
-fn write_control_message(writer: &mut ChildStdin, value: &Value) -> Result<(), String> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|error| format!("serialize resident request: {error}"))?;
-    let length = u32::try_from(bytes.len())
-        .map_err(|_| "resident request exceeds u32 framing".to_string())?;
-    writer
-        .write_all(&length.to_le_bytes())
-        .and_then(|()| writer.write_all(&bytes))
-        .and_then(|()| writer.flush())
-        .map_err(|error| format!("write resident request: {error}"))
-}
-
 fn read_control_message(reader: &mut impl Read) -> Result<Option<Value>, String> {
     let mut total = 0;
     read_control_message_accounted(reader, &mut total)
@@ -2252,11 +2244,6 @@ fn combine_fixture_inspection_and_close<T>(
     }
 }
 
-struct FixtureParameterPayload {
-    transport: String,
-    identity: Value,
-}
-
 fn selected_layer_paths(parameters: &[InteractiveParameter]) -> Vec<(u32, PathBuf)> {
     parameters
         .iter()
@@ -2268,143 +2255,6 @@ fn selected_layer_paths(parameters: &[InteractiveParameter]) -> Vec<(u32, PathBu
                 .map(|path| (parameter.slot, path.clone()))
         })
         .collect()
-}
-
-fn fixture_parameter_payload(
-    parameters: &[InteractiveParameter],
-) -> Result<FixtureParameterPayload, String> {
-    let mut assignments = Vec::new();
-    let mut identity = Vec::new();
-    let mut component_payload = false;
-    for parameter in parameters {
-        let (encoded, kind, value) = match parameter.kind.as_str() {
-            "layer" | "group_start" | "group_end" | "button" | "custom" | "no_data" => {
-                continue;
-            }
-            "integer" | "path" => {
-                if !parameter.value.is_finite() || parameter.value.fract() != 0.0 {
-                    return Err(format!(
-                        "fixture scalar slot {} requires an integer value",
-                        parameter.slot
-                    ));
-                }
-                (
-                    format!("i32={}", parameter.value as i64),
-                    "integer",
-                    json!(parameter.value as i64),
-                )
-            }
-            "popup" => {
-                if !parameter.value.is_finite()
-                    || parameter.value.fract() != 0.0
-                    || parameter.choices.is_empty()
-                    || parameter.choices.len() > 64
-                    || parameter.minimum != 1.0
-                    || parameter.maximum != parameter.choices.len() as f64
-                {
-                    return Err(format!(
-                        "fixture popup slot {} requires a one-based choice",
-                        parameter.slot
-                    ));
-                }
-                (
-                    format!("i32={}", parameter.value as i64),
-                    "popup",
-                    json!(parameter.value as i64),
-                )
-            }
-            "float" => {
-                if !parameter.value.is_finite() {
-                    return Err(format!(
-                        "fixture scalar slot {} requires a finite value",
-                        parameter.slot
-                    ));
-                }
-                (
-                    format!("f64={}", parameter.value),
-                    "float",
-                    json!(parameter.value),
-                )
-            }
-            "color" => (
-                format!(
-                    "argb8={},{},{},{}",
-                    parameter.color[0], parameter.color[1], parameter.color[2], parameter.color[3]
-                ),
-                "color",
-                json!({
-                    "alpha": parameter.color[0],
-                    "red": parameter.color[1],
-                    "green": parameter.color[2],
-                    "blue": parameter.color[3]
-                }),
-            ),
-            "angle" | "point" | "point3d" => {
-                let expected = match parameter.kind.as_str() {
-                    "angle" => 1,
-                    "point" => 2,
-                    _ => 3,
-                };
-                if parameter.component_count != expected
-                    || parameter.components[..expected]
-                        .iter()
-                        .any(|value| !value.is_finite() || !(-32768.0..=32768.0).contains(value))
-                {
-                    return Err(format!(
-                        "fixture component slot {} is invalid",
-                        parameter.slot
-                    ));
-                }
-                component_payload = true;
-                let components = parameter.components[..expected].to_vec();
-                (
-                    format!(
-                        "{}={}",
-                        parameter.kind,
-                        components
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    ),
-                    parameter.kind.as_str(),
-                    json!(components),
-                )
-            }
-            other => {
-                return Err(format!(
-                    "macOS fixture parameter kind {other:?} is not supported"
-                ));
-            }
-        };
-        if parameter.slot == 0
-            || parameter.value < parameter.minimum
-            || parameter.value > parameter.maximum
-        {
-            return Err(format!(
-                "fixture scalar slot {} is outside its declared range",
-                parameter.slot
-            ));
-        }
-        assignments.push(format!(
-            "param_{}@{}:{encoded}",
-            parameter.slot, parameter.slot
-        ));
-        identity.push(json!({
-            "id": format!("param_{}", parameter.slot),
-            "slot": parameter.slot,
-            "kind": kind,
-            "value": value
-        }));
-    }
-    Ok(FixtureParameterPayload {
-        transport: format!(
-            "{}|{}",
-            if component_payload { "v4" } else { "v2" },
-            assignments.join(";")
-        ),
-        identity: Value::Array(identity),
-    })
 }
 
 fn fixture_staging_path(output: &Path) -> Result<PathBuf, String> {

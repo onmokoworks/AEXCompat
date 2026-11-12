@@ -124,3 +124,82 @@ fn inspect_typed_and_batch_preserve_every_large_parameter() {
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("inspection"));
 }
+
+fn declared_color_defaults(batch: bool) {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("aex-defaults-{}-{batch}", std::process::id())));
+    std::fs::create_dir(&scratch.0).unwrap();
+    let input = scratch.0.join("input.png");
+    image::RgbaImage::from_pixel(4, 8, image::Rgba([1u8, 2, 3, 255]))
+        .save(&input)
+        .unwrap();
+    let plugin = repo.join("target/minihost-build/worker_declared_defaults_fixture.aex");
+    let edits = [
+        json!([]),
+        json!([{"slot":1,"color":[255,91,83,47]}]),
+        json!([]),
+        json!([{"slot":2,"value":23}]),
+    ];
+    let expected = [
+        [19, 37, 73, 255],
+        [91, 83, 47, 255],
+        [19, 37, 73, 255],
+        [25, 37, 73, 255],
+    ];
+    let mut cases = Vec::new();
+    for (index, assignments) in edits.into_iter().enumerate() {
+        let request = scratch.0.join(format!("request-{index}.json"));
+        let output = scratch.0.join(format!("output-{index}.png"));
+        std::fs::write(
+            &request,
+            serde_json::to_vec(&json!({"schema_version":1,"assignments":assignments})).unwrap(),
+        )
+        .unwrap();
+        if !batch {
+            require_ok(&invoke(
+                &repo,
+                &[
+                    Path::new("--render-experimental-request"),
+                    &plugin,
+                    &input,
+                    &output,
+                    &request,
+                ],
+            ));
+        }
+        cases.push(json!({"id":index.to_string(),"input":input,"request":request,"output":output}));
+    }
+    if batch {
+        let manifest = scratch.0.join("batch.json");
+        std::fs::write(&manifest,serde_json::to_vec(&json!({"schema":"aexcompat.independent_case_batch","schema_version":1,"plugin":plugin,"route":"classic8","isolation":"fresh_sequence","frame_deadline_ms":10000,"cases":cases})).unwrap()).unwrap();
+        let result = invoke(&repo, &[Path::new("--render-request-batch"), &manifest]);
+        require_ok(&result);
+        let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["complete"], true);
+        for case in report["cases"].as_array().unwrap() {
+            assert_eq!(case["evidence_valid"], true);
+        }
+    }
+    for (index, pixel) in expected.into_iter().enumerate() {
+        let image = image::open(scratch.0.join(format!("output-{index}.png")))
+            .unwrap()
+            .to_rgba8();
+        assert!(
+            image.pixels().all(|p| p.0 == pixel),
+            "case {index}: expected {pixel:?}, got {:?}",
+            image.get_pixel(0, 0)
+        );
+    }
+}
+#[test]
+fn sparse_declared_color_defaults_single_pixels() {
+    declared_color_defaults(false);
+}
+#[test]
+fn sparse_declared_color_defaults_fresh_batch_pixels() {
+    declared_color_defaults(true);
+}

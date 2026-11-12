@@ -48,7 +48,7 @@ including its existing COPY of arbitrary data (#1824). UI inspection still
 returns the full inventory. Tests alternate dense/sparse/dense requests in one
 fresh-case batch to detect retained edits and lost defaults.
 
-## Behavioral verification (Windows, 2026-11-13)
+## Initial behavioral verification (Windows, 2026-11-13)
 
 The SDK-free `worker_many_parameters_fixture.cpp` has variants declaring 1,025,
 1,623, 4,096 and 4,097 controls. Every legal slot contributes to an output pixel
@@ -76,7 +76,7 @@ Representative reproduction commands, from the repository root:
 ```powershell
 $env:PYTHONUTF8 = '1'
 $env:CMAKE_BUILD_PARALLEL_LEVEL = '4'
-& tools/build-native.ps1 -Target aex_worker,worker_many_parameters_1025,worker_many_parameters_1623,worker_many_parameters_4096,worker_many_parameters_4097,worker_independent_case_fixture,worker_independent_smart_fixture,worker_param_checkout_time_selftest,worker_classic_runtime_selftest
+& tools/build-native.ps1 -Target aex_worker,worker_many_parameters_1025,worker_many_parameters_1623,worker_many_parameters_4096,worker_many_parameters_4097,worker_declared_defaults_fixture,worker_independent_case_fixture,worker_independent_smart_fixture,worker_param_checkout_time_selftest,worker_classic_runtime_selftest
 & target/minihost-build/worker_param_checkout_time_selftest.exe
 & target/minihost-build/worker_classic_runtime_selftest.exe
 cargo build --manifest-path broker/Cargo.toml -p dummy-workers --bins --release --locked
@@ -132,8 +132,10 @@ retained separately rather than relabeled as passes.
 
 ## Review handoff
 
-This is a local implementation commit; independent review, push, PR and CI are
-pending as requested. No independent reviewed-HEAD boundary is claimed.
+Independent review of `fd49139988e36e9380809fb704887715bc6d0c23` found the two
+blocking issues recorded below. Both findings were accepted and fixed locally.
+Re-review of the fixes, push, PR and CI remain pending; no clean reviewed-HEAD
+boundary is claimed. The owner explicitly requested no main merge in this pass.
 PR #1830 (issue #1829) merged while this job ran. The exact changed-file overlap
 is `broker/crates/broker/src/image_render/tests.rs` (this job moves an invalid
 slot assertion from 1,025 to 4,097). Its worktree and the main worktree were not
@@ -141,3 +143,106 @@ modified. This branch still starts at `7418be04e`; the reviewer must first revie
 the local diff, then merge current main, review any conflict resolution and
 reverify before pushing. At handoff, fetched main is
 `5763ac29409ac78586d398a9b530dfa10cc5d6ea`.
+
+
+## Independent-review fixes (same issue, 2026-11-13)
+
+### P1: declared colours in sparse requests
+
+`initialize_parameter_definitions` now copies the declared colour into the
+instance definition and its current byte/float caches. Previously it copied raw
+current colour into the caches and left raw current bytes in the definition.
+Sparse requests therefore differed from the former dense discovered defaults.
+Explicit colour assignments still override the initialized value.
+
+The SDK-free `worker_declared_defaults_fixture` deliberately declares current
+and default values that differ for colour, integer, fixed slider, float slider,
+popup, checkbox, angle, point and point3d. Its render checks the exact declared
+values of every omitted scalar/component kind, including float precision and
+percentage-to-pixel conversion; pixels expose colour and the integer edit.
+Both single and fresh-case batch tests run empty / explicit colour / empty /
+sparse integer requests. Thus they check default materialization, explicit edits
+and reset after an edit. The audit found no equivalent gap in those other kinds:
+integer/popup values use the clamped declaration, checkbox normalizes its declared
+boolean, fixed/float sliders retain their native precision, and angle/points use
+declared components. Path values resolve declared mask indices, layer definitions
+are initialized separately, and non-value UI kinds do not carry assignments.
+Arbitrary values already COPY the declared handle at offset 64 into an owned
+current handle at offset 72 (or preserve null); they never reconstruct a default
+from PRINT text. The existing Classic runtime self-test checks null and non-null
+COPY behavior and ownership; the independent-case fixture exercises fresh values.
+
+### P2: guest resident budgets and producer bounds
+
+The initial cross-path claim missed guest resident transport. It is now aligned:
+1 MiB ASCII payload, slots 1..4,096, 1 MiB + 64 KiB request framing. A further
+behavioral test exposed the old 512 KiB response bound on a 4,096-control setup
+inventory. Guest responses and the macOS reader now allow the documented
+6 MiB + 64 KiB descriptor budget, with a separate bounded response-stream budget.
+Failure-diagnostic sub-budgets and explicit over-limit rejection remain intact.
+
+The macOS producer's existing pure encoding/framing code moved to
+`guest_parameter_transport.rs`, used by macOS and compiled in Windows tests.
+It validates count, slot bounds/uniqueness and payload size, and rejects an
+oversized request before writing any prefix or body. Guest parsing still supports
+its existing v2/v4 fixture kinds; this does not add native-only arbitrary/default
+markers or claim every Windows parameter kind works on macOS. Windows producer
+and guest tests pass; a macOS application/end-to-end run was not performed.
+
+### Fail-before / pass-after evidence
+
+| Finding | Behavioral test | Before fix | After fix |
+| --- | --- | --- | --- |
+| P1 | `sparse_declared_color_defaults_single_pixels` | Expected RGB 19,37,73; observed 200,201,202 | Passed all four requests |
+| P1 | `sparse_declared_color_defaults_fresh_batch_pixels` | Same incorrect first-case pixels | Passed all four cases and evidence checks |
+| P2 | `large_resident_parameter_payload_preserves_all_slots` | Rejected 1,025 controls at old ASCII bound | Passed 1,025 / 1,623 / 4,096 |
+| P2 | `resident_parameter_payload_exact_budget_and_overflow` | Rejected legal 1 MiB payload | Accepted exact bound; rejected +1 and slot 4,097 |
+| P2 | `resident_large_request_framing_is_exact_and_bounded` | Rejected 65,537-byte frame | Exact roundtrip through maximum; +1 rejected |
+| P2 | `resident_large_setup_response_preserves_inventory` | Rejected 4,096-control response | All 4,096 descriptors preserved |
+| P2 | `guest_producer_large_parameter_boundaries` | Accepted 4,097 controls | Legal counts preserved; overflow/duplicates rejected |
+| P2 | `guest_producer_request_framing_rejects_overflow_without_writing` | Wrote oversized frame | Exact maximum accepted; oversized write leaves buffer empty |
+
+Logs retain the failing and successful runs under `.local-limits/p1-*` and
+`p2-*`. Early fixture-resource and Ninja-PATH setup errors are also retained;
+those setup errors are not the failing behavioral evidence in the table.
+
+Follow-up suites: native Release worker and both self-test executables passed;
+whole broker workspace libraries passed (408 + 33 + 8; 3 ignored), harness units
+115 passed (2 ignored), independent-case CLI 5 and many-parameter/default CLI 3
+passed, resident sessions 80 passed. Focused pytest passed 191 tests with
+1 skipped and 15 passing subtests. `cargo test --workspace --locked` inside the
+`guest/` workspace passed 801 tests (6 ignored), including 739 guest-worker library
+tests. Tracked Rust plus the new transport module pass rustfmt; whitespace check
+passes. Native ABI header dependency tracking verified 147 translation units.
+
+### Follow-up original comparisons
+
+Color Key 2.3.3 was rerun on the fixed worker: 36 typed singles, all 18 repeated
+pairs exact, and 18 batch cases equal their singles across Smart8/16/32 CPU and
+1/1, 1/2, 1/4. All 18 configurations also match the prior local implementation's
+recorded output hashes.
+
+For the requested shared-harness comparison, the OLM oracle's configured Release
+harness and its worker were copied read-only into this worktree. Original shared
+files were not modified. Recorded identities:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Shared Release harness | `68a251fed8131d3a32cdcbd8797aba9959be417d8da68d1e80f44d087c75e9ba` |
+| Shared worker | `186f0f00b1e9ff793f6ff5f9f23d6167188af3276d298b2ce6764bb6cf9b94f1` |
+| Candidate harness | `248d660b262a2d9b01d96eb22cd178623cccedbc61903f6ce91993e150bd6b82` |
+| Candidate worker | `dfeb6d8e10c9d5a6d87bd639ed7f064e2d0151aed3370cdd32e97dfdc49cd2f0` |
+
+All ten older originals matched the shared snapshot on two 3x7/11x7 default-state
+inputs each (20/20, Smoother Classic8, others Smart8). Color Key 2.3.3 matched on
+six sparse declarative fixtures (empty and low-slot colour edit at each depth).
+The shared version cannot express the new high-slot typed cases; those are the
+separate typed-request results above. This is not a claim that the shared version
+passed those unsupported requests. Comparisons used actual pixels/native words.
+
+Final follow-up records live in `.local-limits/review-originals`,
+`review-shared-older` and `review-shared-colorkey-qualified`: all 98 successful
+owned launches exited and their Jobs had zero active processes. A rejected local
+fixture setup attempt is retained separately. No AE was launched. No main merge,
+push or PR creation was performed. Full Python/SDK/AE and macOS end-to-end suites
+remain unrun; the complete guest workspace was tested on Windows.

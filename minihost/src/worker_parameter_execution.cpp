@@ -763,8 +763,11 @@ void initialize_parameter_definitions(
       record.current_value = default_value;
     }
     else if (record.type == 5) {
-      std::memcpy(record.current_color.data(), record.raw.data() + 56,
-                  record.current_color.size());
+      // PARAMS_SETUP may initialize value independently from dephault. A fresh
+      // instance must materialize the declaration before sparse edits apply.
+      record.current_color = record.default_color;
+      std::memcpy(definitions[i + 1].data() + 56, record.default_color.data(),
+                  record.default_color.size());
       for (std::size_t channel = 0; channel < 4; ++channel)
         record.current_float_color[channel] =
             record.current_color[channel] / 255.0f;
