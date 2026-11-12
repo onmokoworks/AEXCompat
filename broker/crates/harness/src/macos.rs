@@ -4501,29 +4501,44 @@ mod tests {
                 .is_some()
         );
 
-        let mut three_messages = framed.repeat(3);
-        let mut reader = &three_messages[..];
+        let accepted_messages = MAX_RESIDENT_PROTOCOL_BYTES / framed.len();
+        let mut messages = framed.repeat(accepted_messages + 1);
+        let mut reader = &messages[..];
         let mut total = 0;
-        assert!(
-            read_control_message_accounted(&mut reader, &mut total)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            read_control_message_accounted(&mut reader, &mut total)
-                .unwrap()
-                .is_some()
-        );
+        for _ in 0..accepted_messages {
+            assert!(
+                read_control_message_accounted(&mut reader, &mut total)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(total, accepted_messages * framed.len());
+        assert!(total <= MAX_RESIDENT_PROTOCOL_BYTES);
         assert!(
             read_control_message_accounted(&mut reader, &mut total)
                 .unwrap_err()
                 .contains("resident responses exceeded")
         );
 
-        three_messages[..4]
+        // Account for the four-byte prefix at the exact session boundary.
+        let mut total = MAX_RESIDENT_PROTOCOL_BYTES - framed.len();
+        assert!(
+            read_control_message_accounted(&mut &framed[..], &mut total)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(total, MAX_RESIDENT_PROTOCOL_BYTES);
+        let mut total = MAX_RESIDENT_PROTOCOL_BYTES - framed.len() + 1;
+        assert!(
+            read_control_message_accounted(&mut &framed[..], &mut total)
+                .unwrap_err()
+                .contains("resident responses exceeded")
+        );
+
+        messages[..4]
             .copy_from_slice(&((MAX_RESIDENT_RESPONSE_BYTES + 1) as u32).to_le_bytes());
         assert!(
-            read_control_message(&mut &three_messages[..])
+            read_control_message(&mut &messages[..])
                 .unwrap_err()
                 .contains("response length is invalid")
         );
