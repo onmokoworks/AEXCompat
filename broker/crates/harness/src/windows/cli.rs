@@ -1664,7 +1664,8 @@ fn main() -> eframe::Result {
             emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         });
-        if let Err(error) = apply_typed_assignments(&mut parameters, &document, Some(request_path))
+        if let Err(error) =
+            apply_typed_render_assignments(&mut parameters, &document, Some(request_path))
         {
             emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
