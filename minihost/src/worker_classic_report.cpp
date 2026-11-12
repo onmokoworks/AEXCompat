@@ -59,7 +59,7 @@ std::string world_debug_report_json();
 const aexcompat::host_audio::Telemetry& audio_telemetry();
 bool audio_handle_lifetimes_balanced();
 
-void emit_classic_completion_report(const ClassicCompletionInputs& in) {
+void emit_classic_completion_report(const ClassicCompletionInputs& in, std::ostream& stream) {
   namespace report = aexcompat::worker_render_report;
   namespace gpu_transport = aexcompat::gpu_runtime::memory_world_transport;
   using aexcompat::worker_runtime::parameter_execution::requested_parameters_json;
@@ -67,7 +67,7 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
   const auto& arbitrary = worker_runtime::parameters::state().arbitrary;
   const auto& parameter_ui = worker_runtime::parameters::state().ui;
   const auto classic_diagnostics = aexcompat::worker_runtime::classic::diagnostics();
-  report::ReportSnapshot report_snapshot(std::cout);
+  report::ReportSnapshot report_snapshot(stream);
   report::ClassicReport classic_report;
   classic_report.head = {
       in.render_error == 0 && in.parameter_count_contract_valid && in.guards_intact &&
@@ -174,7 +174,7 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
       aexcompat::worker_runtime::classic::last_selector_dispatched(),
       in.depth_supported, in.advertised_depth_supported,
       in.dispatch_pixel_bytes, in.render_error});
-  report::emit(report_snapshot, std::cout);
+  report::emit(report_snapshot, stream);
 }
 
 }  // namespace aexcompat::l2_detail

@@ -1,4 +1,5 @@
 #pragma once
+#include <iostream>
 
 #include "worker_parameter_runtime.hpp"
 #include "worker_smart_execution.hpp"
@@ -74,6 +75,6 @@ struct SmartCompletionInputs {
   std::array<int32_t, 2> context_extent{};
 };
 
-void emit_smart_completion_report(const SmartCompletionInputs& inputs);
+void emit_smart_completion_report(const SmartCompletionInputs& inputs, std::ostream& stream = std::cout);
 
 }  // namespace aexcompat::l2_detail

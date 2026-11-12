@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_drawbot_runtime.hpp"
 #include "worker_pf_progress_info.hpp"
 
@@ -710,3 +711,14 @@ bool close_render_ui_context(EffectEntry entry, std::array<std::byte, kInSize>& 
 }
 
 }  // namespace aexcompat::l2_detail
+
+namespace aexcompat::l2_detail {
+
+aexcompat::worker_runtime::CaseOwnership case_drawbot_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  for (const auto& [key, value] : g_drawbot_objects) result.emplace_back(reinterpret_cast<uintptr_t>(key), 1);
+  for (const auto& [key, value] : g_app_progress_dialogs) result.emplace_back(reinterpret_cast<uintptr_t>(key), 2);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

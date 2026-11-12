@@ -272,6 +272,7 @@ std::string SuiteRegistry::safe_missing_name(const char* name) {
 
 void SuiteRegistry::record_missing_suite(const std::string& name,
                                          int32_t version) {
+  if (case_diagnostics_) case_diagnostics_->record_missing_suite(name, version);
   std::lock_guard<std::mutex> lock(missing_suites_mutex_);
   if (!valid_schema_text(name, kMaxTelemetrySuiteNameBytes, true) ||
       version <= 0 || version > kMaxSuiteVersion) {
@@ -404,6 +405,8 @@ uint32_t SuiteRegistry::force_release_all() noexcept {
 }
 
 std::string SuiteRegistry::missing_suites_report_json() const {
+  if (report_case_diagnostics_ && case_diagnostics_)
+    return case_diagnostics_->missing_suites_report_json();
   std::lock_guard<std::mutex> lock(missing_suites_mutex_);
   std::ostringstream json;
   json << ",\"missing_suites\":[";
@@ -419,6 +422,7 @@ std::string SuiteRegistry::missing_suites_report_json() const {
 
 void SuiteRegistry::note_unsupported_suite_call(UnsupportedSuiteId suite,
                                                 uint32_t slot) noexcept {
+  if (case_diagnostics_) case_diagnostics_->note_unsupported_suite_call(suite, slot);
   const auto descriptor = unsupported_suite_descriptor(suite);
   if (!descriptor.name || descriptor.version <= 0 ||
       slot > kMaxUnsupportedSuiteSlot) return;
@@ -444,7 +448,7 @@ void SuiteRegistry::note_unsupported_suite_call(UnsupportedSuiteId suite,
   } catch (...) {
     return;
   }
-  if (inserted) {
+  if (inserted && !case_collector_) {
     try {
       std::cerr << "stage:suite_slot_unsupported suite=" << descriptor.name
                 << " version=" << descriptor.version << " slot=" << slot
@@ -455,6 +459,8 @@ void SuiteRegistry::note_unsupported_suite_call(UnsupportedSuiteId suite,
 }
 
 std::string SuiteRegistry::unsupported_suite_calls_report_json() const {
+  if (report_case_diagnostics_ && case_diagnostics_)
+    return case_diagnostics_->unsupported_suite_calls_report_json();
   std::lock_guard<std::mutex> lock(unsupported_suite_calls_mutex_);
   std::ostringstream json;
   json << ",\"unsupported_suite_calls\":[";
@@ -494,6 +500,12 @@ std::string SuiteRegistry::suite_timeline_report_json() const {
 SuiteRegistry& suite_registry() {
   static SuiteRegistry registry;
   return registry;
+}
+
+void SuiteRegistry::begin_case_diagnostics() {
+  // Case transitions run after the selector's worker threads have joined.
+  case_diagnostics_ = std::make_unique<SuiteRegistry>();
+  case_diagnostics_->case_collector_ = true;
 }
 
 int32_t record_unsupported_suite_call(UnsupportedSuiteId suite,

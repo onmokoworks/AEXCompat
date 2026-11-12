@@ -149,6 +149,8 @@ class SessionChannels {
   ReadResult read_message(std::string& payload);
   bool write_message(const std::string& payload);
 
+  void allow_case_reports() { max_write_bytes_ = kMaxInspectReportBytes; }
+
   uint32_t read_header_u32(std::size_t offset) const;
   void write_header_u32(std::size_t offset, uint32_t value);
   // Broker-owned static header fields must stay exactly as written at open;
@@ -161,6 +163,7 @@ class SessionChannels {
   void* section_{};
   unsigned char* view_{};
   std::size_t view_bytes_{};
+  std::size_t max_write_bytes_{kMaxMessageBytes};
 };
 
 // Pipe-only control channel for the discovery session (closure-session design

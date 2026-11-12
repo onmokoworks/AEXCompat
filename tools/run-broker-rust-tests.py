@@ -23,6 +23,7 @@ BROKER = "aexcompat-broker"
 HARNESS = "aexcompat-harness"
 NATIVE_BROKER_TARGETS = {
     "discovery_session_native",
+    "independent_cases_native",
     "parameter_animation",
     "render_differential_real_aex",
     "render_session_wrapper",
@@ -30,7 +31,7 @@ NATIVE_BROKER_TARGETS = {
     "resident_session_live",
     "smart_cpu_sealed_render",
 }
-NATIVE_HARNESS_TARGETS = {"artifact_cli"}
+NATIVE_HARNESS_TARGETS = {"artifact_cli", "independent_cases_cli"}
 INDEPENDENT_BROKER_TARGETS = {
     "cli_operation_aliases",
     "cuda_compute_probe",
@@ -56,6 +57,8 @@ SILENT_SKIP_PREREQUISITES = (
     # One binary serves every route since #1495, so naming it once covers what
     # the discovery and classic executables used to cover separately.
     "target/minihost-build/aex_worker.exe",
+    "target/minihost-build/worker_independent_case_fixture.aex",
+    "target/minihost-build/worker_independent_smart_fixture.aex",
     "target/minihost-build/worker_session_detach_fixture.dll",
     "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
     "target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex",

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace aexcompat::worker_runtime::handles {
 
@@ -38,6 +39,7 @@ std::int32_t __cdecl resize_handle(std::uint64_t size, void*** handle);
 bool handle_lifetimes_balanced();
 bool host_handle_is_live(const void* handle);
 Statistics statistics();
+std::vector<std::uintptr_t> live_identities();
 void record_automatic_pre_render_disposal();
 
 class HandleReclamationScope {

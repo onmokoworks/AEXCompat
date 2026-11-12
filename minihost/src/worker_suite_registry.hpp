@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -135,6 +136,8 @@ class SuiteRegistry final {
   std::string missing_suites_report_json() const;
   std::string unsupported_suite_calls_report_json() const;
   std::string suite_timeline_report_json() const;
+  void begin_case_diagnostics();
+  void report_case_diagnostics(bool enabled) { report_case_diagnostics_ = enabled; }
 
   void note_unsupported_suite_call(UnsupportedSuiteId suite,
                                    uint32_t slot) noexcept;
@@ -154,6 +157,9 @@ class SuiteRegistry final {
                                        int32_t version);
 
   suite_runtime::SuiteLeaseTracker lease_tracker_;
+  std::unique_ptr<SuiteRegistry> case_diagnostics_;
+  bool report_case_diagnostics_{};
+  bool case_collector_{};
   std::atomic<uint32_t> rejected_releases_{};
   mutable std::mutex failed_acquires_mutex_;
   std::map<std::pair<std::string, int32_t>, uint32_t> failed_acquires_;

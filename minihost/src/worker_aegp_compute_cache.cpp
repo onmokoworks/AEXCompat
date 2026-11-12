@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_aegp_compute_cache.hpp"
 
 #include "worker_selector_dispatch.hpp"
@@ -954,3 +955,21 @@ bool reset_for_selftest() noexcept {
 }
 
 }  // namespace aexcompat::worker_runtime::compute_cache
+
+namespace aexcompat::worker_runtime::compute_cache {
+
+aexcompat::worker_runtime::CaseOwnership case_cache_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  auto& state = runtime();
+  std::lock_guard lock(state.mutex);
+  // Cached values are module-owned and may grow; checkout receipts are instance-owned.
+  for (const auto& [key, value] : state.receipts) if (value.active) result.emplace_back(key, value.generation);
+  for (const auto& [key, value] : state.classes) {
+    result.emplace_back(value->generation, 0);
+    for (const auto& [entry_key, entry] : value->entries)
+      if (entry->state == EntryState::computing) result.emplace_back(reinterpret_cast<uintptr_t>(entry.get()), 1);
+  }
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

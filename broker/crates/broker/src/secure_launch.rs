@@ -277,6 +277,7 @@ fn secure_launch_impl(
 #[cfg(windows)]
 pub struct SecureSessionProcess {
     launched: Option<crate::windows_process::LaunchedIsolatedProcess>,
+    worker_sha256: [u8; 32],
     require_module_audit: bool,
     /// See `SecureLaunchResult::worker_freshness_warning`; recorded by the
     /// dispatch that admitted the worker and carried into `finish`'s result.
@@ -286,6 +287,11 @@ pub struct SecureSessionProcess {
 
 #[cfg(windows)]
 impl SecureSessionProcess {
+    /// Identity of the admitted, staged executable actually launched.
+    pub(crate) fn worker_sha256(&self) -> [u8; 32] {
+        self.worker_sha256
+    }
+
     /// Records the freshness observation from local worker admission so it
     /// reaches the `finish` result (issue #729).
     pub(crate) fn record_worker_freshness_warning(&mut self, warning: Option<&'static str>) {
@@ -447,6 +453,7 @@ fn secure_launch_session_impl(
     .map_err(|error| stage_error("staged session launch", error))?;
     Ok(SecureSessionProcess {
         launched: Some(launched),
+        worker_sha256: request.worker_expected_sha256,
         require_module_audit: request.require_module_audit,
         worker_freshness_warning: None,
         _stage: worker_stage,

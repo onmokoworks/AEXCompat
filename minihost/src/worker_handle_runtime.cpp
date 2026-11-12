@@ -1,3 +1,4 @@
+#include "worker_case_ownership.hpp"
 #include "worker_memory_fill.hpp"
 #include "worker_handle_runtime.hpp"
 
@@ -263,6 +264,16 @@ Statistics statistics() {
   return result;
 }
 
+std::vector<std::uintptr_t> live_identities() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  std::vector<std::uintptr_t> result;
+  result.reserve(g_handles.size());
+  for (const auto* handle : g_handles)
+    result.push_back(reinterpret_cast<std::uintptr_t>(handle));
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
 void record_automatic_pre_render_disposal() {
   std::lock_guard<std::mutex> lock(g_mutex);
   ++g_statistics.automatic_pre_render_disposals;
@@ -438,3 +449,15 @@ AegpMemorySuite g_aegp_memory_suite{
     &set_aegp_mem_reporting, &get_aegp_mem_stats};
 
 }  // namespace aexcompat::worker_runtime::handles
+
+namespace aexcompat::worker_runtime::handles {
+
+aexcompat::worker_runtime::CaseOwnership case_memory_ownership() {
+  aexcompat::worker_runtime::CaseOwnership result;
+  std::lock_guard lock(g_aegp_memory_mutex);
+  for (const auto& [key, value] : g_aegp_memory) result.emplace_back(reinterpret_cast<uintptr_t>(key), value->lock_count);
+  result.emplace_back(0, g_aegp_statistics.invalid_operations);
+  std::sort(result.begin(), result.end());
+  return result;
+}
+}

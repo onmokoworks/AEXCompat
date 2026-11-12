@@ -126,11 +126,12 @@ causality. Their stack reads and heap-table underreads outside the host-owned
 allocation remain beyond this facility's reach; this does not replace the
 existing debugger-based ubdetect experiment or establish AE equivalence.
 
-## Concurrent resident-request work
+## Independent resident requests
 
-The parallel resident-batch implementation must reject this diagnostic object
-or explicitly isolate/reset its configuration, counters, allocation IDs,
-selector context, journal and diagnostic world layout for each case. This
-implementation deliberately uses the existing one-request worker lifetime.
-Before combining the changes, review shared harness request validation,
-worker argument parsing, render-session transport and CMake integration.
+`--render-request-batch` explicitly rejects `diagnostics.memory_fill` during
+whole-manifest preflight, before discovery, worker startup or output publication.
+A worker configured with memory-fill also reports `render_case:0`, preventing a
+direct session client from entering independent-case mode. Ordinary single-request
+routes retain the diagnostics described above. Configuration, counters, allocation
+IDs, selector context, journal and diagnostic world layout remain worker-scoped;
+per-case reset/isolation has not been implemented or qualified.
