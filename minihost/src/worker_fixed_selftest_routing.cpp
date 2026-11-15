@@ -11,6 +11,7 @@ namespace aexcompat::memory_fill { bool verify(); int journal_probe(int, wchar_t
 #include "worker_aegp_compat_selftests.hpp"
 #include "worker_aegp_init_report.hpp"
 #include "worker_aegp_utility_suite.hpp"
+#include "worker_aegp_render_queue_suite.hpp"
 #include "worker_compute_cache_suite.hpp"
 #include "worker_host_guard_selftests.hpp"
 #include "worker_minidump_runtime.hpp"
@@ -138,6 +139,10 @@ int selftest_suite_entry_utility13(int, wchar_t**) {
             << ",\"suite_leases_balanced\":"
             << (g_host->suite_leases_balanced() ? "true" : "false") << "}\n";
   return result.passed ? 0 : 1;
+}
+
+int selftest_render_queue(int, wchar_t**) {
+  return aexcompat::l2_detail::selftest_render_queue_suite();
 }
 
 int selftest_pf_adv_app(int, wchar_t**) {
@@ -278,7 +283,7 @@ int selftest_selector_fault_attribution(int, wchar_t**) {
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 17> host_commands{{
+  const std::array<selftest::HostCommand, 18> host_commands{{
       {L"--self-test-memory-fill-journal", 4, &aexcompat::memory_fill::journal_probe},
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-selector-fault-unwind", 2, &selftest_selector_fault_unwind},
@@ -292,6 +297,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        &selftest_unhandled_module_thread_crash},
       {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
       {L"--self-test-suite-entry-utility13", 2, &selftest_suite_entry_utility13},
+      {L"--self-test-render-queue-suite", 2, &selftest_render_queue},
       {L"--self-test-pf-adv-app-suite", 2, &selftest_pf_adv_app},
       {L"--self-test-pf-pixel-format-suite", 2, &selftest_pf_pixel_format},
       {L"--self-test-aegp-effect-param-union-suite4", 2,

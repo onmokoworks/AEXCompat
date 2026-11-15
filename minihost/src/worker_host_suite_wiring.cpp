@@ -23,6 +23,7 @@
 #include "worker_aegp_pf_interface_suite.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_utility_suite.hpp"
+#include "worker_aegp_render_queue_suite.hpp"
 #include "worker_color_settings_runtime.hpp"
 #include "worker_drawbot_runtime.hpp"
 #include "worker_handle_runtime.hpp"
@@ -1014,6 +1015,7 @@ bool configure_component_suite_catalog() {
       {"AEGP Utility Suite", 3, &g_utility_suite1},
       {"AEGP Utility Suite", 5, &g_utility_suite2},
       {"AEGP Utility Suite", 7, &g_utility_suite3},
+      {"AEGP Render Queue Suite", 1, &g_render_queue_suite1},
       {"AEGP Utility Suite", 11, &g_utility_suite5},
       {"AEGP Utility Suite", 13, &g_utility_suite},
       {"PF Pixel Data Suite", 1, &g_pixel_data_suite1},

@@ -252,6 +252,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_openmp_policy.cpp
     src/worker_aegp_compute_cache.cpp
     src/worker_aegp_utility_suite.cpp
+    src/worker_aegp_render_queue_suite.cpp
     src/worker_aegp_persistent_data_suite.cpp
     src/worker_pf_pixel_data_suite.cpp
     src/worker_pf_world_suite.cpp

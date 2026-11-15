@@ -131,6 +131,7 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::aegp_utility_5: return {"AEGP Utility Suite", 5};
     case UnsupportedSuiteId::aegp_utility_7: return {"AEGP Utility Suite", 7};
     case UnsupportedSuiteId::aegp_utility_13: return {"AEGP Utility Suite", 13};
+    case UnsupportedSuiteId::aegp_render_queue_1: return {"AEGP Render Queue Suite", 1};
     case UnsupportedSuiteId::pf_ae_adv_app_1: return {"PF AE Adv App Suite", 1};
     case UnsupportedSuiteId::pf_ae_adv_app_2: return {"PF AE Adv App Suite", 2};
     case UnsupportedSuiteId::drawbot_supplier_1: return {"DRAWBOT Supplier Suite", 1};
