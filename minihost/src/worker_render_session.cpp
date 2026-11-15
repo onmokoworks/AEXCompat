@@ -579,7 +579,7 @@ void run_session_frame_loop(
     uint32_t advertised_out_flags, uint32_t advertised_out_flags2,
     const std::vector<ExternalLayerInput>* external_layers, FrameFn&& render_frame,
     const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr,
-    bool audio_passthrough = false) {
+    bool audio_passthrough = false, bool require_smart = false) {
   using aexcompat::strict_json::JsonValue;
   using aexcompat::strict_json::StrictJsonParser;
   using aexcompat::strict_json::json_exact_keys;
@@ -603,6 +603,7 @@ void run_session_frame_loop(
   // swallowing it silently would hide the gap. Frame-local; the session
   // continues.
   constexpr int32_t kSessionUiActionUnsupported = -48;
+  constexpr int32_t kSmartRenderNotAdvertised = -49;
 
   // The depth this session dispatches at, from the advertisement the bootstrap
   // snapshotted right after the plug-in's GLOBAL_SETUP - never read back out of
@@ -1117,6 +1118,10 @@ void run_session_frame_loop(
           std::to_string(frame_error);
       if (smart_output_untouched)
         reply += ",\"smart_output_untouched\":true";
+      if (frame_error == kSmartRenderNotAdvertised && require_smart &&
+          (advertised_out_flags2 & (1u << 10)) == 0)
+        reply += ",\"route_mismatch\":{\"reason\":\"smart_render_not_advertised\","
+            "\"advertised_out_flags2\":" + std::to_string(advertised_out_flags2) + "}";
       const auto& telemetry =
           aexcompat::worker_runtime::selector_dispatch_telemetry();
       const auto& missing = telemetry.missing_dependency;
@@ -1303,6 +1308,11 @@ void run_session_frame_loop(
         break;
       }
       write_session_static_fields();
+    }
+    if (require_smart && (advertised_out_flags2 & (1u << 10)) == 0) {
+      outcome.render_error = kSmartRenderNotAdvertised;
+      if (!respond_error(kSmartRenderNotAdvertised)) outcome.protocol_violation = true;
+      break;
     }
     if (!sequence_started) {
       write<int32_t>(input, 224, current_time);
@@ -1971,7 +1981,7 @@ SmartRenderSessionOutcome run_smart_render_session(
         return frame;
       },
       // Smart sessions are out of cluster-swap scope (design §1): no hook.
-      nullptr);
+      nullptr, false, true);
   return outcome;
 }
 

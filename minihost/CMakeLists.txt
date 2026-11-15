@@ -871,3 +871,13 @@ add_library(worker_declared_defaults_fixture MODULE ../tests/native/worker_decla
 target_include_directories(worker_declared_defaults_fixture PRIVATE src)
 target_compile_features(worker_declared_defaults_fixture PRIVATE cxx_std_17)
 set_target_properties(worker_declared_defaults_fixture PROPERTIES PREFIX "" SUFFIX ".aex")
+
+add_library(worker_non_smart_fixture MODULE ../tests/native/worker_non_smart_fixture.cpp ../tests/native/worker_discovery_handle_fixture.rc)
+target_include_directories(worker_non_smart_fixture PRIVATE src)
+target_compile_features(worker_non_smart_fixture PRIVATE cxx_std_17)
+set_target_properties(worker_non_smart_fixture PROPERTIES PREFIX "" SUFFIX ".aex")
+add_library(worker_non_smart_params_error_fixture MODULE ../tests/native/worker_non_smart_fixture.cpp ../tests/native/worker_discovery_handle_fixture.rc)
+target_include_directories(worker_non_smart_params_error_fixture PRIVATE src)
+target_compile_features(worker_non_smart_params_error_fixture PRIVATE cxx_std_17)
+target_compile_definitions(worker_non_smart_params_error_fixture PRIVATE AEXCOMPAT_FIXTURE_PARAMS_ERROR=4)
+set_target_properties(worker_non_smart_params_error_fixture PROPERTIES PREFIX "" SUFFIX ".aex")

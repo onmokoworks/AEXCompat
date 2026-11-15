@@ -1089,6 +1089,8 @@ struct FrameDone {
     #[serde(default)]
     smart_output_untouched: bool,
     #[serde(default)]
+    route_mismatch: Option<SmartRouteMismatch>,
+    #[serde(default)]
     missing_dependency: Option<String>,
     #[serde(default)]
     return_message: Option<FrameReturnMessage>,
@@ -1102,6 +1104,29 @@ struct FrameDone {
     width: Option<u32>,
     #[serde(default)]
     height: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SmartRouteMismatch {
+    reason: String,
+    advertised_out_flags2: u32,
+}
+
+impl FrameDone {
+    fn malformed_route_mismatch(&self, smart: bool) -> bool {
+        self.route_mismatch.as_ref().is_some_and(|mismatch| {
+            !smart
+                || self.status != "error"
+                || self.render_error != -49
+                || mismatch.reason != "smart_render_not_advertised"
+                || mismatch.advertised_out_flags2 & (1 << 10) != 0
+                || self.smart_output_untouched
+                || self.missing_dependency.is_some()
+                || self.return_message.is_some()
+                || self.selector_crash.is_some()
+        })
+    }
 }
 
 struct CollectedExit {
@@ -3011,6 +3036,14 @@ impl RenderSession {
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
             }
+            if done.malformed_route_mismatch(self.smart) {
+                return Err(self.invalidate(
+                    "malformed_route_mismatch",
+                    format!("frame {frame_index} carried an invalid route mismatch diagnostic"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
             match done.status.as_str() {
                 "error" => {
                     if done.output.is_some()
@@ -3054,6 +3087,14 @@ impl RenderSession {
                             ),
                             true,
                             POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                    if let Some(mismatch) = &done.route_mismatch {
+                        return Err(self.invalidate(
+                            "smart_render_not_advertised",
+                            format!("smart route requires PF_OutFlag2_SUPPORTS_SMART_RENDER; advertised_out_flags2={} (0x{:08x})",
+                                mismatch.advertised_out_flags2, mismatch.advertised_out_flags2),
+                            false, CLOSE_COLLECT_TIMEOUT,
                         ));
                     }
                     if is_fatal_session_error(done.render_error) {

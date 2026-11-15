@@ -471,6 +471,16 @@ timestamps, are compared. The bounded ladder report is described in
   落とす代わりにフレーム局所の専用コード **-48** の error 応答を返す
   (セッションは継続可能)。cluster swap セッションは passthrough の対象外
   (launch プラグイン固定の状態のため、per-plugin 化は #1049)。
+- **SmartFX 非宣言の経路不適合 (#1839)**: smart 要求に対し、GLOBAL_SETUP
+  の `advertised_out_flags2` に bit 10 が無い場合は、最初の有効な frame に
+  `status:"error", render_error:-49` と
+  `route_mismatch:{"reason":"smart_render_not_advertised","advertised_out_flags2":N}`
+  を返す。SEQUENCE_SETUP / render selector は発行せず、output / generation
+  は更新しない。worker は GLOBAL_SETDOWN と最終 report の後 exit 22。
+  broker はこの構造を検証し、同じ reason で session を無効化する。
+  classic への fallback はしない。単発 smart の最終 report も同じ
+  `route_mismatch` を持ち、broker diagnostics は `classification:"route_mismatch"`
+  として表す。SmartFX 宣言ありの selector error は従来の分類を維持する。
 - `status:"error"` の応答は `output` と `generation` を持たない専用形:
 
 ```json

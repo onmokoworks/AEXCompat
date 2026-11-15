@@ -587,6 +587,37 @@ pub(crate) fn isolated_worker_diagnostics(
         .as_object_mut()
         .expect("worker_diagnostics returns an object");
     object.insert("kill_reason".into(), json!(isolated.kill_reason));
+    // A completed failure report distinguishes an unsupported requested route
+    // from a disappearing/crashed worker. Never infer this from exit 22 alone.
+    if isolated.classification.as_str() == "nonzero_exit"
+        && isolated.exit_code == 22
+        && !isolated.stdout_truncated
+    {
+        if let Ok(report) = serde_json::from_str::<Value>(isolated.stdout.trim()) {
+            if report["stage"] == "smartfx_render"
+                && report["status"] == "render_failed"
+                && report["global_setup_error"] == 0
+                && report["smart_render_supported"] == false
+                && report["route_mismatch"]["reason"] == "smart_render_not_advertised"
+            {
+                if let Some(flags) = report["advertised_out_flags2"]
+                    .as_u64()
+                    .filter(|flags| *flags <= u32::MAX as u64 && flags & (1 << 10) == 0)
+                    .filter(|flags| {
+                        report["route_mismatch"]["advertised_out_flags2"].as_u64() == Some(*flags)
+                    })
+                {
+                    object.insert("classification".into(), json!("route_mismatch"));
+                    object.insert(
+                        "route_mismatch".into(),
+                        json!({
+                            "reason": "smart_render_not_advertised", "advertised_out_flags2": flags,
+                        }),
+                    );
+                }
+            }
+        }
+    }
     if let Some(request) = crate::memory_fill::current() {
         // Survives a missing final JSON report after a worker crash/timeout.
         // This is partial captured evidence; never infer not_present from it.

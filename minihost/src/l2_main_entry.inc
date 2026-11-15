@@ -3561,10 +3561,17 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
                 << " assignment_reason=" << assignment_failure.reason;
     }
     std::cerr << '\n' << std::flush;
-    dispose_arbitrary_defaults(entry, input, output);
-    if (global_error == 0)
-      invoke_global_setdown(entry, input.data(), output.data());
-    return session.finish(3);
+    const bool reject_smart_route = is_smart_worker() &&
+        invocation.render_session_mode && global_error == 0 && !smart_render_supported;
+    if (!reject_smart_route) {
+      dispose_arbitrary_defaults(entry, input, output);
+      if (global_error == 0)
+        invoke_global_setdown(entry, input.data(), output.data());
+      return session.finish(3);
+    }
+    // This path can only send the terminal route-mismatch response. It never
+    // dispatches a sequence/frame or accepts pixels using the invalid table.
+    // Preserve the launch rejection trace and setup errors in the final report.
   }
   const auto early_mode = aexcompat::l2mode::select_early_mode(
       invocation.auto_dialog_mode, invocation.do_dialog_mode,
@@ -3725,7 +3732,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const auto dispatch = aexcompat::worker_runtime::invocation::run_smart_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
          image_render_supported, depth_supported, session_depth_ok,
-         advertised_out_flags, advertised_out_flags2, smart_render_supported});
+         advertised_out_flags, advertised_out_flags2, smart_render_supported,
+         nullptr, false, nullptr, global_error});
     if (dispatch.case_id_rejected) {
       dispose_arbitrary_defaults(entry, input, output);
       if (global_error == 0)

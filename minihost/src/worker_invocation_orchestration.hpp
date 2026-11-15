@@ -213,6 +213,9 @@ struct FinalDispatchRequest {
   // for render_once so the thread/context contract can be tested without a
   // loaded AEX or the process-global selector diagnostics it would require.
   void (*concurrent_thread_context_probe)(){};
+  // Route rejection is decided from successful GLOBAL_SETUP even when
+  // PARAMS_SETUP subsequently fails. A failed global setup has no capability verdict.
+  int32_t global_error{-1};
 };
 
 struct ClassicFinalDispatchResult {

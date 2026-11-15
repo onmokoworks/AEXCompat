@@ -313,9 +313,10 @@ void append_classic_context(ReportSnapshot& report, const ClassicReport::Context
 }
 
 void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
+  const bool route_mismatch = v.setup_flags[0] == 0 && !v.advertised[1];
   report.stream()
       << "{\"schema_version\":1,\"stage\":\"smartfx_render\",\"status\":\""
-      << (v.completed ? "render_completed" : "render_failed")
+      << (v.completed && !route_mismatch ? "render_completed" : "render_failed")
       << "\",\"global_setup_error\":" << v.setup_flags[0]
       << ",\"params_setup_error\":" << v.setup_flags[1]
       << ",\"advertised_out_flags\":" << v.setup_flags[2]
@@ -326,10 +327,13 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ",\"input_write_advertised\":" << (v.advertised[3] ? "true" : "false")
       << ",\"input_buffer_writable\":" << (v.advertised[3] ? "true" : "false")
       << ",\"wide_time_checkout_allowed\":" << (v.runtime_flags[0] ? "true" : "false");
+  if (route_mismatch)
+    report.stream() << ",\"route_mismatch\":{\"reason\":\"smart_render_not_advertised\","
+        "\"advertised_out_flags2\":" << v.setup_flags[3] << "}";
   append_temporal_checkout_counters(report.stream(), v.temporal_checkout_counters);
   report.stream()
       << ",\"shutter_dependency_advertised\":" << (v.runtime_flags[1] ? "true" : "false")
-      << ",\"smart_pre_render_dispatched\":" << (v.runtime_flags[2] ? "true" : "false")
+      << ",\"smart_pre_render_dispatched\":" << (v.runtime_flags[2] && !route_mismatch ? "true" : "false")
       << ",\"smart_render_selector_dispatched\":" << (v.runtime_flags[3] ? "true" : "false")
       << ",\"comp_bg_color_success_count\":" << v.host_context[0]
       << ",\"comp_bg_color_rejection_count\":" << v.host_context[1]

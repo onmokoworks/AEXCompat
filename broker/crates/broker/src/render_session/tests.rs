@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn route_mismatch_requires_smart_error_and_non_smart_flags() {
+    let report = json!({"v": 1, "type": "frame_done", "frame_index": 0,
+        "status": "error", "render_error": -49,
+        "route_mismatch": {"reason": "smart_render_not_advertised", "advertised_out_flags2": 8}});
+    let done: FrameDone = serde_json::from_value(report.clone()).unwrap();
+    assert!(!done.malformed_route_mismatch(true));
+    assert!(done.malformed_route_mismatch(false));
+    for (key, value) in [
+        ("status", json!("ok")),
+        ("render_error", json!(-40)),
+        ("smart_output_untouched", json!(true)),
+        ("missing_dependency", json!("runtime.dll")),
+        (
+            "route_mismatch",
+            json!({"reason": "smart_render_not_advertised", "advertised_out_flags2": 1024}),
+        ),
+        (
+            "route_mismatch",
+            json!({"reason": "unknown", "advertised_out_flags2": 8}),
+        ),
+    ] {
+        let mut bad = report.clone();
+        bad[key] = value;
+        let done: FrameDone = serde_json::from_value(bad).unwrap();
+        assert!(done.malformed_route_mismatch(true));
+    }
+    for flags in [json!(-1), json!(4294967296u64), json!("8"), Value::Null] {
+        let mut bad = report.clone();
+        bad["route_mismatch"]["advertised_out_flags2"] = flags;
+        assert!(serde_json::from_value::<FrameDone>(bad).is_err());
+    }
+}
+
+#[test]
 fn diagnostic_world_layout_is_bounded_before_worker_launch() {
     let layout = DiagnosticWorldLayout {
         input_row_padding: 16,
