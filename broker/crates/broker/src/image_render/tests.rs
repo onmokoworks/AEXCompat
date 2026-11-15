@@ -3591,6 +3591,67 @@ mod tests {
     }
 
     #[test]
+    fn smart_route_diagnostic_requires_a_matching_completed_failure_report() {
+        let report = json!({
+            "stage": "smartfx_render", "status": "render_failed", "global_setup_error": 0,
+            "smart_render_supported": false, "advertised_out_flags2": 8,
+            "route_mismatch": {"reason": "smart_render_not_advertised", "advertised_out_flags2": 8},
+        });
+        let mut isolated = crate::secure_launch::SecureLaunchResult {
+            classification: crate::ExitClassification::NonzeroExit,
+            exit_code: 22,
+            stdout: report.to_string(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            kill_reason: None,
+            worker_peak_commit_bytes: None,
+            peak_process_memory_bytes: None,
+            peak_job_memory_bytes: None,
+            process_memory_limit_bytes: 536_870_912,
+            memory_limit_reached: false,
+            dismissed_windows: Vec::new(),
+            worker_freshness_warning: None,
+            module_audit_warning: None,
+        };
+        let diagnostic = isolated_worker_diagnostics(&isolated, 1);
+        assert_eq!(diagnostic["classification"], "route_mismatch");
+        assert_eq!(diagnostic["route_mismatch"], report["route_mismatch"]);
+        for (key, value) in [
+            ("stage", json!("classic_render")),
+            ("status", json!("render_completed")),
+            ("global_setup_error", json!(4)),
+            ("smart_render_supported", json!(true)),
+            ("advertised_out_flags2", json!(1032)),
+            ("advertised_out_flags2", json!(9)),
+            (
+                "route_mismatch",
+                json!({"reason": "unknown", "advertised_out_flags2": 8}),
+            ),
+        ] {
+            let mut invalid = report.clone();
+            invalid[key] = value;
+            isolated.stdout = invalid.to_string();
+            assert_eq!(
+                isolated_worker_diagnostics(&isolated, 1)["classification"],
+                "nonzero_exit"
+            );
+        }
+        isolated.stdout = report.to_string();
+        isolated.stdout_truncated = true;
+        assert_eq!(
+            isolated_worker_diagnostics(&isolated, 1)["classification"],
+            "nonzero_exit"
+        );
+        isolated.stdout_truncated = false;
+        isolated.exit_code = 24;
+        assert_eq!(
+            isolated_worker_diagnostics(&isolated, 1)["classification"],
+            "nonzero_exit"
+        );
+    }
+
+    #[test]
     fn runtime_module_backend_matches_the_worker_gpu_command() {
         assert_eq!(
             runtime_backend(RenderGpuBackend::Auto),

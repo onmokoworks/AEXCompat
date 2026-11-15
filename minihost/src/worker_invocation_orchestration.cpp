@@ -590,11 +590,14 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
   std::cerr << "stage:smart_render_begin\n" << std::flush;
   if (invocation.render_session_mode) {
     // Resident smart session (protocol v1.1). When the plug-in cannot render
-    // (bad params, unsupported depth, no SmartFX support) the loop is never
+    // (bad params or unsupported depth) the loop is never
     // entered; the broker observes the nonzero process exit instead of a
     // hanging session, exactly like the classic session branch.
-    if (params_error == 0 && image_render_supported && session_depth_ok &&
-        smart_render_supported) {
+    // A route mismatch enters the transport loop only to reject the first
+    // frame explicitly, before any sequence/frame selector is dispatched.
+    if ((request.global_error == 0 && !smart_render_supported) ||
+        (params_error == 0 && smart_render_supported &&
+         image_render_supported && session_depth_ok)) {
       const auto outcome = run_smart_render_session(
           entry, input, output, &invocation.requested_parameters, case_id,
           invocation.external_width, invocation.external_height,

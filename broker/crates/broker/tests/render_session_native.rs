@@ -56,6 +56,108 @@ mod windows_e2e {
     }
 
     #[test]
+    fn native_smart_route_mismatch_is_explicit_without_classic_fallback() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let plugin = repository.join("target/minihost-build/worker_non_smart_fixture.aex");
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&plugin).unwrap()));
+        for format in [
+            RenderPixelFormat::Argb8,
+            RenderPixelFormat::Argb16,
+            RenderPixelFormat::Argb32f,
+        ] {
+            for (smart, params_error) in [(false, 0), (true, 0), (true, 4)] {
+                let plugin = if params_error == 0 {
+                    plugin.clone()
+                } else {
+                    repository
+                        .join("target/minihost-build/worker_non_smart_params_error_fixture.aex")
+                };
+                let sha = format!("{:x}", Sha256::digest(std::fs::read(&plugin).unwrap()));
+                let mut session = RenderSession::open(SessionOpenRequest {
+                    companions: Vec::new(),
+                    repository: &repository,
+                    plugin_path: &plugin,
+                    plugin_sha256: &sha,
+                    parameters: None,
+                    payload_override: None,
+                    parameter_animation: None,
+                    aux_manifest: None,
+                    world_dump_dir: None,
+                    output_checksum_detail: false,
+                    mask_trailer: None,
+                    spatial_trailer: None,
+                    camera_trailer: None,
+                    render_environment_trailer: None,
+                    audio_trailer: None,
+                    alpha_as_coverage_params: &[],
+                    conformance_render_settings: None,
+                    layers: &[],
+                    dependencies: Vec::new(),
+                    dependency_search_dirs: vec![plugin.parent().unwrap().to_path_buf()],
+                    width: WIDTH,
+                    height: HEIGHT,
+                    pixel_format: format,
+                    time_step: 1,
+                    total_time: 300,
+                    time_scale: 30,
+                    frame_deadline: Duration::from_secs(30),
+                    smart,
+                    gpu_backend: RenderGpuBackend::Cpu,
+                    gpu_runtime_policy: None,
+                    launch_environment: LaunchEnvironment::default(),
+                })
+                .unwrap();
+                let result = session.render_frame(0, 0, &input_pattern(3));
+                if smart {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains("smart_render_not_advertised"), "{error}");
+                    assert!(error.contains("advertised_out_flags2=8388617"), "{error}");
+                    assert!(!error.contains("worker_exited"), "{error}");
+                    assert!(session.render_frame(1, 1, &input_pattern(5)).is_err());
+                } else {
+                    assert!(matches!(
+                        result.unwrap().status,
+                        FrameStatus::Rendered { .. }
+                    ));
+                }
+                let close = session.close();
+                assert_eq!(close["invalidated"], smart, "{close}");
+                if smart {
+                    assert_eq!(
+                        close["invalidated_reason"]["reason"],
+                        "smart_render_not_advertised"
+                    );
+                    assert_eq!(
+                        close["final_report"]["route_mismatch"]["advertised_out_flags2"],
+                        0x00800009
+                    );
+                    assert_eq!(
+                        close["final_report"]["smart_render_selector_dispatched"],
+                        false
+                    );
+                    assert_eq!(close["final_report"]["global_setdown_error"], 0);
+                    assert_eq!(close["final_report"]["params_setup_error"], params_error);
+                } else {
+                    assert_eq!(close["session_clean"], true, "{close}");
+                }
+            }
+        }
+        let error = aexcompat_broker::image_render::probe_experimental_smart_nop_render(
+            &repository,
+            &plugin,
+            &sha,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("smart_render_not_advertised"), "{error}");
+        assert!(error.contains("route_mismatch"), "{error}");
+        assert!(error.contains("8388617"), "{error}");
+    }
+
+    #[test]
     fn native_launch_validation_failure_reaches_broker_without_values_or_paths() {
         let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
