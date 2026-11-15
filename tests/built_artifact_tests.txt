@@ -285,3 +285,6 @@ tests/test_worker_selftest_routes.py::test_redundant_param_checkin_preserves_own
 tests/test_world_reclamation.py::test_world_reclamation
 tests/test_world_reclamation.py::test_legacy_new_world_flags
 tests/test_world_reclamation.py::test_world_reclamation_lifecycle
+tests/test_render_queue_suite.py::test_render_queue_suite[discovery]
+tests/test_render_queue_suite.py::test_render_queue_suite[classic]
+tests/test_render_queue_suite.py::test_render_queue_suite[smart]

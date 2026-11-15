@@ -62,6 +62,7 @@ enum class UnsupportedSuiteId : uint8_t {
   aegp_utility_5,
   aegp_utility_7,
   aegp_utility_13,
+  aegp_render_queue_1,
   pf_ae_adv_app_1,
   pf_ae_adv_app_2,
   drawbot_supplier_1,
