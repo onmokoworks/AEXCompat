@@ -10,7 +10,7 @@ GUI instructions: [日本語 (primary)](docs/GUI_GUIDE_JA.md) · [English transl
   <img src="docs/images/aexcompat-gui.png" alt="AEXCompat GUI with analysis logs, Effect Controls, and input/output viewers" width="1200">
 </p>
 
-The Rust/egui GUI being unified across Windows and Apple Silicon combines AEX selection, Effect Controls, input/output comparison, and diagnostic logs in one workspace.
+The Rust/egui GUI, which is being unified across Windows and Apple Silicon, combines AEX selection, Effect Controls, input/output comparison, and diagnostic logs in one workspace.
 
 ## What is AEXCompat?
 
@@ -22,7 +22,7 @@ AEXCompat is a clean-room compatibility host that feeds images or audio to Windo
 - Structured selector, Suite, parameter, crash, and hang diagnostics
 - Pixel comparison with reference output captured from After Effects
 
-It is not intended to recreate the complete After Effects application, AEP editor, or full AEGP host.
+It is not intended to recreate the complete After Effects application, an AEP editor, or a full AEGP host.
 
 | Platform | Execution route |
 |---|---|
@@ -47,11 +47,11 @@ cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
 
-Inspecting or rendering an AEX also requires building the `minihost/` workers, which needs CMake in addition to the requirements above. The Adobe SDK is needed only when building probes or SDK fixtures. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for exact commands and toolsets.
+Inspecting or rendering an AEX also requires building the `minihost/` workers, which requires CMake in addition to the requirements above. The Adobe SDK is needed only when building probes or SDK fixtures. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for exact commands and toolsets.
 
 ### Apple Silicon Mac (optional route)
 
-With Rust/Cargo installed, one command builds the arm64 Release worker, applies an ad-hoc signature, creates a DMG, mounts it, and verifies the package. Windows and Rosetta are not required.
+With Rust/Cargo installed, a single command builds the arm64 Release worker, applies an ad-hoc signature, creates a DMG, mounts it, and verifies the package. Windows and Rosetta are not required.
 
 ```sh
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -67,7 +67,7 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
   tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local-smoke.dmg
 ```
 
-The AEX and input image are not included in the DMG. The normal path uses only the arm64 Unicorn worker. The optional Rosetta carrier is included only with `AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1` and is intended for trusted AEX plug-ins.
+The AEX and input image are not included in the DMG. The standard path uses only the arm64 Unicorn worker. The optional Rosetta carrier is included only with `AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1` and is intended for trusted AEX plug-ins.
 
 ## Workflow
 
@@ -77,9 +77,9 @@ The AEX and input image are not included in the DMG. The normal path uses only t
 4. Run **Render current frame** or **Render and save PNG**.
 5. Compare the input and AEX output in the viewer.
 
-Supported image inputs are PNG, JPEG, BMP, TIFF, and WebP; output is PNG. The host also models multiple Layer inputs, time/FPS, downsampling, pixel aspect, sequence state, and mono float32 audio.
+Supported image input formats are PNG, JPEG, BMP, TIFF, and WebP; output is PNG. The host also models multiple Layer inputs, time/FPS, downsampling, pixel aspect ratio, sequence state, and mono float32 audio.
 
-On Windows each frame is cut off after 30 s by default. Set `AEXCOMPAT_FRAME_DEADLINE_MS` (milliseconds, 1000 to 600000) before launching the GUI or CLI for an effect whose frames take longer; `render-video-batch` uses it when the request has no `frame_deadline_ms`. `--render-differential`, `--render-performance-diagnostics` and `--render-memory-diagnostics` keep their fixed 30 s.
+On Windows, each frame is cut off after 30 s by default. For effects whose frames take longer, set `AEXCOMPAT_FRAME_DEADLINE_MS` (in milliseconds, 1000 to 600000) before launching the GUI or CLI; `render-video-batch` uses this value when the request has no `frame_deadline_ms`. `--render-differential`, `--render-performance-diagnostics`, and `--render-memory-diagnostics` keep their fixed 30 s deadline.
 
 ## Architecture
 
@@ -112,11 +112,11 @@ cargo test --manifest-path broker\Cargo.toml --workspace
 uv run python -m pytest -q
 ```
 
-SDK, checkout-built artifact, and machine-bound evidence tests are explicit opt-ins. Public-repository and fork CI runs validate the source-only scope and do not fetch or redistribute the Adobe SDK. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for the complete matrix.
+SDK, checkout-built artifact, and machine-bound evidence tests require explicit opt-in. Public-repository and fork CI runs validate the source-only scope and do not fetch or redistribute the Adobe SDK. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for the complete matrix.
 
 ## Current limitations
 
-- Missing Suites and effect-specific host assumptions can stop loading or rendering
+- Missing Suites and effect-specific host assumptions can prevent loading or rendering
 - Worker completion, image production, and AE pixel equivalence are separate milestones
 - Custom UI, GPU backends, pixel depths, multiple inputs, and sequence semantics vary by plug-in
 
@@ -135,11 +135,11 @@ SDK, checkout-built artifact, and machine-bound evidence tests are explicit opt-
 | Vulnerability reporting | [Security Policy](SECURITY.md) |
 | Development and submission rules | [Contributing](CONTRIBUTING.md) |
 
-The [documentation index](docs/README.md) lists further design and validation documents.
+The [documentation index](docs/README.md) lists additional design and validation documents.
 
 ## Contributing
 
-Compatibility work starts with observed behavior from a real AEX, SDK sample, or self-authored probe. Changes should model the smallest general host capability rather than a fixture-specific branch, add focused boundary tests, and compare against an After Effects oracle where possible.
+Compatibility work starts with observed behavior from a real AEX, an SDK sample, or a self-authored probe. Changes should model the smallest general host capability rather than a fixture-specific branch, add focused boundary tests, and compare against an After Effects oracle where possible.
 
 Do not post proprietary AEX plug-ins, Adobe SDK content, DLLs, dumps, private assets/corpora, secrets, or personal paths in issues or pull requests.
 
