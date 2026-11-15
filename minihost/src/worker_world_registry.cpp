@@ -258,9 +258,31 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   return 0;
 }
 
+// PF_UtilCallbacks.new_world. Only CLEAR_PIXELS (1<<0) and DEEP_PIXELS (1<<1)
+// select anything here; RESERVED0 (1<<2) and RESERVED1 (1<<3) are the host's
+// own, and the SDK names no bit above them.
+//
+// Bits outside that set used to fail the call closed with PF_Err_OUT_OF_MEMORY.
+// That refused a shipping plug-in family outright: F's OpticalDiffusion (public
+// source and binaries at github.com/bryful/F-s-PluginsProjects) passes a
+// PF_PixelFormat into this flags parameter, so the call arrives with
+// 0x62677261 ('bgra', PF_PixelFormat_ARGB32) where a PF_NewWorldFlags belongs.
+// The plug-in does not read the result, so it went on to use a PF_EffectWorld
+// this host had left untouched and took an access violation inside its own
+// render (SEH 512), for a 256x144 argb8 frame in both classic and SmartFX.
+//
+// The misuse is the plug-in's, but refusing it is not AE's behavior: that
+// plug-in renders in After Effects, and the low two bits of what it passes are
+// CLEAR_PIXELS set and DEEP_PIXELS clear, which is exactly the cleared 8-bit
+// world its 8-bit render goes on to write. AE therefore reads the bits it
+// defines and ignores the rest, so this does too. Allocation still fails closed
+// on geometry, pixel size and the registry's own limits, which is what a
+// PF_Err_OUT_OF_MEMORY from here means.
+//
+// Not verified against an AE oracle capture; it rests on the plug-in shipping
+// and rendering in AE. Covered by worker_legacy_new_world_flags_selftest.
 int32_t __cdecl legacy_new_world(void* effect_ref, int32_t width,
                                  int32_t height, int32_t flags, void* world) {
-  if ((flags & ~3) != 0) return 4;
   return new_world(effect_ref, width, height, flags & 1,
                    (flags & 2) ? kPixelFormatArgb64 : kPixelFormatArgb32,
                    world);
