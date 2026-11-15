@@ -1149,6 +1149,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     }
     let valid_run = |classification: crate::ExitClassification, report: &Value| {
         classification.as_str() == "ok"
+            && crate::render_session::validate_world_teardown(report)
             && report.get("request_mode") == Some(&Value::Bool(true))
             && report.get("render_error") == Some(&json!(0))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
@@ -1163,19 +1164,13 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         && runs
             .iter()
             .all(|(classification, report)| valid_run(*classification, report));
-    let summarize = |item: &(crate::ExitClassification, Value)| {
-        json!({
-        "classification":item.0.as_str(),"render_error":item.1.get("render_error"),
-        "output_sha256":item.1.get("output_sha256"),"guard_bytes_intact":item.1.get("guard_bytes_intact"),
-        "request_mode":item.1.get("request_mode"),
-        "requested_parameters":item.1.get("requested_parameters")})
-    };
+
     let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
         "plugin_id":request.plugin_id,"receipt_id":approved_receipt_id,
         "fixture_sha256":approved_fixture_sha256,"assignment_count":assignment_count,
         "accepted":true,"native_process_started":true,"parameters":effective,
         "expected_oracle_sha256":expected,
-        "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),"deterministic":deterministic,
+        "run_1":summarize_classic_request(&runs[0]),"run_2":summarize_classic_request(&runs[1]),"deterministic":deterministic,
         "broker_survived":true,"passed":passed});
     let mut output = OpenOptions::new()
         .write(true)
@@ -1405,6 +1400,7 @@ pub fn execute_smart(
     }
     let valid_run = |classification: crate::ExitClassification, report: &Value| {
         classification.as_str() == "ok"
+            && crate::render_session::validate_world_teardown(report)
             && report.get("request_mode") == Some(&Value::Bool(true))
             && report.get("pre_render_error") == Some(&json!(0))
             && report.get("smart_render_error") == Some(&json!(0))
@@ -1470,38 +1466,7 @@ pub fn execute_smart(
         && runs
             .iter()
             .all(|(classification, report)| valid_run(*classification, report));
-    let summarize = |item: &(crate::ExitClassification, Value)| {
-        json!({
-        "classification":item.0.as_str(),"pre_render_error":item.1.get("pre_render_error"),
-        "smart_render_error":item.1.get("smart_render_error"),"output_sha256":item.1.get("output_sha256"),
-        "result_rects_valid":item.1.get("result_rects_valid"),
-        "guard_bytes_intact":item.1.get("guard_bytes_intact"),"request_mode":item.1.get("request_mode"),
-        "mask_scene_id":item.1.get("mask_scene_id"),"mask_count":item.1.get("mask_count"),
-        "mask_open_count":item.1.get("mask_open_count"),
-        "mask_tangent_vertex_count":item.1.get("mask_tangent_vertex_count"),
-        "mask_lifetimes_balanced":item.1.get("mask_lifetimes_balanced"),
-        "mask_handles_acquired":item.1.get("mask_handles_acquired"),
-        "mask_handles_disposed":item.1.get("mask_handles_disposed"),
-        "stream_handles_acquired":item.1.get("stream_handles_acquired"),
-        "stream_handles_disposed":item.1.get("stream_handles_disposed"),
-        "stream_values_acquired":item.1.get("stream_values_acquired"),
-        "stream_values_disposed":item.1.get("stream_values_disposed"),
-        "suite_leases_balanced":item.1.get("suite_leases_balanced"),
-        "suite_acquires":item.1.get("suite_acquires"),
-        "suite_releases":item.1.get("suite_releases"),
-        "live_suite_lease_count":item.1.get("live_suite_lease_count"),
-        "live_suite_reference_count":item.1.get("live_suite_reference_count"),
-        "live_suite_leases":item.1.get("live_suite_leases"),
-        "handle_lifetimes_balanced":item.1.get("handle_lifetimes_balanced"),
-        "handles_created":item.1.get("handles_created"),
-        "handles_disposed":item.1.get("handles_disposed"),
-        "handle_locks":item.1.get("handle_locks"),
-        "handle_unlocks":item.1.get("handle_unlocks"),
-        "live_handle_count":item.1.get("live_handle_count"),
-        "live_handle_bytes":item.1.get("live_handle_bytes"),
-        "invalid_handle_operations":item.1.get("invalid_handle_operations"),
-        "requested_parameters":item.1.get("requested_parameters")})
-    };
+
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
         "plugin_id":request.plugin_id,"receipt_id":approved_receipt_id,
         "fixture_sha256":approved_fixture_sha256,"assignment_count":assignment_count,
@@ -1511,7 +1476,7 @@ pub fn execute_smart(
         "host_context_open_mask_count":host_context_shape_counts.map(|counts| counts.0),
         "host_context_tangent_vertex_count":host_context_shape_counts.map(|counts| counts.1),
         "expected_oracle_sha256":expected,
-        "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
+        "run_1":summarize_smart_request(&runs[0]),"run_2":summarize_smart_request(&runs[1]),
         "secure_launch_1":secure_launches[0],"secure_launch_2":secure_launches[1],
         "secure_launch_count":2,"normal_token_fallback":false,"deterministic":deterministic,
         "broker_survived":true,"passed":passed});
@@ -1778,6 +1743,7 @@ pub fn execute_smart_suite_fault(
     let fallback_hash = source_argb8_hash();
     let fallback_valid = |classification: crate::ExitClassification, report: &Value| {
         classification.as_str() == "ok"
+            && crate::render_session::validate_world_teardown(report)
             && report.get("pre_render_error") == Some(&json!(0))
             && report.get("smart_render_error") == Some(&json!(0))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
@@ -1902,83 +1868,13 @@ pub fn execute_smart_suite_fault(
         runs.iter()
             .all(|(classification, report)| fallback_valid(*classification, report))
     };
-    let summarize = |item: &(crate::ExitClassification, Value)| {
-        let mut summary = json!({
-            "classification":item.0.as_str(),
-            "pre_render_error":item.1.get("pre_render_error"),
-            "smart_render_error":item.1.get("smart_render_error"),
-            "output_sha256":item.1.get("output_sha256"),
-            "guard_bytes_intact":item.1.get("guard_bytes_intact"),
-            "lifetime_fault_observed":item.1.get("lifetime_fault_observed"),
-            "mask_lifetimes_balanced":item.1.get("mask_lifetimes_balanced"),
-            "suite_fault_observed":item.1.get("suite_fault_observed"),
-            "suite_leases_balanced":item.1.get("suite_leases_balanced"),
-            "suite_acquires":item.1.get("suite_acquires"),
-            "suite_releases":item.1.get("suite_releases"),
-            "live_suite_lease_count":item.1.get("live_suite_lease_count"),
-            "live_suite_leases":item.1.get("live_suite_leases"),
-            "live_suite_reference_count":item.1.get("live_suite_reference_count"),
-            "handle_fault_observed":item.1.get("handle_fault_observed"),
-            "handle_lifetimes_balanced":item.1.get("handle_lifetimes_balanced"),
-            "handles_created":item.1.get("handles_created"),
-            "handles_disposed":item.1.get("handles_disposed"),
-            "handle_locks":item.1.get("handle_locks"),
-            "handle_unlocks":item.1.get("handle_unlocks"),
-            "live_handle_count":item.1.get("live_handle_count"),
-            "live_handle_bytes":item.1.get("live_handle_bytes"),
-            "invalid_handle_operations":item.1.get("invalid_handle_operations"),
-            "world_fault_observed":item.1.get("world_fault_observed"),
-            "world_lifetimes_balanced":item.1.get("world_lifetimes_balanced"),
-            "worlds_created":item.1.get("worlds_created"),
-            "worlds_disposed":item.1.get("worlds_disposed"),
-            "live_world_count":item.1.get("live_world_count"),
-            "live_world_bytes":item.1.get("live_world_bytes"),
-            "invalid_world_operations":item.1.get("invalid_world_operations"),
-            "pixel_format_fault_observed":item.1.get("pixel_format_fault_observed"),
-            "pixel_format_add_calls":item.1.get("pixel_format_add_calls"),
-            "pixel_format_clear_calls":item.1.get("pixel_format_clear_calls"),
-            "supported_pixel_format_count":item.1.get("supported_pixel_format_count"),
-            "invalid_pixel_format_operations":item.1.get("invalid_pixel_format_operations"),
-            "outline_fault_observed":item.1.get("outline_fault_observed"),
-            "outline_mutations":item.1.get("outline_mutations"),
-            "invalid_outline_operations":item.1.get("invalid_outline_operations"),
-            "mask_attribute_fault_observed":item.1.get("mask_attribute_fault_observed"),
-            "mask_mutations":item.1.get("mask_mutations"),
-            "invalid_mask_operations":item.1.get("invalid_mask_operations")
-        });
-        let object = summary.as_object_mut().expect("summary is an object");
-        for field in [
-            "stream_metadata_fault_observed",
-            "stream_metadata_queries",
-            "stream_duplicates",
-            "invalid_stream_operations",
-            "keyframe_fault_observed",
-            "keyframe_mutations",
-            "invalid_keyframe_operations",
-            "dynamic_stream_fault_observed",
-            "dynamic_stream_queries",
-            "dynamic_stream_mutations",
-            "invalid_dynamic_stream_operations",
-            "aegp_memory_fault_observed",
-            "aegp_memory_created",
-            "aegp_memory_freed",
-            "live_aegp_memory_handles",
-            "live_aegp_memory_bytes",
-            "invalid_aegp_memory_operations",
-        ] {
-            object.insert(
-                field.to_string(),
-                item.1.get(field).cloned().unwrap_or(Value::Null),
-            );
-        }
-        summary
-    };
+
     let report = json!({
         "schema_version":1,"stage":"smartfx_suite_fault","plugin_id":plugin_id,
         "receipt_id":approved_receipt_id,"fixture_sha256":approved_fixture_sha256,
         "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection || expect_outline_rejection { "callback_error_rejected" } else { "plugin_fallback" },
         "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection || expect_outline_rejection { Value::Null } else { json!(fallback_hash) },
-        "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
+        "run_1":summarize_smart_fault_request(&runs[0]),"run_2":summarize_smart_fault_request(&runs[1]),
         "broker_survived":true,"passed":passed
     });
     let mut output = OpenOptions::new()
@@ -2091,6 +1987,7 @@ pub fn execute_smart_mask_scene(
     }
     let valid_run = |classification: crate::ExitClassification, report: &Value| {
         classification.as_str() == "ok"
+            && crate::render_session::validate_world_teardown(report)
             && report.get("pre_render_error") == Some(&json!(0))
             && report.get("smart_render_error") == Some(&json!(0))
             && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
@@ -2107,23 +2004,13 @@ pub fn execute_smart_mask_scene(
         && runs
             .iter()
             .all(|(classification, report)| valid_run(*classification, report));
-    let summarize = |item: &(crate::ExitClassification, Value)| {
-        json!({
-            "classification":item.0.as_str(),
-            "pre_render_error":item.1.get("pre_render_error"),
-            "smart_render_error":item.1.get("smart_render_error"),
-            "output_sha256":item.1.get("output_sha256"),
-            "guard_bytes_intact":item.1.get("guard_bytes_intact"),
-            "mask_scene_id":item.1.get("mask_scene_id"),
-            "mask_count":item.1.get("mask_count")
-        })
-    };
+
     let report = json!({
         "schema_version":1,"stage":"smartfx_mask_scene","plugin_id":plugin_id,
         "receipt_id":approved_receipt_id,"fixture_sha256":approved_fixture_sha256,
         "scene_case_id":scene_case_id,"host_scene_id":scene_id,"mask_index":mask_index,
         "expected_mask_count":expected_count,"expected_oracle_sha256":expected,
-        "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
+        "run_1":summarize_smart_mask_request(&runs[0]),"run_2":summarize_smart_mask_request(&runs[1]),
         "deterministic":deterministic,"broker_survived":true,"passed":passed
     });
     let mut output = OpenOptions::new()
@@ -2136,9 +2023,164 @@ pub fn execute_smart_mask_scene(
     Ok(passed)
 }
 
+fn summarize_classic_request(item: &(crate::ExitClassification, Value)) -> Value {
+    let mut summary = json!({
+        "classification":item.0.as_str(),"render_error":item.1.get("render_error"),
+        "output_sha256":item.1.get("output_sha256"),"guard_bytes_intact":item.1.get("guard_bytes_intact"),
+        "request_mode":item.1.get("request_mode"),
+        "requested_parameters":item.1.get("requested_parameters")});
+    crate::render_session::propagate_world_reclamation(&item.1, &mut summary);
+    summary
+}
+
+fn summarize_smart_request(item: &(crate::ExitClassification, Value)) -> Value {
+    let mut summary = json!({
+        "classification":item.0.as_str(),"pre_render_error":item.1.get("pre_render_error"),
+        "smart_render_error":item.1.get("smart_render_error"),"output_sha256":item.1.get("output_sha256"),
+        "result_rects_valid":item.1.get("result_rects_valid"),
+        "guard_bytes_intact":item.1.get("guard_bytes_intact"),"request_mode":item.1.get("request_mode"),
+        "mask_scene_id":item.1.get("mask_scene_id"),"mask_count":item.1.get("mask_count"),
+        "mask_open_count":item.1.get("mask_open_count"),
+        "mask_tangent_vertex_count":item.1.get("mask_tangent_vertex_count"),
+        "mask_lifetimes_balanced":item.1.get("mask_lifetimes_balanced"),
+        "mask_handles_acquired":item.1.get("mask_handles_acquired"),
+        "mask_handles_disposed":item.1.get("mask_handles_disposed"),
+        "stream_handles_acquired":item.1.get("stream_handles_acquired"),
+        "stream_handles_disposed":item.1.get("stream_handles_disposed"),
+        "stream_values_acquired":item.1.get("stream_values_acquired"),
+        "stream_values_disposed":item.1.get("stream_values_disposed"),
+            "suite_leases_balanced":item.1.get("suite_leases_balanced"),
+        "suite_acquires":item.1.get("suite_acquires"),
+        "suite_releases":item.1.get("suite_releases"),
+        "live_suite_lease_count":item.1.get("live_suite_lease_count"),
+        "live_suite_reference_count":item.1.get("live_suite_reference_count"),
+        "live_suite_leases":item.1.get("live_suite_leases"),
+        "handle_lifetimes_balanced":item.1.get("handle_lifetimes_balanced"),
+        "handles_created":item.1.get("handles_created"),
+        "handles_disposed":item.1.get("handles_disposed"),
+        "handle_locks":item.1.get("handle_locks"),
+        "handle_unlocks":item.1.get("handle_unlocks"),
+        "live_handle_count":item.1.get("live_handle_count"),
+        "live_handle_bytes":item.1.get("live_handle_bytes"),
+        "invalid_handle_operations":item.1.get("invalid_handle_operations"),
+        "requested_parameters":item.1.get("requested_parameters")});
+    crate::render_session::propagate_world_reclamation(&item.1, &mut summary);
+    summary
+}
+
+fn summarize_smart_fault_request(item: &(crate::ExitClassification, Value)) -> Value {
+    let mut summary = json!({
+        "classification":item.0.as_str(),
+        "pre_render_error":item.1.get("pre_render_error"),
+        "smart_render_error":item.1.get("smart_render_error"),
+        "output_sha256":item.1.get("output_sha256"),
+        "guard_bytes_intact":item.1.get("guard_bytes_intact"),
+        "lifetime_fault_observed":item.1.get("lifetime_fault_observed"),
+        "mask_lifetimes_balanced":item.1.get("mask_lifetimes_balanced"),
+        "suite_fault_observed":item.1.get("suite_fault_observed"),
+        "suite_leases_balanced":item.1.get("suite_leases_balanced"),
+        "suite_acquires":item.1.get("suite_acquires"),
+        "suite_releases":item.1.get("suite_releases"),
+        "live_suite_lease_count":item.1.get("live_suite_lease_count"),
+        "live_suite_leases":item.1.get("live_suite_leases"),
+        "live_suite_reference_count":item.1.get("live_suite_reference_count"),
+        "handle_fault_observed":item.1.get("handle_fault_observed"),
+        "handle_lifetimes_balanced":item.1.get("handle_lifetimes_balanced"),
+        "handles_created":item.1.get("handles_created"),
+        "handles_disposed":item.1.get("handles_disposed"),
+        "handle_locks":item.1.get("handle_locks"),
+        "handle_unlocks":item.1.get("handle_unlocks"),
+        "live_handle_count":item.1.get("live_handle_count"),
+        "live_handle_bytes":item.1.get("live_handle_bytes"),
+        "invalid_handle_operations":item.1.get("invalid_handle_operations"),
+        "world_fault_observed":item.1.get("world_fault_observed"),
+        "world_lifetimes_balanced":item.1.get("world_lifetimes_balanced"),
+        "worlds_created":item.1.get("worlds_created"),
+        "worlds_disposed":item.1.get("worlds_disposed"),
+        "live_world_count":item.1.get("live_world_count"),
+        "live_world_bytes":item.1.get("live_world_bytes"),
+        "invalid_world_operations":item.1.get("invalid_world_operations"),
+        "pixel_format_fault_observed":item.1.get("pixel_format_fault_observed"),
+        "pixel_format_add_calls":item.1.get("pixel_format_add_calls"),
+        "pixel_format_clear_calls":item.1.get("pixel_format_clear_calls"),
+        "supported_pixel_format_count":item.1.get("supported_pixel_format_count"),
+        "invalid_pixel_format_operations":item.1.get("invalid_pixel_format_operations"),
+        "outline_fault_observed":item.1.get("outline_fault_observed"),
+        "outline_mutations":item.1.get("outline_mutations"),
+        "invalid_outline_operations":item.1.get("invalid_outline_operations"),
+        "mask_attribute_fault_observed":item.1.get("mask_attribute_fault_observed"),
+        "mask_mutations":item.1.get("mask_mutations"),
+        "invalid_mask_operations":item.1.get("invalid_mask_operations")
+    });
+    crate::render_session::propagate_world_reclamation(&item.1, &mut summary);
+    let object = summary.as_object_mut().expect("summary is an object");
+    for field in [
+        "stream_metadata_fault_observed",
+        "stream_metadata_queries",
+        "stream_duplicates",
+        "invalid_stream_operations",
+        "keyframe_fault_observed",
+        "keyframe_mutations",
+        "invalid_keyframe_operations",
+        "dynamic_stream_fault_observed",
+        "dynamic_stream_queries",
+        "dynamic_stream_mutations",
+        "invalid_dynamic_stream_operations",
+        "aegp_memory_fault_observed",
+        "aegp_memory_created",
+        "aegp_memory_freed",
+        "live_aegp_memory_handles",
+        "live_aegp_memory_bytes",
+        "invalid_aegp_memory_operations",
+    ] {
+        object.insert(
+            field.to_string(),
+            item.1.get(field).cloned().unwrap_or(Value::Null),
+        );
+    }
+    summary
+}
+
+fn summarize_smart_mask_request(item: &(crate::ExitClassification, Value)) -> Value {
+    let mut summary = json!({
+        "classification":item.0.as_str(),
+        "pre_render_error":item.1.get("pre_render_error"),
+        "smart_render_error":item.1.get("smart_render_error"),
+        "output_sha256":item.1.get("output_sha256"),
+        "guard_bytes_intact":item.1.get("guard_bytes_intact"),
+        "mask_scene_id":item.1.get("mask_scene_id"),
+        "mask_count":item.1.get("mask_count")
+    });
+    crate::render_session::propagate_world_reclamation(&item.1, &mut summary);
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_request_summaries_preserve_reclamation_warning() {
+        let worker = json!({"world_lifetimes_balanced":true,"worlds_created":6,
+            "worlds_disposed":2,"live_world_count":0,"live_world_bytes":0,
+            "invalid_world_operations":0,"plugin_world_leak_warning":true,
+            "plugin_leaked_worlds_reclaimed":4,"plugin_leaked_world_bytes_reclaimed":8192});
+        assert!(crate::render_session::validate_world_teardown(&worker));
+        for summarize in [
+            summarize_classic_request,
+            summarize_smart_request,
+            summarize_smart_fault_request,
+            summarize_smart_mask_request,
+        ] {
+            let result = summarize(&(crate::ExitClassification::Ok, worker.clone()));
+            assert_eq!(result["plugin_world_leak_warning"], true);
+            assert_eq!(result["plugin_leaked_worlds_reclaimed"], 4);
+            assert_eq!(result["plugin_leaked_world_bytes_reclaimed"], 8192);
+        }
+        let mut faulty = worker;
+        faulty["invalid_world_operations"] = json!(1);
+        assert!(!crate::render_session::validate_world_teardown(&faulty));
+    }
 
     #[test]
     fn aux_channel_json_is_strict_and_f32le_only() {

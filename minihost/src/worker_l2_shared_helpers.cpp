@@ -11,6 +11,7 @@
 #include "worker_pf_helper_runtime.hpp"
 #include "worker_pf_state_runtime.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_world_registry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -169,6 +170,9 @@ int32_t invoke_global_setdown(EffectEntry entry, void* input, void* output) {
   const bool compute_cache_teardown_safe =
       aexcompat::worker_runtime::compute_cache::teardown_owner_from_entry(
           reinterpret_cast<const void*>(entry));
+  // Failed setdown/quiescence cannot establish that plug-in callbacks stopped.
+  aexcompat::world_registry::note_global_setdown_result(
+      error == 0 && compute_cache_teardown_safe);
   on_global_setdown();
   aexcompat::pf_helper::reset();
   return error != 0 ? error

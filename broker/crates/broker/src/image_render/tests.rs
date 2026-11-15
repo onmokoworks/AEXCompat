@@ -3,6 +3,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reclaimed_world_warning_survives_image_result_projection() {
+        let worker = json!({"world_lifetimes_balanced":true,
+            "plugin_world_leak_warning":true,"plugin_leaked_worlds_reclaimed":4,
+            "plugin_leaked_world_bytes_reclaimed":8192});
+        let result = build_interactive_image_report(&worker, audio_report_facts(None));
+        assert_eq!(result["plugin_world_leak_warning"], true);
+        assert_eq!(result["plugin_leaked_worlds_reclaimed"], 4);
+        assert_eq!(result["plugin_leaked_world_bytes_reclaimed"], 8192);
+        assert_eq!(result["world_lifetimes_balanced"], true);
+    }
+
+    #[test]
     fn frame_deadline_override_accepts_the_range_and_rejects_everything_else() {
         use std::ffi::OsStr;
         assert_eq!(

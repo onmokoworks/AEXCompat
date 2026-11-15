@@ -112,7 +112,12 @@ bool __cdecl teardown_session_providers(void* opaque) noexcept {
   // A failed/partially faulted Death leaves support-library state unknown;
   // do not run BIB termination through it. The session fails closed.
   const bool bib_ok = cor_ok && teardown_bib_suite(nullptr);
-  return companions_ok && cor_ok && bib_ok;
+  const bool quiesced = companions_ok && cor_ok && bib_ok &&
+      aexcompat::worker_runtime::compute_cache::unload_safe();
+  // Providers can retain PF worlds after GLOBAL_SETDOWN. Cluster swaps do not
+  // consume this terminal hook; all outgoing worlds remain charged until here.
+  aexcompat::world_registry::reclaim_plugin_worlds_after_setdown(quiesced);
+  return quiesced;
 }
 
 // Captures the in-place dependency search directories carried by a
@@ -1262,9 +1267,18 @@ bool verify_redundant_param_checkin() {
         "fresh case resets only classic redundant telemetry, preserving lifecycle failures");
   hosted.definitions[1] = {};
   exercise();
+  alignas(8) std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> retained_world{};
+  check(aexcompat::world_registry::new_world(nullptr, 2, 2, 1,
+      aexcompat::world_registry::kPixelFormatArgb32, retained_world.data()) == 0,
+      "global PF world allocated inside independent case");
   check(first_case.finish(), "redundant case is clean");
   wr::FreshCase next_case(defaults);
   check(next_case.begin(), "next case begins");
+  aexcompat::world_registry::OwnedWorldSnapshot retained_snapshot{};
+  check(aexcompat::world_registry::snapshot_owned_world(retained_world.data(), retained_snapshot),
+      "global PF world survives case boundary");
+  check(aexcompat::world_registry::dispose_world(nullptr, retained_world.data()) == 0,
+      "later case can dispose retained global PF world");
   check(hosted.completed.empty() && hosted.redundant_checkins == 0,
         "next case forgets completed addresses and redundant counter");
   check(checkin_param(&owner, first.data()) == 4, "previous case address rejected");
@@ -2814,6 +2828,37 @@ int run_discovery_session(const std::wstring& manifest_argument,
 }
 
 
+// Exercise the production GLOBAL_SETDOWN -> provider hook -> report boundary,
+// not merely the registry's counters. No external plug-in is loaded.
+bool verify_world_reclamation_lifecycle() {
+  namespace wr = aexcompat::world_registry;
+  using World = std::array<std::byte, aexcompat::world_safety::kEffectWorldSize>;
+  World world{};
+  if (wr::new_world(nullptr, 2, 2, 1, wr::kPixelFormatArgb32, world.data()) != 0)
+    return false;
+  const auto fake_entry = +[](int32_t selector, void*, void*, void**, void*, void*) -> int32_t {
+    return selector == 3 && wr::statistics().live_count == 1 ? 0 : 4;
+  };
+  std::array<std::byte, 4096> input{}, output{};
+  if (invoke_global_setdown(fake_entry, input.data(), output.data()) != 0 ||
+      !wr::owns_world(world.data()) || wr::statistics().reclaimed != 0)
+    return false;
+  struct Provider { World* world; bool observed{}; } provider{&world};
+  aexcompat::worker_runtime::RuntimeContext runtime;
+  aexcompat::worker_runtime::WorkerSession session(runtime, nullptr, nullptr);
+  session.set_pre_unload_hook(+[](void* opaque) noexcept {
+    auto& p = *static_cast<Provider*>(opaque);
+    wr::OwnedWorldSnapshot snapshot{};
+    p.observed = wr::snapshot_owned_world(p.world->data(), snapshot);
+    if (p.observed) std::memset(snapshot.world.data, 42, 16);
+    return p.observed && teardown_session_providers(nullptr);
+  }, &provider);
+  if (!session.prepare_protocol_report()) return false;
+  const auto stats = wr::statistics();
+  return provider.observed && stats.reclaimed == 1 && stats.reclaimed_bytes == 16 &&
+      stats.disposed == 0 && wr::lifetimes_balanced();
+}
+
 int worker_main_impl(int argc, wchar_t **argv) {
   if (const int bootstrap_error = configure_worker_entry_bootstrap())
     return bootstrap_error;
@@ -2822,6 +2867,11 @@ int worker_main_impl(int argc, wchar_t **argv) {
   // still needs authenticated inherited handles and fails closed if malformed.
   if (!aexcompat::worker_runtime::minidump::configure_from_inherited_handle())
     return 3;
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-world-reclamation-lifecycle") {
+    const bool passed = verify_world_reclamation_lifecycle();
+    std::cout << "{\"world_reclamation_lifecycle\":\"" << (passed ? "passed" : "failed") << "\"}\n";
+    return passed ? 0 : 1;
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pipl-entrypoint") {
     const bool passed = verify_pipl_entrypoint_parser();
     std::cout << "{\"pipl_entrypoint\":\"" << (passed ? "passed" : "failed")
@@ -3706,6 +3756,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
   dispose_all_live_handles();
   handle_reclamation_scope.reclaim();
+  bool plugin_world_fault =
+      aexcompat::world_registry::statistics().invalid_operations != 0;
   // Smart-worker fault-injection probes as a handler table (issue #171):
   // each requested mode runs its verifier in the same order as before.
   const struct SmartFaultProbe {
@@ -3743,7 +3795,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // A swap failure still gets the completion report below; only its exit code
   // is dedicated (25), so a terminal-audit rejection must not pre-empt it
   // with the generic module-audit code here.
+  const auto world_faults_before_providers =
+      aexcompat::world_registry::statistics().invalid_operations;
   const bool protocol_report_ready = session.prepare_protocol_report();
+  plugin_world_fault = plugin_world_fault ||
+      aexcompat::world_registry::statistics().invalid_operations != world_faults_before_providers;
   if (!protocol_report_ready && !session_swap_failure)
     return session.finish(14);
   if (is_render_worker()) {
@@ -3914,7 +3970,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
                                                 : depth_supported)) ||
                audio_effect_only) &&
               render_error == 0 && guards_intact &&
-              handle_lifetimes_balanced() && world_lifetimes_balanced() &&
+              handle_lifetimes_balanced() && world_lifetimes_balanced() && !plugin_world_fault &&
               async_receipt_lifetimes_balanced() &&
               async_layer_requests_balanced() &&
               gpu_memory_lifetimes_balanced() &&
@@ -3947,7 +4003,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
           : global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
         image_render_supported && session_depth_ok && smart_render_supported &&
         smart_session_render_error == 0 && smart.guards_intact &&
-        handle_lifetimes_balanced() && world_lifetimes_balanced() &&
+        handle_lifetimes_balanced() && world_lifetimes_balanced() && !plugin_world_fault &&
         gpu_memory_lifetimes_balanced() &&
         audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
         param_checkouts_balanced() &&
@@ -3961,7 +4017,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       image_render_supported && depth_supported && smart.pre_error == 0 && smart.render_error == 0 &&
       smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
       smart.rects_valid && smart.guards_intact &&
-      handle_lifetimes_balanced() && world_lifetimes_balanced() &&
+      handle_lifetimes_balanced() && world_lifetimes_balanced() && !plugin_world_fault &&
       gpu_memory_lifetimes_balanced() &&
       audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
       param_checkouts_balanced() &&

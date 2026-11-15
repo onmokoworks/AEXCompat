@@ -649,6 +649,19 @@ target_compile_definitions(worker_legacy_new_world_flags_selftest PRIVATE
 target_include_directories(worker_legacy_new_world_flags_selftest PRIVATE
   src ../instruments/common)
 
+add_executable(worker_world_reclamation_selftest
+  ../tests/native/worker_world_reclamation_selftest.cpp
+  src/worker_world_registry.cpp
+  src/worker_world_safety.cpp
+  src/worker_pf_world_facade.cpp
+  ../instruments/common/trace_writer.cpp
+)
+target_compile_features(worker_world_reclamation_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_world_reclamation_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_world_reclamation_selftest PRIVATE
+  src ../instruments/common)
+
 add_executable(worker_classic_execution_selftest
   ../tests/native/worker_classic_execution_selftest.cpp
   src/worker_classic_execution.cpp

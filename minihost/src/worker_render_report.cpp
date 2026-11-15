@@ -25,6 +25,15 @@
 
 namespace aexcompat::worker_render_report {
 
+namespace {
+std::string plugin_world_reclamation_json() {
+  const auto s = aexcompat::world_registry::statistics();
+  return ",\"plugin_leaked_worlds_reclaimed\":" + std::to_string(s.reclaimed) +
+      ",\"plugin_leaked_world_bytes_reclaimed\":" + std::to_string(s.reclaimed_bytes) +
+      ",\"plugin_world_leak_warning\":" + (s.reclaimed ? "true" : "false");
+}
+}  // namespace
+
 ReportSnapshot::ReportSnapshot(const std::ios& formatting_source) {
   stream_.copyfmt(formatting_source);
 }
@@ -477,6 +486,7 @@ void append_smart_lifetimes(ReportSnapshot& report, const SmartReport::Lifetimes
       << ",\"invalid_handle_operations\":" << v.handle_details[5]
       << ",\"handle_fault_observed\":" << (v.handle_fault ? "true" : "false")
       << ",\"world_fault_observed\":" << (v.world_fault ? "true" : "false")
+      << plugin_world_reclamation_json()
       << ",\"world_lifetimes_balanced\":" << (v.worlds_balanced ? "true" : "false")
       << ",\"worlds_created\":" << v.worlds[0] << ",\"worlds_disposed\":" << v.worlds[1]
       << ",\"live_world_count\":" << v.worlds[2] << ",\"live_world_bytes\":" << v.worlds[3]
@@ -623,9 +633,13 @@ void append_classic_subsystems(
       << ",\"arbitrary_interpolation_failures\":" << value.arbitrary[11]
       << ",\"arbitrary_interpolation_amount\":" << value.arbitrary_interpolation_amount
       << ",\"invalid_arbitrary_operations\":" << value.arbitrary[12]
+      << plugin_world_reclamation_json()
       << ",\"world_lifetimes_balanced\":" << (value.world_balanced ? "true" : "false")
       << ",\"worlds_created\":" << value.worlds[0]
       << ",\"worlds_disposed\":" << value.worlds[1]
+      << ",\"live_world_count\":" << aexcompat::world_registry::statistics().live_count
+      << ",\"live_world_bytes\":" << aexcompat::world_registry::statistics().live_bytes
+      << ",\"invalid_world_operations\":" << aexcompat::world_registry::statistics().invalid_operations
       << ",\"receipt_lifetimes_balanced\":" << (value.receipt_balanced ? "true" : "false")
       << ",\"receipts_created\":" << value.receipts[0]
       << ",\"receipts_checked_in\":" << value.receipts[1]

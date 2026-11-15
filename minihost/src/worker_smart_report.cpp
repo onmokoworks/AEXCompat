@@ -100,7 +100,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in, std::ostream&
                 in.arbitrary_defaults_disposed && arbitrary.invalid_operations == 0 &&
                 smart.guards_intact &&
                 worker_runtime::handles::handle_lifetimes_balanced() &&
-                aexcompat::world_registry::lifetimes_balanced() &&
+                (in.world_fault_observed || aexcompat::world_registry::statistics().invalid_operations == 0) &&
                 gpu_transport::gpu_memory_lifetimes_balanced() &&
                 audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
                 param_checkouts_balanced() &&

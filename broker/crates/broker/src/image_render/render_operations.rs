@@ -1226,7 +1226,7 @@ pub fn probe_experimental_nop_render(
         || input_hash != output_hash
         || report.get("guard_bytes_intact") != Some(&json!(true))
         || report.get("handle_lifetimes_balanced") != Some(&json!(true))
-        || report.get("world_lifetimes_balanced") != Some(&json!(true))
+        || !crate::render_session::validate_world_teardown(&report)
         || report.get("suite_leases_balanced") != Some(&json!(true))
         || report.get("global_setdown_error") != Some(&json!(0))
     {
@@ -1277,7 +1277,7 @@ pub fn probe_experimental_smart_nop_render(
         || report.get("result_rects_valid") != Some(&json!(true))
         || report.get("guard_bytes_intact") != Some(&json!(true))
         || report.get("handle_lifetimes_balanced") != Some(&json!(true))
-        || report.get("world_lifetimes_balanced") != Some(&json!(true))
+        || !crate::render_session::validate_world_teardown(&report)
         || report.get("suite_leases_balanced") != Some(&json!(true))
         || report.get("global_setdown_error") != Some(&json!(0))
     {
@@ -1325,7 +1325,7 @@ pub fn probe_experimental_input_buffer_write(
             ))
         || report.get("guard_bytes_intact") != Some(&json!(true))
         || report.get("handle_lifetimes_balanced") != Some(&json!(true))
-        || report.get("world_lifetimes_balanced") != Some(&json!(true))
+        || !crate::render_session::validate_world_teardown(&report)
         || report.get("global_setdown_error") != Some(&json!(0))
     {
         return Err(invalid("input-buffer write worker contract failed"));
@@ -1376,7 +1376,7 @@ pub fn probe_experimental_smart_input_buffer_write(
         || report.get("result_rects_valid") != Some(&json!(true))
         || report.get("guard_bytes_intact") != Some(&json!(true))
         || report.get("handle_lifetimes_balanced") != Some(&json!(true))
-        || report.get("world_lifetimes_balanced") != Some(&json!(true))
+        || !crate::render_session::validate_world_teardown(&report)
         || report.get("global_setdown_error") != Some(&json!(0))
     {
         return Err(invalid("SmartFX input-buffer write worker contract failed"));
@@ -1444,7 +1444,7 @@ fn probe_experimental_frame_resize(
         || !direction_valid
         || report.get("guard_bytes_intact") != Some(&json!(true))
         || report.get("handle_lifetimes_balanced") != Some(&json!(true))
-        || report.get("world_lifetimes_balanced") != Some(&json!(true))
+        || !crate::render_session::validate_world_teardown(&report)
         || report.get("suite_leases_balanced") != Some(&json!(true))
         || report.get("global_setdown_error") != Some(&json!(0))
     {
@@ -1518,7 +1518,7 @@ pub fn probe_experimental_persistent_sequence(
         || frame_errors.iter().any(|error| error != &json!(0))
         || report.get("guard_bytes_intact") != Some(&json!(true))
         || report.get("handle_lifetimes_balanced") != Some(&json!(true))
-        || report.get("world_lifetimes_balanced") != Some(&json!(true))
+        || !crate::render_session::validate_world_teardown(&report)
         || report.get("suite_leases_balanced") != Some(&json!(true))
         || report.get("param_checkouts_balanced") != Some(&json!(true))
     {
@@ -1564,7 +1564,7 @@ pub fn probe_experimental_flattened_sequence(
         || report.get("persistent_sequence_setdown_error") != Some(&json!(0))
         || report.get("guard_bytes_intact") != Some(&json!(true))
         || report.get("handle_lifetimes_balanced") != Some(&json!(true))
-        || report.get("world_lifetimes_balanced") != Some(&json!(true))
+        || !crate::render_session::validate_world_teardown(&report)
         || report.get("suite_leases_balanced") != Some(&json!(true))
         || report.get("pf_path_lifetimes_balanced") != Some(&json!(true))
     {
