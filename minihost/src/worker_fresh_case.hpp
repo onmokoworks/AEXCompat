@@ -58,7 +58,7 @@ class FreshCase {
         handles::live_identities() == handles_ && handles.invalid_operations == invalid_handles_ &&
         state.arbitrary.invalid_operations == invalid_arbitrary_ &&
         suite_registry().snapshot().live_leases == leases_.live_leases &&
-        worlds.live_count == worlds_.live_count && worlds.live_bytes == worlds_.live_bytes &&
+        // PF worlds may remain in global data until GLOBAL_SETDOWN (#1834).
         worlds.invalid_operations == worlds_.invalid_operations;
     if (!clean) return false;
     state.records = defaults_;

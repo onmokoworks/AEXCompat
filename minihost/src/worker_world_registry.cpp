@@ -63,6 +63,7 @@ struct OwnedWorld {
   uint64_t size{};
   int32_t pixel_format{};
   WorldFacade* companion{};
+  bool gpu_transport_owned{};
 };
 
 struct AegpWorldView {
@@ -102,6 +103,10 @@ uint64_t g_created{};
 uint64_t g_disposed{};
 uint64_t g_invalid_operations{};
 uint64_t g_live_bytes{};
+uint64_t g_reclaimed{};
+uint64_t g_reclaimed_bytes{};
+bool g_global_setdown_seen{};
+bool g_global_setdown_failed{};
 std::unordered_map<void**, AegpWorldView> g_aegp_views;
 std::unordered_map<void*, PlatformWorldEntry> g_platform_worlds;
 std::atomic<uint64_t> g_platform_world_generation{1};
@@ -167,9 +172,9 @@ bool resolve_dispatch_world_format(
       world, &resolve_owned_world, result);
 }
 
-int32_t __cdecl new_world(void*, int32_t width, int32_t height,
+static int32_t new_world_impl(int32_t width, int32_t height,
                           int32_t clear_pixels, int32_t pixel_format,
-                          void* world) {
+                          void* world, bool gpu_transport_owned) {
   RegistryLock lock;
   const int32_t pixel_bytes = bytes_per_pixel(pixel_format);
   // No check on the destination struct: reusing one local for a second
@@ -225,7 +230,7 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   // holding a world that names a companion this registry no longer knows about
   // (dispose could never retire it).
   try {
-    g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion});
+    g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion, gpu_transport_owned});
   } catch (...) {
     // The struct was already filled in above, so it has to be cleared with the
     // allocation: `g_worlds` is keyed by the pixel pointer, and a caller left
@@ -258,6 +263,15 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   return 0;
 }
 
+int32_t __cdecl new_world(void*, int32_t width, int32_t height,
+                          int32_t clear_pixels, int32_t pixel_format, void* world) {
+  return new_world_impl(width, height, clear_pixels, pixel_format, world, false);
+}
+static int32_t __cdecl new_transport_world(void*, int32_t width, int32_t height,
+                          int32_t clear_pixels, int32_t pixel_format, void* world) {
+  return new_world_impl(width, height, clear_pixels, pixel_format, world, true);
+}
+
 // PF_UtilCallbacks.new_world. Only CLEAR_PIXELS (1<<0) and DEEP_PIXELS (1<<1)
 // select anything here; RESERVED0 (1<<2) and RESERVED1 (1<<3) are the host's
 // own, and the SDK names no bit above them.
@@ -288,7 +302,7 @@ int32_t __cdecl legacy_new_world(void* effect_ref, int32_t width,
                    world);
 }
 
-int32_t __cdecl dispose_world(void*, void* world) {
+static int32_t dispose_world_impl(void* world, bool gpu_transport_owned) {
   RegistryLock lock;
   // Resolved through the pixel pointer the struct carries, so a copy of the
   // struct disposes the same allocation. Fail-closed is unchanged: a cleared
@@ -299,7 +313,7 @@ int32_t __cdecl dispose_world(void*, void* world) {
     return 4;
   }
   const auto found = g_worlds.find(world_pixels(world));
-  if (found == g_worlds.end()) {
+  if (found == g_worlds.end() || found->second.gpu_transport_owned != gpu_transport_owned) {
     ++g_invalid_operations;
     return 4;
   }
@@ -315,6 +329,13 @@ int32_t __cdecl dispose_world(void*, void* world) {
   ++g_disposed;
   std::memset(world, 0, world_safety::kEffectWorldSize);
   return 0;
+}
+
+int32_t __cdecl dispose_world(void*, void* world) {
+  return dispose_world_impl(world, false);
+}
+static int32_t __cdecl dispose_transport_world(void*, void* world) {
+  return dispose_world_impl(world, true);
 }
 
 int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
@@ -922,21 +943,51 @@ int32_t __cdecl aegp_world_reference_platform(int32_t plugin_id,
   return 0;
 }
 
+// Host policy, not an AE-oracle-verified reclamation timing. PF new_world
+// values can survive frames in sequence/global data. Only the completed global
+// teardown may retire them; never dereference caller-owned PF_EffectWorld
+// structs here (they may have been stack locals long since gone).
+void note_global_setdown_result(bool safe) {
+  RegistryLock lock;
+  g_global_setdown_seen = true;
+  g_global_setdown_failed = g_global_setdown_failed || !safe;
+}
+
+void reclaim_plugin_worlds_after_setdown(bool providers_quiesced) {
+  RegistryLock lock;
+  if (!providers_quiesced || !g_global_setdown_seen || g_global_setdown_failed)
+    return;
+  for (auto it = g_worlds.begin(); it != g_worlds.end();) {
+    const auto& world = it->second;
+    // GPU fallback worlds belong to the GPU transport's disposal protocol.
+    if (world.gpu_transport_owned) {
+      ++it;
+      continue;
+    }
+    ::operator delete(world.pixels);
+    aexcompat::worker_runtime::pf_world_facade::retire(world.companion);
+    ++g_reclaimed;
+    g_reclaimed_bytes += world.size;
+    g_live_bytes -= world.size;
+    it = g_worlds.erase(it);
+  }
+}
+
 bool lifetimes_balanced() {
   RegistryLock lock;
-  return g_worlds.empty() && g_created == g_disposed && g_live_bytes == 0;
+  return g_worlds.empty() && g_created == g_disposed + g_reclaimed && g_live_bytes == 0;
 }
 
 Statistics statistics() {
   RegistryLock lock;
   return {g_created, g_disposed, g_invalid_operations, g_worlds.size(),
-          g_live_bytes};
+          g_live_bytes, g_reclaimed, g_reclaimed_bytes};
 }
 
 void configure_gpu_fallback_bridge(
     RecognizesSmartWorld recognizes_smart_world) {
   gpu_runtime::memory_world_transport::configure_host_world_fallback(
-      &new_world, &dispose_world, &owns_world, recognizes_smart_world);
+      &new_transport_world, &dispose_transport_world, &owns_world, recognizes_smart_world);
 }
 
 }  // namespace aexcompat::world_registry
@@ -946,7 +997,11 @@ namespace aexcompat::world_registry {
 aexcompat::worker_runtime::CaseOwnership case_world_ownership() {
   aexcompat::worker_runtime::CaseOwnership result;
   RegistryLock lock;
-  for (const auto& [key, value] : g_worlds) result.emplace_back(reinterpret_cast<uintptr_t>(key), value.size);
+  // Plugin PF worlds may outlive independent cases in global data. GPU
+  // transport ownership is still case-scoped and must balance.
+  for (const auto& [key, value] : g_worlds)
+    if (value.gpu_transport_owned)
+      result.emplace_back(reinterpret_cast<uintptr_t>(key), value.size);
   for (const auto& [key, value] : g_aegp_views) if (!value.borrowed) result.emplace_back(reinterpret_cast<uintptr_t>(key), 1);
   for (const auto& [key, value] : g_platform_worlds) result.emplace_back(reinterpret_cast<uintptr_t>(key), 2);
   result.emplace_back(0, g_live_owned_aegp_backings.load());

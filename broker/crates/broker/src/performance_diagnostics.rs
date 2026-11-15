@@ -402,6 +402,7 @@ fn run_observations(
     let mut session_open_ns = Vec::new();
     let mut worker_admitted_hashes = Vec::new();
     let mut memory_sessions = Vec::new();
+    let mut world_reclamation_warnings = Vec::new();
     let mut output_identities = Vec::new();
     for (session_index, &(width, height)) in request.resolutions.iter().enumerate() {
         let pixel_count = width as usize * height as usize;
@@ -603,6 +604,9 @@ fn run_observations(
                 None,
             ));
         }
+        if let Some(warning) = world_reclamation_warning(&close, session_index) {
+            world_reclamation_warnings.push(warning);
+        }
         if profile.is_some() {
             memory_sessions.push(json!({
                 "session_index": session_index, "width": width, "height": height,
@@ -635,6 +639,7 @@ fn run_observations(
     identity["plugin_sha256_at_end"] = json!(plugin_sha256_after);
     report["identity"] = identity;
     report["samples"] = json!(samples);
+    report["plugin_world_reclamation_warnings"] = json!(world_reclamation_warnings);
     report["frames_per_resolution"] = json!(request.frames_per_resolution);
     report["session_open_ns"] = json!(session_open_ns);
     Ok(report)
@@ -653,9 +658,36 @@ pub struct RunRequest<'a> {
     pub timeout_ms: u64,
 }
 
+fn world_reclamation_warning(close: &Value, session_index: usize) -> Option<Value> {
+    (close["plugin_world_leak_warning"] == json!(true)).then(|| {
+        json!({
+            "session_index": session_index,
+            "plugin_leaked_worlds_reclaimed": close["plugin_leaked_worlds_reclaimed"],
+            "plugin_leaked_world_bytes_reclaimed": close["plugin_leaked_world_bytes_reclaimed"],
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn performance_summary_retains_each_session_reclamation_warning() {
+        let clean = json!({"plugin_world_leak_warning":false});
+        let leaked = json!({"plugin_world_leak_warning":true,
+            "plugin_leaked_worlds_reclaimed":4,"plugin_leaked_world_bytes_reclaimed":8192});
+        let warnings: Vec<_> = [clean, leaked.clone(), leaked]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, close)| world_reclamation_warning(close, index))
+            .collect();
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0]["session_index"], 1);
+        assert_eq!(warnings[1]["session_index"], 2);
+        assert_eq!(warnings[0]["plugin_leaked_worlds_reclaimed"], 4);
+        assert_eq!(warnings[1]["plugin_leaked_world_bytes_reclaimed"], 8192);
+    }
 
     fn family(pixel_cost: u64, fixed_cost: u64, quadratic: bool, leak_bytes: u64) -> Vec<Sample> {
         let mut samples = Vec::new();

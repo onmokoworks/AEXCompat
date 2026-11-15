@@ -73,7 +73,7 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in, std::ostr
       in.render_error == 0 && in.parameter_count_contract_valid && in.guards_intact &&
                 in.arbitrary_defaults_disposed && arbitrary.invalid_operations == 0 &&
                 worker_runtime::handles::handle_lifetimes_balanced() &&
-                aexcompat::world_registry::lifetimes_balanced() &&
+                aexcompat::world_registry::statistics().invalid_operations == 0 &&
                 gpu_transport::gpu_memory_lifetimes_balanced() &&
                 aexcompat::pf_path_runtime::lifetimes_balanced() &&
                 aexcompat::render_receipts::lifetimes_balanced() &&

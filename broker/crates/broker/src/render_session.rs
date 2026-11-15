@@ -3881,6 +3881,9 @@ impl RenderSession {
             "worker": worker,
             "final_report": final_report,
             "session_clean": session_clean,
+            "plugin_world_leak_warning": final_report.as_ref().and_then(|r| r.get("plugin_world_leak_warning")),
+            "plugin_leaked_worlds_reclaimed": final_report.as_ref().and_then(|r| r.get("plugin_leaked_worlds_reclaimed")),
+            "plugin_leaked_world_bytes_reclaimed": final_report.as_ref().and_then(|r| r.get("plugin_leaked_world_bytes_reclaimed")),
         })
     }
 }
@@ -3991,7 +3994,7 @@ fn validate_final_report_mode(
     if report.get("handle_lifetimes_balanced") != Some(&Value::Bool(true)) {
         return Err(CloseReportInvariant::HandleLifetimes);
     }
-    if report.get("world_lifetimes_balanced") != Some(&Value::Bool(true)) {
+    if !validate_world_teardown(report) {
         return Err(CloseReportInvariant::WorldLifetimes);
     }
     if report.get("param_checkouts_balanced") != Some(&Value::Bool(true)) {
@@ -4036,6 +4039,57 @@ fn validate_final_report_mode(
         }
     }
     Ok(lease_validation)
+}
+
+/// Bounded warning projection shared by hand-built result summaries.
+pub(crate) fn propagate_world_reclamation(source: &Value, destination: &mut Value) {
+    destination["plugin_world_leak_warning"] = source
+        .get("plugin_world_leak_warning")
+        .and_then(Value::as_bool)
+        .map_or(Value::Null, Value::Bool);
+    for field in [
+        "plugin_leaked_worlds_reclaimed",
+        "plugin_leaked_world_bytes_reclaimed",
+    ] {
+        destination[field] = source
+            .get(field)
+            .and_then(Value::as_u64)
+            .map_or(Value::Null, |n| json!(n));
+    }
+}
+
+/// Balance includes host reclamation after GLOBAL_SETDOWN; disposed counts only
+/// plug-in disposal. Live worlds during frames are allowed, never reclaimed.
+/// AE's reclamation timing has not been oracle-verified.
+pub(crate) fn validate_world_teardown(report: &Value) -> bool {
+    if report.get("world_lifetimes_balanced") != Some(&json!(true)) {
+        return false;
+    }
+    let fields = [
+        "plugin_leaked_worlds_reclaimed",
+        "plugin_leaked_world_bytes_reclaimed",
+        "plugin_world_leak_warning",
+    ];
+    if fields.iter().all(|key| report.get(key).is_none()) {
+        return report
+            .get("invalid_world_operations")
+            .is_none_or(|v| v == &json!(0)); // Legacy worker reports, before the reclamation extension.
+    }
+    let number = |key| report.get(key).and_then(Value::as_u64);
+    let (Some(reclaimed), Some(bytes), Some(created), Some(disposed)) = (
+        number(fields[0]),
+        number(fields[1]),
+        number("worlds_created"),
+        number("worlds_disposed"),
+    ) else {
+        return false;
+    };
+    report.get(fields[2]) == Some(&json!(reclaimed != 0))
+        && (reclaimed == 0) == (bytes == 0)
+        && disposed.checked_add(reclaimed) == Some(created)
+        && number("live_world_count") == Some(0)
+        && number("live_world_bytes") == Some(0)
+        && number("invalid_world_operations") == Some(0)
 }
 
 fn validate_suite_lease_state(

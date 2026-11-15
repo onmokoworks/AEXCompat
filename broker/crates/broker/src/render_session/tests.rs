@@ -1011,3 +1011,86 @@ fn smart_session_commands_carry_the_gpu_backend() {
         }
     }
 }
+
+#[test]
+fn reclaimed_worlds_are_warnings_on_classic_smart_and_close_routes() {
+    let base = serde_json::json!({
+        "status":"render_completed", "render_error":0, "global_setdown_error":0,
+        "persistent_sequence_setup_error":0, "persistent_sequence_setdown_error":0,
+        "session_mode":true, "session_render_error":0,
+        "session_sequence_setup_error":0,"session_sequence_setdown_error":0,
+        "guard_bytes_intact":true,"suite_leases_balanced":true,
+        "suite_fault_observed":false,"suite_acquires":2,"suite_releases":2,
+        "handle_lifetimes_balanced":true,"param_checkouts_balanced":true,
+        "world_lifetimes_balanced":true,"worlds_created":6,"worlds_disposed":2,
+        "live_world_count":0,"live_world_bytes":0,"invalid_world_operations":0,
+        "plugin_leaked_worlds_reclaimed":4,"plugin_leaked_world_bytes_reclaimed":8192,
+        "plugin_world_leak_warning":true
+    });
+    for smart in [false, true] {
+        assert!(validate_final_report(&base, smart).is_ok());
+        let close = serde_json::json!({"invalidated":false,"worker":{"classification":"ok"},"final_report":base});
+        assert!(validate_close_report(&close, smart).is_ok());
+        for (field, value) in [
+            ("plugin_world_leak_warning", serde_json::json!(false)),
+            ("plugin_leaked_worlds_reclaimed", serde_json::json!(3)),
+            ("plugin_leaked_world_bytes_reclaimed", serde_json::json!(0)),
+            ("worlds_disposed", serde_json::json!(u64::MAX)),
+            ("live_world_count", serde_json::json!(1)),
+            ("live_world_bytes", serde_json::json!(1)),
+            ("invalid_world_operations", serde_json::json!(1)),
+            ("guard_bytes_intact", serde_json::json!(false)),
+            ("global_setdown_error", serde_json::json!(4)),
+        ] {
+            let mut bad = base.clone();
+            bad[field] = value;
+            assert!(validate_final_report(&bad, smart).is_err(), "{field}");
+        }
+        for field in [
+            "plugin_leaked_worlds_reclaimed",
+            "plugin_leaked_world_bytes_reclaimed",
+            "plugin_world_leak_warning",
+        ] {
+            let mut bad = base.clone();
+            bad.as_object_mut().unwrap().remove(field);
+            assert!(
+                validate_final_report(&bad, smart).is_err(),
+                "missing {field}"
+            );
+        }
+    }
+    let mut summary = serde_json::json!({});
+    propagate_world_reclamation(&base, &mut summary);
+    assert_eq!(
+        summary,
+        serde_json::json!({"plugin_world_leak_warning":true,
+        "plugin_leaked_worlds_reclaimed":4,"plugin_leaked_world_bytes_reclaimed":8192})
+    );
+}
+
+#[test]
+fn bridge_fallback_close_accepts_reclaimed_worlds_but_rejects_world_faults() {
+    let mut close = serde_json::json!({
+        "invalidated":false,"worker":{"classification":"ok"},
+        "frames_errored":1,"smart_output_untouched_frames":1,
+        "final_report":{
+            "status":"render_completed","global_setdown_error":0,
+            "guard_bytes_intact":true,"suite_leases_balanced":true,
+            "handle_lifetimes_balanced":true,"param_checkouts_balanced":true,
+            "session_mode":true,"session_render_error":0,
+            "session_sequence_setup_error":0,"session_sequence_setdown_error":0,
+            "pre_render_error":0,"smart_render_selector_error":0,"smart_render_error":-6,
+            "output_pixels_valid":false,"empty_result_rect":false,"result_rects_valid":true,
+            "world_lifetimes_balanced":true,"worlds_created":6,"worlds_disposed":2,
+            "live_world_count":0,"live_world_bytes":0,"invalid_world_operations":0,
+            "plugin_leaked_worlds_reclaimed":4,"plugin_leaked_world_bytes_reclaimed":8192,
+            "plugin_world_leak_warning":true
+        }
+    });
+    assert!(validate_abandoned_smart_untouched_close(&close).is_ok());
+    close["final_report"]["invalid_world_operations"] = serde_json::json!(1);
+    assert_eq!(
+        validate_abandoned_smart_untouched_close(&close),
+        Err("world_lifetimes_balanced")
+    );
+}

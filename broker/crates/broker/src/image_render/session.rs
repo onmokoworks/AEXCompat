@@ -2020,6 +2020,7 @@ pub(crate) fn build_interactive_image_report(
         "secondary_layers": facts.secondary_layers,
         "guard_bytes_intact": true, "passed": true
     });
+    crate::render_session::propagate_world_reclamation(worker_report, &mut report);
     let report_object = report
         .as_object_mut()
         .expect("interactive render report is an object");

@@ -21,6 +21,8 @@ struct Statistics {
   uint64_t invalid_operations{};
   std::size_t live_count{};
   uint64_t live_bytes{};
+  uint64_t reclaimed{};
+  uint64_t reclaimed_bytes{};
 };
 
 struct OwnedWorldSnapshot {
@@ -82,6 +84,10 @@ bool owned_world_matches(void* world, int32_t pixel_format);
 bool snapshot_owned_world(void* world, OwnedWorldSnapshot& snapshot);
 bool lifetimes_balanced();
 Statistics statistics();
+// GLOBAL_SETDOWN alone does not quiesce provider death callbacks. Cluster
+// swaps accumulate worlds until terminal provider shutdown, never frame end.
+void note_global_setdown_result(bool safe);
+void reclaim_plugin_worlds_after_setdown(bool providers_quiesced);
 
 using RecognizesSmartWorld = bool (*)(void*);
 void configure_gpu_fallback_bridge(RecognizesSmartWorld recognizes_smart_world);
