@@ -450,6 +450,9 @@ impl HarnessApp {
                 self.live_session = None;
             }
         }
+        // The macOS guest keeps its resident session inside the backend.
+        #[cfg(target_os = "macos")]
+        crate::worker_backend::close_resident_session();
     }
 
     fn accept_adjacent_discovery(&mut self, discovery: AdjacentImportDiscovery) {
@@ -1883,6 +1886,9 @@ impl HarnessApp {
         }) else {
             return;
         };
+        // Only the Windows resident session records the selected size.
+        #[cfg(not(windows))]
+        let _ = selection_size;
         let Some(input) = self.input_image.clone() else {
             return;
         };
@@ -2233,7 +2239,7 @@ impl HarnessApp {
         let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         self.status = format!("Dispatching PF_Cmd_USER_CHANGED_PARAM for slot {slot}...");
         self.spawn_native("user_changed_parameter", move || {
-            let report = aexcompat_broker::image_render::trigger_experimental_button(
+            let report = crate::worker_backend::trigger_experimental_button(
                 &repository,
                 &plugin_path,
                 &hash,

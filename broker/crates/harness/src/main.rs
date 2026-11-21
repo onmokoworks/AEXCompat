@@ -38,7 +38,10 @@ mod unified_gui {
     include!("macos_unified_gui_tests.rs");
 
     pub(crate) fn run(repository: PathBuf) -> eframe::Result {
-        run_gui(repository)
+        let result = run_gui(repository);
+        // Statics are never dropped, so close the resident guest explicitly.
+        crate::worker_backend::close_resident_session();
+        result
     }
 }
 
@@ -90,7 +93,7 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
-    if std::env::var_os("AEXCOMPAT_LEGACY_MAC_GUI").is_some() {
+    if std::env::var_os("AEXCOMPAT_LEGACY_MAC_GUI").is_some_and(|value| value == "1") {
         return macos::run();
     }
     unified_gui::run(macos::gui_repository_root())

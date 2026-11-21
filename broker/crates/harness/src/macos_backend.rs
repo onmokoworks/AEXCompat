@@ -1,15 +1,18 @@
 // GUI から見たワーカーの窓口の macOS 版。Windows 版の画面が呼ぶ broker の関数と
 // 同じ形で、x64 guest の常駐セッションを使って描く。guest でできないもの
-// （GPU、マスクやカメラの文脈、Custom UI の操作、0 以外の時刻、色深度を
-// 保ったままのチェーン）は Unsupported として明示的に失敗させる。
-// 依存 DLL と依存フォルダは画面が AEX の隣から自動で集めて渡してくるので
-// 拒否はせず、guest が読まなかったことを報告に残す。DLL が本当に要る AEX は
-// guest の読み込みで明示的に失敗する。
+// （GPU、マスクやカメラの文脈、Custom UI の操作、frame 0 / 30fps 以外の時刻、
+// 依存 DLL、色深度を保ったままのチェーン）は Unsupported として明示的に失敗させる。
+// 依存フォルダは画面が AEX の隣から自動で渡してくるので拒否せず、guest が
+// 読まなかったことを報告に残す。
+//
+// 読み込んだ AEX のハッシュは記録するだけで、起動の条件にはしない
+// （CLAUDE.md の record, never enforce）。常駐セッションの再利用は、パスでは
+// なく AEX と入力の中身のハッシュで決める。
 
 use super::{
-    GuestWorkerCandidate, MacRenderFormat, RESIDENT_RENDER_DEADLINE, ResidentCommand,
-    ResidentSessionHandle, discover_parameters, guest_worker_candidates, selected_layer_paths,
-    start_resident_session_with_geometry,
+    DynamicParameterUi, GuestWorkerCandidate, MacRenderFormat, RESIDENT_RENDER_DEADLINE,
+    ResidentCommand, ResidentSessionHandle, discover_parameters, guest_worker_candidates,
+    selected_layer_paths, start_resident_session_with_geometry,
 };
 use aexcompat_broker::image_render::{
     NativeImageInput, RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction,
@@ -18,9 +21,14 @@ use aexcompat_broker::render_fixture::InteractiveParameter;
 use aexcompat_broker::render_request::HostContext;
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, TryLockError};
+
+/// The guest renders frame 0 of a 30 fps timeline with a one-frame step.
+const GUEST_TIME_SCALE: u32 = 30;
 
 fn unsupported(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, message.into())
@@ -30,15 +38,38 @@ fn failed(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
 }
 
+fn file_sha256(path: &Path) -> io::Result<String> {
+    Ok(format!("{:x}", Sha256::digest(std::fs::read(path)?)))
+}
+
+/// Replaces worker paths and stderr text with a count so a report stays shareable.
+fn scrub_security(report: &mut Value) {
+    if let Some(security) = report
+        .get_mut("macos_security")
+        .and_then(Value::as_object_mut)
+        && let Some(reasons) = security.get("fallback_reasons").and_then(Value::as_array)
+    {
+        let count = reasons.len();
+        security.insert("fallback_reasons".into(), json!(count));
+    }
+    if let Some(object) = report.as_object_mut()
+        && let Some(reasons) = object.get("fallback_reasons").and_then(Value::as_array)
+    {
+        let count = reasons.len();
+        object.insert("fallback_reasons".into(), json!(count));
+    }
+}
+
 pub(crate) fn inspect_experimental_via_discovery_in_place(
     repository: &Path,
     plugin: ApprovedImageArtifact,
     dependency_search_dirs: Vec<PathBuf>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
-    let (parameters, _defaults, report, _identity) =
+    let (parameters, _defaults, report, (staged_sha256, _post_setup_sha256)) =
         discover_parameters(repository, &plugin.path).map_err(failed)?;
     let mut diagnostics: Value = serde_json::from_str(&report)
         .map_err(|error| failed(format!("guest setup report is not JSON: {error}")))?;
+    scrub_security(&mut diagnostics);
     // The GUI reads the same capability fields the Windows discovery
     // inspection derives from the worker's out_flags/out_flags2.
     let out_flags = diagnostics["out_flags"]
@@ -50,6 +81,14 @@ pub(crate) fn inspect_experimental_via_discovery_in_place(
     if diagnostics["params_setup_error"] != json!(0) {
         return Err(failed("AEX rejected PF_PARAMS_SETUP"));
     }
+    // One row per declared parameter, supported or not, so the GUI can tell
+    // "declared none" from "declared only unsupported controls".
+    let metadata = diagnostics["parameters"]
+        .as_array()
+        .ok_or_else(|| failed("guest setup report has no parameters array"))?
+        .iter()
+        .map(|row| json!({"index": row["slot"], "type": row["param_type"]}))
+        .collect::<Vec<_>>();
     let audio_effect_only = out_flags & (1_u64 << 31) != 0;
     diagnostics["advertised_out_flags"] = json!(out_flags);
     diagnostics["advertised_out_flags2"] = json!(out_flags2);
@@ -60,21 +99,20 @@ pub(crate) fn inspect_experimental_via_discovery_in_place(
     diagnostics["image_render_supported"] = json!(!audio_effect_only);
     diagnostics["runtime_module_policy_applied"] = json!(false);
     diagnostics["guest_ignored_dependency_folders"] = json!(dependency_search_dirs.len());
-    // One row per declared parameter, supported or not, so the GUI can tell
-    // "declared none" from "declared only unsupported controls".
-    let metadata = diagnostics["parameters"]
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .map(|row| json!({"index": row["slot"], "type": row["param_type"]}))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
     diagnostics["parameter_metadata"] = Value::Array(metadata);
+    // What the guest actually staged, next to what the GUI selected.
+    diagnostics["plugin_sha256"] = json!(staged_sha256);
+    diagnostics["inspection_plugin_sha256"] = json!(hex_lower(&plugin.expected_sha256));
     Ok((parameters, diagnostics))
 }
 
-/// Describes why no guest worker can start, or `None` when one is built.
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Describes why no guest worker can start, or `None` when one is built. The
+/// guest picks the SmartFX or Classic path itself, so `smart` does not choose a
+/// different worker here.
 pub(crate) fn missing_render_worker(repository: &Path, _smart: bool) -> Option<String> {
     guest_worker_candidates(repository).err()
 }
@@ -87,28 +125,106 @@ fn guest_format(pixel_format: RenderPixelFormat) -> MacRenderFormat {
     }
 }
 
-/// The session stays open between renders, the way the macOS GUI kept it:
-/// the same AEX, input, depth and layer inputs reuse the loaded guest.
-struct CachedSession {
-    plugin: PathBuf,
-    input: PathBuf,
+/// What a resident guest was opened with. Content hashes, not paths: a
+/// rebuilt AEX or an edited input at the same path must reopen the guest.
+#[derive(Clone, PartialEq)]
+struct SessionKey {
+    plugin_sha256: String,
+    input_sha256: String,
     format: MacRenderFormat,
-    layers: Vec<(u32, PathBuf)>,
+    layers: Vec<(u32, PathBuf, String)>,
+}
+
+struct CachedSession {
+    key: SessionKey,
     session: ResidentSessionHandle,
 }
 
 static SESSION: Mutex<Option<CachedSession>> = Mutex::new(None);
+/// Set when a close arrives while a render holds the session; the render
+/// drops the session as soon as it finishes.
+static CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Closes the resident guest, if any. Called when the GUI drops its AEX.
-pub(crate) fn close_resident_session() {
-    let cached = SESSION
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take();
-    drop(cached);
+fn lock_session() -> MutexGuard<'static, Option<CachedSession>> {
+    let mut guard = SESSION.lock().unwrap_or_else(|error| error.into_inner());
+    if CLOSE_REQUESTED.swap(false, Ordering::AcqRel) {
+        *guard = None;
+    }
+    guard
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Closes the resident guest. Never blocks the GUI behind a running render:
+/// if one holds the session, the close is applied when it returns.
+pub(crate) fn close_resident_session() {
+    match SESSION.try_lock() {
+        Ok(mut guard) => {
+            CLOSE_REQUESTED.store(false, Ordering::Release);
+            *guard = None;
+        }
+        Err(TryLockError::Poisoned(error)) => {
+            *error.into_inner() = None;
+        }
+        Err(TryLockError::WouldBlock) => CLOSE_REQUESTED.store(true, Ordering::Release),
+    }
+}
+
+fn session_key(
+    plugin_path: &Path,
+    input_path: &Path,
+    format: MacRenderFormat,
+    parameters: &[InteractiveParameter],
+) -> io::Result<SessionKey> {
+    let layers = selected_layer_paths(parameters)
+        .into_iter()
+        .map(|(slot, path)| file_sha256(&path).map(|hash| (slot, path, hash)))
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(SessionKey {
+        plugin_sha256: file_sha256(plugin_path)?,
+        input_sha256: file_sha256(input_path)?,
+        format,
+        layers,
+    })
+}
+
+fn ensure_session<'a>(
+    guard: &'a mut MutexGuard<'static, Option<CachedSession>>,
+    repository: &Path,
+    plugin_path: &Path,
+    input_path: &Path,
+    key: SessionKey,
+) -> io::Result<&'a mut CachedSession> {
+    if guard.as_ref().is_none_or(|cached| cached.key != key) {
+        // Dropping the previous handle performs its bounded shutdown.
+        **guard = None;
+        let candidates: Vec<GuestWorkerCandidate> =
+            guest_worker_candidates(repository).map_err(failed)?;
+        let layers = key
+            .layers
+            .iter()
+            .map(|(slot, path, _)| (*slot, path.clone()))
+            .collect();
+        let session = start_resident_session_with_geometry(
+            &candidates,
+            plugin_path,
+            input_path,
+            Path::new("."),
+            key.format,
+            layers,
+            false,
+        )
+        .map_err(failed)?;
+        **guard = Some(CachedSession { key, session });
+    }
+    Ok(guard.as_mut().expect("session was just ensured"))
+}
+
+fn unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
 fn render_in_guest(
     repository: &Path,
     plugin_path: &Path,
@@ -116,48 +232,22 @@ fn render_in_guest(
     output_path: &Path,
     parameters: &[InteractiveParameter],
     pixel_format: RenderPixelFormat,
+    smart: bool,
 ) -> io::Result<Value> {
     let format = guest_format(pixel_format);
-    let layers = selected_layer_paths(parameters);
-    let mut guard = SESSION.lock().unwrap_or_else(|error| error.into_inner());
-    let reusable = guard.as_ref().is_some_and(|cached| {
-        cached.plugin == plugin_path
-            && cached.input == input_path
-            && cached.format == format
-            && cached.layers == layers
-    });
-    if !reusable {
-        // Dropping the previous handle performs its bounded shutdown.
-        *guard = None;
-        let candidates: Vec<GuestWorkerCandidate> =
-            guest_worker_candidates(repository).map_err(failed)?;
-        let output_directory = output_path
-            .parent()
-            .ok_or_else(|| failed("render output has no parent folder"))?;
-        let session = start_resident_session_with_geometry(
-            &candidates,
-            plugin_path,
-            input_path,
-            output_directory,
-            format,
-            layers.clone(),
-            false,
-        )
-        .map_err(failed)?;
-        *guard = Some(CachedSession {
-            plugin: plugin_path.to_path_buf(),
-            input: input_path.to_path_buf(),
-            format,
-            layers,
-            session,
-        });
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    let cached = guard.as_mut().expect("session was just ensured");
+    let key = session_key(plugin_path, input_path, format, parameters)?;
+    let plugin_sha256 = key.plugin_sha256.clone();
+    let mut guard = lock_session();
+    let cached = ensure_session(&mut guard, repository, plugin_path, input_path, key)?;
     // Deep formats write a new folder holding the artifact and a PNG preview;
-    // the artifact writer creates it and refuses an existing one.
+    // the artifact writer creates it and refuses an existing one, so every
+    // render gets its own folder next to the PNG.
     let guest_output = match format {
         MacRenderFormat::PngArgb8 => output_path.to_path_buf(),
-        _ => output_path.with_extension("artifact"),
+        _ => output_path.with_extension(format!("{}.artifact", unique_suffix())),
     };
     let frame_index = cached.session.next_frame;
     cached.session.next_frame += 1;
@@ -182,18 +272,42 @@ fn render_in_guest(
             return Err(failed(error));
         }
     };
+    if CLOSE_REQUESTED.swap(false, Ordering::AcqRel) {
+        *guard = None;
+    }
+    drop(guard);
+    let mut guest_report: Value =
+        serde_json::from_str(&result.report).unwrap_or(Value::String(result.report));
+    scrub_security(&mut guest_report);
+    // The GUI stamps the path it asked for into its receipt. A guest that ran
+    // the other path must not pass as the requested one (#606).
+    let requested_path = if smart { "smartfx" } else { "classic" };
+    let ran_path = guest_report["frame"]["output"]["render_path"].as_str();
+    if ran_path != Some(requested_path) {
+        return Err(unsupported(format!(
+            "the macOS x64 guest ran the {} path but {requested_path} was requested",
+            ran_path.unwrap_or("unknown")
+        )));
+    }
     if let Some(preview) = result.preview.as_deref()
         && preview != output_path
     {
         std::fs::copy(preview, output_path)?;
     }
-    let guest_report: Value =
-        serde_json::from_str(&result.report).unwrap_or(Value::String(result.report));
+    let artifact = (result.output != output_path).then(|| {
+        result
+            .output
+            .strip_prefix(output_path.parent().unwrap_or(Path::new("")))
+            .unwrap_or(&result.output)
+            .display()
+            .to_string()
+    });
     Ok(json!({
         "passed": true,
         "platform": "macos_x64_guest",
         "pixel_format": pixel_format.report_name(),
-        "artifact": (result.output != output_path).then(|| result.output.display().to_string()),
+        "plugin_sha256": plugin_sha256,
+        "artifact": artifact,
         "guest_report": guest_report,
     }))
 }
@@ -202,12 +316,12 @@ fn render_in_guest(
 pub(crate) fn render_experimental_image_with_approved_dependencies_and_search_dirs(
     repository: &Path,
     plugin_path: &Path,
-    _approved_sha256: &str,
+    approved_sha256: &str,
     input_path: &Path,
     output_path: &Path,
     parameters: &[InteractiveParameter],
     timing: RenderTiming,
-    _smart: bool,
+    smart: bool,
     pixel_format: RenderPixelFormat,
     host_context: Option<&HostContext>,
     custom_ui_action: Option<RenderUiAction>,
@@ -230,9 +344,16 @@ pub(crate) fn render_experimental_image_with_approved_dependencies_and_search_di
             "GPU backends are not available in the macOS x64 guest; use Auto or CPU",
         ));
     }
-    if timing.current_time != 0 {
+    if timing.current_time != 0 || timing.time_step != 1 || timing.time_scale != GUEST_TIME_SCALE {
         return Err(unsupported(
-            "the macOS x64 guest renders frame 0 only; set the current time to 0",
+            "the macOS x64 guest renders frame 0 at 30 fps with a one-frame step only",
+        ));
+    }
+    if !dependencies.is_empty() {
+        // An AEX that loads a DLL at run time would get nothing and could
+        // still look successful, so this fails instead of rendering.
+        return Err(unsupported(
+            "dependency DLLs are not loaded by the macOS x64 guest",
         ));
     }
     let mut report = render_in_guest(
@@ -242,10 +363,73 @@ pub(crate) fn render_experimental_image_with_approved_dependencies_and_search_di
         output_path,
         parameters,
         pixel_format,
+        smart,
     )?;
-    report["guest_ignored_dependencies"] = json!(dependencies.len());
+    report["inspection_plugin_sha256"] = json!(approved_sha256.to_ascii_lowercase());
     report["guest_ignored_dependency_folders"] = json!(dependency_search_dirs.len());
+    report["requested_timing"] = json!({
+        "current_time": timing.current_time,
+        "time_step": timing.time_step,
+        "total_time": timing.total_time,
+        "time_scale": timing.time_scale,
+    });
     Ok(report)
+}
+
+/// PF_Cmd_USER_CHANGED_PARAM through the open resident guest, as the former
+/// macOS GUI did. The guest needs an input, so a render must have opened the
+/// session for this AEX first.
+pub(crate) fn trigger_experimental_button(
+    _repository: &Path,
+    plugin_path: &Path,
+    _approved_sha256: &str,
+    slot: u32,
+    parameters: &[InteractiveParameter],
+) -> io::Result<Value> {
+    if !parameters
+        .iter()
+        .any(|parameter| parameter.slot == slot && parameter.supervised)
+    {
+        return Err(failed("parameter is not supervised by the AEX"));
+    }
+    let payload = crate::guest_parameter_transport::fixture_parameter_payload(parameters)
+        .map_err(failed)?
+        .transport;
+    let plugin_sha256 = file_sha256(plugin_path)?;
+    let guard = lock_session();
+    let Some(cached) = guard
+        .as_ref()
+        .filter(|cached| cached.key.plugin_sha256 == plugin_sha256)
+    else {
+        return Err(unsupported(
+            "render this AEX once first: the macOS x64 guest sends USER_CHANGED_PARAM through its open render session",
+        ));
+    };
+    let (reply, receiver) = std::sync::mpsc::channel();
+    cached
+        .session
+        .sender
+        .send(ResidentCommand::UserChanged {
+            slot,
+            parameters: payload,
+            reply,
+        })
+        .map_err(|error| failed(format!("resident guest session stopped: {error}")))?;
+    let updates: Vec<DynamicParameterUi> = receiver
+        .recv_timeout(RESIDENT_RENDER_DEADLINE * 2)
+        .map_err(|error| failed(format!("resident guest did not answer: {error}")))?
+        .map_err(failed)?;
+    Ok(json!({
+        "user_changed_param_requested": true,
+        "user_changed_param_slot": slot,
+        "user_changed_param_error": 0,
+        "platform": "macos_x64_guest",
+        "plugin_sha256": plugin_sha256,
+        "dynamic_parameter_ui": updates
+            .iter()
+            .map(|update| json!({"slot": update.slot, "ui_flags": update.ui_flags, "flags": update.flags}))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
