@@ -7,5 +7,6 @@ include!("windows/independent_cases.rs");
 include!("windows/live_session.rs");
 include!("windows/app.rs");
 include!("windows/effect_chain.rs");
+include!("windows/viewer.rs");
 include!("windows/cli.rs");
 include!("windows/tests.rs");

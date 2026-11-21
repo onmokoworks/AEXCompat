@@ -1,7 +1,7 @@
 #[cfg(windows)]
 use crate::render_fixture::{
-    FixtureCase, FixtureCaseIdentity, FixtureFinalArtifact, FixturePixelFormat,
-    LoadedRenderFixture, expand_fixture_cases, fixture_case_identity, load_render_fixture,
+    FixtureCase, FixtureCaseIdentity, FixtureFinalArtifact, LoadedRenderFixture,
+    expand_fixture_cases, fixture_case_identity, load_render_fixture,
 };
 use sha2::Sha256 as FixtureSha256;
 use std::cell::RefCell;
@@ -97,9 +97,9 @@ impl Drop for FixtureOverridesGuard {
     }
 }
 
-#[cfg(windows)]
-impl From<FixturePixelFormat> for RenderPixelFormat {
-    fn from(value: FixturePixelFormat) -> Self {
+impl From<crate::render_fixture::FixturePixelFormat> for RenderPixelFormat {
+    fn from(value: crate::render_fixture::FixturePixelFormat) -> Self {
+        use crate::render_fixture::FixturePixelFormat;
         match value {
             FixturePixelFormat::Argb8 => Self::Argb8,
             FixturePixelFormat::Argb16 => Self::Argb16,

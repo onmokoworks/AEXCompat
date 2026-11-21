@@ -441,13 +441,13 @@ impl HarnessApp {
         self.spawn(move || {
             let report = run_effect_chain(&repository, &input, &output, &plan, |stage, input, output, native| {
                 let mut report = if let Some(native) = native {
-                    aexcompat_broker::image_render::render_native_image_with_dependencies(
+                    crate::worker_backend::render_native_image_with_dependencies(
                         &repository, &stage.plugin, &stage.hash, native, output, &stage.parameters,
                         timing, stage.selection.path.is_smart(), stage.host_context.as_ref(),
                         stage.custom_ui_action.clone(), gpu_backend, stage.dependencies.clone(),
                         stage.search_dirs.clone(),
                     )
-                } else { aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
+                } else { crate::worker_backend::render_experimental_image_with_approved_dependencies_and_search_dirs(
                     &repository, &stage.plugin, &stage.hash, input, output, &stage.parameters, timing,
                     stage.selection.path.is_smart(), stage.pixel_format,
                     stage.host_context.as_ref(), stage.custom_ui_action.clone(), gpu_backend,

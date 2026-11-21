@@ -38,6 +38,9 @@ use aexcompat_broker::render_pixel_format::RenderPixelFormat;
 
 include!("macos_chain.rs");
 
+#[path = "macos_backend.rs"]
+pub(crate) mod backend;
+
 const INPUT_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"];
 
 fn supported_input_image(path: &Path) -> bool {
@@ -419,9 +422,13 @@ impl Drop for ResidentSessionHandle {
     }
 }
 
+pub(crate) fn gui_repository_root() -> PathBuf {
+    repository_root()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
 pub fn run() -> eframe::Result<()> {
-    let repository = repository_root()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let repository = gui_repository_root();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])

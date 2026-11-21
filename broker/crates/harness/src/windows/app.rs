@@ -1360,7 +1360,7 @@ impl HarnessApp {
         self.spawn_native("inspect_parameters", move || {
             let expected_sha256 = decode_sha256(&hash)?;
             let (parameters, diagnostics) =
-                aexcompat_broker::image_render::inspect_experimental_via_discovery_in_place(
+                crate::worker_backend::inspect_experimental_via_discovery_in_place(
                     &repository,
                     aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
                         path: plugin_path,
@@ -1911,9 +1911,10 @@ impl HarnessApp {
                 return;
             }
         };
-        let worker =
-            required_render_worker_path(&self.repository, interactive_selection.path.is_smart());
-        if !worker.is_file() {
+        if let Some(worker) = crate::worker_backend::missing_render_worker(
+            &self.repository,
+            interactive_selection.path.is_smart(),
+        ) {
             self.status = "Required render worker is missing or unreadable.".into();
             self.report = serde_json::json!({
                 "passed": false,
@@ -2070,7 +2071,7 @@ impl HarnessApp {
                 // policy and authenticated preflight as the shipping CLI. An
                 // unavailable/ambiguous driver fails explicitly; it never
                 // becomes a policy-free GPU launch or a silent CPU success.
-                aexcompat_broker::image_render::render_experimental_image_with_auto_opencl_policy(
+                crate::worker_backend::render_experimental_image_with_auto_opencl_policy(
                     &repository,
                     &plugin_path,
                     &hash,
@@ -2084,7 +2085,7 @@ impl HarnessApp {
                     dependency_search_dirs,
                 )
             } else {
-                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
+                crate::worker_backend::render_experimental_image_with_approved_dependencies_and_search_dirs(
                     &repository,
                     &plugin_path,
                     &hash,
