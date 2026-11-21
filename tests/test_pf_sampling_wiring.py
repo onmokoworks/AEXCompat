@@ -24,6 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _compile_cache import portable_cxx_flags
 from _native_selftest import ROOT, candidates, locate_optional
 
 NAME = "worker_pf_sampling_wiring_selftest.exe"
@@ -37,6 +38,7 @@ def build_portable_selftest(tmp_path: Path) -> Path:
         [
             compiler,
             "-std=c++17",
+            *portable_cxx_flags(),
             "-D__cdecl=",
             "-Dstrnlen_s=strnlen",
             "-I",

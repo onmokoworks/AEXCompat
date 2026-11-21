@@ -300,6 +300,7 @@ enum LegacyWin64Import {
     GetSystemDefaultLCID,
     GetCPInfo,
     IsDebuggerPresent,
+    IsProcessorFeaturePresent,
     OutputDebugStringA,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -774,6 +775,13 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::IsDebuggerPresent
         }
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (
+            "kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll",
+            "IsProcessorFeaturePresent",
+        ) => LegacyWin64Import::IsProcessorFeaturePresent,
+        (_, "IsProcessorFeaturePresent") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("kernel32.dll", "OutputDebugStringA") => LegacyWin64Import::OutputDebugStringA,
         (_, "OutputDebugStringA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentThreadId") => {
@@ -3366,6 +3374,18 @@ fn install_win64_import(
                         "install GetCPInfo import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_get_cp_info(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::IsProcessorFeaturePresent => {
+                    uc(
+                        "write IsProcessorFeaturePresent return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install IsProcessorFeaturePresent import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_is_processor_feature_present(unicorn);
                         }),
                     )?;
                 }
@@ -11930,4 +11950,36 @@ fn format_crt_ctime(fields: [i32; 9]) -> Result<String, String> {
         months[month as usize],
         year + 1900
     ))
+}
+
+/// PF_* ids answered as present. The guest runs Unicorn's default x86-64
+/// CPU model (Haswell) without a CPUID hook, so these follow what that model
+/// executes under TCG and what x64 Windows always reports on it:
+/// CMPXCHG8B (2), MMX (3), SSE (6), RDTSC (8), PAE (9), SSE2 (10), NX (12),
+/// SSE3 (13), CMPXCHG16B (14), SSSE3 (36), SSE4.1 (37) and SSE4.2 (38).
+///
+/// AVX (39) and AVX2 (40) answer absent although CPUID advertises them: the
+/// guest only emulates a bounded AVX subset, so a plug-in that checks first
+/// should take its SSE path rather than run into an unemulated instruction.
+/// PF_FASTFAIL_AVAILABLE (23) answers absent because the guest does not
+/// service `int 0x29`; the MSVC CRT then reaches UnhandledExceptionFilter or
+/// TerminateProcess, which fail as explicit unsupported imports.
+const EMULATED_PROCESSOR_FEATURES: [u32; 12] = [2, 3, 6, 8, 9, 10, 12, 13, 14, 36, 37, 38];
+
+fn emulate_is_processor_feature_present(unicorn: &mut Unicorn<'_, GuestState>) {
+    let feature = match unicorn.reg_read(RegisterX86::RCX) {
+        Ok(value) => value as u32,
+        Err(error) => {
+            unicorn.get_data_mut().callback_error =
+                Some(format!("read IsProcessorFeaturePresent feature: {error}"));
+            let _ = unicorn.emu_stop();
+            return;
+        }
+    };
+    let present = u64::from(EMULATED_PROCESSOR_FEATURES.contains(&feature));
+    if let Err(error) = unicorn.reg_write(RegisterX86::RAX, present) {
+        unicorn.get_data_mut().callback_error =
+            Some(format!("write IsProcessorFeaturePresent result: {error}"));
+        let _ = unicorn.emu_stop();
+    }
 }
