@@ -197,6 +197,10 @@ pub(crate) fn close_resident_session_blocking() {
     while PENDING_DROPS.load(Ordering::Acquire) > 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    let pending = PENDING_DROPS.load(Ordering::Acquire);
+    if pending > 0 {
+        eprintln!("aexcompat: {pending} guest shutdown(s) still running at exit");
+    }
 }
 
 fn apply_requested_close(guard: &mut MutexGuard<'static, Option<CachedSession>>) {
@@ -365,7 +369,15 @@ fn render_in_guest(
             .preview
             .as_deref()
             .ok_or_else(|| failed("guest wrote no preview for the deep artifact"))?;
-        std::fs::copy(preview, output_path)?;
+        // Copy beside the output first so a failed copy never truncates a
+        // file the user chose to overwrite.
+        let partial = output_path.with_extension(format!("{suffix}.partial.png"));
+        if let Err(error) =
+            std::fs::copy(preview, &partial).and_then(|_| std::fs::rename(&partial, output_path))
+        {
+            let _ = std::fs::remove_file(&partial);
+            return Err(error);
+        }
     } else {
         std::fs::rename(&staged.path, output_path)?;
     }
