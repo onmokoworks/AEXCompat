@@ -1,3 +1,4 @@
+#![cfg_attr(not(windows), allow(dead_code, unused_imports, unused_variables))]
 // Keep the public image-rendering surface in one module while grouping the
 // implementation into bounded, reviewable source files. `include!` preserves
 // the original item scope and therefore does not change visibility or paths.

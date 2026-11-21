@@ -1,3 +1,4 @@
+#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 use crate::fixture_profiles::maskoffset::{
     OracleMask, OracleMaskVertex, bezier_mask_argb8_hash, mask_scene_argb8_hash,
     rectangle_mask_argb8_hash, source_argb8_hash,
@@ -1040,6 +1041,7 @@ pub fn run(repository: &Path, request_path: &Path, output_path: &Path) -> io::Re
     Ok(accepted)
 }
 
+#[cfg(windows)]
 pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io::Result<bool> {
     crate::trace_policy::validate_broker_trace_directory(repository)?;
     let request_path = resolve_inside(repository, request_path, "target/render-requests", false)?;
@@ -1182,6 +1184,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     Ok(passed)
 }
 
+#[cfg(windows)]
 pub fn execute_smart(
     repository: &Path,
     request_path: &Path,
@@ -1490,6 +1493,7 @@ pub fn execute_smart(
     Ok(passed)
 }
 
+#[cfg(windows)]
 pub fn execute_smart_suite_fault(
     repository: &Path,
     plugin_id: &str,
@@ -1887,6 +1891,7 @@ pub fn execute_smart_suite_fault(
     Ok(passed)
 }
 
+#[cfg(windows)]
 pub fn execute_smart_mask_scene(
     repository: &Path,
     plugin_id: &str,
@@ -2023,6 +2028,7 @@ pub fn execute_smart_mask_scene(
     Ok(passed)
 }
 
+#[cfg(windows)]
 fn summarize_classic_request(item: &(crate::ExitClassification, Value)) -> Value {
     let mut summary = json!({
         "classification":item.0.as_str(),"render_error":item.1.get("render_error"),
@@ -2033,6 +2039,7 @@ fn summarize_classic_request(item: &(crate::ExitClassification, Value)) -> Value
     summary
 }
 
+#[cfg(windows)]
 fn summarize_smart_request(item: &(crate::ExitClassification, Value)) -> Value {
     let mut summary = json!({
         "classification":item.0.as_str(),"pre_render_error":item.1.get("pre_render_error"),
@@ -2068,6 +2075,7 @@ fn summarize_smart_request(item: &(crate::ExitClassification, Value)) -> Value {
     summary
 }
 
+#[cfg(windows)]
 fn summarize_smart_fault_request(item: &(crate::ExitClassification, Value)) -> Value {
     let mut summary = json!({
         "classification":item.0.as_str(),
@@ -2141,6 +2149,7 @@ fn summarize_smart_fault_request(item: &(crate::ExitClassification, Value)) -> V
     summary
 }
 
+#[cfg(windows)]
 fn summarize_smart_mask_request(item: &(crate::ExitClassification, Value)) -> Value {
     let mut summary = json!({
         "classification":item.0.as_str(),
@@ -2155,7 +2164,7 @@ fn summarize_smart_mask_request(item: &(crate::ExitClassification, Value)) -> Va
     summary
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 

@@ -12,6 +12,7 @@ pub struct NativeImageInput {
     pub world_layout: Option<crate::render_fixture::FixtureWorldLayout>,
 }
 
+#[cfg(windows)]
 impl NativeImageInput {
     pub fn validate(&self) -> io::Result<()> {
         let bpp = self.format.bytes_per_pixel();
@@ -137,7 +138,7 @@ impl NativeImageInput {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod native_input_tests {
     use super::*;
 
@@ -309,6 +310,7 @@ mod native_input_tests {
     }
 }
 
+#[cfg(windows)]
 /// Runs one chain stage using the existing isolated session and provenance path.
 /// Timed secondary images are decoded at native depth, just like static layers.
 /// Missing timestamps remain explicit failures in the worker.
@@ -352,6 +354,7 @@ pub fn render_native_image_with_timed_layers(
     )
 }
 
+#[cfg(windows)]
 /// Runs one chain stage using the existing isolated session and provenance path.
 pub fn render_native_image_with_dependencies(
     repository: &Path,

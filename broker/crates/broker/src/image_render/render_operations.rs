@@ -1,3 +1,4 @@
+#[cfg(windows)]
 /// Render the approved ScatterMap fixture through the session-only transport.
 ///
 /// The explicit name is intentional: this is not a generic AEX path and must
@@ -77,6 +78,7 @@ pub fn render_scattermap_fixture(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image(
     repository: &Path,
     plugin_path: &Path,
@@ -281,6 +283,7 @@ fn render_audio_via_length_one_session(
     AudioWrapperOutcome::Report(Value::Object(report))
 }
 
+#[cfg(windows)]
 pub fn render_experimental_audio(
     repository: &Path,
     plugin_path: &Path,
@@ -336,6 +339,7 @@ pub fn render_experimental_audio(
     }
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_at_time(
     repository: &Path,
     plugin_path: &Path,
@@ -358,6 +362,7 @@ pub fn render_experimental_image_at_time(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_at_time_with_format(
     repository: &Path,
     plugin_path: &Path,
@@ -383,6 +388,7 @@ pub fn render_experimental_image_at_time_with_format(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_at_time_with_format_and_context(
     repository: &Path,
     plugin_path: &Path,
@@ -410,6 +416,7 @@ pub fn render_experimental_image_at_time_with_format_and_context(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_at_time_with_format_context_and_click(
     repository: &Path,
     plugin_path: &Path,
@@ -438,6 +445,7 @@ pub fn render_experimental_image_at_time_with_format_context_and_click(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_at_time_with_format_context_and_ui_action(
     repository: &Path,
     plugin_path: &Path,
@@ -467,6 +475,7 @@ pub fn render_experimental_image_at_time_with_format_context_and_ui_action(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
     repository: &Path,
     plugin_path: &Path,
@@ -498,6 +507,7 @@ pub fn render_experimental_image_at_time_with_format_context_ui_action_and_gpu_b
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_with_approved_dependencies(
     repository: &Path,
     plugin_path: &Path,
@@ -531,6 +541,7 @@ pub fn render_experimental_image_with_approved_dependencies(
     )
 }
 
+#[cfg(windows)]
 /// Interactive in-place render with the same explicitly approved runtime
 /// roots used for Effect Controls inspection. The secure session boundary
 /// canonicalizes and bounds the roots again; this API does not turn a root
@@ -570,6 +581,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_search_dirs(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
@@ -605,6 +617,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
     )
 }
 
+#[cfg(windows)]
 /// Shipping OpenCL route shared by the CLI and GUI. Its caller supplies normal
 /// discovered dependency roots, not a policy file or a hand-picked GPU runtime
 /// folder. Failure at generation or preflight is explicit; no CPU retry can
@@ -650,6 +663,7 @@ pub fn render_experimental_image_with_auto_opencl_policy(
     )
 }
 
+#[cfg(windows)]
 /// Renders through the authenticated GPU policy route while retaining the
 /// dependency search roots discovered by the shipping GUI.
 pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy_and_search_dirs(
@@ -699,6 +713,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
     )
 }
 
+#[cfg(windows)]
 /// Argb16 render whose output PNG keeps 16-bit depth: the worker's AE-range
 /// RGBA16 transport is expanded to full-range RGBA16 PNG samples instead of
 /// being quantized to the 8-bit preview. The depth-preserving raw sidecar is
@@ -726,6 +741,7 @@ pub fn render_experimental_image_at_time_with_deep16_png(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
     repository: &Path,
     plugin_path: &Path,
@@ -767,6 +783,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_with_timed_layers(
     repository: &Path,
     plugin_path: &Path,
@@ -809,6 +826,7 @@ pub fn render_experimental_image_with_timed_layers(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_with_parameter_animation(
     repository: &Path,
     plugin_path: &Path,
@@ -864,6 +882,7 @@ pub fn render_experimental_image_with_parameter_animation(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_image_with_audio_sidecar(
     repository: &Path,
     plugin_path: &Path,
@@ -904,6 +923,7 @@ pub fn render_experimental_image_with_audio_sidecar(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_artifact_at_time(
     repository: &Path,
     plugin_path: &Path,
@@ -931,6 +951,7 @@ pub fn render_experimental_artifact_at_time(
     )
 }
 
+#[cfg(windows)]
 fn render_experimental_artifact_at_time_with_context(
     repository: &Path,
     plugin_path: &Path,
@@ -978,6 +999,7 @@ fn render_experimental_artifact_at_time_with_context(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_smart_image(
     repository: &Path,
     plugin_path: &Path,
@@ -997,6 +1019,7 @@ pub fn render_experimental_smart_image(
     )
 }
 
+#[cfg(windows)]
 pub fn render_experimental_smart_image_at_time(
     repository: &Path,
     plugin_path: &Path,
@@ -1019,6 +1042,7 @@ pub fn render_experimental_smart_image_at_time(
     )
 }
 
+#[cfg(windows)]
 pub fn inspect_experimental(
     repository: &Path,
     plugin_path: &Path,
@@ -1028,6 +1052,7 @@ pub fn inspect_experimental(
         .map(|(parameters, _)| parameters)
 }
 
+#[cfg(windows)]
 pub fn inspect_experimental_external_dependencies(
     repository: &Path,
     plugin_path: &Path,
@@ -1076,6 +1101,7 @@ pub fn inspect_experimental_external_dependencies(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_options_dialog(
     repository: &Path,
     plugin_path: &Path,
@@ -1131,6 +1157,7 @@ pub fn probe_experimental_options_dialog(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_automatic_options_dialog(
     repository: &Path,
     plugin_path: &Path,
@@ -1189,6 +1216,7 @@ pub fn probe_experimental_automatic_options_dialog(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_nop_render(
     repository: &Path,
     plugin_path: &Path,
@@ -1236,6 +1264,7 @@ pub fn probe_experimental_nop_render(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_smart_nop_render(
     repository: &Path,
     plugin_path: &Path,
@@ -1287,6 +1316,7 @@ pub fn probe_experimental_smart_nop_render(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_input_buffer_write(
     repository: &Path,
     plugin_path: &Path,
@@ -1334,6 +1364,7 @@ pub fn probe_experimental_input_buffer_write(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_smart_input_buffer_write(
     repository: &Path,
     plugin_path: &Path,
@@ -1391,6 +1422,7 @@ enum FrameResizeDirection {
     Shrink,
 }
 
+#[cfg(windows)]
 fn probe_experimental_frame_resize(
     repository: &Path,
     plugin_path: &Path,
@@ -1454,6 +1486,7 @@ fn probe_experimental_frame_resize(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_expand_buffer(
     repository: &Path,
     plugin_path: &Path,
@@ -1467,6 +1500,7 @@ pub fn probe_experimental_expand_buffer(
     )
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_shrink_buffer(
     repository: &Path,
     plugin_path: &Path,
@@ -1480,6 +1514,7 @@ pub fn probe_experimental_shrink_buffer(
     )
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_persistent_sequence(
     repository: &Path,
     plugin_path: &Path,
@@ -1528,6 +1563,7 @@ pub fn probe_experimental_persistent_sequence(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_flattened_sequence(
     repository: &Path,
     plugin_path: &Path,
@@ -1574,6 +1610,7 @@ pub fn probe_experimental_flattened_sequence(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn probe_experimental_copied_flattened_sequence(
     repository: &Path,
     plugin_path: &Path,
@@ -1622,6 +1659,7 @@ pub fn probe_experimental_copied_flattened_sequence(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn inspect_experimental_with_diagnostics(
     repository: &Path,
     plugin_path: &Path,
@@ -1636,6 +1674,7 @@ pub fn inspect_experimental_with_diagnostics(
     )
 }
 
+#[cfg(windows)]
 /// Inspects one in-place plug-in through the shipping discovery-session
 /// contract. A cleanup crash can succeed only through the authenticated,
 /// single-use retry authorization minted by that session.
@@ -1666,6 +1705,7 @@ pub fn inspect_experimental_via_discovery_in_place(
     })
 }
 
+#[cfg(windows)]
 fn finish_discovery_inspection<F>(
     outcome: crate::render_session::InspectOutcome,
     repository: &Path,
@@ -1708,6 +1748,7 @@ where
     }
 }
 
+#[cfg(windows)]
 pub fn inspect_experimental_with_approved_dependencies(
     repository: &Path,
     plugin_path: &Path,
@@ -1724,6 +1765,7 @@ pub fn inspect_experimental_with_approved_dependencies(
     .map(|(parameters, _)| parameters)
 }
 
+#[cfg(windows)]
 pub fn inspect_experimental_with_approved_dependencies_and_diagnostics(
     repository: &Path,
     plugin_path: &Path,
@@ -1739,6 +1781,7 @@ pub fn inspect_experimental_with_approved_dependencies_and_diagnostics(
     )
 }
 
+#[cfg(windows)]
 /// In-place variant (issue #751): the plug-in loads from its real path and
 /// its dependency closure resolves through `dependency_search_dirs` inside
 /// the worker, so nothing is staged and no dependency closure is walked.
@@ -1765,6 +1808,7 @@ pub fn inspect_experimental_in_place(
     )
 }
 
+#[cfg(windows)]
 pub fn inspect_experimental_in_place_plugin_data_effect(
     repository: &Path,
     plugin_path: &Path,
@@ -1789,6 +1833,7 @@ pub fn inspect_experimental_in_place_plugin_data_effect(
     )
 }
 
+#[cfg(windows)]
 /// Performs the single cleanup-contained retry authorized by an authenticated
 /// discovery-session checkpoint followed by an OS-classified cleanup crash.
 /// The worker recomputes the report and deliberately does not enter
@@ -1845,6 +1890,7 @@ fn cleanup_contained_report_is_valid(diagnostics: &Value) -> bool {
             == Some(-1)
 }
 
+#[cfg(windows)]
 pub fn inspect_experimental_with_runtime_policy(
     repository: &Path,
     plugin_path: &Path,

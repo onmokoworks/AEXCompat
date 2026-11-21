@@ -1,3 +1,4 @@
+#[cfg(windows)]
 fn inspect_experimental_with_diagnostics_and_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
@@ -17,6 +18,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     )
 }
 
+#[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
 fn inspect_experimental_impl(
     repository: &Path,
@@ -791,6 +793,7 @@ pub fn trigger_experimental_button(
     Ok(report)
 }
 
+#[cfg(windows)]
 pub fn initialize_experimental_aegp(
     repository: &Path,
     plugin_path: &Path,
@@ -799,6 +802,7 @@ pub fn initialize_experimental_aegp(
     initialize_experimental_aegp_impl(repository, plugin_path, approved_sha256, Vec::new())
 }
 
+#[cfg(windows)]
 /// In-place AEGP discovery variant. The AEGP image stays in its configured
 /// install tree and resolves imports only through the same broker-approved
 /// search roots used by PF discovery.
@@ -821,6 +825,7 @@ pub fn initialize_experimental_aegp_in_place(
     )
 }
 
+#[cfg(windows)]
 fn initialize_experimental_aegp_impl(
     repository: &Path,
     plugin_path: &Path,

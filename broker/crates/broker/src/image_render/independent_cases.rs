@@ -1,3 +1,4 @@
+#[cfg(windows)]
 /// Finite independent-instance execution. Call `render` for every case in the
 /// initial preflight phase, then `start` and replay. The caller owns the bounded
 /// list and closes once after replay.
@@ -10,6 +11,7 @@ pub struct IndependentCaseBatch {
     poisoned: bool,
 }
 
+#[cfg(windows)]
 impl Default for IndependentCaseBatch {
     fn default() -> Self {
         Self {
@@ -23,6 +25,7 @@ impl Default for IndependentCaseBatch {
     }
 }
 
+#[cfg(windows)]
 impl IndependentCaseBatch {
     pub fn start(&mut self) -> io::Result<()> {
         if !self.preflight || self.static_key.is_none() {
