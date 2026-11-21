@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 /// The guest renders frame 0 of a 30 fps timeline with a one-frame step.
@@ -144,6 +144,10 @@ static SESSION: Mutex<Option<CachedSession>> = Mutex::new(None);
 /// Set when a close arrives while a render holds the session; the render
 /// drops the session as soon as it finishes.
 static CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Set once the window has closed: no new guest may start after that.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+/// Sessions being shut down on detached threads, waited for at exit.
+static PENDING_DROPS: AtomicUsize = AtomicUsize::new(0);
 
 fn lock_session() -> MutexGuard<'static, Option<CachedSession>> {
     let mut guard = SESSION.lock().unwrap_or_else(|error| error.into_inner());
@@ -169,7 +173,11 @@ pub(crate) fn close_resident_session() {
         }
     };
     if let Some(cached) = taken {
-        std::thread::spawn(move || drop(cached));
+        PENDING_DROPS.fetch_add(1, Ordering::AcqRel);
+        std::thread::spawn(move || {
+            drop(cached);
+            PENDING_DROPS.fetch_sub(1, Ordering::AcqRel);
+        });
     }
 }
 
@@ -177,12 +185,18 @@ pub(crate) fn close_resident_session() {
 /// the window has closed, when nothing is left to freeze and a detached
 /// thread would be cut off by process exit.
 pub(crate) fn close_resident_session_blocking() {
+    SHUTTING_DOWN.store(true, Ordering::Release);
     // A running call releases the lock within its own response deadline.
     let mut guard = SESSION.lock().unwrap_or_else(|error| error.into_inner());
     CLOSE_REQUESTED.store(false, Ordering::Release);
     let taken = guard.take();
     drop(guard);
     drop(taken);
+    // Each detached shutdown is itself bounded; wait a little longer than one.
+    let deadline = std::time::Instant::now() + super::RESIDENT_CLOSE_DEADLINE * 3;
+    while PENDING_DROPS.load(Ordering::Acquire) > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 fn apply_requested_close(guard: &mut MutexGuard<'static, Option<CachedSession>>) {
@@ -219,6 +233,11 @@ fn ensure_session<'a>(
     if guard.as_ref().is_none_or(|cached| cached.key != key) {
         // Dropping the previous handle performs its bounded shutdown.
         **guard = None;
+        if SHUTTING_DOWN.load(Ordering::Acquire) {
+            return Err(failed(
+                "the GUI is closing; no new guest session is started",
+            ));
+        }
         let candidates: Vec<GuestWorkerCandidate> =
             guest_worker_candidates(repository).map_err(failed)?;
         let layers = key
@@ -239,6 +258,27 @@ fn ensure_session<'a>(
         **guard = Some(CachedSession { key, session });
     }
     Ok(guard.as_mut().expect("session was just ensured"))
+}
+
+/// Removes a render's staging PNG or artifact folder unless the render
+/// completed, so no error path leaves partial files next to the output.
+struct StagedOutput {
+    path: PathBuf,
+    directory: bool,
+    keep: bool,
+}
+
+impl Drop for StagedOutput {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let _ = if self.directory {
+            std::fs::remove_dir_all(&self.path)
+        } else {
+            std::fs::remove_file(&self.path)
+        };
+    }
 }
 
 fn unique_suffix() -> u128 {
@@ -270,10 +310,16 @@ fn render_in_guest(
     // An 8 bpc frame is written to a staging name and moved over the output
     // only after the render path check below passes.
     let suffix = unique_suffix();
-    let staged_png = output_path.with_extension(format!("{suffix}.partial.png"));
-    let guest_output = match format {
-        MacRenderFormat::PngArgb8 => staged_png.clone(),
-        _ => output_path.with_extension(format!("{suffix}.artifact")),
+    let deep = format != MacRenderFormat::PngArgb8;
+    let guest_output = if deep {
+        output_path.with_extension(format!("{suffix}.artifact"))
+    } else {
+        output_path.with_extension(format!("{suffix}.partial.png"))
+    };
+    let mut staged = StagedOutput {
+        path: guest_output.clone(),
+        directory: deep,
+        keep: false,
     };
     let frame_index = cached.session.next_frame;
     cached.session.next_frame += 1;
@@ -309,18 +355,22 @@ fn render_in_guest(
     let requested_path = if smart { "smartfx" } else { "classic" };
     let ran_path = guest_report["frame"]["output"]["render_path"].as_str();
     if ran_path != Some(requested_path) {
-        let _ = std::fs::remove_file(&staged_png);
         return Err(unsupported(format!(
             "the macOS x64 guest ran the {} path but {requested_path} was requested",
             ran_path.unwrap_or("unknown")
         )));
     }
-    if format == MacRenderFormat::PngArgb8 {
-        std::fs::rename(&staged_png, output_path)?;
-    } else if let Some(preview) = result.preview.as_deref() {
+    if deep {
+        let preview = result
+            .preview
+            .as_deref()
+            .ok_or_else(|| failed("guest wrote no preview for the deep artifact"))?;
         std::fs::copy(preview, output_path)?;
+    } else {
+        std::fs::rename(&staged.path, output_path)?;
     }
-    let artifact = (format != MacRenderFormat::PngArgb8).then(|| {
+    staged.keep = true;
+    let artifact = deep.then(|| {
         result
             .output
             .strip_prefix(output_path.parent().unwrap_or(Path::new("")))
@@ -432,15 +482,16 @@ pub(crate) fn trigger_experimental_button(
         ));
     };
     let (reply, receiver) = std::sync::mpsc::channel();
-    cached
-        .session
-        .sender
-        .send(ResidentCommand::UserChanged {
-            slot,
-            parameters: payload,
-            reply,
-        })
-        .map_err(|error| failed(format!("resident guest session stopped: {error}")))?;
+    // The lock is held across the guest's answer (bounded by its deadline).
+    // Only worker threads call this; the GUI thread closes with try_lock.
+    if let Err(error) = cached.session.sender.send(ResidentCommand::UserChanged {
+        slot,
+        parameters: payload,
+        reply,
+    }) {
+        *guard = None;
+        return Err(failed(format!("resident guest session stopped: {error}")));
+    }
     let staged_plugin_sha256 = cached.session.staged_plugin_sha256.clone();
     let answer = receiver
         .recv_timeout(RESIDENT_RENDER_DEADLINE * 2)
