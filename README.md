@@ -1,45 +1,23 @@
 # AEXCompat
 
-GUI の操作手順: [日本語（正本）](docs/GUI_GUIDE_JA.md) · [English translation](docs/GUI_GUIDE.md)
+[English](README.en.md)
 
-After Effects用の`.aex`プラグインを、After Effects本体の外で読み込み、描画、デバッグするための互換ホストです。
-
-[English](README.en.md) · [クイックスタート](#クイックスタート) · [ドキュメント](#ドキュメント) · [ライセンス](#ライセンス)
+Windows x64用のAfter Effectsプラグイン（`.aex`）を、After Effectsなしで読み込んで描画・デバッグするためのツールです。
 
 <p align="center">
   <img src="docs/images/aexcompat-gui.png" alt="AEXCompat GUI：解析ログ、Effect Controls、入力・出力ビューアー" width="1200">
 </p>
 
-Rust/egui製のGUIにより、AEXの選択、Effect Controlsの操作、入力と出力の比較、診断ログの確認が行えます。WindowsとApple Silicon Macの間でGUIの共通化を進めています。
+- AEXを選ぶとEffect Controlsが出て、画像を入れて描画し、入力と出力を見比べられます
+- Classic Render、SmartFX、ARGB8/16/32Fに対応しています
+- 描画が止まったときや落ちたときの状況を、診断ログに残します
+- 複数のAEXを順に掛ける[エフェクトチェーン](docs/GUI_GUIDE_JA.md#エフェクトを連続して適用する)も使えます
 
-Windows GUIでは、複数のAEXを順番に適用する[エフェクトチェーン](docs/WINDOWS_GUI_EFFECT_CHAIN.md)も利用できます（ARGB8 / ARGB16 / ARGB32f、Auto・CPU）。
-
-## AEXCompatとは
-
-AEXCompatは、Windows x64の`.aex`プラグインに画像や音声を入力し、その結果を表示・保存・診断するためのクリーンルーム互換ホストです。
-
-- Effect Controls、Classic Render、SmartFX、ARGB8/16/32Fに対応
-- selector、Suite、パラメーター、クラッシュ、ハングに関する情報を、構造化した診断ログとして記録
-- After Effects実機で取得した参照画像とのピクセル単位での比較
-
-なお、After Effects全体やAEP編集環境、AEGPホスト全体の再実装は目的としていません。
-
-| 環境 | 実行経路 |
-|---|---|
-| Windows x64 | Rust製desktop harness + ネイティブC++/MSVC worker |
-| Apple Silicon | arm64 Unicorn workerでWindows x64 AEXをゲスト実行 |
-
-## クイックスタート
+## 試す
 
 ### Windows
 
-GUIをソースからビルドして起動するには、次の環境が必要です。
-
-- Windows 10/11 x64
-- Rust/Cargo
-- Visual StudioまたはBuild Tools（MSVC C++ツールチェーン + Windows SDK）
-
-次のコマンドでGUIをビルドして起動できます。
+Windows 10/11 x64、Rust/Cargo、Visual StudioかBuild Tools（MSVC C++とWindows SDK）が必要です。
 
 ```powershell
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -47,11 +25,11 @@ cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
 
-AEXの解析や描画を行うには、`minihost/`のworkerも別途ビルドしてください。workerのビルドには、上記の環境に加えてCMakeが必要です。Adobe SDKが必要となるのは、計測用のprobeやSDKサンプルの検証用プラグインをビルドする場合のみです。具体的なコマンドやツールセットの要件については、[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
+AEXを読み込む・描画するには、`minihost/`のworkerもビルドします（CMakeが必要）。手順は[Build Requirements](docs/BUILD_REQUIREMENTS.md)にあります。
 
-### Apple Silicon Mac（補助経路）
+### Apple Silicon Mac
 
-Rust/Cargoのみで、arm64 workerのReleaseビルド、ad-hoc署名、DMG作成、マウント後の検証まで実行できます。この通常経路ではWindowsやRosettaは不要です。
+Windows x64のAEXを、Unicornでエミュレートして動かします。Rust/Cargo、Xcode Command Line Tools、CMakeが必要です（リポジトリのパスに空白やコロンを含めない）。次のコマンドで、arm64 workerのDMGをビルドして確かめられます。MacでGUIを動かす手順は[GUIガイド](docs/GUI_GUIDE_JA.md#apple-silicon-mac)にあります。
 
 ```sh
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -59,7 +37,7 @@ cd AEXCompat
 tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local.dmg
 ```
 
-手元のAEXとPNGを使って描画を検証する場合は、両方の絶対パスを指定してください。
+手元のAEXとPNGで試すときは、絶対パスで渡します。
 
 ```sh
 AEXCOMPAT_SMOKE_AEX=/absolute/path/to/effect.aex \
@@ -67,44 +45,24 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
   tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local-smoke.dmg
 ```
 
-AEXと入力画像はDMGには収録されません。通常はarm64 Unicornのみを使用します。Rosetta native carrierは、信頼できるAEXを対象とした任意の実行経路であり、`AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1`を指定した場合にのみ追加されます。
-
 ## 使い方
 
-1. AEXを選択します
-2. 自動実行される`PF_PARAMS_SETUP`の結果から、Effect Controlsが生成されます
-3. 入力画像とパラメーターを指定します
-4. **Render current frame**または**Render and save PNG**を実行します
-5. ビューアーで入力とAEXの出力を比較します
+1. AEXを選ぶ
+2. Effect Controlsが出る
+3. 入力画像とパラメーターを決める
+4. **Render**を押す（Windowsは**Render preview**）
+5. 入力と出力を見比べる
 
-入力画像はPNG、JPEG、BMP、TIFF、WebPに対応しており、出力形式はPNGです。複数レイヤー、時間/FPS、ダウンサンプル、ピクセルアスペクト比、シーケンス状態、モノラルのfloat32音声も扱えます。
+入力はPNG、JPEG、BMP、TIFF、WebP（MacのGUIは今のところPNGのみ）、8 bpcの出力はPNGです（16/32 bpcの保存形式はGUIガイドにあります）。複数レイヤーも使えます。時間とFPS、モノラルのfloat32音声、ダウンサンプル、ピクセルアスペクト比、シーケンス状態の検査は、今のところWindowsのGUIだけです。詳しい操作は[GUIガイド](docs/GUI_GUIDE_JA.md)にあります。
 
-Windowsでは、1フレームの描画が既定で30秒を超えると打ち切られます。それより時間のかかるエフェクトを処理する場合は、GUIやCLIを起動する前に`AEXCOMPAT_FRAME_DEADLINE_MS`（ミリ秒、1000〜600000）を設定してください。`render-video-batch`でも、リクエストに`frame_deadline_ms`の指定がない場合はこの値が使われます。`--render-differential`、`--render-performance-diagnostics`、`--render-memory-diagnostics`は30秒固定のままです。
+## できないこと
 
-## アーキテクチャ
+- 未対応のSuiteや、エフェクト固有のホストへの依存で止まることがあります
+- 描画できても、After Effectsと同じ絵になるとは限りません
+- カスタムUI、GPU、ピクセル深度、複数入力、シーケンス処理の扱いは、AEXによって動いたり動かなかったりします
+- After Effects全体やAEGPホスト全体の再実装は目指していません
 
-```text
-Desktop Harness / CLI
-        ↓
-Rust Broker（入力検証・staging・provenance）
-        ↓
-Isolated Worker Process
-        ↓
-Clean-room Effect Host（selectors・PF worlds・Suites）
-        ↓
-AEX → image / audio / diagnostics
-```
-
-| ディレクトリ | 役割 |
-|---|---|
-| `broker/` | Rust製のbrokerとdesktop harness、隔離したプロセスの起動 |
-| `minihost/` | AE Effect ABIとPF Suiteを提供するC++ worker |
-| `guest/` | Apple Silicon上でWindows x64 AEXを動かすゲストworker |
-| `instruments/` | SDK ABI、Suite、selectorを測定するprobe AEX |
-| `tests/` | 契約・境界・回帰の検証と、失敗時に処理を停止するfail-closedテスト |
-| `analysis/` | AE実機で取得した参照結果と、実行時の検証記録 |
-
-## テスト
+## 開発
 
 ```powershell
 uv sync --locked
@@ -112,43 +70,35 @@ cargo test --manifest-path broker\Cargo.toml --workspace
 uv run python -m pytest -q
 ```
 
-SDKやビルド成果物、特定マシンのビルド状態にひもづく検証記録を必要とするテストは、各manifestに登録されており、既定ではスキップされます。これらはそれぞれ`--run-sdk-tests`、`--run-built-artifact-tests`、`--run-local-artifact-tests`を指定して有効にしてください。有効にしたテストを実行するには、対応するSDKやツールチェーン、成果物が必要です。
+| ディレクトリ | 中身 |
+|---|---|
+| `broker/` | Rust製のbrokerとGUI |
+| `minihost/` | AEXを動かすC++ worker |
+| `guest/` | Apple SiliconでWindows x64 AEXを動かすworker |
+| `instruments/` | SDK ABIやSuiteを測るためのAEX |
+| `tests/` | テスト |
+| `analysis/` | After Effects実機の参照結果と検証記録 |
 
-fork環境のCIではソースコードのみを対象に実行され、Adobe SDKの取得や再配布は行いません。同一リポジトリ内でのPR、mainへのpush、定期実行では、認証が必要な非公開バケットからSDKを取得し、取得に成功した場合にのみSDKとビルド成果物を使うテストも実行します。SDKを取得できるかどうかはリポジトリの公開・非公開ではなく、取得用の資格情報を利用できるかで決まります。検証の組み合わせと環境要件については、[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
+SDKを使うテストやCIの条件は[Build Requirements](docs/BUILD_REQUIREMENTS.md)、投稿のルールは[Contributing](CONTRIBUTING.md)にあります。非公開・市販のAEX、Adobe SDK、メモリダンプ、個人のファイルパスは、IssueやPRに載せないでください。
 
-## 現在の制限
-
-- 未対応のSuiteや、エフェクト固有のホストへの依存によって動作が停止する場合があります
-- workerの処理完了、画像の生成、After Effectsとのピクセル一致は、それぞれ異なる達成段階です
-- カスタムUI、GPUバックエンド、ピクセル深度、複数入力、シーケンス処理の挙動は、AEXごとに異なります
-
-## ドキュメント
+## 資料
 
 | 内容 | 文書 |
 |---|---|
-| ビルド、SDK、CIの要件 | [Build Requirements](docs/BUILD_REQUIREMENTS.md) |
-| 現在の互換性 | [Compatibility Status](docs/COMPATIBILITY_STATUS_2026-07-16.md) |
-| 開発方針とロードマップ | [Project Direction](docs/PROJECT_DIRECTION.md) |
-| MacでのAEX検証方法と日付付き結果 | [macOS Unicorn Corpus Metrics](docs/MACOS_UNICORN_CORPUS_METRICS.md) |
+| ビルドとCI | [Build Requirements](docs/BUILD_REQUIREMENTS.md) |
+| いまの互換性 | [Compatibility Status](docs/COMPATIBILITY_STATUS_2026-07-16.md) |
+| 方針とロードマップ | [Project Direction](docs/PROJECT_DIRECTION.md) |
+| Macでの検証結果 | [macOS Unicorn Corpus Metrics](docs/MACOS_UNICORN_CORPUS_METRICS.md) |
 | AEXの移植・解析 | [AEX Porting Dossier](docs/aex-porting-dossier.md) |
 | Windowsネイティブ実行の安全性強化 | [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md) |
-| 別のマシンでのAE参照結果の取得 | [AE Oracle Cross-Machine Runbook](docs/AE_ORACLE_CROSS_MACHINE_RUNBOOK_2026-07-18.md) |
-| 公開範囲と第三者の成果物の扱い | [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) |
+| 別のマシンでAE参照結果を取る | [AE Oracle Cross-Machine Runbook](docs/AE_ORACLE_CROSS_MACHINE_RUNBOOK_2026-07-18.md) |
+| 公開範囲と第三者の成果物 | [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) |
 | 脆弱性の報告 | [Security Policy](SECURITY.md) |
-| 開発・投稿ルール | [Contributing](CONTRIBUTING.md) |
 
-その他の設計・検証文書は、[文書索引](docs/README.md)から確認できます。
-
-## Contributing
-
-互換機能を追加する際は、実際のAEX、SDKのサンプル、自作の検証用AEXで動作の違いを再現します。実装にあたっては、特定のAEXだけに通用する処理ではなく、一般化した最小限のホスト機能として作成します。対象を絞ったテストと境界値の検証を行い、可能であればAfter Effects実機の結果とも比較します。
-
-非公開・市販のAEX、Adobe SDK、DLL、メモリダンプ、非公開の素材や検証データ、秘密情報、個人のファイルパスをIssueやPRへ投稿しないでください。
+ほかの資料は[文書索引](docs/README.md)にあります。
 
 ## ライセンス
 
-AEXCompatの開発者が権利を持つ部分は、[Mozilla Public License 2.0](LICENSE)のもとで提供されます。第三者の成果物、Adobe SDK、非公開AEXには、それぞれの権利・利用条件が適用されます。
-
-Unicorn Engineを含む実行ファイルの配布条件、依存関係の告知、公開前の確認事項については、[Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md)を参照してください。
+AEXCompatの開発者が権利を持つ部分は[Mozilla Public License 2.0](LICENSE)です。第三者の成果物、Adobe SDK、非公開AEXには、それぞれの条件が適用されます。Unicorn Engineを含む実行ファイルの配布条件は[Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md)にあります。
 
 Adobe、After Effectsおよび関連製品名は各権利者の商標です。本プロジェクトはAdobe公式のものではありません。

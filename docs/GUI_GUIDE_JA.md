@@ -128,7 +128,7 @@ Analysis & Logs で、選択中の AEX と入力、描画設定、実行結果�
 | 16/32 bpc で Mac の出力が見えない | `Completed: render artifact` または `Completed: effect chain artifact` と Output の保存先を確認する。深い色深度のプレビューは未対応 |
 | チェーンの途中で失敗 | 報告された段を確認し、単独でも再現するか調べる。全段の色深度対応を確認する |
 | 保存先が既に存在する、書込に失敗する | 新しい名前と書込可能なフォルダーを使う。raw サイドカーの保存先も確認する |
-| Windows で描画がタイムアウトする | 既定は 1 フレーム 30 秒。必要なら起動前に `$env:AEXCOMPAT_FRAME_DEADLINE_MS="120000"` を設定する。指定範囲は 1000〜600000 ms |
+| Windows で描画がタイムアウトする | 既定は 1 フレーム 30 秒。必要なら起動前に `$env:AEXCOMPAT_FRAME_DEADLINE_MS="120000"` を設定する。指定範囲は 1000〜600000 ms。`render-video-batch` は、リクエストに `frame_deadline_ms` がないときこの値を使う。`--render-differential`、`--render-performance-diagnostics`、`--render-memory-diagnostics` は 30 秒のまま |
 | 未対応 Suite、selector、出力サイズ・チェックサムのエラー | エラー文と再現条件を残して報告する。検証を無効にして出力を採用しない |
 
 ## 残る Windows / Mac の差分
