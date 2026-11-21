@@ -40,7 +40,7 @@ mod unified_gui {
     pub(crate) fn run(repository: PathBuf) -> eframe::Result {
         let result = run_gui(repository);
         // Statics are never dropped, so close the resident guest explicitly.
-        crate::worker_backend::close_resident_session();
+        crate::macos::backend::close_resident_session_blocking();
         result
     }
 }

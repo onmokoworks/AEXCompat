@@ -153,18 +153,41 @@ fn lock_session() -> MutexGuard<'static, Option<CachedSession>> {
     guard
 }
 
-/// Closes the resident guest. Never blocks the GUI behind a running render:
-/// if one holds the session, the close is applied when it returns.
+/// Closes the resident guest without blocking the GUI: the bounded shutdown
+/// runs on its own thread, and if a render or a USER_CHANGED_PARAM holds the
+/// session, the close is applied when that call returns.
 pub(crate) fn close_resident_session() {
-    match SESSION.try_lock() {
+    let taken = match SESSION.try_lock() {
         Ok(mut guard) => {
             CLOSE_REQUESTED.store(false, Ordering::Release);
-            *guard = None;
+            guard.take()
         }
-        Err(TryLockError::Poisoned(error)) => {
-            *error.into_inner() = None;
+        Err(TryLockError::Poisoned(error)) => error.into_inner().take(),
+        Err(TryLockError::WouldBlock) => {
+            CLOSE_REQUESTED.store(true, Ordering::Release);
+            None
         }
-        Err(TryLockError::WouldBlock) => CLOSE_REQUESTED.store(true, Ordering::Release),
+    };
+    if let Some(cached) = taken {
+        std::thread::spawn(move || drop(cached));
+    }
+}
+
+/// Closes the resident guest and waits for its bounded shutdown. Used after
+/// the window has closed, when nothing is left to freeze and a detached
+/// thread would be cut off by process exit.
+pub(crate) fn close_resident_session_blocking() {
+    // A running call releases the lock within its own response deadline.
+    let mut guard = SESSION.lock().unwrap_or_else(|error| error.into_inner());
+    CLOSE_REQUESTED.store(false, Ordering::Release);
+    let taken = guard.take();
+    drop(guard);
+    drop(taken);
+}
+
+fn apply_requested_close(guard: &mut MutexGuard<'static, Option<CachedSession>>) {
+    if CLOSE_REQUESTED.swap(false, Ordering::AcqRel) {
+        **guard = None;
     }
 }
 
@@ -239,15 +262,18 @@ fn render_in_guest(
         std::fs::create_dir_all(parent)?;
     }
     let key = session_key(plugin_path, input_path, format, parameters)?;
-    let plugin_sha256 = key.plugin_sha256.clone();
     let mut guard = lock_session();
     let cached = ensure_session(&mut guard, repository, plugin_path, input_path, key)?;
     // Deep formats write a new folder holding the artifact and a PNG preview;
     // the artifact writer creates it and refuses an existing one, so every
     // render gets its own folder next to the PNG.
+    // An 8 bpc frame is written to a staging name and moved over the output
+    // only after the render path check below passes.
+    let suffix = unique_suffix();
+    let staged_png = output_path.with_extension(format!("{suffix}.partial.png"));
     let guest_output = match format {
-        MacRenderFormat::PngArgb8 => output_path.to_path_buf(),
-        _ => output_path.with_extension(format!("{}.artifact", unique_suffix())),
+        MacRenderFormat::PngArgb8 => staged_png.clone(),
+        _ => output_path.with_extension(format!("{suffix}.artifact")),
     };
     let frame_index = cached.session.next_frame;
     cached.session.next_frame += 1;
@@ -272,9 +298,8 @@ fn render_in_guest(
             return Err(failed(error));
         }
     };
-    if CLOSE_REQUESTED.swap(false, Ordering::AcqRel) {
-        *guard = None;
-    }
+    let staged_plugin_sha256 = cached.session.staged_plugin_sha256.clone();
+    apply_requested_close(&mut guard);
     drop(guard);
     let mut guest_report: Value =
         serde_json::from_str(&result.report).unwrap_or(Value::String(result.report));
@@ -284,17 +309,18 @@ fn render_in_guest(
     let requested_path = if smart { "smartfx" } else { "classic" };
     let ran_path = guest_report["frame"]["output"]["render_path"].as_str();
     if ran_path != Some(requested_path) {
+        let _ = std::fs::remove_file(&staged_png);
         return Err(unsupported(format!(
             "the macOS x64 guest ran the {} path but {requested_path} was requested",
             ran_path.unwrap_or("unknown")
         )));
     }
-    if let Some(preview) = result.preview.as_deref()
-        && preview != output_path
-    {
+    if format == MacRenderFormat::PngArgb8 {
+        std::fs::rename(&staged_png, output_path)?;
+    } else if let Some(preview) = result.preview.as_deref() {
         std::fs::copy(preview, output_path)?;
     }
-    let artifact = (result.output != output_path).then(|| {
+    let artifact = (format != MacRenderFormat::PngArgb8).then(|| {
         result
             .output
             .strip_prefix(output_path.parent().unwrap_or(Path::new("")))
@@ -306,7 +332,7 @@ fn render_in_guest(
         "passed": true,
         "platform": "macos_x64_guest",
         "pixel_format": pixel_format.report_name(),
-        "plugin_sha256": plugin_sha256,
+        "plugin_sha256": staged_plugin_sha256,
         "artifact": artifact,
         "guest_report": guest_report,
     }))
@@ -396,7 +422,7 @@ pub(crate) fn trigger_experimental_button(
         .map_err(failed)?
         .transport;
     let plugin_sha256 = file_sha256(plugin_path)?;
-    let guard = lock_session();
+    let mut guard = lock_session();
     let Some(cached) = guard
         .as_ref()
         .filter(|cached| cached.key.plugin_sha256 == plugin_sha256)
@@ -415,19 +441,53 @@ pub(crate) fn trigger_experimental_button(
             reply,
         })
         .map_err(|error| failed(format!("resident guest session stopped: {error}")))?;
-    let updates: Vec<DynamicParameterUi> = receiver
+    let staged_plugin_sha256 = cached.session.staged_plugin_sha256.clone();
+    let answer = receiver
         .recv_timeout(RESIDENT_RENDER_DEADLINE * 2)
-        .map_err(|error| failed(format!("resident guest did not answer: {error}")))?
-        .map_err(failed)?;
+        .map_err(|error| format!("resident guest did not answer: {error}"))
+        .and_then(|result| result);
+    match &answer {
+        Ok(_) => apply_requested_close(&mut guard),
+        Err(_) => *guard = None,
+    }
+    drop(guard);
+    user_changed_report(
+        parameters,
+        slot,
+        staged_plugin_sha256,
+        answer.map_err(failed)?,
+    )
+}
+
+/// The report the GUI's dynamic-UI parser reads. Like the former macOS GUI,
+/// a partial table or a changed slot order is a failure, not a partial update.
+fn user_changed_report(
+    parameters: &[InteractiveParameter],
+    slot: u32,
+    plugin_sha256: String,
+    updates: Vec<DynamicParameterUi>,
+) -> io::Result<Value> {
+    if updates.len() != parameters.len() {
+        return Err(failed(
+            "USER_CHANGED_PARAM returned a partial parameter table",
+        ));
+    }
+    if parameters
+        .iter()
+        .zip(&updates)
+        .any(|(parameter, update)| parameter.slot != update.slot)
+    {
+        return Err(failed("USER_CHANGED_PARAM parameter identity changed"));
+    }
     Ok(json!({
         "user_changed_param_requested": true,
         "user_changed_param_slot": slot,
         "user_changed_param_error": 0,
         "platform": "macos_x64_guest",
         "plugin_sha256": plugin_sha256,
-        "dynamic_parameter_ui": updates
+        "parameters": updates
             .iter()
-            .map(|update| json!({"slot": update.slot, "ui_flags": update.ui_flags, "flags": update.flags}))
+            .map(|update| json!({"index": update.slot, "ui_flags": update.ui_flags, "flags": update.flags}))
             .collect::<Vec<_>>(),
     }))
 }
@@ -470,4 +530,23 @@ pub(crate) fn render_native_image_with_dependencies(
     Err(unsupported(
         "16/32 bpc effect chains are not available in the macOS x64 guest yet; use 8 bpc",
     ))
+}
+
+/// Builds the USER_CHANGED_PARAM report from (slot, ui_flags, flags) rows so
+/// GUI tests can feed it to the same parser the GUI uses.
+#[cfg(test)]
+pub(crate) fn user_changed_report_from_rows(
+    parameters: &[InteractiveParameter],
+    slot: u32,
+    rows: &[(u32, u32, u32)],
+) -> io::Result<Value> {
+    let updates = rows
+        .iter()
+        .map(|&(slot, ui_flags, flags)| DynamicParameterUi {
+            slot,
+            ui_flags,
+            flags,
+        })
+        .collect();
+    user_changed_report(parameters, slot, String::new(), updates)
 }

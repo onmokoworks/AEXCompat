@@ -67,4 +67,61 @@ mod macos_unified_gui_tests {
         crate::macos::backend::close_resident_session();
         std::fs::remove_dir_all(scratch).unwrap();
     }
+
+    fn parameter(slot: u32) -> aexcompat_broker::image_render::InteractiveParameter {
+        aexcompat_broker::image_render::InteractiveParameter {
+            slot,
+            name: format!("parameter-{slot}"),
+            kind: "float".into(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 0.0,
+            choices: Vec::new(),
+            use_declared_default: false,
+            color_float: None,
+            color: [255, 0, 0, 0],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: slot == 1,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0; 2],
+        }
+    }
+
+    #[test]
+    fn guest_user_changed_report_updates_effect_controls() {
+        let mut parameters = vec![parameter(1), parameter(2), parameter(3)];
+        // Slot 2 becomes disabled (bit 5), slot 3 hidden (bit 9).
+        let report = crate::macos::backend::user_changed_report_from_rows(
+            &parameters,
+            1,
+            &[(1, 0, 1 << 6), (2, 1 << 5, 0), (3, 1 << 9, 0)],
+        )
+        .unwrap();
+        assert!(apply_dynamic_ui_report(&mut parameters, &report));
+        assert!(parameters[0].enabled && parameters[0].visible);
+        assert!(!parameters[1].enabled && parameters[1].visible);
+        assert!(parameters[2].enabled && !parameters[2].visible);
+    }
+
+    #[test]
+    fn guest_user_changed_report_rejects_partial_or_reordered_tables() {
+        let parameters = vec![parameter(1), parameter(2)];
+        assert!(
+            crate::macos::backend::user_changed_report_from_rows(&parameters, 1, &[(1, 0, 0)])
+                .is_err()
+        );
+        assert!(
+            crate::macos::backend::user_changed_report_from_rows(
+                &parameters,
+                1,
+                &[(2, 0, 0), (1, 0, 0)]
+            )
+            .is_err()
+        );
+    }
 }
