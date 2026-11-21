@@ -123,9 +123,9 @@ Analysis & Logs で、選択中の AEX と入力、描画設定、実行結果�
 |---|---|
 | worker が見つからない | Windows は native worker をビルドする。Mac は `AEXCOMPAT_GUEST_WORKER` が存在する arm64 実行ファイルを指すか確認する |
 | `Could not inspect AEX parameters` | Windows x64 の AEX か確認し、診断欄で不足 DLL や未対応 Suite を調べる。Windows では依存 DLL の配置・検索先も確認する |
-| Mac で `Input exceeds the 4K UHD boundary` | 幅 3840、高さ 2160 以下の画像で試す |
+| Mac で `resident input dimensions must be 1x1..=3840x2160` | 幅 3840、高さ 2160 以下の画像で試す |
 | 描画ボタンが無効 | AEX の解析と画像の読込が完了しているか、別の処理中でないか確認する |
-| Mac で `… is not available in the macOS x64 guest` | その機能は Windows でだけ使える。「残る Windows / Mac の差分」を参照する |
+| Mac で `not available in the macOS x64 guest` または `needs the Windows native worker and is not available on this OS` | その機能は Windows でだけ使える。「残る Windows / Mac の差分」を参照する |
 | Mac で `dependency DLLs are not loaded by the macOS x64 guest` | AEX の隣に置いた DLL を guest は読み込めない。その AEX は Windows で描画する |
 | チェーンの途中で失敗 | 報告された段を確認し、単独でも再現するか調べる。全段の色深度対応を確認する |
 | 保存先が既に存在する、書込に失敗する | 新しい名前と書込可能なフォルダーを使う。raw サイドカーの保存先も確認する |
@@ -134,7 +134,7 @@ Analysis & Logs で、選択中の AEX と入力、描画設定、実行結果�
 
 ## 残る Windows / Mac の差分
 
-X01b で Mac のチェーンと 3840×2160 の 4K UHD 入力・描画に対応しました。8/16/32 bpc の実 AEX テストを通しています。大きな複数レイヤーは既存のメモリー・ファイル数・時間制限に達する場合があります。[監査記録](../analysis/PLATFORM_PARITY_2026-10-26.md) も参照してください。
+X01b で Mac に 3840×2160 の 4K UHD 入力・描画が入りました。当時の Mac GUI のチェーンは 8/16/32 bpc に対応していましたが、Windows と同じ画面に統合した今は 8 bpc だけです。大きな複数レイヤーは既存のメモリー・ファイル数・時間制限に達する場合があります。[監査記録](../analysis/PLATFORM_PARITY_2026-10-26.md) も参照してください。
 
 - 画面は同じで、実行方式は Windows が native worker、Mac が Unicorn の x64 guest です。
 - 次の機能は Mac では理由を表示して止まります: GPU（OpenCL、CUDA、DirectX）、マスク・空間・描画の文脈、カスタム UI の操作、frame 0 / 30 fps 以外の時刻、依存 DLL、16/32 bpc のチェーン、音声、互換性・GPU・性能・AEGP の診断操作。

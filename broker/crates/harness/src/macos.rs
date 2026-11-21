@@ -3656,6 +3656,45 @@ mod tests {
     }
 
     #[test]
+    fn user_changed_response_is_exact_and_bound_to_worker_and_slot() {
+        let response = json!({
+            "v": 1,
+            "type": "user_changed_done",
+            "worker_pid": 42,
+            "status": "ok",
+            "report": {
+                "slot": 2,
+                "selector_error": 0,
+                "parameters": [
+                    {"slot": 1, "ui_flags": 1 << 5, "flags": 0},
+                    {"slot": 2, "ui_flags": 1 << 9, "flags": 1 << 6}
+                ]
+            }
+        });
+        let updates = validate_user_changed(&response, 42, 2).unwrap();
+        assert_eq!(
+            updates,
+            vec![
+                DynamicParameterUi {
+                    slot: 1,
+                    ui_flags: 1 << 5,
+                    flags: 0
+                },
+                DynamicParameterUi {
+                    slot: 2,
+                    ui_flags: 1 << 9,
+                    flags: 1 << 6
+                },
+            ]
+        );
+        let mut extra = response.clone();
+        extra["unexpected"] = json!(true);
+        assert!(validate_user_changed(&extra, 42, 2).is_err());
+        assert!(validate_user_changed(&response, 41, 2).is_err());
+        assert!(validate_user_changed(&response, 42, 3).is_err());
+    }
+
+    #[test]
     fn resident_shutdown_cancels_an_active_render_before_close() {
         let (command_sender, command_receiver) = mpsc::channel();
         let (result_sender, result_receiver) = mpsc::channel();

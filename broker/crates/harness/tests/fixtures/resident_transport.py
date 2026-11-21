@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Protocol double for the Mac GUI adapter; does not emulate an AEX.
+"""Protocol double for the macOS resident guest session; does not emulate an AEX.
 
 Changes dimensions only when the GUI actually passes --negotiate-output 1.
 Emits deep boundary samples and signed origin for end-to-end export tests.

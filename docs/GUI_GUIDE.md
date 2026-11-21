@@ -123,9 +123,9 @@ For a bug report, record the OS, AEXCompat commit, AEX version, input dimensions
 |---|---|
 | Worker not found | Build the native worker on Windows. On Mac, check that `AEXCOMPAT_GUEST_WORKER` points to an existing arm64 executable |
 | `Could not inspect AEX parameters` | Check that the AEX is Windows x64, then inspect diagnostics for missing DLLs or unsupported suites. On Windows, also check dependency DLL locations and search paths |
-| `Input exceeds the 4K UHD boundary` on Mac | Use an image with width at most 3840 and height at most 2160 |
+| `resident input dimensions must be 1x1..=3840x2160` on Mac | Use an image with width at most 3840 and height at most 2160 |
 | Render button disabled | Check that AEX inspection and image loading have completed and no other operation is running |
-| `… is not available in the macOS x64 guest` on Mac | That feature is Windows-only. See Remaining Windows / Mac differences |
+| `not available in the macOS x64 guest` or `needs the Windows native worker and is not available on this OS` on Mac | That feature is Windows-only. See Remaining Windows / Mac differences |
 | `dependency DLLs are not loaded by the macOS x64 guest` on Mac | The guest cannot load DLLs placed next to the AEX. Render that AEX on Windows |
 | Chain fails partway through | Inspect the named stage and try it alone. Check depth support in every stage |
 | Destination exists or writing fails | Choose a new name in a writable directory. Check the raw sidecar destination too |
@@ -134,7 +134,7 @@ For a bug report, record the OS, AEXCompat commit, AEX version, input dimensions
 
 ## Remaining Windows / Mac differences
 
-X01b adds Mac chains and 3840×2160 4K UHD input/rendering, tested with a real AEX at 8/16/32 bpc. Large multilayer requests can still reach existing memory, file-count, or time limits. See the [audit](../analysis/PLATFORM_PARITY_2026-10-26.md).
+X01b added 3840×2160 4K UHD input/rendering on Mac. The former Mac GUI also ran chains at 8/16/32 bpc; since the GUIs were unified, Mac chains are 8 bpc only. Large multilayer requests can still reach existing memory, file-count, or time limits. See the [audit](../analysis/PLATFORM_PARITY_2026-10-26.md).
 
 - The GUI is the same; Windows runs a native worker and Mac runs the Unicorn x64 guest.
 - On Mac these stop with a stated reason: GPU (OpenCL, CUDA, DirectX), mask/spatial/render context, custom UI actions, times other than frame 0 at 30 fps, dependency DLLs, 16/32 bpc chains, audio, and compatibility/GPU/performance/AEGP diagnostics.

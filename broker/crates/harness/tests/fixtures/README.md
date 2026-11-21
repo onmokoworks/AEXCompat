@@ -2,7 +2,7 @@
 
 The four `black.*` files are real, independently encoded 3x2 RGB images with
 six opaque black pixels. They exercise JPEG, BMP, TIFF and WebP decoders through
-the Mac GUI and all resident depths. Generated with Pillow 12.2.0:
+the macOS resident input encoder at all depths. Generated with Pillow 12.2.0:
 
 ```python
 from PIL import Image
