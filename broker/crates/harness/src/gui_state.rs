@@ -1,4 +1,3 @@
-#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AnalysisPaneState {
     pub(crate) open: bool,
