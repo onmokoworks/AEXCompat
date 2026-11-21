@@ -6,7 +6,8 @@ developer tools (`lipo`, `otool`, `nm`), and looks for a `PiPL` resource in the
 bundle's `.rsrc` files or the executable's resource fork. Prints aggregate
 counts only: no plug-in names, paths, or hashes, so the summary can be shared.
 `--detail` adds counts of `@rpath` library leaf names and of exported
-entry-like symbol names. Pass one or more directories to scan recursively.
+entry-like symbol names. Those are vendor-chosen names, so keep `--detail`
+output private for third-party plug-ins and share only the plain summary. Pass one or more directories to scan recursively.
 """
 
 from __future__ import annotations
@@ -60,7 +61,8 @@ SYMBOL_MARKERS = {
 }
 
 
-ENTRY_LIKE = re.compile(r"^_\w*(Main|EntryPoint)\w*$")
+# C symbols only: mangled C++ names (`__Z…`) would spell out vendor classes.
+ENTRY_LIKE = re.compile(r"^_[A-Za-z]\w*(Main|EntryPoint)\w*$")
 FILETYPES = {"BUNDLE", "DYLIB", "EXECUTE", "OBJECT", "DYLINKER", "KEXTBUNDLE"}
 
 
@@ -181,7 +183,10 @@ def main() -> int:
     parser.add_argument(
         "--detail",
         action="store_true",
-        help="also count @rpath library leaf names and entry-like exported symbol names",
+        help=(
+            "also count @rpath library leaf names and entry-like exported symbol names; "
+            "these can identify third-party plug-ins, so do not share them"
+        ),
     )
     args = parser.parse_args()
     counts: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)

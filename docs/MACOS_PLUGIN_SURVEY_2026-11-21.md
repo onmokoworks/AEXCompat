@@ -25,7 +25,7 @@ python3 -I tools/macho_plugin_survey.py "/Library/Application Support/Adobe/Comm
 | `dispatch_*` を import | 13 | 3 |
 | 未定義シンボル数 | 25 以下 80、26〜100 199、101〜400 60、400 超 19 | 51〜100 1、101〜200 1、201〜400 1 |
 
-同梱のエフェクトで PiPL が見つからない 220 個は、`EffectMainExtra`（106）、`FilterMain`（91）、`MainEntry`（76）などの独自の入口を export している（`--detail`）。さらに `@rpath` で AE 内部のライブラリを読み込む。多い順に `dvacore` 254、`libtbb` 232、`AdobeARE` 228、`boost_thread` 228、`U.dylib` 170、`PF.dylib` 92。AE の外で読み込む前提で作られていないので、対象から外す。
+同梱のエフェクト全体では、`EffectMainExtra`（106）、`FilterMain`（91）、`MainEntry`（76）などの独自の入口を export しているものが多い（`--detail`、PiPL の有無とは突き合わせていない）。さらに `@rpath` で AE 内部のライブラリを読み込む。多い順に `dvacore` 254、`libtbb` 232、`AdobeARE` 228、`boost_thread` 228、`U.dylib` 170、`PF.dylib` 92。AE の外で読み込む前提で作られていないので、対象から外す。
 
 ## 分かったこと
 
@@ -39,7 +39,7 @@ python3 -I tools/macho_plugin_survey.py "/Library/Application Support/Adobe/Comm
 ## 次にすること
 
 1. SDK のサンプル（Skeleton など）を Mac でビルドし、同じスクリプトで数える。依存が libSystem と libc++ だけで済むなら、最初の 1 本にする
-2. サードパーティ製の標本を増やす。手元にない市販品は、持っている人にこのスクリプトを回してもらい、集計の JSON だけを受け取る
+2. サードパーティ製の標本を増やす。手元にない市販品は、持っている人にこのスクリプトを `--detail` なしで回してもらい、集計の JSON だけを受け取る（`--detail` はライブラリ名や関数名から製品が分かるので共有しない）
 3. 設計は別 Issue に起こす。骨子は次のとおり
    - PE とは別の Mach-O の読み込み（universal のスライス選択、`MH_BUNDLE` と `MH_DYLIB`、2 通りの fixup、初期化子、TLV）
    - Win64 とは別の System V の呼び出し規約（引数のレジスター、home 領域なし、red zone）
