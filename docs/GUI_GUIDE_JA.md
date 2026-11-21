@@ -37,17 +37,19 @@ cargo run --manifest-path broker/Cargo.toml -p aexcompat-harness --jobs 1
 
 ## AEX と画像を選ぶ
 
-1. Windows は Add AEX...、Mac は AEX... で Windows x64 の `.aex` を選びます。解析が終わると Effect Controls に編集可能なパラメーターが表示されます。
-2. Windows は Choose image...、Mac は PNG... で入力画像を選びます。画像のドラッグ＆ドロップも使えます。
-3. Windows は Render preview、Mac は Render を押します。Windows の詳細パネルでは Render current frame も使えます。
+画面は Windows と Mac で同じです。
 
-Windows の入力は PNG、JPEG、BMP、TIFF、WebP に対応します。このバージョンの Mac GUI では PNG を使い、幅 3840、高さ 2160 ピクセル以下にしてください。
+1. Add AEX... で Windows x64 の `.aex` を選びます。解析が終わると Effect Controls に編集可能なパラメーターが表示されます。
+2. Choose image... で入力画像を選びます。画像のドラッグ＆ドロップも使えます。
+3. Render preview を押します。詳細パネルでは Render current frame も使えます。
+
+入力は PNG、JPEG、BMP、TIFF、WebP に対応します。Mac では幅 3840、高さ 2160 ピクセル以下にしてください。
 
 ## Effect Controls を編集する
 
 数値、スライダー、チェックボックス、選択肢、色、座標を変更します。レイヤー入力を持つエフェクトでは、その項目から別の画像を選びます。表示される項目と編集範囲は AEX によって変わります。
 
-各項目の Reset で初期値に戻します。全パラメーターを戻すには、Effect Controls の見出しにある Windows の Reset、Mac の Reset All を押してください。チェーンでは選択中の段に適用されます。
+各項目の Reset で初期値に戻します。全パラメーターを戻すには、Effect Controls の見出しにある Reset を押してください。チェーンでは選択中の段に適用されます。
 
 Auto Update をオンにすると、編集後に自動で再描画します。重いエフェクトではオフにして、編集をまとめてから描画ボタンを押してください。処理中は一部の操作が無効になります。無効な項目や未対応の項目は、診断欄の理由を確認してください。
 
@@ -55,11 +57,11 @@ Auto Update をオンにすると、編集後に自動で再描画します。�
 
 INPUT は入力、AEX OUTPUT は描画結果、COMPARE は両方を横に並べます。画像上でホイールを動かすと拡大・縮小し、ドラッグすると表示位置を動かせます。Fit で全体表示に戻します。倍率はウィンドウに収めた状態を基準にしています。
 
-Mac の 16 bpc と 32 bpc float はファイルを書き出しますが、出力プレビューは表示しません。成功したかどうかは Output の保存先と Worker report で確認してください。
+Mac の 16 bpc と 32 bpc float は、表示用の PNG と、値を保った raw または EXR を書き出します（「保存する」を参照）。
 
 ## 色深度を選ぶ
 
-Analysis & Logs → Render Settings → Pixel depth で選びます。Mac では上部の形式選択も使えます。
+Analysis & Logs → Render Settings → Pixel depth で選びます。
 
 | 色深度 | 用途・注意点 |
 |---|---|
@@ -71,13 +73,13 @@ AEX が対応する色深度を選んでください。高い色深度を選ん�
 
 ## エフェクトを連続して適用する
 
-Windows と Mac の GUI でチェーンを使えます。
+Windows と Mac でチェーンを使えます。Mac のチェーンは今のところ 8 bpc だけです。
 
 1. 入力画像と最初の AEX を選びます。
-2. Effect Controls → Effect chain の Windows では Add...、Mac では Add AEX... で次の AEX を追加します。最大 8 段です。
+2. Effect Controls → Effect chain の Add... で次の AEX を追加します。最大 8 段です。
 3. 行を選んで、その段のパラメーターを編集します。同じ AEX を複数回使っても、設定は段ごとに保持されます。
 4. Up / Down で順序を変え、チェックを外すとその段を飛ばします。Remove で選択中の段を削除します。
-5. Windows は Render preview または PNG 保存、Mac は Render を実行します。有効な段を上から順に適用します。
+5. Render preview または PNG 保存を実行します。有効な段を上から順に適用します。
 
 Windows のバックエンドは Auto または CPU を使います。有効な全段が選択した色深度に対応する必要があります。途中で失敗すると後続の段を止め、失敗した段を報告します。
 
@@ -99,21 +101,19 @@ raw サイドカーは行間の余白を含まない little-endian の RGBA で�
 
 ### Mac
 
-Render で `target/harness-output` に保存します。Analysis & Logs → Output に実際の保存先が表示されます。
+Windows と同じく Render preview（保存先は `target/harness-output`）、Save PNG...、Render and save PNG... で保存します。
 
-| 上部の形式 | 保存される内容 |
+| 色深度 | 保存される内容 |
 |---|---|
-| ARGB8 PNG | `mac-aex-….png` |
-| ARGB16 raw | `mac-aex-….raw-artifact/` 内の `output.bin` と `output.json` |
-| FLOAT32 EXR | `mac-aex-….exr-artifact/` 内の `output.exr` と `output.json` |
+| ARGB8 | PNG |
+| ARGB16 | 表示用の PNG と、隣の `<名前>.<番号>.artifact/` 内の `output.bin` と `output.json` |
+| ARGB32f | 表示用の PNG と、隣の `<名前>.<番号>.artifact/` 内の `output.exr` と `output.json` |
 
-単一エフェクトの Mac ARGB16 raw は little-endian の ARGB です。Windows チェーンの RGBA サイドカーと取り違えないでください。`output.json` に寸法、チャンネル順、色深度、ハッシュなどが記録されます。ディレクトリごと保管してください。Mac の GUI は 16-bit PNG や float raw サイドカーを同時出力しません。
-
-複数段のチェーン、または段を無効にした場合は、`mac-chain-…/` に保存します。`chain.json` は段ごとの記録、`output.argb` は選択した色深度の ARGB データです。8 bpc は `output.png`、16 bpc は `artifact/output.bin` と `artifact/output.json`、float は `artifact/output.exr` と `artifact/output.json` も保存します。チェーンの `artifact/output.bin` も ARGB 順です。メタデータとともにディレクトリごと保管してください。
+Mac の ARGB16 raw は little-endian の ARGB です。Windows チェーンの RGBA サイドカーと取り違えないでください。`output.json` に寸法、チャンネル順、色深度、ハッシュなどが記録されます。PNG と `.artifact/` を一緒に保管してください。
 
 ## 診断とレポートを読む
 
-Analysis & Logs で、選択中の AEX と入力、描画設定、実行結果を確認します。Mac の Worker report には worker の結果とエラーが表示されます。Windows では互換性、GPU、性能などの診断操作も使えます。操作が無効なら、表示される未対応理由を確認してください。
+Analysis & Logs で、選択中の AEX と入力、描画設定、実行結果を確認します。互換性、GPU、性能などの診断操作は Windows で使えます。Mac では理由を表示して止まります。操作が無効なら、表示される未対応理由を確認してください。
 
 不具合の報告にはOS、AEXCompat のコミット、AEX のバージョン、入力の寸法と色深度、パラメーター、実行した操作、エラー文を残します。レポート内の個人の絶対パスを取り除き、非公開 AEX、SDK、画像そのものは公開しないでください。
 
@@ -123,9 +123,10 @@ Analysis & Logs で、選択中の AEX と入力、描画設定、実行結果�
 |---|---|
 | worker が見つからない | Windows は native worker をビルドする。Mac は `AEXCOMPAT_GUEST_WORKER` が存在する arm64 実行ファイルを指すか確認する |
 | `Could not inspect AEX parameters` | Windows x64 の AEX か確認し、診断欄で不足 DLL や未対応 Suite を調べる。Windows では依存 DLL の配置・検索先も確認する |
-| Mac で画像を選べない、`Input exceeds the 4K UHD boundary` | PNG を使い、幅 3840、高さ 2160 以下の画像で試す |
+| Mac で `resident input dimensions must be 1x1..=3840x2160` | 幅 3840、高さ 2160 以下の画像で試す |
 | 描画ボタンが無効 | AEX の解析と画像の読込が完了しているか、別の処理中でないか確認する |
-| 16/32 bpc で Mac の出力が見えない | `Completed: render artifact` または `Completed: effect chain artifact` と Output の保存先を確認する。深い色深度のプレビューは未対応 |
+| Mac で `not available in the macOS x64 guest` または `needs the Windows native worker and is not available on this OS` | その機能は Windows でだけ使える。「残る Windows / Mac の差分」を参照する |
+| Mac で `dependency DLLs are not loaded by the macOS x64 guest` | AEX の隣に置いた DLL を guest は読み込めない。その AEX は Windows で描画する |
 | チェーンの途中で失敗 | 報告された段を確認し、単独でも再現するか調べる。全段の色深度対応を確認する |
 | 保存先が既に存在する、書込に失敗する | 新しい名前と書込可能なフォルダーを使う。raw サイドカーの保存先も確認する |
 | Windows で描画がタイムアウトする | 既定は 1 フレーム 30 秒。必要なら起動前に `$env:AEXCOMPAT_FRAME_DEADLINE_MS="120000"` を設定する。指定範囲は 1000〜600000 ms |
@@ -133,14 +134,14 @@ Analysis & Logs で、選択中の AEX と入力、描画設定、実行結果�
 
 ## 残る Windows / Mac の差分
 
-X01b で Mac のチェーンと 3840×2160 の 4K UHD 入力・描画に対応しました。8/16/32 bpc の実 AEX テストを通しています。大きな複数レイヤーは既存のメモリー・ファイル数・時間制限に達する場合があります。[監査記録](../analysis/PLATFORM_PARITY_2026-10-26.md) も参照してください。
+X01b で Mac に 3840×2160 の 4K UHD 入力・描画が入りました。当時の Mac GUI のチェーンは 8/16/32 bpc に対応していましたが、Windows と同じ画面に統合した今は 8 bpc だけです。大きな複数レイヤーは既存のメモリー・ファイル数・時間制限に達する場合があります。[監査記録](../analysis/PLATFORM_PARITY_2026-10-26.md) も参照してください。
 
-- 実行方式は Windows が native worker、Mac が Unicorn worker。GPU の選択は Mac GUI では未対応です。
-- 音声・タイムライン、debug request 編集、カスタム UI の操作・診断は Windows 側にあり、Mac GUI には同等の操作がありません。
-- Mac の画像選択は PNG、寸法は 3840×2160 以下。深い色深度のプレビューと PNG 保存は未対応です。
-- 16-bit raw の順序は Windows チェーンが RGBA、Mac は単一エフェクトもチェーンも ARGB。float の GUI 出力は Windows チェーンが PNG＋raw、Mac が EXR＋JSON です。
-- 依存 DLL 探索、互換性・GPU・性能・AEGP の診断 UI、パラメーター変更後の UI 更新範囲には差が残ります。
-- U03 の CLI は UI イベントと描画呼び出しを記録します。Mac GUI の対話式カスタム UI や文字の描画は未実装です。Suite の全バージョン・全 slot、ACE、arbitrary stream の一致も未確認です。
+- 画面は同じで、実行方式は Windows が native worker、Mac が Unicorn の x64 guest です。
+- 次の機能は Mac では理由を表示して止まります: GPU（OpenCL、CUDA、DirectX）、マスク・空間・描画の文脈、カスタム UI の操作、frame 0 / 30 fps 以外の時刻、依存 DLL、16/32 bpc のチェーン、音声、互換性・GPU・性能・AEGP の診断操作。
+- Supervised なパラメーターの変更（USER_CHANGED_PARAM）は、Mac では同じ AEX を一度描画した後に使えます。
+- Mac の入力は 3840×2160 以下です。
+- 16-bit raw の順序は Windows チェーンが RGBA、Mac が ARGB。float の出力は Windows チェーンが PNG＋raw、Mac が PNG＋EXR＋JSON です。
+- U03 の CLI は UI イベントと描画呼び出しを記録します。Mac の対話式カスタム UI や文字の描画は未実装です。Suite の全バージョン・全 slot、ACE、arbitrary stream の一致も未確認です。
 - RVA・ポインターチェーン・画面全体の監視は guest 側にあります。native worker の対応機能、両側の ROI 比較、GUI の出力領域・geometry 操作は残っています。
 
 この文書の手順はソースを確認して記述しました。Windows での実行確認や、両 OS の全機能一致を示すものではありません。

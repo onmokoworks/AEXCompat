@@ -93,9 +93,6 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
-    if std::env::var_os("AEXCOMPAT_LEGACY_MAC_GUI").is_some_and(|value| value == "1") {
-        return macos::run();
-    }
     unified_gui::run(macos::gui_repository_root())
 }
 

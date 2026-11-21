@@ -1,25 +1,17 @@
-use crate::guest_parameter_transport::{
-    FixtureParameterPayload, fixture_parameter_payload, write_control_message,
-};
-use eframe::egui::{self, Color32, RichText};
+use crate::guest_parameter_transport::{fixture_parameter_payload, write_control_message};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use crate::gui_state::{
-    AnalysisPaneState, LiveRenderState, ViewerMode, parameter_is_default, reset_all,
-    reset_parameter,
-};
 use crate::macos_worker_controller::{
     MAX_STDERR_BYTES, ResourceLimits, SecurityTier, WorkerSession, audit_process, read_bounded,
     run_staged_setup, terminate_process_group,
@@ -30,26 +22,14 @@ use aexcompat_broker::render_artifacts::{
     write_raw_world_checkpoint_artifact, write_strided_world_checkpoint_artifact,
 };
 use aexcompat_broker::render_fixture::{
-    FixtureCaseIdentity, FixtureCheckpoint, FixtureFinalArtifact, FixturePixelFormat,
-    FixtureTiming, FixtureWorldLayout, FixtureWorlds, InteractiveParameter, LoadedRenderFixture,
+    FixtureCaseIdentity, FixtureFinalArtifact, FixturePixelFormat, FixtureTiming,
+    FixtureWorldLayout, FixtureWorlds, InteractiveParameter, LoadedRenderFixture,
     expand_fixture_cases, fixture_case_identity, load_render_fixture,
 };
 use aexcompat_broker::render_pixel_format::RenderPixelFormat;
 
-include!("macos_chain.rs");
-
 #[path = "macos_backend.rs"]
 pub(crate) mod backend;
-
-const INPUT_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"];
-
-fn supported_input_image(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| {
-        INPUT_IMAGE_EXTENSIONS
-            .iter()
-            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-    })
-}
 
 const MAX_WIDTH: u32 = 3840;
 const MAX_HEIGHT: u32 = 2160;
@@ -327,11 +307,6 @@ struct DynamicParameterUi {
 }
 
 struct ResidentSessionHandle {
-    plugin_path: PathBuf,
-    input: PathBuf,
-    format: MacRenderFormat,
-    negotiate_output: bool,
-    layers: Vec<(u32, PathBuf)>,
     /// SHA-256 of the AEX bytes the guest staged and loaded.
     staged_plugin_sha256: String,
     sender: Sender<ResidentCommand>,
@@ -343,37 +318,6 @@ struct ResidentSessionHandle {
 }
 
 type SharedResidentChild = Arc<Mutex<Option<Child>>>;
-
-struct PendingResidentRender {
-    parameters: Vec<InteractiveParameter>,
-    output: PathBuf,
-    format: MacRenderFormat,
-}
-
-struct ResidentAdmissionHandle {
-    plugin_path: PathBuf,
-    input: PathBuf,
-    format: MacRenderFormat,
-    negotiate_output: bool,
-    layers: Vec<(u32, PathBuf)>,
-    receiver: Receiver<Result<ResidentSessionHandle, String>>,
-}
-
-enum ResidentState {
-    Idle,
-    Starting {
-        admission: ResidentAdmissionHandle,
-        pending: PendingResidentRender,
-    },
-    Ready(ResidentSessionHandle),
-    Failed,
-}
-
-impl ResidentState {
-    fn is_starting(&self) -> bool {
-        matches!(self, Self::Starting { .. })
-    }
-}
 
 impl ResidentSessionHandle {
     fn shutdown(&mut self) -> Result<(), String> {
@@ -429,970 +373,7 @@ pub(crate) fn gui_repository_root() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-pub fn run() -> eframe::Result<()> {
-    let repository = gui_repository_root();
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 640.0]),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "AEXCompat Image Harness",
-        options,
-        Box::new(move |_cc| Ok(Box::new(MacHarnessApp::new(repository)))),
-    )
-}
-
-struct MacHarnessApp {
-    licenses: crate::licenses::LicenseWindow,
-    repository: PathBuf,
-    plugin_path: Option<PathBuf>,
-    input: Option<PathBuf>,
-    output: Option<PathBuf>,
-    input_texture: Option<egui::TextureHandle>,
-    output_texture: Option<egui::TextureHandle>,
-    status: String,
-    report: String,
-    parameters: Vec<InteractiveParameter>,
-    parameter_defaults: Vec<InteractiveParameter>,
-    analysis: AnalysisPaneState,
-    live_render: LiveRenderState,
-    viewer_mode: ViewerMode,
-    viewer_zoom: f32,
-    viewer_pan: egui::Vec2,
-    busy: bool,
-    render_format: MacRenderFormat,
-    negotiate_output: bool,
-    resident: ResidentState,
-    user_changed: Option<Receiver<Result<Vec<DynamicParameterUi>, String>>>,
-    pending_user_changed: Option<u32>,
-    effect_chain: Vec<crate::gui_state::EffectChainSlot<MacEffectEditor>>,
-    active_effect: usize,
-    chain_task: Option<MacChainTask>,
-}
-
-impl Drop for MacHarnessApp {
-    fn drop(&mut self) {
-        if let Err(error) = self.close_resident() {
-            eprintln!("aexcompat resident cleanup failed during app exit: {error}");
-        }
-    }
-}
-
-impl MacHarnessApp {
-    fn new(repository: PathBuf) -> Self {
-        Self {
-            licenses: crate::licenses::LicenseWindow::default(),
-            repository,
-            plugin_path: None,
-            input: None,
-            output: None,
-            input_texture: None,
-            output_texture: None,
-            status: "Select an x64 AEX and an image.".into(),
-            report: String::new(),
-            parameters: Vec::new(),
-            parameter_defaults: Vec::new(),
-            analysis: AnalysisPaneState::default(),
-            live_render: LiveRenderState::default(),
-            viewer_mode: ViewerMode::Input,
-            viewer_zoom: 1.0,
-            viewer_pan: egui::Vec2::ZERO,
-            busy: false,
-            render_format: MacRenderFormat::PngArgb8,
-            negotiate_output: false,
-            resident: ResidentState::Idle,
-            user_changed: None,
-            pending_user_changed: None,
-            effect_chain: Vec::new(),
-            active_effect: 0,
-            chain_task: None,
-        }
-    }
-
-    fn close_resident(&mut self) -> Result<(), String> {
-        self.user_changed = None;
-        self.pending_user_changed = None;
-        match std::mem::replace(&mut self.resident, ResidentState::Idle) {
-            ResidentState::Ready(mut session) => session.shutdown(),
-            // Dropping the receiver is the cancellation boundary. The detached
-            // admission thread owns any worker it creates and closes it if the
-            // GUI no longer accepts the result.
-            ResidentState::Idle | ResidentState::Starting { .. } | ResidentState::Failed => Ok(()),
-        }
-    }
-
-    fn occupied(&self) -> bool {
-        self.busy || self.resident.is_starting()
-    }
-
-    fn choose_aex(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("After Effects plug-in", &["aex"])
-            .pick_file()
-        {
-            if let Err(error) = self.close_resident() {
-                self.status = "Could not cleanly close the previous AEX session.".into();
-                self.report = error;
-                return;
-            }
-            match discover_parameters(&self.repository, &path) {
-                Ok((parameters, parameter_defaults, report, _)) => {
-                    self.status = format!(
-                        "Selected AEX with {} editable parameters: {}",
-                        parameters.len(),
-                        path.display()
-                    );
-                    self.report = report;
-                    self.parameter_defaults = parameter_defaults;
-                    self.parameters = parameters;
-                    self.plugin_path = Some(path);
-                    self.viewer_mode = ViewerMode::Input;
-                }
-                Err(error) => {
-                    self.status = "Could not inspect AEX parameters.".into();
-                    self.report = error;
-                    self.parameters.clear();
-                    self.parameter_defaults.clear();
-                    self.plugin_path = None;
-                }
-            }
-            self.save_active_effect();
-            self.output = None;
-            self.output_texture = None;
-        }
-    }
-
-    fn choose_input(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Image", INPUT_IMAGE_EXTENSIONS)
-            .pick_file()
-        else {
-            return;
-        };
-        self.load_input_path(ctx, path);
-    }
-
-    fn load_input_path(&mut self, ctx: &egui::Context, path: PathBuf) {
-        if let Err(error) = self.close_resident() {
-            self.status = "Could not cleanly close the previous input session.".into();
-            self.report = error;
-            return;
-        }
-        if let Err(error) = validate_resident_image_dimensions(&path) {
-            self.status = "Input exceeds the supported image boundary.".into();
-            self.report = error;
-            return;
-        }
-        match load_texture(ctx, "mac-input", &path) {
-            Ok((texture, width, height)) if width <= MAX_WIDTH && height <= MAX_HEIGHT => {
-                self.input = Some(path);
-                self.input_texture = Some(texture);
-                self.output = None;
-                self.output_texture = None;
-                self.viewer_mode = ViewerMode::Input;
-                self.status = format!("Input ready: {width}x{height}");
-            }
-            Ok((_, width, height)) => {
-                self.status = "Input exceeds the 4K UHD boundary.".into();
-                self.report = format!(
-                    "Image must be within 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
-                );
-            }
-            Err(error) => {
-                self.status = "Could not open input image.".into();
-                self.report = error;
-            }
-        }
-    }
-
-    fn accept_dropped_input(&mut self, ctx: &egui::Context) {
-        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
-        if dropped.is_empty() {
-            return;
-        }
-        if self.occupied() {
-            self.status = "Image drop ignored while a native task is running.".into();
-            return;
-        }
-        let Some(path) =
-            crate::shared_ui::single_supported_dropped_path(&dropped, supported_input_image)
-        else {
-            self.status = "Drop exactly one PNG, JPEG, BMP, TIFF or WebP image file.".into();
-            return;
-        };
-        self.load_input_path(ctx, path);
-    }
-
-    fn render(&mut self) {
-        self.save_active_effect();
-        if self.uses_chain_renderer() {
-            self.render_chain();
-        } else {
-            self.render_single();
-        }
-    }
-
-    fn render_single(&mut self) {
-        let (Some(aex), Some(input)) = (self.plugin_path.clone(), self.input.clone()) else {
-            return;
-        };
-        let workers = match guest_worker_candidates(&self.repository) {
-            Ok(paths) => paths,
-            Err(error) => {
-                self.status = "Guest worker is not built.".into();
-                self.report = error;
-                return;
-            }
-        };
-        let output_directory = self.repository.join("target/harness-output");
-        if let Err(error) = std::fs::create_dir_all(&output_directory) {
-            self.status = "Could not create output directory.".into();
-            self.report = error.to_string();
-            return;
-        }
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        let output = match self.render_format {
-            MacRenderFormat::PngArgb8 => output_directory.join(format!("mac-aex-{nonce}.png")),
-            MacRenderFormat::RawArgb16 => {
-                output_directory.join(format!("mac-aex-{nonce}.raw-artifact"))
-            }
-            MacRenderFormat::ExrArgb32f => {
-                output_directory.join(format!("mac-aex-{nonce}.exr-artifact"))
-            }
-        };
-        let same_ready = matches!(
-            &self.resident,
-            ResidentState::Ready(session)
-                if session.plugin_path == aex
-                    && session.input == input
-                    && session.format == self.render_format
-                    && session.negotiate_output == self.negotiate_output
-                    && session.layers == selected_layer_paths(&self.parameters)
-        );
-        let same_starting = matches!(
-            &self.resident,
-            ResidentState::Starting { admission, .. }
-                if admission.plugin_path == aex
-                    && admission.input == input
-                    && admission.format == self.render_format
-                    && admission.negotiate_output == self.negotiate_output
-                    && admission.layers == selected_layer_paths(&self.parameters)
-        );
-        let pending = PendingResidentRender {
-            parameters: self.parameters.clone(),
-            output,
-            format: self.render_format,
-        };
-        if same_starting {
-            if let ResidentState::Starting {
-                pending: queued, ..
-            } = &mut self.resident
-            {
-                *queued = pending;
-            }
-            self.status = "Waiting for resident x64 guest admission...".into();
-            return;
-        }
-        if !same_ready {
-            if let Err(error) = self.close_resident() {
-                self.status = "Could not cleanly replace the resident session.".into();
-                self.report = error;
-                return;
-            }
-            self.resident = ResidentState::Starting {
-                admission: begin_resident_admission(
-                    workers,
-                    aex,
-                    input,
-                    output_directory,
-                    self.render_format,
-                    self.parameters.clone(),
-                    self.negotiate_output,
-                ),
-                pending,
-            };
-            self.status = "Starting and probing resident x64 guest...".into();
-            self.report.clear();
-            return;
-        }
-        self.dispatch_resident_render(pending);
-    }
-
-    fn dispatch_resident_render(&mut self, pending: PendingResidentRender) {
-        let ResidentState::Ready(session) = &mut self.resident else {
-            return;
-        };
-        if session.format != pending.format {
-            self.status = "Resident format changed; reopen the session.".into();
-            return;
-        }
-        let frame_index = session.next_frame;
-        session.next_frame += 1;
-        if let Err(error) = session.sender.send(ResidentCommand::Render {
-            frame_index,
-            parameters: pending.parameters,
-            output: pending.output,
-        }) {
-            self.resident = ResidentState::Failed;
-            self.status = "Resident guest session stopped.".into();
-            self.report = error.to_string();
-            return;
-        }
-        self.busy = true;
-        self.status = format!("Rendering frame {frame_index} in the resident x64 guest...");
-        self.report.clear();
-    }
-
-    fn parameter_changed(&mut self) {
-        self.live_render.parameter_changed(Instant::now());
-    }
-
-    fn dispatch_user_changed(&mut self, slot: u32) {
-        if self.user_changed.is_some() {
-            self.status = "A supervised parameter change is already in flight.".into();
-            return;
-        }
-        let ResidentState::Ready(session) = &self.resident else {
-            if self.plugin_path.is_some() && self.input.is_some() {
-                self.render_single();
-                if matches!(
-                    self.resident,
-                    ResidentState::Starting { .. } | ResidentState::Ready(_)
-                ) {
-                    self.pending_user_changed = Some(slot);
-                    self.status = "Queued USER_CHANGED_PARAM after the resident render.".into();
-                }
-            } else {
-                self.status =
-                    "Select an AEX and input before invoking a supervised control.".into();
-            }
-            return;
-        };
-        let parameters = match fixture_parameter_payload(&self.parameters) {
-            Ok(parameters) => parameters.transport,
-            Err(error) => {
-                self.status = "Could not encode the supervised parameter state.".into();
-                self.report = error;
-                self.parameter_changed();
-                return;
-            }
-        };
-        let (reply, receiver) = mpsc::channel();
-        if let Err(error) = session.sender.send(ResidentCommand::UserChanged {
-            slot,
-            parameters,
-            reply,
-        }) {
-            self.status = "Resident guest session stopped.".into();
-            self.report = error.to_string();
-            return;
-        }
-        self.user_changed = Some(receiver);
-        self.busy = true;
-        self.status = format!("Dispatching USER_CHANGED_PARAM for slot {slot}...");
-    }
-
-    fn apply_dynamic_parameter_ui(
-        &mut self,
-        updates: Vec<DynamicParameterUi>,
-    ) -> Result<(), String> {
-        if updates.len() != self.parameters.len() {
-            return Err("USER_CHANGED_PARAM returned a partial parameter table".into());
-        }
-        let mut next = self.parameters.clone();
-        for (parameter, update) in next.iter_mut().zip(updates) {
-            if parameter.slot != update.slot {
-                return Err("USER_CHANGED_PARAM parameter identity changed".into());
-            }
-            parameter.enabled = update.ui_flags & (1 << 5) == 0;
-            parameter.visible = update.ui_flags & (1 << 9) == 0;
-            parameter.supervised = update.flags & (1 << 6) != 0;
-        }
-        self.parameters = next;
-        Ok(())
-    }
-
-    fn dispatch_live_render(&mut self, ctx: &egui::Context) {
-        let now = Instant::now();
-        let ready = self.plugin_path.is_some() && self.input.is_some();
-        let occupied = self.occupied();
-        if self.live_render.take_due(now, occupied, ready) {
-            self.render();
-        } else if ready
-            && !occupied
-            && let Some(remaining) = self.live_render.remaining(now)
-        {
-            ctx.request_repaint_after(remaining.min(Duration::from_millis(60)));
-        }
-    }
-
-    fn poll(&mut self, ctx: &egui::Context) {
-        self.poll_chain(ctx);
-        let user_changed =
-            self.user_changed
-                .as_ref()
-                .and_then(|receiver| match receiver.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(
-                        "resident USER_CHANGED_PARAM controller stopped without a result".into(),
-                    )),
-                });
-        if let Some(result) = user_changed {
-            self.user_changed = None;
-            self.busy = false;
-            match result.and_then(|updates| self.apply_dynamic_parameter_ui(updates)) {
-                Ok(()) => {
-                    self.status = "USER_CHANGED_PARAM completed.".into();
-                    self.parameter_changed();
-                }
-                Err(error) => {
-                    let cleanup = self.close_resident().err();
-                    self.status = "USER_CHANGED_PARAM failed.".into();
-                    self.report = cleanup
-                        .map(|cleanup| format!("{error}\nresident cleanup: {cleanup}"))
-                        .unwrap_or(error);
-                }
-            }
-        }
-        let admission_result = match &self.resident {
-            ResidentState::Starting { admission, .. } => match admission.receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
-                    "resident admission thread stopped without a result".into(),
-                )),
-            },
-            _ => None,
-        };
-        if let Some(result) = admission_result {
-            let state = std::mem::replace(&mut self.resident, ResidentState::Idle);
-            let ResidentState::Starting { pending, .. } = state else {
-                unreachable!("only a starting admission can produce an admission result");
-            };
-            match result {
-                Ok(session) => {
-                    self.resident = ResidentState::Ready(session);
-                    self.dispatch_resident_render(pending);
-                }
-                Err(error) => self.record_resident_admission_failure(error),
-            }
-        }
-        let result = match &self.resident {
-            ResidentState::Ready(session) => session.receiver.try_recv().ok(),
-            _ => None,
-        };
-        let Some(result) = result else {
-            if self.busy || self.resident.is_starting() {
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
-            }
-            return;
-        };
-        self.busy = false;
-        // A supervised chain control may warm up its own resident session.
-        // That stage-only render is never the chain's published output.
-        if self.uses_chain_renderer() {
-            match result {
-                Ok(_) => {
-                    if let Some(slot) = self.pending_user_changed.take() {
-                        self.dispatch_user_changed(slot);
-                    }
-                }
-                Err(error) => {
-                    let cleanup = self.close_resident().err();
-                    self.status = "Supervised chain control failed.".into();
-                    self.report = cleanup
-                        .map(|cleanup| format!("{error}; cleanup: {cleanup}"))
-                        .unwrap_or(error);
-                }
-            }
-            return;
-        }
-        match result {
-            Ok(result) => match result.preview.as_deref() {
-                Some(preview) => match load_texture(ctx, "mac-output", preview) {
-                    Ok((texture, width, height)) => {
-                        let had_output = self.output_texture.is_some();
-                        self.output = Some(result.output);
-                        self.output_texture = Some(texture);
-                        self.viewer_mode = self.viewer_mode.after_successful_render(had_output);
-                        self.status = format!("Completed: {width}x{height} output");
-                        self.report = result.report;
-                    }
-                    Err(error) => {
-                        self.status =
-                            "Worker completed but output preview could not be opened.".into();
-                        self.report = error;
-                    }
-                },
-                None => {
-                    self.output = Some(result.output);
-                    self.output_texture = None;
-                    self.status = "Completed: render artifact".into();
-                    self.report = result.report;
-                }
-            },
-            Err(error) => {
-                let cleanup_error = self.close_resident().err();
-                self.status = "Render failed.".into();
-                self.report = cleanup_error
-                    .map(|cleanup| format!("{error}\nresident cleanup: {cleanup}"))
-                    .unwrap_or(error);
-            }
-        }
-        if matches!(self.resident, ResidentState::Ready(_))
-            && let Some(slot) = self.pending_user_changed.take()
-        {
-            self.dispatch_user_changed(slot);
-        }
-    }
-
-    fn record_resident_admission_failure(&mut self, error: String) {
-        self.pending_user_changed = None;
-        self.status = "Could not start resident guest session.".into();
-        self.report = error;
-        self.resident = ResidentState::Failed;
-    }
-}
-
-impl eframe::App for MacHarnessApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.set_visuals(egui::Visuals::dark());
-        self.accept_dropped_input(ctx);
-        self.poll(ctx);
-        self.dispatch_live_render(ctx);
-        self.licenses.show(ctx);
-        egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.heading(RichText::new("AEXCompat").size(22.0));
-                ui.weak("EFFECT LAB · APPLE SILICON X64 GUEST");
-                ui.separator();
-                let occupied = self.occupied();
-                if ui
-                    .add_enabled(!occupied, egui::Button::new("AEX..."))
-                    .clicked()
-                {
-                    self.choose_aex();
-                }
-                if ui
-                    .add_enabled(!occupied, egui::Button::new("Image..."))
-                    .clicked()
-                {
-                    self.choose_input(ctx);
-                }
-                ui.add_enabled_ui(!occupied, |ui| {
-                    egui::ComboBox::from_id_salt("mac-render-format")
-                        .selected_text(match self.render_format {
-                            MacRenderFormat::PngArgb8 => "ARGB8 PNG",
-                            MacRenderFormat::RawArgb16 => "ARGB16 PNG + raw",
-                            MacRenderFormat::ExrArgb32f => "FLOAT32 EXR + PNG + raw",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.render_format,
-                                MacRenderFormat::PngArgb8,
-                                "ARGB8 PNG",
-                            );
-                            ui.selectable_value(
-                                &mut self.render_format,
-                                MacRenderFormat::RawArgb16,
-                                "ARGB16 PNG + raw",
-                            );
-                            ui.selectable_value(
-                                &mut self.render_format,
-                                MacRenderFormat::ExrArgb32f,
-                                "FLOAT32 EXR + PNG + raw",
-                            );
-                        });
-                });
-                ui.add_enabled_ui(!occupied && !self.uses_chain_renderer(), |ui| {
-                    ui.checkbox(
-                        &mut self.negotiate_output,
-                        "Negotiate output size (single effect)",
-                    );
-                });
-                let ready = !occupied && self.plugin_path.is_some() && self.input.is_some();
-                if ui.add_enabled(ready, egui::Button::new("Render")).clicked() {
-                    self.render();
-                }
-                ui.separator();
-                let mut live_render = self.live_render.enabled();
-                if ui.checkbox(&mut live_render, "Auto Update").changed() {
-                    self.live_render.set_enabled(live_render);
-                }
-                if occupied {
-                    ui.spinner();
-                }
-                self.licenses.about_button(ui, "About");
-                ui.label(&self.status);
-            });
-            ui.add_space(6.0);
-        });
-
-        let mut analysis = std::mem::take(&mut self.analysis);
-        crate::shared_ui::show_analysis_panel(
-            ctx,
-            &mut analysis,
-            "Analysis & Logs",
-            "Diagnostics, render settings and command output",
-            |ui| {
-                crate::shared_ui::analysis_section_heading(
-                    ui,
-                    crate::shared_ui::AnalysisSection::ProjectSession.title(),
-                    ui.visuals().weak_text_color(),
-                );
-                ui.label(
-                    "Select the current plug-in and input used by the resident x64 guest session.",
-                );
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.occupied(), egui::Button::new("Change AEX source..."))
-                        .clicked()
-                    {
-                        self.choose_aex();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.occupied(),
-                            egui::Button::new("Change image source..."),
-                        )
-                        .clicked()
-                    {
-                        self.choose_input(ctx);
-                    }
-                });
-                for (label, path) in [
-                    ("AEX", self.plugin_path.as_deref()),
-                    ("Input", self.input.as_deref()),
-                ] {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(label).strong());
-                        ui.monospace(
-                            path.map(Path::display)
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "not available".into()),
-                        );
-                    });
-                }
-
-                crate::shared_ui::analysis_section_heading(
-                    ui,
-                    crate::shared_ui::AnalysisSection::Advanced.title(),
-                    ui.visuals().weak_text_color(),
-                );
-                ui.collapsing("Developer probes and diagnostics", |ui| {
-                    ui.label(RichText::new("DEPENDENCIES").small().strong());
-                    ui.add_enabled(false, egui::Button::new("Inspect dependencies"))
-                        .on_disabled_hover_text(
-                            "Windows registry/runtime-root discovery has no macOS equivalent; the guest session reports its staged worker inputs instead.",
-                        );
-                    ui.weak("Dependency discovery: unavailable on this backend (no Windows registry/runtime roots).");
-                    ui.separator();
-                    ui.label(RichText::new("AEGP round-trip diagnostics").strong());
-                ui.weak(
-                    "Unavailable on Apple Silicon: the bounded x64 guest AEGP transport has not been implemented yet.",
-                );
-                let (_, intent) = crate::shared_ui::show_aegp_actions(
-                    ui,
-                    self.occupied(),
-                    false,
-                    crate::shared_ui::BackendCapability::Unavailable {
-                        reason: "Unavailable on Apple Silicon until the bounded x64 guest AEGP transport is implemented.",
-                    },
-                );
-                debug_assert!(intent.is_none());
-                });
-
-                crate::shared_ui::analysis_section_heading(
-                    ui,
-                    crate::shared_ui::AnalysisSection::RenderSettings.title(),
-                    ui.visuals().weak_text_color(),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Pixel depth");
-                    ui.selectable_value(
-                        &mut self.render_format,
-                        MacRenderFormat::PngArgb8,
-                        "8 bpc",
-                    );
-                    ui.selectable_value(
-                        &mut self.render_format,
-                        MacRenderFormat::RawArgb16,
-                        "16 bpc",
-                    );
-                    ui.selectable_value(
-                        &mut self.render_format,
-                        MacRenderFormat::ExrArgb32f,
-                        "32 bpc float",
-                    );
-                });
-                let mut live_render = self.live_render.enabled();
-                if ui.checkbox(&mut live_render, "Auto Update").changed() {
-                    self.live_render.set_enabled(live_render);
-                }
-                ui.weak("Render path: persistent classic x64 guest session. GPU backend selection is unavailable in this backend.");
-
-                crate::shared_ui::analysis_section_heading(
-                    ui,
-                    crate::shared_ui::AnalysisSection::Output.title(),
-                    ui.visuals().weak_text_color(),
-                );
-                ui.label(RichText::new(&self.status).strong());
-                if let Some(output) = &self.output {
-                    ui.monospace(format!("Output: {}", output.display()));
-                }
-                ui.label(RichText::new("Worker report").strong());
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.report)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(12),
-                );
-            },
-        );
-        self.analysis = analysis;
-
-        crate::shared_ui::show_workspace_body(ctx, |region, ui| match region {
-            crate::shared_ui::WorkspaceRegion::EffectControls => self.show_effect_controls(ui),
-            crate::shared_ui::WorkspaceRegion::Viewer => self.show_workspace_viewer(ui),
-        });
-    }
-}
-
-impl MacHarnessApp {
-    fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
-        self.show_chain_controls(ui);
-        let mut changed = false;
-        let occupied = self.occupied();
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new("Effect Controls").size(20.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(
-                        !occupied
-                            && self.parameters.iter().zip(&self.parameter_defaults).any(
-                                |(parameter, default)| !parameter_is_default(parameter, default),
-                            ),
-                        egui::Button::new("Reset All"),
-                    )
-                    .clicked()
-                {
-                    changed |= reset_all(&mut self.parameters, &self.parameter_defaults);
-                }
-            });
-        });
-        ui.label(
-            self.plugin_path
-                .as_deref()
-                .and_then(Path::file_stem)
-                .and_then(|name| name.to_str())
-                .unwrap_or("Select an AEX to load its parameters."),
-        );
-        ui.separator();
-        if self.parameters.is_empty() {
-            ui.weak("This effect exposed no supported editable parameters.");
-        }
-        let output = crate::shared_ui::show_effect_controls(
-            ui,
-            &mut self.parameters,
-            &self.parameter_defaults,
-            occupied,
-            crate::shared_ui::EffectControlCapabilities {
-                choose_layer: true,
-                trigger_button: true,
-            },
-            crate::shared_ui::EffectControlsText {
-                layer_unavailable: "Layer selection is unavailable in the Apple Silicon guest transport.",
-                button_unavailable: "Button dispatch is unavailable in the Apple Silicon guest transport.",
-                ..Default::default()
-            },
-        );
-        for intent in output.intents {
-            match intent {
-                crate::shared_ui::EffectControlIntent::Changed { slot, supervised } => {
-                    if supervised {
-                        self.dispatch_user_changed(slot);
-                    } else {
-                        changed = true;
-                    }
-                }
-                crate::shared_ui::EffectControlIntent::Reset { slot, supervised } => {
-                    let mut reset = false;
-                    if let (Some(parameter), Some(default)) = (
-                        self.parameters.iter_mut().find(|value| value.slot == slot),
-                        self.parameter_defaults
-                            .iter()
-                            .find(|value| value.slot == slot),
-                    ) {
-                        reset = reset_parameter(parameter, default);
-                    }
-                    if reset {
-                        if supervised {
-                            self.dispatch_user_changed(slot);
-                        } else {
-                            changed = true;
-                        }
-                    }
-                }
-                crate::shared_ui::EffectControlIntent::ChooseLayer { slot } => {
-                    let selected = rfd::FileDialog::new()
-                        .add_filter("Image", INPUT_IMAGE_EXTENSIONS)
-                        .pick_file();
-                    if let Some(parameter) =
-                        self.parameters.iter_mut().find(|value| value.slot == slot)
-                        && selected != parameter.layer_path
-                    {
-                        parameter.layer_path = selected;
-                        if let Err(error) = self.close_resident() {
-                            self.report = error;
-                        }
-                        changed = true;
-                    }
-                }
-                crate::shared_ui::EffectControlIntent::TriggerButton { slot } => {
-                    self.dispatch_user_changed(slot);
-                }
-            }
-        }
-        if changed {
-            self.parameter_changed();
-        }
-    }
-
-    fn show_workspace_viewer(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.viewer_mode, ViewerMode::Input, "INPUT");
-            ui.selectable_value(&mut self.viewer_mode, ViewerMode::Output, "AEX OUTPUT");
-            ui.selectable_value(&mut self.viewer_mode, ViewerMode::Compare, "COMPARE");
-            ui.separator();
-            ui.weak("4K UHD workspace / aspect fit");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Fit").clicked() {
-                    self.viewer_zoom = 1.0;
-                    self.viewer_pan = egui::Vec2::ZERO;
-                }
-                ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
-                if self.occupied() {
-                    ui.spinner();
-                    ui.weak("Rendering...");
-                }
-            });
-        });
-        ui.separator();
-        let viewer_height = (ui.available_height() * 0.68).clamp(300.0, 860.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), viewer_height),
-            egui::Layout::top_down(egui::Align::Center),
-            |ui| match self.viewer_mode {
-                ViewerMode::Input => show_viewer_texture(
-                    ui,
-                    "Input",
-                    self.input_texture.as_ref(),
-                    &mut self.viewer_zoom,
-                    &mut self.viewer_pan,
-                ),
-                ViewerMode::Output => show_viewer_texture(
-                    ui,
-                    "AEX output",
-                    self.output_texture.as_ref(),
-                    &mut self.viewer_zoom,
-                    &mut self.viewer_pan,
-                ),
-                ViewerMode::Compare => ui.columns(2, |columns| {
-                    show_viewer_texture(
-                        &mut columns[0],
-                        "Input",
-                        self.input_texture.as_ref(),
-                        &mut self.viewer_zoom,
-                        &mut self.viewer_pan,
-                    );
-                    show_viewer_texture(
-                        &mut columns[1],
-                        "AEX output",
-                        self.output_texture.as_ref(),
-                        &mut self.viewer_zoom,
-                        &mut self.viewer_pan,
-                    );
-                }),
-            },
-        );
-    }
-}
-
-fn show_viewer_texture(
-    ui: &mut egui::Ui,
-    label: &str,
-    texture: Option<&egui::TextureHandle>,
-    zoom: &mut f32,
-    pan: &mut egui::Vec2,
-) {
-    let Some(texture) = texture else {
-        ui.centered_and_justified(|ui| {
-            ui.colored_label(Color32::GRAY, format!("{label} is not available"));
-        });
-        return;
-    };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).strong());
-        ui.monospace(format!("{} x {}", texture.size()[0], texture.size()[1]));
-        ui.weak("Wheel to zoom / drag to pan");
-    });
-    let available = ui.available_size().max(egui::vec2(1.0, 1.0));
-    let source = egui::vec2(texture.size()[0] as f32, texture.size()[1] as f32);
-    let (viewport, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
-    if response.hovered() {
-        let scroll = ui.input(|input| input.raw_scroll_delta.y);
-        if scroll != 0.0 {
-            let previous_zoom = *zoom;
-            *zoom = (*zoom * (scroll * 0.0025).exp()).clamp(0.25, 8.0);
-            if let Some(pointer) = response.hover_pos() {
-                let pointer_from_center = pointer - viewport.center();
-                *pan = pointer_from_center - (pointer_from_center - *pan) * (*zoom / previous_zoom);
-            }
-        }
-    }
-    if response.dragged_by(egui::PointerButton::Primary)
-        || response.dragged_by(egui::PointerButton::Middle)
-    {
-        *pan += response.drag_delta();
-    }
-    let fit_scale = (available.x / source.x).min(available.y / source.y);
-    let display = source * fit_scale * *zoom;
-    let image_rect = egui::Rect::from_center_size(viewport.center() + *pan, display);
-    ui.painter().with_clip_rect(viewport).image(
-        texture.id(),
-        image_rect,
-        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-}
-
-fn load_texture(
-    ctx: &egui::Context,
-    name: &str,
-    path: &Path,
-) -> Result<(egui::TextureHandle, u32, u32), String> {
-    let rgba = image::open(path)
-        .map_err(|error| error.to_string())?
-        .into_rgba8();
-    let (width, height) = rgba.dimensions();
-    if width == 0 || height == 0 {
-        return Err("PNG dimensions must be nonzero".into());
-    }
-    let texture = ctx.load_texture(
-        name,
-        egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], rgba.as_raw()),
-        egui::TextureOptions::LINEAR,
-    );
-    Ok((texture, width, height))
-}
-
+#[cfg(test)]
 fn read_control_message(reader: &mut impl Read) -> Result<Option<Value>, String> {
     let mut total = 0;
     read_control_message_accounted(reader, &mut total)
@@ -1601,6 +582,7 @@ fn save_deep_preview(
         .map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
 fn save_argb16_raw_slot(
     slot: &Path,
     directory: &Path,
@@ -1688,6 +670,7 @@ fn save_argb16_raw_slot_at_origin(
     Ok(checksum)
 }
 
+#[cfg(test)]
 fn save_argb32f_exr_slot(
     slot: &Path,
     directory: &Path,
@@ -1793,7 +776,6 @@ struct MacFixtureLaunch<'a> {
     worlds: Option<&'a FixtureWorlds>,
     smart: bool,
     time_scale: u32,
-    raw_primary: Option<&'a MacChainWorld>,
 }
 
 #[derive(Serialize)]
@@ -1970,11 +952,7 @@ fn launch_resident_candidate(
     let output_slot = session
         .root()
         .join(format!("output.{}", format.pixel_format()));
-    let (width, height) = if let Some(raw) = fixture.and_then(|launch| launch.raw_primary) {
-        raw.write_slot(&input_slot, primary_format)?
-    } else {
-        write_resident_input_slot(input, &input_slot, primary_format)?
-    };
+    let (width, height) = write_resident_input_slot(input, &input_slot, primary_format)?;
     let plugin_sha256 = format!(
         "{:x}",
         Sha256::digest(
@@ -2546,7 +1524,6 @@ fn render_single_fixture_headless(
         worlds: fixture.worlds.as_ref(),
         smart: fixture.render_path == "smart",
         time_scale: fixture.timing.time_scale,
-        raw_primary: None,
     };
     let workers = guest_worker_candidates(repository)?;
     let mut started = start_resident_worker(
@@ -2804,55 +1781,6 @@ fn wait_or_kill_resident_child(
     }
 }
 
-fn spawn_resident_admission<T, F>(start: F) -> Receiver<Result<T, String>>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        // If the GUI has moved to another AEX/input while admission was in
-        // flight, send failure drops the completed session here. Its Drop
-        // implementation performs the normal bounded cleanup.
-        let _ = sender.send(start());
-    });
-    receiver
-}
-
-fn begin_resident_admission(
-    candidates: Vec<GuestWorkerCandidate>,
-    aex: PathBuf,
-    input: PathBuf,
-    output_directory: PathBuf,
-    format: MacRenderFormat,
-    parameters: Vec<InteractiveParameter>,
-    negotiate_output: bool,
-) -> ResidentAdmissionHandle {
-    let plugin_path = aex.clone();
-    let admission_input = input.clone();
-    let layers = selected_layer_paths(&parameters);
-    let identity_layers = layers.clone();
-    let receiver = spawn_resident_admission(move || {
-        start_resident_session_with_geometry(
-            &candidates,
-            &aex,
-            &input,
-            &output_directory,
-            format,
-            layers,
-            negotiate_output,
-        )
-    });
-    ResidentAdmissionHandle {
-        plugin_path,
-        input: admission_input,
-        format,
-        negotiate_output,
-        layers: identity_layers,
-        receiver,
-    }
-}
-
 fn recv_resident_response(
     receiver: &Receiver<Result<Option<Value>, String>>,
     child: &SharedResidentChild,
@@ -2935,7 +1863,6 @@ fn start_resident_session_with_geometry(
         worlds: None,
         smart: false,
         time_scale: 30,
-        raw_primary: None,
     });
     let started = start_resident_worker(
         candidates,
@@ -3146,11 +2073,6 @@ fn start_resident_session_with_geometry(
         }
     });
     Ok(ResidentSessionHandle {
-        plugin_path: aex.to_path_buf(),
-        input: input.to_path_buf(),
-        format,
-        negotiate_output,
-        layers,
         staged_plugin_sha256,
         sender: command_sender,
         receiver: result_receiver,
@@ -3424,38 +2346,6 @@ fn read_thin_macho_is_x86_64(mut reader: impl Read) -> std::io::Result<bool> {
     Ok(cpu == 0x0100_0007)
 }
 
-fn run_guest_workers(
-    candidates: &[GuestWorkerCandidate],
-    arguments: &[String],
-    native_deadline: Duration,
-) -> Result<Output, String> {
-    let mut failures = Vec::new();
-    for candidate in candidates {
-        let deadline = candidate.native.then_some(native_deadline);
-        match run_worker(&candidate.path, arguments, deadline) {
-            Ok(output) if output.status.success() => return Ok(output),
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                failures.push(format!(
-                    "{} exited {}: {}; worker stdout: {}",
-                    candidate.path.display(),
-                    output.status,
-                    stderr.trim(),
-                    stdout.trim()
-                ));
-            }
-            Err(error) => failures.push(format!("{}: {error}", candidate.path.display())),
-        }
-    }
-    Err(format!(
-        "all guest workers failed: {}",
-        failures.join(" | ")
-    ))
-}
-
-const NATIVE_DEADLINE_REAP_BUDGET: Duration = Duration::from_millis(20);
-
 fn take_shared_resident_child(child: &SharedResidentChild) -> Option<Child> {
     match child.try_lock() {
         Ok(mut child) => child.take(),
@@ -3498,121 +2388,6 @@ fn enqueue_resident_join(join: thread::JoinHandle<()>) {
     }
 }
 
-struct BackgroundReapRequest {
-    child: Child,
-    #[cfg(test)]
-    completion: Option<Sender<u32>>,
-}
-
-fn background_reaper() -> &'static Sender<BackgroundReapRequest> {
-    static REAPER: OnceLock<Sender<BackgroundReapRequest>> = OnceLock::new();
-    REAPER.get_or_init(|| {
-        let (sender, receiver) = mpsc::channel::<BackgroundReapRequest>();
-        thread::Builder::new()
-            .name("aexcompat-native-child-reaper".into())
-            .spawn(move || {
-                let mut pending = Vec::new();
-                loop {
-                    match receiver.recv_timeout(Duration::from_millis(10)) {
-                        Ok(request) => pending.push(request),
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) if pending.is_empty() => break,
-                        Err(RecvTimeoutError::Disconnected) => {}
-                    }
-                    pending.retain_mut(|request| match request.child.try_wait() {
-                        Ok(Some(_)) => {
-                            #[cfg(test)]
-                            if let Some(completion) = request.completion.take() {
-                                let _ = completion.send(request.child.id());
-                            }
-                            false
-                        }
-                        Ok(None) | Err(_) => true,
-                    });
-                }
-            })
-            .expect("start native child reaper");
-        sender
-    })
-}
-
-fn enqueue_background_reap(child: Child, #[cfg(test)] completion: Option<Sender<u32>>) {
-    let request = BackgroundReapRequest {
-        child,
-        #[cfg(test)]
-        completion,
-    };
-    background_reaper()
-        .send(request)
-        .expect("native child reaper remains available");
-}
-
-fn kill_and_reap_or_transfer(mut child: Child, budget: Duration) -> bool {
-    let _ = child.kill();
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return true,
-            Ok(None) if started.elapsed() < budget => thread::yield_now(),
-            Ok(None) | Err(_) => {
-                enqueue_background_reap(
-                    child,
-                    #[cfg(test)]
-                    None,
-                );
-                return false;
-            }
-        }
-    }
-}
-
-fn run_worker(
-    worker: &Path,
-    arguments: &[String],
-    deadline: Option<Duration>,
-) -> Result<Output, String> {
-    let mut child = Command::new(worker)
-        .args(arguments)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("start guest worker: {error}"))?;
-    if let Some(deadline) = deadline {
-        let started = Instant::now();
-        loop {
-            match child
-                .try_wait()
-                .map_err(|error| format!("poll guest worker: {error}"))?
-            {
-                Some(_) => break,
-                None if started.elapsed() < deadline => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                None => {
-                    // Reap a normally interruptible native child without ever
-                    // turning Rosetta admission failure into an unbounded wait.
-                    // If SIGKILL cannot complete within this small budget,
-                    // transfer the handle to the background reaper and let the
-                    // Unicorn candidate start at once.
-                    let reaped = kill_and_reap_or_transfer(child, NATIVE_DEADLINE_REAP_BUDGET);
-                    return Err(format!(
-                        "native worker exceeded {} ms and was terminated{}",
-                        deadline.as_millis(),
-                        if reaped {
-                            ""
-                        } else {
-                            " (child cleanup still pending)"
-                        }
-                    ));
-                }
-            }
-        }
-    }
-    child
-        .wait_with_output()
-        .map_err(|error| format!("collect guest worker output: {error}"))
-}
-
 fn repository_root() -> Option<PathBuf> {
     let mut starts = Vec::new();
     if let Ok(current) = std::env::current_dir() {
@@ -3638,6 +2413,9 @@ fn repository_root() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aexcompat_broker::render_fixture::FixtureCheckpoint;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
     include!("macos_transport_tests.rs");
 
     fn fixture_resident_child() -> Child {
@@ -4193,85 +2971,6 @@ mod tests {
         {
             assert!(guest_worker_candidates(&repository).is_ok());
         }
-    }
-
-    #[test]
-    fn failed_native_candidate_falls_back_to_the_next_worker() {
-        let workers = [
-            GuestWorkerCandidate {
-                path: PathBuf::from("/usr/bin/false"),
-                native: true,
-            },
-            GuestWorkerCandidate {
-                path: PathBuf::from("/usr/bin/true"),
-                native: false,
-            },
-        ];
-        let output = run_guest_workers(&workers, &[], Duration::from_millis(100)).unwrap();
-        assert!(output.status.success());
-    }
-
-    #[test]
-    fn timed_out_native_candidate_falls_back_without_waiting_for_its_deadline_twice() {
-        let workers = [
-            GuestWorkerCandidate {
-                path: PathBuf::from("/bin/sleep"),
-                native: true,
-            },
-            GuestWorkerCandidate {
-                path: PathBuf::from("/usr/bin/true"),
-                native: false,
-            },
-        ];
-        let started = Instant::now();
-        let output =
-            run_guest_workers(&workers, &["1".to_string()], Duration::from_millis(20)).unwrap();
-        assert!(output.status.success());
-        assert!(started.elapsed() < Duration::from_millis(500));
-    }
-
-    #[test]
-    fn native_deadline_cleanup_reaps_an_interruptible_child_within_a_bounded_budget() {
-        let child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
-        let started = Instant::now();
-
-        assert!(kill_and_reap_or_transfer(
-            child,
-            NATIVE_DEADLINE_REAP_BUDGET
-        ));
-        assert!(started.elapsed() < Duration::from_millis(100));
-    }
-
-    #[test]
-    fn native_deadline_cleanup_transfers_slow_reap_ownership() {
-        let child = Command::new("/bin/sleep").arg("0.05").spawn().unwrap();
-        let pid = child.id();
-        let (completion, completed) = mpsc::channel();
-
-        enqueue_background_reap(child, Some(completion));
-
-        assert_eq!(completed.recv_timeout(Duration::from_secs(1)).unwrap(), pid);
-    }
-
-    #[test]
-    fn failed_worker_preserves_structured_stdout_diagnostics() {
-        let workers = [GuestWorkerCandidate {
-            path: PathBuf::from("/bin/sh"),
-            native: false,
-        }];
-        let error = run_guest_workers(
-            &workers,
-            &[
-                "-c".to_string(),
-                "printf '%s' '{\"unsupported_suite_calls\":[{\"name\":\"AEGP Utility Suite\",\"version\":13,\"slot\":11,\"call_count\":1}]}' >&1; printf '%s' 'selector returned 4' >&2; exit 1".to_string(),
-            ],
-            Duration::from_millis(100),
-        )
-        .unwrap_err();
-        assert!(error.contains("selector returned 4"));
-        assert!(error.contains(
-            "worker stdout: {\"unsupported_suite_calls\":[{\"name\":\"AEGP Utility Suite\",\"version\":13,\"slot\":11,\"call_count\":1}]}"
-        ));
     }
 
     #[test]
@@ -4941,11 +3640,6 @@ mod tests {
             ResidentCommand::UserChanged { .. } => panic!("unexpected user change"),
         });
         let mut session = ResidentSessionHandle {
-            plugin_path: PathBuf::new(),
-            input: PathBuf::new(),
-            format: MacRenderFormat::PngArgb8,
-            negotiate_output: false,
-            layers: Vec::new(),
             staged_plugin_sha256: String::new(),
             sender: command_sender,
             receiver: result_receiver,
@@ -4962,7 +3656,7 @@ mod tests {
     }
 
     #[test]
-    fn user_changed_response_is_exact_and_dynamic_state_is_atomic() {
+    fn user_changed_response_is_exact_and_bound_to_worker_and_slot() {
         let response = json!({
             "v": 1,
             "type": "user_changed_done",
@@ -4978,53 +3672,26 @@ mod tests {
             }
         });
         let updates = validate_user_changed(&response, 42, 2).unwrap();
-        let mut app = MacHarnessApp::new(PathBuf::new());
-        app.parameters = vec![
-            fixture_parameter(1, "integer", 1.0),
-            fixture_parameter(2, "button", 0.0),
-        ];
-        app.apply_dynamic_parameter_ui(updates).unwrap();
-        assert!(!app.parameters[0].enabled);
-        assert!(app.parameters[0].visible);
-        assert!(app.parameters[1].enabled);
-        assert!(!app.parameters[1].visible);
-        assert!(app.parameters[1].supervised);
-
-        let before = app
-            .parameters
-            .iter()
-            .map(|parameter| (parameter.enabled, parameter.visible, parameter.supervised))
-            .collect::<Vec<_>>();
-        let partial = vec![DynamicParameterUi {
-            slot: 1,
-            ui_flags: 0,
-            flags: 0,
-        }];
-        assert!(app.apply_dynamic_parameter_ui(partial).is_err());
         assert_eq!(
-            app.parameters
-                .iter()
-                .map(|parameter| (parameter.enabled, parameter.visible, parameter.supervised))
-                .collect::<Vec<_>>(),
-            before
+            updates,
+            vec![
+                DynamicParameterUi {
+                    slot: 1,
+                    ui_flags: 1 << 5,
+                    flags: 0
+                },
+                DynamicParameterUi {
+                    slot: 2,
+                    ui_flags: 1 << 9,
+                    flags: 1 << 6
+                },
+            ]
         );
-
         let mut extra = response.clone();
         extra["unexpected"] = json!(true);
         assert!(validate_user_changed(&extra, 42, 2).is_err());
         assert!(validate_user_changed(&response, 41, 2).is_err());
         assert!(validate_user_changed(&response, 42, 3).is_err());
-    }
-
-    #[test]
-    fn failed_first_admission_discards_the_queued_supervised_change() {
-        let mut app = MacHarnessApp::new(std::env::temp_dir());
-        app.pending_user_changed = Some(3);
-        app.record_resident_admission_failure("admission failed".into());
-
-        assert_eq!(app.pending_user_changed, None);
-        assert!(matches!(app.resident, ResidentState::Failed));
-        assert_eq!(app.report, "admission failed");
     }
 
     #[test]
@@ -5064,11 +3731,6 @@ mod tests {
             }
         });
         let mut session = ResidentSessionHandle {
-            plugin_path: PathBuf::new(),
-            input: PathBuf::new(),
-            format: MacRenderFormat::PngArgb8,
-            negotiate_output: false,
-            layers: Vec::new(),
             staged_plugin_sha256: String::new(),
             sender: command_sender,
             receiver: result_receiver,
@@ -5119,11 +3781,6 @@ mod tests {
             finished_sender.send(()).unwrap();
         });
         let mut session = ResidentSessionHandle {
-            plugin_path: PathBuf::new(),
-            input: PathBuf::new(),
-            format: MacRenderFormat::PngArgb8,
-            negotiate_output: false,
-            layers: Vec::new(),
             staged_plugin_sha256: String::new(),
             sender: command_sender,
             receiver: result_receiver,
@@ -5141,46 +3798,6 @@ mod tests {
         finished_receiver
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
-    }
-
-    #[test]
-    fn resident_admission_returns_promptly_and_delivers_readiness_later() {
-        let (release, blocked) = mpsc::channel();
-        let started = Instant::now();
-        let admission = spawn_resident_admission(move || {
-            blocked.recv().unwrap();
-            Ok::<_, String>(42)
-        });
-
-        assert!(started.elapsed() < Duration::from_millis(250));
-        assert!(matches!(
-            admission.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
-        release.send(()).unwrap();
-        assert_eq!(
-            admission.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Ok(42)
-        );
-    }
-
-    #[test]
-    fn resident_admission_delivers_failure_after_a_blocked_probe() {
-        let (release, blocked) = mpsc::channel();
-        let admission = spawn_resident_admission(move || {
-            blocked.recv().unwrap();
-            Err::<(), _>("probe rejected worker".to_string())
-        });
-
-        assert!(matches!(
-            admission.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
-        release.send(()).unwrap();
-        assert_eq!(
-            admission.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Err("probe rejected worker".to_string())
-        );
     }
 
     #[test]

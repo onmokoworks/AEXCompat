@@ -9,21 +9,6 @@ fn check_input_format(name: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name);
-    assert!(supported_input_image(&path));
-    let ctx = egui::Context::default();
-    let mut app = MacHarnessApp::new(PathBuf::new());
-    let _ = ctx.run(
-        egui::RawInput {
-            dropped_files: vec![egui::DroppedFile {
-                path: Some(path.clone()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        },
-        |ctx| app.accept_dropped_input(ctx),
-    );
-    assert_eq!(app.input, Some(path.clone()), "{}", app.report);
-    assert!(app.input_texture.is_some());
     for format in [
         MacRenderFormat::PngArgb8,
         MacRenderFormat::RawArgb16,
@@ -64,14 +49,7 @@ fn gui_admits_webp() {
 }
 
 #[test]
-fn gui_image_filter_aliases_and_invalid_input() {
-    for ext in INPUT_IMAGE_EXTENSIONS {
-        assert!(supported_input_image(Path::new(&format!(
-            "image.{}",
-            ext.to_uppercase()
-        ))));
-    }
-    assert!(!supported_input_image(Path::new("image.gif")));
+fn resident_encoder_rejects_invalid_input() {
     let root = transport_root("invalid-image");
     let path = root.join("bad.jpg");
     std::fs::write(&path, b"not a JPEG").unwrap();
@@ -98,23 +76,18 @@ fn gui_adapter_negotiates_geometry_and_exports_deep_preview() {
             MacRenderFormat::RawArgb16,
             MacRenderFormat::ExrArgb32f,
         ] {
-            // The same admission adapter used by the GUI passes the launch flag,
-            // probes, validates the frame, exports, and closes the worker.
-            let admission = begin_resident_admission(
-                workers.clone(),
-                plugin.clone(),
-                input.clone(),
-                root.clone(),
+            // The resident session the GUI backend opens passes the launch
+            // flag, probes, validates the frame, exports, and closes the worker.
+            let mut session = start_resident_session_with_geometry(
+                &workers,
+                &plugin,
+                &input,
+                &root,
                 format,
                 Vec::new(),
                 negotiate,
-            );
-            let mut session = admission
-                .receiver
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap()
-                .unwrap();
-            assert_eq!(session.negotiate_output, negotiate);
+            )
+            .unwrap();
             for frame_index in 0..2 {
                 let output = root.join(format!(
                     "{negotiate}-{}-{frame_index}.png",
@@ -292,55 +265,5 @@ fn deep_preview_preserves_raw_and_rejects_corrupt_slots() {
     let saved = std::fs::read(&png).unwrap();
     assert!(save_deep_preview(&slot, &png, 1, 1, MacRenderFormat::ExrArgb32f, &hash).is_err());
     assert_eq!(std::fs::read(&png).unwrap(), saved);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn deep_chain_exports_png_without_quantizing_intermediate() {
-    let root = transport_root("chain");
-    let workers = vec![GuestWorkerCandidate {
-        path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resident_transport.py"),
-        native: false,
-    }];
-    let plugin = root.join("double.aex");
-    std::fs::write(&plugin, b"protocol double").unwrap();
-    let stage = crate::gui_state::EffectChainSlot {
-        enabled: true,
-        editor: MacEffectEditor {
-            plugin: Some(plugin),
-            parameters: Vec::new(),
-            defaults: Vec::new(),
-        },
-    };
-    let input = root.join("input.png");
-    image::RgbaImage::new(2, 1).save(&input).unwrap();
-    for format in [MacRenderFormat::RawArgb16, MacRenderFormat::ExrArgb32f] {
-        let result = render_mac_chain(
-            &workers,
-            &[stage.clone(), stage.clone()],
-            &input,
-            format,
-            &root,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        let preview = result.preview.unwrap();
-        let decoded = image::open(&preview).unwrap();
-        assert_eq!(
-            decoded.color(),
-            if format == MacRenderFormat::RawArgb16 {
-                image::ColorType::Rgba16
-            } else {
-                image::ColorType::Rgba8
-            }
-        );
-        let raw = std::fs::read(preview.with_extension("argb")).unwrap();
-        let report: Value = serde_json::from_str(&result.report).unwrap();
-        assert_eq!(
-            format!("{:x}", Sha256::digest(&raw)),
-            report["world_sha256"]
-        );
-        assert_eq!(report["stages"].as_array().unwrap().len(), 2);
-    }
     std::fs::remove_dir_all(root).unwrap();
 }

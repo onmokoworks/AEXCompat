@@ -10,7 +10,7 @@ GUI instructions: [日本語 (primary)](docs/GUI_GUIDE_JA.md) · [English transl
   <img src="docs/images/aexcompat-gui.png" alt="AEXCompat GUI with analysis logs, Effect Controls, and input/output viewers" width="1200">
 </p>
 
-The Rust/egui GUI, which is being unified across Windows and Apple Silicon, combines AEX selection, Effect Controls, input/output comparison, and diagnostic logs in one workspace.
+The Rust/egui GUI, shared by Windows and Apple Silicon Macs, combines AEX selection, Effect Controls, input/output comparison, and diagnostic logs in one workspace.
 
 ## What is AEXCompat?
 

@@ -1,9 +1,3 @@
-#[cfg(any(target_os = "macos", test))]
-use std::time::{Duration, Instant};
-
-#[cfg(any(target_os = "macos", test))]
-pub(crate) const LIVE_RENDER_DEBOUNCE: Duration = Duration::from_millis(500);
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AnalysisPaneState {
     pub(crate) open: bool,
@@ -25,79 +19,6 @@ impl AnalysisPaneState {
 
     pub(crate) fn set_width(&mut self, width: f32) {
         self.width = width.clamp(Self::MIN_WIDTH, Self::MAX_WIDTH);
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg(any(target_os = "macos", test))]
-pub(crate) enum ViewerMode {
-    #[default]
-    Input,
-    Output,
-    Compare,
-}
-
-#[cfg(any(target_os = "macos", test))]
-impl ViewerMode {
-    pub(crate) fn after_successful_render(self, had_output: bool) -> Self {
-        if !had_output && self == Self::Input {
-            Self::Output
-        } else {
-            self
-        }
-    }
-}
-
-#[derive(Debug)]
-#[cfg(any(target_os = "macos", test))]
-pub(crate) struct LiveRenderState {
-    enabled: bool,
-    due: Option<Instant>,
-}
-
-#[cfg(any(target_os = "macos", test))]
-impl Default for LiveRenderState {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            due: None,
-        }
-    }
-}
-
-#[cfg(any(target_os = "macos", test))]
-impl LiveRenderState {
-    pub(crate) fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub(crate) fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-        if !enabled {
-            self.due = None;
-        }
-    }
-
-    pub(crate) fn parameter_changed(&mut self, now: Instant) {
-        if self.enabled {
-            self.due = Some(now + LIVE_RENDER_DEBOUNCE);
-        }
-    }
-
-    pub(crate) fn take_due(&mut self, now: Instant, busy: bool, render_ready: bool) -> bool {
-        let Some(due) = self.due else {
-            return false;
-        };
-        if busy || !render_ready || now < due {
-            return false;
-        }
-        self.due = None;
-        true
-    }
-
-    #[cfg(target_os = "macos")]
-    pub(crate) fn remaining(&self, now: Instant) -> Option<Duration> {
-        self.due.map(|due| due.saturating_duration_since(now))
     }
 }
 
@@ -237,53 +158,6 @@ mod tests {
         state.set_width(10_000.0);
         assert_eq!(state.width, AnalysisPaneState::MAX_WIDTH);
     }
-
-    #[test]
-    fn live_render_debounces_parameter_changes() {
-        let started = Instant::now();
-        let mut state = LiveRenderState::default();
-        state.parameter_changed(started);
-        state.parameter_changed(started + Duration::from_millis(300));
-        assert!(!state.take_due(started + Duration::from_millis(799), false, true));
-        assert!(state.take_due(started + Duration::from_millis(800), false, true));
-        assert!(!state.take_due(started + Duration::from_secs(2), false, true));
-    }
-
-    #[test]
-    fn live_render_waits_for_readiness_and_disables_cleanly() {
-        let started = Instant::now();
-        let mut state = LiveRenderState::default();
-        state.parameter_changed(started);
-        let due = started + LIVE_RENDER_DEBOUNCE;
-        assert!(!state.take_due(due, true, true));
-        assert!(!state.take_due(due, false, false));
-        assert!(state.take_due(due, false, true));
-
-        state.parameter_changed(started);
-        state.set_enabled(false);
-        assert!(!state.enabled());
-        assert!(!state.take_due(started + Duration::from_secs(1), false, true));
-    }
-
-    #[test]
-    fn first_render_reveals_output_without_overriding_later_viewer_choices() {
-        assert_eq!(
-            ViewerMode::Input.after_successful_render(false),
-            ViewerMode::Output
-        );
-        assert_eq!(
-            ViewerMode::Compare.after_successful_render(false),
-            ViewerMode::Compare
-        );
-        assert_eq!(
-            ViewerMode::Input.after_successful_render(true),
-            ViewerMode::Input
-        );
-        assert_eq!(
-            ViewerMode::Compare.after_successful_render(true),
-            ViewerMode::Compare
-        );
-    }
 }
 
 /// Both backends park the complete editor for each stage.
@@ -293,13 +167,4 @@ pub(crate) const MAX_EFFECT_CHAIN_STAGES: usize = 8;
 pub(crate) struct EffectChainSlot<T> {
     pub(crate) enabled: bool,
     pub(crate) editor: T,
-}
-
-/// Preserve visible order and ordinals while omitting bypassed stages.
-pub(crate) fn enabled_chain<T>(slots: &[EffectChainSlot<T>]) -> impl Iterator<Item = (usize, &T)> {
-    slots
-        .iter()
-        .enumerate()
-        .filter(|(_, slot)| slot.enabled)
-        .map(|(index, slot)| (index, &slot.editor))
 }
