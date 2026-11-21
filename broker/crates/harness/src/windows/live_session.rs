@@ -293,7 +293,7 @@ fn live_render(
     }
     let one_shot = |reason: String| -> Result<(String, Option<PathBuf>), String> {
         let mut report =
-            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
+            crate::worker_backend::render_experimental_image_with_approved_dependencies_and_search_dirs(
                 &request.repository,
                 &request.plugin_path,
                 &request.plugin_sha256,

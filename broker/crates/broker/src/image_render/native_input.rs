@@ -35,13 +35,13 @@ impl NativeImageInput {
         }
         // All IEEE-754 input words are transport data, including NaN payloads.
         // Layout/size limits above and worker output validation remain intact.
-        self.diagnostic_layout()?;
+        self.validated_world_layout()?;
         Ok(())
     }
 
-    fn diagnostic_layout(
+    fn validated_world_layout(
         &self,
-    ) -> io::Result<Option<crate::render_session::DiagnosticWorldLayout>> {
+    ) -> io::Result<Option<&crate::render_fixture::FixtureWorldLayout>> {
         let Some(world) = &self.world_layout else {
             return Ok(None);
         };
@@ -65,6 +65,16 @@ impl NativeImageInput {
             MAX_PIXELS,
             MAX_PIXELS * 16 + u64::from(MAX_DIMENSION) * 256,
         )?;
+        Ok(Some(world))
+    }
+
+    #[cfg(windows)]
+    fn diagnostic_layout(
+        &self,
+    ) -> io::Result<Option<crate::render_session::DiagnosticWorldLayout>> {
+        let Some(world) = self.validated_world_layout()? else {
+            return Ok(None);
+        };
         Ok(Some(crate::render_session::DiagnosticWorldLayout {
             input_row_padding: world.row_padding,
             input_padding_byte: Some(world.padding_byte),
@@ -137,7 +147,7 @@ impl NativeImageInput {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod native_input_tests {
     use super::*;
 
@@ -309,6 +319,7 @@ mod native_input_tests {
     }
 }
 
+#[cfg(windows)]
 /// Runs one chain stage using the existing isolated session and provenance path.
 /// Timed secondary images are decoded at native depth, just like static layers.
 /// Missing timestamps remain explicit failures in the worker.
@@ -352,6 +363,7 @@ pub fn render_native_image_with_timed_layers(
     )
 }
 
+#[cfg(windows)]
 /// Runs one chain stage using the existing isolated session and provenance path.
 pub fn render_native_image_with_dependencies(
     repository: &Path,

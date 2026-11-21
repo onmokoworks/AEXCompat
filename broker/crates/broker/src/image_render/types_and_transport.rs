@@ -84,6 +84,7 @@ fn requested_minidump_directory(repository: &Path) -> io::Result<Option<String>>
     crate::minidump_policy::configured_directory_display(repository)
 }
 
+#[cfg(windows)]
 fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
     if let Some(path) = fixture_world_dump_override() {
         return resolve_world_dump_dir(repository, &path).map(Some);

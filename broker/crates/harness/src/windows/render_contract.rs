@@ -86,14 +86,6 @@ fn visible_text_summary(value: &str) -> String {
     output
 }
 
-fn required_render_worker_path(repository: &Path, smart: bool) -> PathBuf {
-    repository.join(if smart {
-        "target/minihost-build/aex_worker.exe"
-    } else {
-        "target/minihost-build/aex_worker.exe"
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_input_fingerprint(
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],

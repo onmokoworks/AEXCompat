@@ -1,10 +1,12 @@
+#[cfg(windows)]
 use crate::render_fixture::{
-    FixtureCase, FixtureCaseIdentity, FixtureFinalArtifact, FixturePixelFormat,
-    LoadedRenderFixture, expand_fixture_cases, fixture_case_identity, load_render_fixture,
+    FixtureCase, FixtureCaseIdentity, FixtureFinalArtifact, LoadedRenderFixture,
+    expand_fixture_cases, fixture_case_identity, load_render_fixture,
 };
 use sha2::Sha256 as FixtureSha256;
 use std::cell::RefCell;
 
+#[cfg(windows)]
 thread_local! {
     static FIXTURE_WORLD_DUMP_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static FIXTURE_RENDER_SETTINGS_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -20,32 +22,39 @@ struct FixtureCapture {
     path: PathBuf,
 }
 
+#[cfg(windows)]
 fn fixture_world_dump_override() -> Option<PathBuf> {
     FIXTURE_WORLD_DUMP_OVERRIDE.with(|value| value.borrow().clone())
 }
 
+#[cfg(windows)]
 fn fixture_render_settings_override() -> Option<String> {
     FIXTURE_RENDER_SETTINGS_OVERRIDE.with(|value| value.borrow().clone())
 }
 
+#[cfg(windows)]
 fn fixture_case_identity_override() -> Option<FixtureCaseIdentity> {
     FIXTURE_CASE_IDENTITY_OVERRIDE.with(|value| value.borrow().clone())
 }
 
+#[cfg(windows)]
 fn fixture_world_layout_override() -> Option<crate::render_session::DiagnosticWorldLayout> {
     FIXTURE_WORLD_LAYOUT_OVERRIDE.with(|value| *value.borrow())
 }
 
+#[cfg(windows)]
 fn fixture_secondary_layouts_override() -> Option<Vec<crate::render_session::SessionLayerLayout>> {
     FIXTURE_SECONDARY_LAYOUTS_OVERRIDE.with(|value| value.borrow().clone())
 }
 
+#[cfg(windows)]
 fn fixture_capture_override() -> Option<Vec<FixtureCapture>> {
     FIXTURE_CAPTURE_OVERRIDE.with(|value| value.borrow().clone())
 }
 
 struct FixtureOverridesGuard;
 
+#[cfg(windows)]
 impl FixtureOverridesGuard {
     fn set(
         world_dump: PathBuf,
@@ -76,6 +85,7 @@ impl FixtureOverridesGuard {
     }
 }
 
+#[cfg(windows)]
 impl Drop for FixtureOverridesGuard {
     fn drop(&mut self) {
         FIXTURE_WORLD_DUMP_OVERRIDE.with(|value| *value.borrow_mut() = None);
@@ -87,8 +97,9 @@ impl Drop for FixtureOverridesGuard {
     }
 }
 
-impl From<FixturePixelFormat> for RenderPixelFormat {
-    fn from(value: FixturePixelFormat) -> Self {
+impl From<crate::render_fixture::FixturePixelFormat> for RenderPixelFormat {
+    fn from(value: crate::render_fixture::FixturePixelFormat) -> Self {
+        use crate::render_fixture::FixturePixelFormat;
         match value {
             FixturePixelFormat::Argb8 => Self::Argb8,
             FixturePixelFormat::Argb16 => Self::Argb16,
@@ -156,6 +167,7 @@ fn find_checkpoint_dump(
     found.ok_or_else(|| invalid(format!("requested checkpoint was not produced: {stage}")))
 }
 
+#[cfg(windows)]
 /// Run one strict, shareable fixture. Asset paths inside the fixture are relative
 /// to the fixture file; plug-in selection and its approved hash stay outside it.
 pub fn render_declarative_fixture(
@@ -213,6 +225,7 @@ pub fn render_declarative_fixture(
     )
 }
 
+#[cfg(windows)]
 fn render_fixture_cases<F>(
     loaded: &LoadedRenderFixture,
     cases: &[FixtureCase],
@@ -257,6 +270,7 @@ where
     result
 }
 
+#[cfg(windows)]
 fn render_single_declarative_fixture(
     repository: &Path,
     plugin_path: &Path,
@@ -562,7 +576,7 @@ fn render_single_declarative_fixture(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod declarative_fixture_tests {
     use super::*;
 

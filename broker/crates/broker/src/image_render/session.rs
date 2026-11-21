@@ -1,3 +1,4 @@
+#[cfg(windows)]
 fn render_with_artifact(
     repository: &Path,
     plugin_id: &str,
@@ -53,6 +54,7 @@ fn render_with_artifact(
     )
 }
 
+#[cfg(windows)]
 fn render_with_artifact_using(
     repository: &Path,
     plugin_id: &str,
@@ -662,6 +664,7 @@ struct SessionAudioSource {
     input_sha256: String,
 }
 
+#[cfg(windows)]
 struct SessionWrapperRequest<'a> {
     repository: &'a Path,
     plugin_id: &'a str,
@@ -781,6 +784,7 @@ fn in_place_session_search_dirs(
 // former `#[cfg(not(windows))]` shim here was dead code that never compiled on
 // any target and misleadingly suggested a non-Windows fallback; it is removed so
 // the fail-closed caller is not misread as breaking non-Windows renders.
+#[cfg(windows)]
 fn render_classic_via_length_one_session(
     request: &SessionWrapperRequest<'_>,
 ) -> SessionWrapperOutcome {
@@ -1275,6 +1279,7 @@ fn render_classic_via_length_one_session(
     SessionWrapperOutcome::Report(report)
 }
 
+#[cfg(windows)]
 /// A bounded failure summary for the public one-shot-compatible wrapper.  The
 /// typed invariant comes from `render_session`; the only worker values exposed
 /// are the four small lease counters.  Do not add report strings, paths, or
@@ -1311,6 +1316,7 @@ fn close_failure_diagnostic(
     )
 }
 
+#[cfg(windows)]
 /// The wrapper has no retained close state: each render consumes its session,
 /// validates that close summary, then clones only that summary's final report.
 /// Keeping this boundary explicit makes a rejected close unable to carry its
@@ -1973,6 +1979,7 @@ pub(crate) struct InteractiveImageReportFacts {
     pub(crate) audio_input_sha256: Option<String>,
 }
 
+#[cfg(windows)]
 pub(crate) fn build_interactive_image_report(
     worker_report: &Value,
     facts: InteractiveImageReportFacts,

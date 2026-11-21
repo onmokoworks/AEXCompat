@@ -450,6 +450,9 @@ impl HarnessApp {
                 self.live_session = None;
             }
         }
+        // The macOS guest keeps its resident session inside the backend.
+        #[cfg(target_os = "macos")]
+        crate::worker_backend::close_resident_session();
     }
 
     fn accept_adjacent_discovery(&mut self, discovery: AdjacentImportDiscovery) {
@@ -1360,7 +1363,7 @@ impl HarnessApp {
         self.spawn_native("inspect_parameters", move || {
             let expected_sha256 = decode_sha256(&hash)?;
             let (parameters, diagnostics) =
-                aexcompat_broker::image_render::inspect_experimental_via_discovery_in_place(
+                crate::worker_backend::inspect_experimental_via_discovery_in_place(
                     &repository,
                     aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
                         path: plugin_path,
@@ -1883,6 +1886,9 @@ impl HarnessApp {
         }) else {
             return;
         };
+        // Only the Windows resident session records the selected size.
+        #[cfg(not(windows))]
+        let _ = selection_size;
         let Some(input) = self.input_image.clone() else {
             return;
         };
@@ -1911,9 +1917,10 @@ impl HarnessApp {
                 return;
             }
         };
-        let worker =
-            required_render_worker_path(&self.repository, interactive_selection.path.is_smart());
-        if !worker.is_file() {
+        if let Some(worker) = crate::worker_backend::missing_render_worker(
+            &self.repository,
+            interactive_selection.path.is_smart(),
+        ) {
             self.status = "Required render worker is missing or unreadable.".into();
             self.report = serde_json::json!({
                 "passed": false,
@@ -2070,7 +2077,7 @@ impl HarnessApp {
                 // policy and authenticated preflight as the shipping CLI. An
                 // unavailable/ambiguous driver fails explicitly; it never
                 // becomes a policy-free GPU launch or a silent CPU success.
-                aexcompat_broker::image_render::render_experimental_image_with_auto_opencl_policy(
+                crate::worker_backend::render_experimental_image_with_auto_opencl_policy(
                     &repository,
                     &plugin_path,
                     &hash,
@@ -2084,7 +2091,7 @@ impl HarnessApp {
                     dependency_search_dirs,
                 )
             } else {
-                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
+                crate::worker_backend::render_experimental_image_with_approved_dependencies_and_search_dirs(
                     &repository,
                     &plugin_path,
                     &hash,
@@ -2232,7 +2239,7 @@ impl HarnessApp {
         let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         self.status = format!("Dispatching PF_Cmd_USER_CHANGED_PARAM for slot {slot}...");
         self.spawn_native("user_changed_parameter", move || {
-            let report = aexcompat_broker::image_render::trigger_experimental_button(
+            let report = crate::worker_backend::trigger_experimental_button(
                 &repository,
                 &plugin_path,
                 &hash,

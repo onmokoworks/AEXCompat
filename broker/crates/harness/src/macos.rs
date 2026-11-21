@@ -38,6 +38,9 @@ use aexcompat_broker::render_pixel_format::RenderPixelFormat;
 
 include!("macos_chain.rs");
 
+#[path = "macos_backend.rs"]
+pub(crate) mod backend;
+
 const INPUT_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"];
 
 fn supported_input_image(path: &Path) -> bool {
@@ -329,6 +332,8 @@ struct ResidentSessionHandle {
     format: MacRenderFormat,
     negotiate_output: bool,
     layers: Vec<(u32, PathBuf)>,
+    /// SHA-256 of the AEX bytes the guest staged and loaded.
+    staged_plugin_sha256: String,
     sender: Sender<ResidentCommand>,
     receiver: Receiver<Result<RenderResult, String>>,
     next_frame: u64,
@@ -419,9 +424,13 @@ impl Drop for ResidentSessionHandle {
     }
 }
 
+pub(crate) fn gui_repository_root() -> PathBuf {
+    repository_root()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
 pub fn run() -> eframe::Result<()> {
-    let repository = repository_root()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let repository = gui_repository_root();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
@@ -2937,6 +2946,7 @@ fn start_resident_session_with_geometry(
         negotiate_output,
     )?;
     let plugin_sha256 = started.plugin_sha256.clone();
+    let staged_plugin_sha256 = plugin_sha256.clone();
     let input_sha256 = started.input_sha256.clone();
     let width = started.width;
     let height = started.height;
@@ -3141,6 +3151,7 @@ fn start_resident_session_with_geometry(
         format,
         negotiate_output,
         layers,
+        staged_plugin_sha256,
         sender: command_sender,
         receiver: result_receiver,
         next_frame: 0,
@@ -4935,6 +4946,7 @@ mod tests {
             format: MacRenderFormat::PngArgb8,
             negotiate_output: false,
             layers: Vec::new(),
+            staged_plugin_sha256: String::new(),
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
@@ -5057,6 +5069,7 @@ mod tests {
             format: MacRenderFormat::PngArgb8,
             negotiate_output: false,
             layers: Vec::new(),
+            staged_plugin_sha256: String::new(),
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
@@ -5111,6 +5124,7 @@ mod tests {
             format: MacRenderFormat::PngArgb8,
             negotiate_output: false,
             layers: Vec::new(),
+            staged_plugin_sha256: String::new(),
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,

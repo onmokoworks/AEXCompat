@@ -77,6 +77,7 @@ const MAX_UNSUPPORTED_SUITE_SLOT: u64 = 1023;
 const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
 
+#[cfg(windows)]
 fn conformance_render_settings_transport() -> io::Result<Option<String>> {
     let encoded = if let Some(value) = fixture_render_settings_override() {
         value
@@ -569,6 +570,7 @@ pub(crate) fn stderr_tail(stderr: &str) -> String {
     )
 }
 
+#[cfg(windows)]
 /// Diagnostics for a dispatched worker run, including the kill evidence from
 /// Job Object accounting (issue #21): why a dead worker died (timeout versus
 /// allocations failing at the memory cap) and how much memory it peaked at.

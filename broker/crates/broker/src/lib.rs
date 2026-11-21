@@ -8,7 +8,6 @@ pub mod fixture_profiles;
 pub mod gpu_platform_collector;
 pub mod gpu_runtime_policy_generator;
 pub mod host_core;
-#[cfg(windows)]
 pub mod image_render;
 pub mod installed_runtime_roots;
 #[cfg(windows)]
@@ -34,7 +33,6 @@ pub mod render_artifacts;
 pub mod render_differential;
 pub mod render_fixture;
 pub mod render_pixel_format;
-#[cfg(windows)]
 pub mod render_request;
 #[cfg(windows)]
 pub mod render_session;

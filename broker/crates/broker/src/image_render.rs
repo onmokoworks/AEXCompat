@@ -1,3 +1,4 @@
+#![cfg_attr(not(windows), allow(dead_code, unused_imports, unused_variables))]
 // Keep the public image-rendering surface in one module while grouping the
 // implementation into bounded, reviewable source files. `include!` preserves
 // the original item scope and therefore does not change visibility or paths.
@@ -23,4 +24,5 @@ include!("image_render/inspection_and_probes.rs");
 include!("image_render/visual_diagnostics.rs");
 include!("image_render/session.rs");
 include!("image_render/independent_cases.rs");
+include!("image_render/unsupported.rs");
 include!("image_render/tests.rs");

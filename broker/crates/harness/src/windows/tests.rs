@@ -1222,11 +1222,11 @@ mod tests {
     fn render_worker_preflight_and_disconnected_tasks_are_explicit() {
         let repository = Path::new("C:/aexcompat");
         assert_eq!(
-            required_render_worker_path(repository, false),
+            crate::worker_backend::required_render_worker_path(repository, false),
             repository.join("target/minihost-build/aex_worker.exe")
         );
         assert_eq!(
-            required_render_worker_path(repository, true),
+            crate::worker_backend::required_render_worker_path(repository, true),
             repository.join("target/minihost-build/aex_worker.exe")
         );
 

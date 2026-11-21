@@ -725,6 +725,7 @@ mod chain_tests {
             format: MacRenderFormat::PngArgb8,
             negotiate_output: false,
             layers: Vec::new(),
+            staged_plugin_sha256: String::new(),
             sender,
             receiver,
             next_frame: 1,
