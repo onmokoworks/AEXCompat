@@ -566,24 +566,6 @@ impl AegpRoundtripAction {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-pub(crate) fn show_unavailable_aegp_actions(
-    ui: &mut eframe::egui::Ui,
-    explanation: &str,
-) -> (
-    Vec<(AegpRoundtripAction, eframe::egui::Response)>,
-    Option<AegpRoundtripAction>,
-) {
-    show_aegp_actions(
-        ui,
-        false,
-        false,
-        BackendCapability::Unavailable {
-            reason: explanation,
-        },
-    )
-}
-
 pub(crate) fn show_aegp_actions(
     ui: &mut eframe::egui::Ui,
     busy: bool,
@@ -804,30 +786,6 @@ mod tests {
                 "ANALYSIS / LOG OUTPUT",
             ]
         );
-    }
-
-    #[test]
-    fn unavailable_aegp_actions_are_visible_but_cannot_dispatch() {
-        eframe::egui::__run_test_ui(|ui| {
-            let (buttons, intent) =
-                show_unavailable_aegp_actions(ui, "guest transport unavailable");
-            assert_eq!(buttons.len(), AegpRoundtripAction::ALL.len());
-            assert_eq!(
-                buttons
-                    .iter()
-                    .map(|(action, _)| *action)
-                    .collect::<Vec<_>>(),
-                AegpRoundtripAction::ALL
-            );
-            for (_, response) in buttons {
-                assert!(!response.enabled());
-                assert!(!response.clicked());
-            }
-            assert_eq!(
-                intent, None,
-                "an unavailable backend must not emit a command"
-            );
-        });
     }
 
     #[test]
