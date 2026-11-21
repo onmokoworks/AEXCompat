@@ -11485,6 +11485,56 @@ fn is_debugger_present_is_false_deterministic_and_library_scoped() {
 }
 
 #[test]
+fn issue1852_is_processor_feature_present_reports_the_emulated_feature_set() {
+    const IS_PROCESSOR_FEATURE_PRESENT: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            IS_PROCESSOR_FEATURE_PRESENT,
+            "kernel32.dll",
+            "IsProcessorFeaturePresent",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::IsProcessorFeaturePresent)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "IsProcessorFeaturePresent"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
+        dispatch_win64_import(
+            "api-ms-win-core-processthreads-l1-1-0.dll",
+            "IsProcessorFeaturePresent"
+        ),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::IsProcessorFeaturePresent)
+    );
+    // SSE2 (10), SSE3 (13) and SSE4.2 (38) are present; AVX (39),
+    // PF_FASTFAIL_AVAILABLE (23) and an unknown id are not, and the upper
+    // half of RCX is ignored like a Win64 DWORD argument.
+    for (feature, expected) in [
+        (10_u64, 1),
+        (13, 1),
+        (38, 1),
+        (39, 0),
+        (23, 0),
+        (0xffff_ffff_0000_000a, 1),
+        (99, 0),
+    ] {
+        let mut arguments = [u64::MAX; 6];
+        arguments[0] = feature;
+        assert_eq!(
+            engine
+                .call_win64(IS_PROCESSOR_FEATURE_PRESENT, arguments)
+                .unwrap(),
+            expected,
+            "feature {feature:#x}"
+        );
+    }
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
 fn issue1347_create_thread_runs_bounded_guest_callback_and_completes_handle() {
     const CREATE: u64 = STUB_BASE + 0x1a0;
     const WAIT: u64 = STUB_BASE + 0x1b0;

@@ -39,6 +39,8 @@ def test_compile_and_link_caches_only_compile_steps(monkeypatch, tmp_path, sccac
 
     monkeypatch.setenv("AEXCOMPAT_COMPILE_CACHE", "sccache")
     monkeypatch.setattr(_compile_cache.subprocess, "run", record_run)
+    # Exercise the Windows flag on every OS: it must reach compiles only.
+    monkeypatch.setattr(_compile_cache, "_platform", lambda: "win32")
     output = tmp_path / "selftest"
     sources = [Path("first.cpp"), Path("second.cpp")]
 
@@ -56,6 +58,7 @@ def test_compile_and_link_caches_only_compile_steps(monkeypatch, tmp_path, sccac
             [
                 "sccache",
                 "clang++",
+                "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
                 "-std=c++17",
                 "-c",
                 str(sources[0]),
@@ -68,6 +71,7 @@ def test_compile_and_link_caches_only_compile_steps(monkeypatch, tmp_path, sccac
             [
                 "sccache",
                 "clang++",
+                "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
                 "-std=c++17",
                 "-c",
                 str(sources[1]),
