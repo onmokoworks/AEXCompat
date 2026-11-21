@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from _compile_cache import portable_cxx_flags
 from _native_selftest import ROOT, locate_optional
 
 NAME = "worker_cross_thread_dispatch_world_selftest.exe"
@@ -45,7 +46,7 @@ def _build_portable(tmp_path: Path) -> Path:
         )
     output = tmp_path / "worker_cross_thread_dispatch_world_selftest"
     subprocess.run(
-        [compiler, "-std=c++17", "-D__cdecl=", "-I", str(ROOT / "minihost" / "src")]
+        [compiler, "-std=c++17", *portable_cxx_flags(), "-D__cdecl=", "-I", str(ROOT / "minihost" / "src")]
         + [str(ROOT / source) for source in SOURCES]
         + ["-o", str(output)],
         check=True,

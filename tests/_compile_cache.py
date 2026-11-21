@@ -1,4 +1,5 @@
 import os
+import sys
 import subprocess
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -12,6 +13,19 @@ def compiler_argv(compiler: str) -> list[str]:
         require_sccache()
         return ["sccache", compiler]
     return [compiler]
+
+
+def portable_cxx_flags() -> list[str]:
+    """Flags every portable native self-test build needs on this platform.
+
+    On Windows these self-tests are built with the runner's preinstalled
+    clang++ against the newest MSVC STL, which rejects any clang older than the
+    one it was released with (STL1000, issue #1852). The self-tests use plain
+    C++17 and none of the STL features behind that check, so allow the pair.
+    """
+    if sys.platform == "win32":
+        return ["-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"]
+    return []
 
 
 def compile_and_link(
@@ -29,6 +43,7 @@ def compile_and_link(
         subprocess.run(
             [
                 *compiler_argv(compiler),
+                *portable_cxx_flags(),
                 *compile_args,
                 "-c",
                 str(source),
