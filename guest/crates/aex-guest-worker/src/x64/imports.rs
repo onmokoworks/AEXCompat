@@ -11952,11 +11952,19 @@ fn format_crt_ctime(fields: [i32; 9]) -> Result<String, String> {
     ))
 }
 
-/// PF_* features the emulated x86-64 CPU really provides: CMPXCHG8B (2),
-/// MMX (3), SSE (6) and SSE2 (10), the x86-64 baseline. Everything else,
-/// including PF_FASTFAIL_AVAILABLE (23), reports absent: the guest does not
-/// service `int 0x29`, so the MSVC CRT must take its non-fastfail path.
-const EMULATED_PROCESSOR_FEATURES: [u32; 4] = [2, 3, 6, 10];
+/// PF_* ids answered as present. The guest runs Unicorn's default x86-64
+/// CPU model (Haswell) without a CPUID hook, so these follow what that model
+/// executes under TCG and what x64 Windows always reports on it:
+/// CMPXCHG8B (2), MMX (3), SSE (6), RDTSC (8), PAE (9), SSE2 (10), NX (12),
+/// SSE3 (13), CMPXCHG16B (14), SSSE3 (36), SSE4.1 (37) and SSE4.2 (38).
+///
+/// AVX (39) and AVX2 (40) answer absent although CPUID advertises them: the
+/// guest only emulates a bounded AVX subset, so a plug-in that checks first
+/// should take its SSE path rather than run into an unemulated instruction.
+/// PF_FASTFAIL_AVAILABLE (23) answers absent because the guest does not
+/// service `int 0x29`; the MSVC CRT then reaches UnhandledExceptionFilter or
+/// TerminateProcess, which fail as explicit unsupported imports.
+const EMULATED_PROCESSOR_FEATURES: [u32; 12] = [2, 3, 6, 8, 9, 10, 12, 13, 14, 36, 37, 38];
 
 fn emulate_is_processor_feature_present(unicorn: &mut Unicorn<'_, GuestState>) {
     let feature = match unicorn.reg_read(RegisterX86::RCX) {

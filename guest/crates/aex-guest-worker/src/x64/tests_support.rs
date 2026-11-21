@@ -11502,11 +11502,21 @@ fn issue1852_is_processor_feature_present_reports_the_x64_baseline_only() {
         dispatch_win64_import("fixture.dll", "IsProcessorFeaturePresent"),
         Win64ImportDispatch::UnsupportedLegacyImport
     );
-    // SSE2 (10) is present; PF_FASTFAIL_AVAILABLE (23) and an unknown id are
-    // not, and the upper half of RCX is ignored like a Win64 DWORD argument.
+    assert_eq!(
+        dispatch_win64_import(
+            "api-ms-win-core-processthreads-l1-1-0.dll",
+            "IsProcessorFeaturePresent"
+        ),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::IsProcessorFeaturePresent)
+    );
+    // SSE2 (10), SSE3 (13) and SSE4.2 (38) are present; AVX (39),
+    // PF_FASTFAIL_AVAILABLE (23) and an unknown id are not, and the upper
+    // half of RCX is ignored like a Win64 DWORD argument.
     for (feature, expected) in [
         (10_u64, 1),
-        (6, 1),
+        (13, 1),
+        (38, 1),
+        (39, 0),
         (23, 0),
         (0xffff_ffff_0000_000a, 1),
         (99, 0),
