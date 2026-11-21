@@ -11485,7 +11485,7 @@ fn is_debugger_present_is_false_deterministic_and_library_scoped() {
 }
 
 #[test]
-fn issue1852_is_processor_feature_present_reports_the_x64_baseline_only() {
+fn issue1852_is_processor_feature_present_reports_the_emulated_feature_set() {
     const IS_PROCESSOR_FEATURE_PRESENT: u64 = STUB_BASE + 0x1a0;
     let mut engine = test_engine(&[0xc3]);
     assert_eq!(

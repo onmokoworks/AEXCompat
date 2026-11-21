@@ -23,9 +23,14 @@ def portable_cxx_flags() -> list[str]:
     one it was released with (STL1000, issue #1852). The self-tests use plain
     C++17 and none of the STL features behind that check, so allow the pair.
     """
-    if sys.platform == "win32":
+    if _platform() == "win32":
         return ["-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"]
     return []
+
+
+def _platform() -> str:
+    """The platform the flags are chosen for; tests replace this, not sys."""
+    return sys.platform
 
 
 def compile_and_link(
