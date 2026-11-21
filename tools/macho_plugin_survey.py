@@ -62,7 +62,7 @@ SYMBOL_MARKERS = {
 
 
 # C symbols only: mangled C++ names (`__Z…`) would spell out vendor classes.
-ENTRY_LIKE = re.compile(r"^_[A-Za-z]\w*(Main|EntryPoint)\w*$")
+ENTRY_LIKE = re.compile(r"^_(?!_)\w*(Main|EntryPoint)\w*$")
 FILETYPES = {"BUNDLE", "DYLIB", "EXECUTE", "OBJECT", "DYLINKER", "KEXTBUNDLE"}
 
 
