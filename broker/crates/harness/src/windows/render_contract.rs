@@ -1485,7 +1485,8 @@ fn render_diagnostics(report: &serde_json::Value) -> Option<RenderDiagnostics> {
 }
 
 /// The error UPDATE_PARAMS_UI returned on the supervised-parameter route,
-/// when it ran and failed. The worker then keeps the previous UI flags (#1858).
+/// when it ran and failed. The worker then drops what it wrote and keeps the
+/// USER_CHANGED_PARAM result (#1858).
 fn update_params_ui_failure(report: &serde_json::Value) -> Option<i64> {
     report
         .get("update_params_ui_error")

@@ -2826,7 +2826,7 @@ impl HarnessApp {
             apply_dynamic_ui_report(&mut self.parameters, &report);
             if let Some(error) = update_params_ui_failure(&report) {
                 self.status = format!(
-                    "PF_Cmd_UPDATE_PARAMS_UI returned {error}; Effect Controls keep the previous UI state."
+                    "PF_Cmd_UPDATE_PARAMS_UI returned {error}; its UI changes were not applied."
                 );
             }
         }
