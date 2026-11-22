@@ -245,6 +245,8 @@ struct HarnessApp {
     pixel_comparison: Option<Result<PixelComparison, String>>,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     parameter_defaults: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    /// Group (topic) slots twirled closed in Effect Controls.
+    collapsed_groups: std::collections::BTreeSet<u32>,
     parameter_inspection_state: ParameterInspectionState,
     host_context: Option<aexcompat_broker::render_request::HostContext>,
     smart_render: bool,
@@ -328,6 +330,7 @@ impl HarnessApp {
             pixel_comparison: None,
             parameters: Vec::new(),
             parameter_defaults: Vec::new(),
+            collapsed_groups: std::collections::BTreeSet::new(),
             parameter_inspection_state: ParameterInspectionState::NotSelected,
             host_context: None,
             smart_render: false,
@@ -2500,6 +2503,7 @@ impl HarnessApp {
             ui,
             &mut self.parameters,
             &self.parameter_defaults,
+            &mut self.collapsed_groups,
             self.busy,
             crate::shared_ui::EffectControlCapabilities {
                 choose_layer: true,
@@ -2768,11 +2772,28 @@ impl HarnessApp {
                         .as_bool()
                         .unwrap_or(false);
                     let inspection_state = parameter_inspection_state(&report, &parameters)?;
-                    Ok((capability, parameters, audio_effect_only, inspection_state))
+                    let collapsed_groups = crate::shared_ui::initially_collapsed_groups(
+                        &parameters,
+                        &report["worker_diagnostics"],
+                    );
+                    Ok((
+                        capability,
+                        parameters,
+                        audio_effect_only,
+                        inspection_state,
+                        collapsed_groups,
+                    ))
                 })();
                 match accepted {
-                    Ok((capability, parameters, audio_effect_only, inspection_state)) => {
+                    Ok((
+                        capability,
+                        parameters,
+                        audio_effect_only,
+                        inspection_state,
+                        collapsed_groups,
+                    )) => {
                         self.parameters = normalize_inspected_ui_parameters(&parameters);
+                        self.collapsed_groups = collapsed_groups;
                         self.parameter_defaults = self.parameters.clone();
                         self.parameter_inspection_state = inspection_state;
                         self.audio_effect_only = audio_effect_only;

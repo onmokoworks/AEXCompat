@@ -374,6 +374,13 @@ fn inspection_result_from_report(
         });
     }
     diagnostics["parameter_metadata"] = Value::Array(parameter_metadata);
+    // Declared PF_ParamFlags per slot, so the GUI can start groups collapsed
+    // the way the Effect Controls panel does.
+    diagnostics["parameter_flags"] = Value::Array(
+        rows.iter()
+            .map(|row| json!({"index": row.get("index"), "flags": row.get("flags")}))
+            .collect(),
+    );
     Ok((parameters, diagnostics))
 }
 
