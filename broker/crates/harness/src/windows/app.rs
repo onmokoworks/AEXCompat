@@ -2808,7 +2808,7 @@ impl HarnessApp {
                 .as_ref()
                 .and_then(render_diagnostics);
             self.output_image = Some(output.clone());
-            self.preview = Some(ctx.load_texture("output", image, egui::TextureOptions::LINEAR));
+            self.preview = Some(ctx.load_texture("output", image, PREVIEW_TEXTURE_OPTIONS));
             self.viewer_mode = if self.viewer_mode == 2 && self.input_preview.is_some() {
                 2
             } else {
