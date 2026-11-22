@@ -33,6 +33,7 @@ effect_editor_state! {
     diagnostic_warning: Option<String>,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     parameter_defaults: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    collapsed_groups: std::collections::BTreeSet<u32>,
     parameter_inspection_state: ParameterInspectionState,
     host_context: Option<aexcompat_broker::render_request::HostContext>,
     smart_render: bool,

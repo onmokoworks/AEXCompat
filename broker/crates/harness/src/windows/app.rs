@@ -402,6 +402,7 @@ impl HarnessApp {
         self.preflight_warnings.clear();
         self.parameters.clear();
         self.parameter_defaults.clear();
+        self.collapsed_groups.clear();
         self.parameter_inspection_state = ParameterInspectionState::NotSelected;
         self.audio_input = None;
         self.audio_effect_only = false;
@@ -1002,6 +1003,7 @@ impl HarnessApp {
         self.close_live_session();
         self.parameters.clear();
         self.parameter_defaults.clear();
+        self.collapsed_groups.clear();
         self.parameter_inspection_state = if self.selection.is_some() {
             ParameterInspectionState::Failed
         } else {
@@ -1249,6 +1251,7 @@ impl HarnessApp {
                 self.selection_stale = false;
                 self.parameters.clear();
                 self.parameter_defaults.clear();
+                self.collapsed_groups.clear();
                 self.audio_input = None;
                 self.audio_effect_only = false;
                 self.smart_render = false;
@@ -2810,6 +2813,7 @@ impl HarnessApp {
                     Err(error) => {
                         self.parameters.clear();
                         self.parameter_defaults.clear();
+                        self.collapsed_groups.clear();
                         self.parameter_inspection_state = ParameterInspectionState::Failed;
                         self.audio_effect_only = false;
                         self.status = "Effect Controls capability inspection failed safely; rendering is blocked.".into();
@@ -2819,6 +2823,7 @@ impl HarnessApp {
             } else {
                 self.parameters.clear();
                 self.parameter_defaults.clear();
+                self.collapsed_groups.clear();
                 self.parameter_inspection_state = ParameterInspectionState::Failed;
                 self.audio_effect_only = false;
             }
