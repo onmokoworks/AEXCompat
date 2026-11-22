@@ -3453,10 +3453,12 @@ bool dispatch_conditional_ui_selectors(EffectEntry entry,
 // may replace the host's own. A selector that reported an error stopped
 // somewhere it chose not to say, so what it wrote is partial by definition;
 // letting the frame proceed without it is the #883 fix, adopting its writes
-// anyway is not part of that. UPDATE_PARAMS_UI is no longer dispatched (#1156),
-// so it rewrites nothing and does not gate this; only QUERY_DYNAMIC_FLAGS does.
+// anyway is not part of that. UPDATE_PARAMS_UI is dispatched only on the
+// GUI's supervised-parameter route (#1156, #1858); where it ran, an error
+// from it rejects its partial writes the same way.
 bool conditional_ui_definitions_usable() {
-  return !g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0;
+  return (!g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0) &&
+      (g_update_params_ui_error == -1 || g_update_params_ui_error == 0);
 }
 
 

@@ -2822,8 +2822,13 @@ impl HarnessApp {
             self.pixel_comparison = None;
             self.viewer_mode = 1;
         }
-        if let Ok(report) = serde_json::from_str(&result.body) {
+        if let Ok(report) = serde_json::from_str::<serde_json::Value>(&result.body) {
             apply_dynamic_ui_report(&mut self.parameters, &report);
+            if let Some(error) = update_params_ui_failure(&report) {
+                self.status = format!(
+                    "PF_Cmd_UPDATE_PARAMS_UI returned {error}; Effect Controls keep the previous UI state."
+                );
+            }
         }
         self.report = inspection_blocker.unwrap_or(result.body);
         self.receiver = None;

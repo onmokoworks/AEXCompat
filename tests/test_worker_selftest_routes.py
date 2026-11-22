@@ -117,6 +117,16 @@ def test_loaded_plugin_aegp_stream_values_pass_on_all_workers() -> None:
         pass
 
 
+def test_l2_user_change_sends_update_params_ui_to_effects_that_ask_for_it() -> None:
+    completed = _run_route(
+        "discovery", "--self-test-l2-update-params-ui-after-user-change"
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert json.loads(completed.stdout) == {
+        "l2_update_params_ui_after_user_change": "passed"
+    }
+
+
 def test_l2_point_defaults_use_the_lifecycle_layer_extent() -> None:
     completed = _run_route("discovery", "--self-test-l2-point-default-units")
     assert completed.returncode == 0, completed.stderr or completed.stdout
