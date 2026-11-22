@@ -234,6 +234,30 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
       (!g_user_changed_param_requested || g_user_changed_param_error == 0);
   conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
       entry, input, output, lifecycle_params.data());
+  // The GUI's supervised-parameter route stands in for the Effect Controls
+  // panel, which re-reads the UI after USER_CHANGED_PARAM by sending
+  // UPDATE_PARAMS_UI to an effect that advertises SEND_UPDATE_PARAMS_UI. That
+  // is where effects such as the SDK Supervisor sample gray parameters out
+  // with PF_UpdateParamUI (issue #1858). Render and discovery never get here
+  // with a user change requested, so they still never issue it (#1156).
+  // A failed UPDATE_PARAMS_UI stopped somewhere it did not say, so its
+  // partial writes are dropped and what USER_CHANGED_PARAM wrote is kept.
+  if (conditional_ui_ok && g_user_changed_param_requested &&
+      g_update_params_ui_advertised) {
+    const auto after_user_change = lifecycle_definitions;
+    g_update_params_ui_active = true;
+    g_active_ui_params = lifecycle_params.data();
+    g_active_ui_param_count = lifecycle_params.size();
+    g_update_params_ui_error = entry(kUpdateParamsUi, input.data(), output.data(),
+        lifecycle_params.data(), nullptr, nullptr);
+    g_active_ui_params = nullptr;
+    g_active_ui_param_count = 0;
+    g_update_params_ui_active = false;
+    // Element-wise, so lifecycle_params keeps pointing at the same storage.
+    if (g_update_params_ui_error != 0)
+      std::copy(after_user_change.begin(), after_user_change.end(),
+                lifecycle_definitions.begin());
+  }
   if (conditional_ui_ok && conditional_ui_definitions_usable()) {
     for (std::size_t i = 0; i < g_params.size(); ++i)
       g_params[i].raw = lifecycle_definitions[i + 1];
@@ -380,6 +404,139 @@ bool verify_l2_point_default_units() {
   parameter_state.timelines = saved_timelines;
   g_user_changed_param_requested = saved_user_changed_requested;
   g_user_changed_parameters = saved_user_changed_parameters;
+  return passed;
+}
+
+// Issue #1858: the GUI's supervised-parameter route sends UPDATE_PARAMS_UI
+// after USER_CHANGED_PARAM to an effect advertising SEND_UPDATE_PARAMS_UI, and
+// what PF_UpdateParamUI wrote there reaches the reported parameter table.
+struct L2UpdateParamsUiProbe {
+  bool fail_update{};
+  int user_changed_calls{};
+  int update_calls{};
+  bool update_after_user_change{};
+  int32_t update_param_ui_result{-1};
+};
+L2UpdateParamsUiProbe g_l2_update_params_ui_probe;
+
+int32_t __cdecl l2_update_params_ui_probe_entry(
+    int32_t selector, void*, void*, void** params, void*, void*) {
+  auto& probe = g_l2_update_params_ui_probe;
+  if (selector != kUserChangedParam && selector != kUpdateParamsUi) return 0;
+  if (!params || !params[2]) return 4;
+  // USER_CHANGED_PARAM hides the slider; UPDATE_PARAMS_UI grays it out.
+  const uint32_t bit = selector == kUserChangedParam ? (1u << 9) : (1u << 5);
+  decltype(aexcompat::worker_runtime::parameters::ParamRecord::raw) changed{};
+  std::memcpy(changed.data(), params[2], changed.size());
+  write<uint32_t>(changed, kParamUiFlags,
+                  read<uint32_t>(changed, kParamUiFlags) | bit);
+  const int32_t result = update_param_ui(&g_effect, 2, changed.data());
+  if (selector == kUserChangedParam) {
+    ++probe.user_changed_calls;
+    return result;
+  }
+  ++probe.update_calls;
+  probe.update_after_user_change = probe.user_changed_calls == 1;
+  probe.update_param_ui_result = result;
+  return probe.fail_update ? 4 : 0;
+}
+
+struct L2UpdateParamsUiOutcome {
+  bool lifecycle_ok{};
+  L2UpdateParamsUiProbe probe{};
+  int32_t update_params_ui_error{};
+  bool slider_hidden{};
+  bool slider_disabled{};
+};
+
+L2UpdateParamsUiOutcome run_l2_update_params_ui_probe(bool advertised,
+                                                      bool fail_update) {
+  auto& parameter_state =
+      aexcompat::worker_runtime::parameters::state();
+  parameter_state.records.clear();
+  parameter_state.timelines.clear();
+  aexcompat::worker_runtime::parameters::ParamRecord checkbox{};
+  checkbox.index = 1;
+  checkbox.type = 4;
+  checkbox.flags = 1u << 6;  // PF_ParamFlag_SUPERVISE
+  write<int32_t>(checkbox.raw, kParamType, checkbox.type);
+  write<uint32_t>(checkbox.raw, kParamFlags, checkbox.flags);
+  parameter_state.records.push_back(checkbox);
+  aexcompat::worker_runtime::parameters::ParamRecord slider{};
+  slider.index = 2;
+  slider.type = 10;
+  slider.has_numeric = true;
+  slider.valid_max = slider.slider_max = 100.0;
+  write<int32_t>(slider.raw, kParamType, slider.type);
+  parameter_state.records.push_back(slider);
+
+  g_user_changed_param_requested = true;
+  g_user_changed_param_slot = 1;
+  g_user_changed_parameters.clear();
+  g_update_params_ui_advertised = advertised;
+  g_query_dynamic_flags_advertised = false;
+  g_l2_update_params_ui_probe = {};
+  g_l2_update_params_ui_probe.fail_update = fail_update;
+
+  std::array<std::byte, kInSize> input{};
+  std::array<std::byte, kOutSize> output{};
+  std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
+  bool lifecycle_data_null = false;
+  bool user_changed_ok = false;
+  bool conditional_ui_ok = false;
+  const auto lifecycle_exit = run_l2_parameter_lifecycle(
+      &l2_update_params_ui_probe_entry, input, output, 0, 0,
+      lifecycle_errors, lifecycle_data_null, user_changed_ok,
+      conditional_ui_ok, 256, 144);
+  L2UpdateParamsUiOutcome outcome{};
+  outcome.lifecycle_ok = !lifecycle_exit && user_changed_ok &&
+      conditional_ui_ok && g_user_changed_param_error == 0;
+  outcome.probe = g_l2_update_params_ui_probe;
+  outcome.update_params_ui_error = g_update_params_ui_error;
+  const uint32_t slider_ui = g_params.size() == 2
+      ? read<uint32_t>(g_params[1].raw, kParamUiFlags) : 0;
+  outcome.slider_hidden = (slider_ui & (1u << 9)) != 0;
+  outcome.slider_disabled = (slider_ui & (1u << 5)) != 0;
+  return outcome;
+}
+
+bool verify_l2_update_params_ui_after_user_change() {
+  auto& parameter_state =
+      aexcompat::worker_runtime::parameters::state();
+  const auto saved_records = parameter_state.records;
+  const auto saved_timelines = parameter_state.timelines;
+  const bool saved_user_changed_requested = g_user_changed_param_requested;
+  const auto saved_user_changed_slot = g_user_changed_param_slot;
+  const auto saved_user_changed_parameters = g_user_changed_parameters;
+  const bool saved_update_advertised = g_update_params_ui_advertised;
+  const bool saved_query_advertised = g_query_dynamic_flags_advertised;
+
+  const auto advertised = run_l2_update_params_ui_probe(true, false);
+  const auto silent = run_l2_update_params_ui_probe(false, false);
+  const auto failing = run_l2_update_params_ui_probe(true, true);
+  const bool passed = advertised.lifecycle_ok &&
+      advertised.probe.user_changed_calls == 1 &&
+      advertised.probe.update_calls == 1 &&
+      advertised.probe.update_after_user_change &&
+      advertised.probe.update_param_ui_result == 0 &&
+      advertised.update_params_ui_error == 0 && advertised.slider_hidden &&
+      advertised.slider_disabled &&
+      silent.lifecycle_ok && silent.probe.user_changed_calls == 1 &&
+      silent.probe.update_calls == 0 && silent.update_params_ui_error == -1 &&
+      silent.slider_hidden && !silent.slider_disabled &&
+      // A failed UPDATE_PARAMS_UI keeps USER_CHANGED_PARAM's write only.
+      failing.lifecycle_ok && failing.probe.update_calls == 1 &&
+      failing.probe.update_param_ui_result == 0 &&
+      failing.update_params_ui_error == 4 && failing.slider_hidden &&
+      !failing.slider_disabled;
+
+  parameter_state.records = saved_records;
+  parameter_state.timelines = saved_timelines;
+  g_user_changed_param_requested = saved_user_changed_requested;
+  g_user_changed_param_slot = saved_user_changed_slot;
+  g_user_changed_parameters = saved_user_changed_parameters;
+  g_update_params_ui_advertised = saved_update_advertised;
+  g_query_dynamic_flags_advertised = saved_query_advertised;
   return passed;
 }
 
@@ -2886,6 +3043,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
               << "\",\"v2\":true,\"v1_fallback\":true,\"multi_effect\":true,"
                  "\"bounded\":true,\"fail_closed\":true}\n";
     return passed ? 0 : 73;
+  }
+  if (argc == 2 &&
+      std::wstring(argv[1]) ==
+          L"--self-test-l2-update-params-ui-after-user-change") {
+    const bool passed = verify_l2_update_params_ui_after_user_change();
+    std::cout << "{\"l2_update_params_ui_after_user_change\":\""
+              << (passed ? "passed" : "failed") << "\"}\n";
+    return passed ? 0 : 75;
   }
   if (argc == 2 &&
       std::wstring(argv[1]) == L"--self-test-l2-point-default-units") {

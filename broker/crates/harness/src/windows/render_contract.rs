@@ -1484,6 +1484,16 @@ fn render_diagnostics(report: &serde_json::Value) -> Option<RenderDiagnostics> {
     })
 }
 
+/// The error UPDATE_PARAMS_UI returned on the supervised-parameter route,
+/// when it ran and failed. The worker then drops what it wrote and keeps the
+/// USER_CHANGED_PARAM result (#1858).
+fn update_params_ui_failure(report: &serde_json::Value) -> Option<i64> {
+    report
+        .get("update_params_ui_error")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|error| *error != 0 && *error != -1)
+}
+
 fn apply_dynamic_ui_report(
     parameters: &mut [aexcompat_broker::image_render::InteractiveParameter],
     report: &serde_json::Value,
