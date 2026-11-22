@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use aexcompat_broker::render_fixture::InteractiveParameter;
@@ -67,7 +68,6 @@ pub(crate) enum EffectControlIntent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EffectControlRole {
     GroupStart,
-    GroupEnd,
     Editor,
     Reset,
     Button,
@@ -111,10 +111,15 @@ pub(crate) struct EffectControlCapabilities {
     pub(crate) trigger_button: bool,
 }
 
+/// How far a parameter inside a group is indented per nesting level.
+const GROUP_INDENT: f32 = 14.0;
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn show_effect_controls(
     ui: &mut egui::Ui,
     parameters: &mut [InteractiveParameter],
     defaults: &[InteractiveParameter],
+    collapsed_groups: &mut BTreeSet<u32>,
     busy: bool,
     capabilities: EffectControlCapabilities,
     text: EffectControlsText<'_>,
@@ -125,192 +130,68 @@ pub(crate) fn show_effect_controls(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Open groups around the current row, and the depth inside the
+            // collapsed or hidden group whose rows are being skipped.
+            let mut depth = 0_usize;
+            let mut skipping_inside: Option<usize> = None;
             for parameter in parameters {
+                let kind = parameter.kind.as_str();
+                if let Some(inside) = skipping_inside {
+                    if kind == "group_start" {
+                        depth += 1;
+                    } else if kind == "group_end" {
+                        if depth == inside {
+                            skipping_inside = None;
+                        }
+                        depth = depth.saturating_sub(1);
+                    }
+                    continue;
+                }
+                if kind == "group_end" {
+                    depth = depth.saturating_sub(1);
+                    continue;
+                }
+                if kind == "group_start" {
+                    depth += 1;
+                    if !parameter.visible {
+                        skipping_inside = Some(depth);
+                        continue;
+                    }
+                    let collapsed = collapsed_groups.contains(&parameter.slot);
+                    let response = indented(ui, depth - 1, |ui| {
+                        ui.add_space(6.0);
+                        group_header(ui, &parameter.name, collapsed)
+                    });
+                    if response.clicked() {
+                        if collapsed {
+                            collapsed_groups.remove(&parameter.slot);
+                        } else {
+                            collapsed_groups.insert(parameter.slot);
+                        }
+                    }
+                    #[cfg(test)]
+                    widgets.push((parameter.slot, EffectControlRole::GroupStart, response));
+                    if collapsed {
+                        skipping_inside = Some(depth);
+                    }
+                    continue;
+                }
                 if !parameter.visible {
                     continue;
                 }
-                if parameter.kind == "group_start" {
-                    ui.add_space(8.0);
-                    let _response = ui.label(RichText::new(&parameter.name).strong());
-                    #[cfg(test)]
-                    widgets.push((parameter.slot, EffectControlRole::GroupStart, _response));
-                    continue;
-                }
-                if parameter.kind == "group_end" {
-                    let _response = ui.separator();
-                    #[cfg(test)]
-                    widgets.push((parameter.slot, EffectControlRole::GroupEnd, _response));
-                    continue;
-                }
-                if parameter.kind == "button" {
-                    let response = ui
-                        .add_enabled(
-                            parameter.enabled && !busy && capabilities.trigger_button,
-                            egui::Button::new(&parameter.name),
-                        )
-                        .on_disabled_hover_text(text.button_unavailable);
-                    if response.clicked() {
-                        intents.push(EffectControlIntent::TriggerButton {
-                            slot: parameter.slot,
-                        });
-                    }
-                    #[cfg(test)]
-                    widgets.push((parameter.slot, EffectControlRole::Button, response));
-                    continue;
-                }
-                if matches!(parameter.kind.as_str(), "custom" | "no_data") {
-                    ui.label(&parameter.name);
-                    ui.small(format!("{} ({})", parameter.kind, text.read_only));
-                    continue;
-                }
-
-                let previous_value = parameter.value;
-                let previous_color = parameter.color;
-                let previous_components = parameter.components;
-                let previous_summary = parameter.debug_summary.clone();
-                let _editor = ui.add_enabled_ui(parameter.enabled && !busy, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&parameter.name).small());
-                        if let Some(default) = defaults
-                            .iter()
-                            .find(|default| default.slot == parameter.slot)
-                        {
-                            let reset = ui.add_enabled(
-                                !crate::gui_state::parameter_is_default(parameter, default),
-                                egui::Button::new(text.reset).small(),
-                            );
-                            if reset.clicked() {
-                                intents.push(EffectControlIntent::Reset {
-                                    slot: parameter.slot,
-                                    supervised: parameter.supervised,
-                                });
-                            }
-                            #[cfg(test)]
-                            widgets.push((parameter.slot, EffectControlRole::Reset, reset));
-                        }
-                    });
-                    match parameter.kind.as_str() {
-                        "layer" => {
-                            ui.horizontal(|ui| {
-                                let response = ui
-                                    .add_enabled(
-                                        capabilities.choose_layer,
-                                        egui::Button::new(text.choose_image).small(),
-                                    )
-                                    .on_disabled_hover_text(text.layer_unavailable);
-                                if response.clicked() {
-                                    intents.push(EffectControlIntent::ChooseLayer {
-                                        slot: parameter.slot,
-                                    });
-                                }
-                                #[cfg(test)]
-                                widgets.push((
-                                    parameter.slot,
-                                    EffectControlRole::ChooseLayer,
-                                    response,
-                                ));
-                                ui.label(
-                                    parameter
-                                        .layer_path
-                                        .as_ref()
-                                        .and_then(|path| path.file_name())
-                                        .and_then(|name| name.to_str())
-                                        .unwrap_or(text.not_connected),
-                                );
-                            });
-                        }
-                        "arbitrary_data" => {
-                            ui.add(
-                                egui::TextEdit::singleline(
-                                    parameter.debug_summary.get_or_insert_with(String::new),
-                                )
-                                .desired_width(f32::INFINITY),
-                            );
-                        }
-                        "path" => {
-                            ui.add(
-                                egui::DragValue::new(&mut parameter.value)
-                                    .range(0.0..=parameter.maximum),
-                            );
-                        }
-                        "angle" | "point" | "point3d" => {
-                            ui.horizontal(|ui| {
-                                for (index, label) in ["X", "Y", "Z"]
-                                    .iter()
-                                    .enumerate()
-                                    .take(parameter.component_count)
-                                {
-                                    ui.label(*label);
-                                    ui.add(
-                                        egui::DragValue::new(&mut parameter.components[index])
-                                            .speed(0.1),
-                                    );
-                                }
-                            });
-                        }
-                        "color" => {
-                            let mut color = Color32::from_rgba_unmultiplied(
-                                parameter.color[1],
-                                parameter.color[2],
-                                parameter.color[3],
-                                parameter.color[0],
-                            );
-                            if ui.color_edit_button_srgba(&mut color).changed() {
-                                parameter.color = [color.a(), color.r(), color.g(), color.b()];
-                            }
-                        }
-                        _ if !parameter.choices.is_empty() => {
-                            let mut selected = parameter.value as usize;
-                            egui::ComboBox::from_id_salt(("effect-control", parameter.slot))
-                                .selected_text(
-                                    parameter
-                                        .choices
-                                        .get(selected.saturating_sub(1))
-                                        .map(String::as_str)
-                                        .unwrap_or("Unknown"),
-                                )
-                                .show_ui(ui, |ui| {
-                                    for (index, choice) in parameter.choices.iter().enumerate() {
-                                        ui.selectable_value(&mut selected, index + 1, choice);
-                                    }
-                                });
-                            if !parameter.use_declared_default
-                                || selected != parameter.value as usize
-                            {
-                                parameter.value = selected as f64;
-                            }
-                        }
-                        "integer" if parameter.minimum == 0.0 && parameter.maximum == 1.0 => {
-                            let mut checked = parameter.value != 0.0;
-                            if ui.checkbox(&mut checked, text.enabled).changed() {
-                                parameter.value = f64::from(checked);
-                            }
-                        }
-                        _ => {
-                            modern_slider_with_default(
-                                ui,
-                                &mut parameter.value,
-                                parameter.minimum..=parameter.maximum,
-                                &parameter.name,
-                                parameter.use_declared_default,
-                            );
-                        }
-                    }
+                indented(ui, depth, |ui| {
+                    show_parameter_row(
+                        ui,
+                        parameter,
+                        defaults,
+                        busy,
+                        capabilities,
+                        text,
+                        &mut intents,
+                        #[cfg(test)]
+                        &mut widgets,
+                    )
                 });
-                #[cfg(test)]
-                widgets.push((parameter.slot, EffectControlRole::Editor, _editor.response));
-                if parameter.value != previous_value
-                    || parameter.color != previous_color
-                    || parameter.components != previous_components
-                    || parameter.debug_summary != previous_summary
-                {
-                    parameter.use_declared_default = false;
-                    intents.push(EffectControlIntent::Changed {
-                        slot: parameter.slot,
-                        supervised: parameter.supervised,
-                    });
-                }
-                ui.add_space(4.0);
             }
         });
     EffectControlsOutput {
@@ -318,6 +199,253 @@ pub(crate) fn show_effect_controls(
         #[cfg(test)]
         widgets,
     }
+}
+
+fn indented<R>(ui: &mut egui::Ui, depth: usize, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    if depth == 0 {
+        return add(ui);
+    }
+    ui.horizontal_top(|ui| {
+        ui.add_space(depth as f32 * GROUP_INDENT);
+        ui.vertical(add).inner
+    })
+    .inner
+}
+
+/// A group (topic) heading that twirls open and closed like the Effect
+/// Controls panel. The arrow is painted so it does not depend on the font.
+fn group_header(ui: &mut egui::Ui, name: &str, collapsed: bool) -> egui::Response {
+    ui.horizontal(|ui| {
+        let size = ui.spacing().icon_width;
+        let (rect, icon) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+        let label = ui.add(
+            egui::Label::new(RichText::new(name).strong())
+                .selectable(false)
+                .sense(egui::Sense::click()),
+        );
+        let center = rect.center();
+        let radius = size * 0.3;
+        let points = if collapsed {
+            vec![
+                center + egui::vec2(-radius * 0.6, -radius),
+                center + egui::vec2(radius, 0.0),
+                center + egui::vec2(-radius * 0.6, radius),
+            ]
+        } else {
+            vec![
+                center + egui::vec2(-radius, -radius * 0.6),
+                center + egui::vec2(radius, -radius * 0.6),
+                center + egui::vec2(0.0, radius),
+            ]
+        };
+        ui.painter().add(egui::Shape::convex_polygon(
+            points,
+            ui.visuals().text_color(),
+            egui::Stroke::NONE,
+        ));
+        icon.union(label)
+    })
+    .inner
+}
+
+/// The groups that start collapsed. AE honors PF_ParamFlag_START_COLLAPSED
+/// (COLLAPSE_TWIRLY, 1 << 5) on a group only when the effect sets
+/// PF_OutFlag2_PARAM_GROUP_START_COLLAPSED_FLAG (1 << 3); otherwise every
+/// group starts collapsed. `diagnostics` is the inspection's worker
+/// diagnostics, which carry `advertised_out_flags2` and `parameter_flags`.
+pub(crate) fn initially_collapsed_groups(
+    parameters: &[InteractiveParameter],
+    diagnostics: &serde_json::Value,
+) -> BTreeSet<u32> {
+    let honors_flag = diagnostics["advertised_out_flags2"]
+        .as_u64()
+        .is_some_and(|flags| flags & (1 << 3) != 0);
+    let declared_flags = |slot: u32| {
+        diagnostics["parameter_flags"]
+            .as_array()
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row["index"].as_u64() == Some(u64::from(slot)))
+            })
+            .and_then(|row| row["flags"].as_u64())
+            .unwrap_or(0)
+    };
+    parameters
+        .iter()
+        .filter(|parameter| parameter.kind == "group_start")
+        .filter(|parameter| !honors_flag || declared_flags(parameter.slot) & (1 << 5) != 0)
+        .map(|parameter| parameter.slot)
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_parameter_row(
+    ui: &mut egui::Ui,
+    parameter: &mut InteractiveParameter,
+    defaults: &[InteractiveParameter],
+    busy: bool,
+    capabilities: EffectControlCapabilities,
+    text: EffectControlsText<'_>,
+    intents: &mut Vec<EffectControlIntent>,
+    #[cfg(test)] widgets: &mut Vec<(u32, EffectControlRole, egui::Response)>,
+) {
+    if parameter.kind == "button" {
+        let response = ui
+            .add_enabled(
+                parameter.enabled && !busy && capabilities.trigger_button,
+                egui::Button::new(&parameter.name),
+            )
+            .on_disabled_hover_text(text.button_unavailable);
+        if response.clicked() {
+            intents.push(EffectControlIntent::TriggerButton {
+                slot: parameter.slot,
+            });
+        }
+        #[cfg(test)]
+        widgets.push((parameter.slot, EffectControlRole::Button, response));
+        return;
+    }
+    if matches!(parameter.kind.as_str(), "custom" | "no_data") {
+        ui.label(&parameter.name);
+        ui.small(format!("{} ({})", parameter.kind, text.read_only));
+        return;
+    }
+
+    let previous_value = parameter.value;
+    let previous_color = parameter.color;
+    let previous_components = parameter.components;
+    let previous_summary = parameter.debug_summary.clone();
+    let _editor = ui.add_enabled_ui(parameter.enabled && !busy, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&parameter.name).small());
+            if let Some(default) = defaults
+                .iter()
+                .find(|default| default.slot == parameter.slot)
+            {
+                let reset = ui.add_enabled(
+                    !crate::gui_state::parameter_is_default(parameter, default),
+                    egui::Button::new(text.reset).small(),
+                );
+                if reset.clicked() {
+                    intents.push(EffectControlIntent::Reset {
+                        slot: parameter.slot,
+                        supervised: parameter.supervised,
+                    });
+                }
+                #[cfg(test)]
+                widgets.push((parameter.slot, EffectControlRole::Reset, reset));
+            }
+        });
+        match parameter.kind.as_str() {
+            "layer" => {
+                ui.horizontal(|ui| {
+                    let response = ui
+                        .add_enabled(
+                            capabilities.choose_layer,
+                            egui::Button::new(text.choose_image).small(),
+                        )
+                        .on_disabled_hover_text(text.layer_unavailable);
+                    if response.clicked() {
+                        intents.push(EffectControlIntent::ChooseLayer {
+                            slot: parameter.slot,
+                        });
+                    }
+                    #[cfg(test)]
+                    widgets.push((parameter.slot, EffectControlRole::ChooseLayer, response));
+                    ui.label(
+                        parameter
+                            .layer_path
+                            .as_ref()
+                            .and_then(|path| path.file_name())
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(text.not_connected),
+                    );
+                });
+            }
+            "arbitrary_data" => {
+                ui.add(
+                    egui::TextEdit::singleline(
+                        parameter.debug_summary.get_or_insert_with(String::new),
+                    )
+                    .desired_width(f32::INFINITY),
+                );
+            }
+            "path" => {
+                ui.add(egui::DragValue::new(&mut parameter.value).range(0.0..=parameter.maximum));
+            }
+            "angle" | "point" | "point3d" => {
+                ui.horizontal(|ui| {
+                    for (index, label) in ["X", "Y", "Z"]
+                        .iter()
+                        .enumerate()
+                        .take(parameter.component_count)
+                    {
+                        ui.label(*label);
+                        ui.add(egui::DragValue::new(&mut parameter.components[index]).speed(0.1));
+                    }
+                });
+            }
+            "color" => {
+                let mut color = Color32::from_rgba_unmultiplied(
+                    parameter.color[1],
+                    parameter.color[2],
+                    parameter.color[3],
+                    parameter.color[0],
+                );
+                if ui.color_edit_button_srgba(&mut color).changed() {
+                    parameter.color = [color.a(), color.r(), color.g(), color.b()];
+                }
+            }
+            _ if !parameter.choices.is_empty() => {
+                let mut selected = parameter.value as usize;
+                egui::ComboBox::from_id_salt(("effect-control", parameter.slot))
+                    .selected_text(
+                        parameter
+                            .choices
+                            .get(selected.saturating_sub(1))
+                            .map(String::as_str)
+                            .unwrap_or("Unknown"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (index, choice) in parameter.choices.iter().enumerate() {
+                            ui.selectable_value(&mut selected, index + 1, choice);
+                        }
+                    });
+                if !parameter.use_declared_default || selected != parameter.value as usize {
+                    parameter.value = selected as f64;
+                }
+            }
+            "integer" if parameter.minimum == 0.0 && parameter.maximum == 1.0 => {
+                let mut checked = parameter.value != 0.0;
+                if ui.checkbox(&mut checked, text.enabled).changed() {
+                    parameter.value = f64::from(checked);
+                }
+            }
+            _ => {
+                modern_slider_with_default(
+                    ui,
+                    &mut parameter.value,
+                    parameter.minimum..=parameter.maximum,
+                    &parameter.name,
+                    parameter.use_declared_default,
+                );
+            }
+        }
+    });
+    #[cfg(test)]
+    widgets.push((parameter.slot, EffectControlRole::Editor, _editor.response));
+    if parameter.value != previous_value
+        || parameter.color != previous_color
+        || parameter.components != previous_components
+        || parameter.debug_summary != previous_summary
+    {
+        parameter.use_declared_default = false;
+        intents.push(EffectControlIntent::Changed {
+            slot: parameter.slot,
+            supervised: parameter.supervised,
+        });
+    }
+    ui.add_space(4.0);
 }
 
 pub(crate) fn modern_slider(
@@ -753,6 +881,7 @@ mod tests {
                 ui,
                 &mut *parameters.borrow_mut(),
                 &defaults,
+                &mut BTreeSet::new(),
                 false,
                 EffectControlCapabilities {
                     choose_layer: false,
@@ -773,6 +902,133 @@ mod tests {
         ));
         assert_eq!(parameters[0].value, defaults[0].value);
         assert!(parameters[0].use_declared_default);
+    }
+
+    fn rendered_slots(
+        parameters: &[InteractiveParameter],
+        collapsed: &BTreeSet<u32>,
+    ) -> Vec<(u32, EffectControlRole)> {
+        let parameters = std::cell::RefCell::new(parameters.to_vec());
+        let defaults = parameters.borrow().clone();
+        let collapsed = std::cell::RefCell::new(collapsed.clone());
+        let rendered = std::cell::RefCell::new(Vec::new());
+        eframe::egui::__run_test_ui(|ui| {
+            let output = show_effect_controls(
+                ui,
+                &mut parameters.borrow_mut(),
+                &defaults,
+                &mut collapsed.borrow_mut(),
+                false,
+                EffectControlCapabilities {
+                    choose_layer: false,
+                    trigger_button: false,
+                },
+                EffectControlsText::default(),
+            );
+            *rendered.borrow_mut() = output
+                .widgets
+                .iter()
+                .filter(|(_, role, _)| {
+                    matches!(
+                        role,
+                        EffectControlRole::GroupStart | EffectControlRole::Editor
+                    )
+                })
+                .map(|(slot, role, _)| (*slot, *role))
+                .collect();
+        });
+        rendered.into_inner()
+    }
+
+    fn nested_groups() -> Vec<InteractiveParameter> {
+        vec![
+            parameter(1, "float"),
+            parameter(2, "group_start"),
+            parameter(3, "float"),
+            parameter(4, "group_start"),
+            parameter(5, "float"),
+            parameter(6, "group_end"),
+            parameter(7, "float"),
+            parameter(8, "group_end"),
+            parameter(9, "float"),
+        ]
+    }
+
+    #[test]
+    fn collapsed_groups_hide_their_rows_including_nested_groups() {
+        use EffectControlRole::{Editor, GroupStart};
+        let parameters = nested_groups();
+        assert_eq!(
+            rendered_slots(&parameters, &BTreeSet::new()),
+            vec![
+                (1, Editor),
+                (2, GroupStart),
+                (3, Editor),
+                (4, GroupStart),
+                (5, Editor),
+                (7, Editor),
+                (9, Editor),
+            ]
+        );
+        assert_eq!(
+            rendered_slots(&parameters, &BTreeSet::from([4])),
+            vec![
+                (1, Editor),
+                (2, GroupStart),
+                (3, Editor),
+                (4, GroupStart),
+                (7, Editor),
+                (9, Editor),
+            ]
+        );
+        // Closing the outer group hides the inner one whatever its own state.
+        assert_eq!(
+            rendered_slots(&parameters, &BTreeSet::from([2])),
+            vec![(1, Editor), (2, GroupStart), (9, Editor)]
+        );
+    }
+
+    #[test]
+    fn hidden_group_hides_its_heading_and_rows() {
+        use EffectControlRole::{Editor, GroupStart};
+        let mut parameters = nested_groups();
+        parameters[3].visible = false;
+        assert_eq!(
+            rendered_slots(&parameters, &BTreeSet::new()),
+            vec![
+                (1, Editor),
+                (2, GroupStart),
+                (3, Editor),
+                (7, Editor),
+                (9, Editor)
+            ]
+        );
+    }
+
+    #[test]
+    fn groups_start_collapsed_unless_the_effect_opts_into_the_twirl_flag() {
+        let parameters = nested_groups();
+        let flags = serde_json::json!([
+            {"index": 2, "flags": 0},
+            {"index": 4, "flags": 1 << 5},
+        ]);
+        // Without PF_OutFlag2_PARAM_GROUP_START_COLLAPSED_FLAG every group
+        // starts collapsed.
+        assert_eq!(
+            initially_collapsed_groups(
+                &parameters,
+                &serde_json::json!({"advertised_out_flags2": 0, "parameter_flags": flags}),
+            ),
+            BTreeSet::from([2, 4])
+        );
+        // With it, only groups declaring PF_ParamFlag_START_COLLAPSED do.
+        assert_eq!(
+            initially_collapsed_groups(
+                &parameters,
+                &serde_json::json!({"advertised_out_flags2": 1 << 3, "parameter_flags": flags}),
+            ),
+            BTreeSet::from([4])
+        );
     }
 
     #[test]
@@ -807,6 +1063,7 @@ mod tests {
                 ui,
                 &mut parameters.borrow_mut(),
                 &defaults,
+                &mut BTreeSet::new(),
                 false,
                 EffectControlCapabilities {
                     choose_layer: false,
@@ -827,7 +1084,6 @@ mod tests {
                     (2, EffectControlRole::ChooseLayer),
                     (2, EffectControlRole::Editor),
                     (3, EffectControlRole::Button),
-                    (4, EffectControlRole::GroupEnd),
                 ]
             );
             assert!(output.widgets.iter().all(|(slot, _, _)| *slot != 5));
@@ -899,6 +1155,7 @@ mod tests {
                         ui,
                         &mut parameters.borrow_mut(),
                         &defaults,
+                        &mut BTreeSet::new(),
                         false,
                         EffectControlCapabilities {
                             choose_layer: true,
@@ -925,6 +1182,7 @@ mod tests {
                             ui,
                             &mut parameters.borrow_mut(),
                             &defaults,
+                            &mut BTreeSet::new(),
                             false,
                             EffectControlCapabilities {
                                 choose_layer: true,
@@ -959,6 +1217,7 @@ mod tests {
                     ui,
                     &mut parameters.borrow_mut(),
                     &defaults,
+                    &mut BTreeSet::new(),
                     false,
                     EffectControlCapabilities {
                         choose_layer: true,
@@ -995,6 +1254,7 @@ mod tests {
                         ui,
                         &mut parameters.borrow_mut(),
                         &defaults,
+                        &mut BTreeSet::new(),
                         false,
                         EffectControlCapabilities {
                             choose_layer: true,
@@ -1042,6 +1302,7 @@ mod tests {
                         ui,
                         &mut parameters.borrow_mut(),
                         &defaults,
+                        &mut BTreeSet::new(),
                         false,
                         EffectControlCapabilities {
                             choose_layer: true,
@@ -1089,6 +1350,7 @@ mod tests {
                     ui,
                     &mut parameters.borrow_mut(),
                     &defaults,
+                    &mut BTreeSet::new(),
                     false,
                     EffectControlCapabilities {
                         choose_layer: true,

@@ -89,6 +89,12 @@ pub(crate) fn inspect_experimental_via_discovery_in_place(
         .iter()
         .map(|row| json!({"index": row["slot"], "type": row["param_type"]}))
         .collect::<Vec<_>>();
+    let parameter_flags = diagnostics["parameters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| json!({"index": row["slot"], "flags": row["flags"]}))
+        .collect::<Vec<_>>();
     let audio_effect_only = out_flags & (1_u64 << 31) != 0;
     diagnostics["advertised_out_flags"] = json!(out_flags);
     diagnostics["advertised_out_flags2"] = json!(out_flags2);
@@ -100,6 +106,7 @@ pub(crate) fn inspect_experimental_via_discovery_in_place(
     diagnostics["runtime_module_policy_applied"] = json!(false);
     diagnostics["guest_ignored_dependency_folders"] = json!(dependency_search_dirs.len());
     diagnostics["parameter_metadata"] = Value::Array(metadata);
+    diagnostics["parameter_flags"] = Value::Array(parameter_flags);
     // What the guest actually staged, next to what the GUI selected.
     diagnostics["plugin_sha256"] = json!(staged_sha256);
     diagnostics["inspection_plugin_sha256"] = json!(hex_lower(&plugin.expected_sha256));
