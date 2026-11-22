@@ -4,8 +4,16 @@ fn load_preview(
     path: &Path,
 ) -> Result<egui::TextureHandle, String> {
     let image = decode_preview_image(path)?;
-    Ok(ctx.load_texture(texture_name, image, egui::TextureOptions::LINEAR))
+    Ok(ctx.load_texture(texture_name, image, PREVIEW_TEXTURE_OPTIONS))
 }
+
+/// Previews scaled above 100% keep each source pixel square so 1px results
+/// (dither, halftone, anti-aliasing) stay readable; downscaled previews stay
+/// smooth.
+const PREVIEW_TEXTURE_OPTIONS: egui::TextureOptions = egui::TextureOptions {
+    magnification: egui::TextureFilter::Nearest,
+    ..egui::TextureOptions::LINEAR
+};
 
 fn decode_preview_image(path: &Path) -> Result<egui::ColorImage, String> {
     let image = image::open(path).map_err(|error| format!("image decode failed: {error}"))?;
