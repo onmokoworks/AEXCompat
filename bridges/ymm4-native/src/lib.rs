@@ -10,14 +10,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aexcompat_broker::image_render::{
     InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
     inspect_experimental_with_diagnostics,
+};
+use aexcompat_broker::render_session::actor::{
+    ActorOptions, ClosePolicy, FrameRequest, RenderSessionActor, SessionRenderError,
 };
 use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
 use serde_json;
@@ -27,26 +28,34 @@ const FRAME_DEADLINE_MS: u64 = 30_000;
 const OPEN_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
 const CLOSE_JOIN_GRACE_MS: u64 = 100;
 
-struct RenderRequest {
-    frame_index: u32,
-    current_time: i32,
-    rgba: Vec<u8>,
-    parameters: Option<Vec<InteractiveParameter>>,
-    reply: Sender<RenderReply>,
+/// Stable C ABI render results. Zero succeeds; every error remains negative
+/// for existing callers. SessionLost requires closing/reopening the handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Ymm4ErrorCode {
+    Success = 0,
+    InvalidArgument = -1,
+    FrameError = -2,
+    OutputTooLarge = -3,
+    SessionLost = -4,
 }
 
-enum RenderReply {
-    Rendered {
-        pixels: Vec<u8>,
-        width: u32,
-        height: u32,
-    },
-    Error(String),
+struct RenderError {
+    code: Ymm4ErrorCode,
+    message: String,
+}
+
+impl RenderError {
+    fn new(code: Ymm4ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
 }
 
 pub struct AexYmm4Session {
-    tx: Option<Sender<RenderRequest>>,
-    join: Option<JoinHandle<()>>,
+    actor: RenderSessionActor,
     last_error: Mutex<String>,
 }
 
@@ -140,11 +149,9 @@ fn open_session(
     time_scale: u32,
     smart: bool,
     parameters: Vec<InteractiveParameter>,
-    open_tx: Sender<Result<(), String>>,
-    rx: Receiver<RenderRequest>,
-) -> Result<(), String> {
+) -> std::io::Result<RenderSession> {
     let baseline = (!parameters.is_empty()).then_some(parameters.as_slice());
-    let mut session = match RenderSession::open(SessionOpenRequest {
+    RenderSession::open(SessionOpenRequest {
         repository: &repository,
         plugin_path: &plugin,
         plugin_sha256: &plugin_sha256,
@@ -178,97 +185,50 @@ fn open_session(
         gpu_runtime_policy: None,
         payload_override: None,
         launch_environment: Default::default(),
-    }) {
-        Ok(session) => session,
-        Err(error) => {
-            let message = format!("RenderSession::open failed: {error}");
-            let _ = open_tx.send(Err(message.clone()));
-            return Err(message);
-        }
-    };
-    if open_tx.send(Ok(())).is_err() {
-        let _ = session.close();
-        return Ok(());
-    }
-
-    for request in rx {
-        let reply = match session.render_frame_with_parameters(
-            request.frame_index,
-            request.current_time,
-            &request.rgba,
-            request.parameters.as_deref(),
-        ) {
-            Ok(outcome) => match outcome.status {
-                FrameStatus::Rendered {
-                    pixels,
-                    width,
-                    height,
-                    ..
-                } => RenderReply::Rendered {
-                    pixels,
-                    width,
-                    height,
-                },
-                FrameStatus::FrameError {
-                    render_error,
-                    missing_dependency,
-                    return_message,
-                    selector_crash,
-                } => RenderReply::Error(format!(
-                    "AEX frame error {render_error}{}{}{}",
-                    // A guarded selector fault, not a value the plug-in returned:
-                    // the numeric 512 alone cannot tell the two apart (issue #983).
-                    selector_crash
-                        .map(|crash| {
-                            format!(
-                                "; {} crashed with exception 0x{:08X}",
-                                crash.selector, crash.exception_code
-                            )
-                        })
-                        .unwrap_or_default(),
-                    missing_dependency
-                        .as_deref()
-                        .map(|value| format!("; missing dependency: {value}"))
-                        .unwrap_or_default(),
-                    // The plug-in's own account of the failure, when it left one.
-                    return_message
-                        .map(|value| format!("; {}: {}", value.selector, value.text))
-                        .unwrap_or_default()
-                )),
-                FrameStatus::SmartOutputUntouched => {
-                    RenderReply::Error("AEX Smart frame produced no output".to_owned())
-                }
-            },
-            Err(error) => {
-                RenderReply::Error(format!("RenderSession::render_frame failed: {error}"))
-            }
-        };
-        if request.reply.send(reply).is_err() {
-            break;
-        }
-    }
-
-    let _ = session.close();
-    Ok(())
+    })
 }
 
-impl Drop for AexYmm4Session {
-    fn drop(&mut self) {
-        self.tx.take();
-        if let Some(join) = self.join.take() {
-            // A misbehaving worker is already protected by RenderSession's
-            // frame watchdog. Do not let YMM4's processor teardown wait
-            // indefinitely if the owning thread is inside a broken open or
-            // render call; dropping the handle detaches it and lets the
-            // broker's watchdog finish cleanup.
-            let deadline = Instant::now() + Duration::from_millis(CLOSE_JOIN_GRACE_MS);
-            while !join.is_finished() && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            if join.is_finished() {
-                let _ = join.join();
-            }
-        }
+fn frame_pixels(status: FrameStatus) -> Result<(Vec<u8>, u32, u32), RenderError> {
+    match status {
+        FrameStatus::Rendered {
+            pixels,
+            width,
+            height,
+            ..
+        } => Ok((pixels, width, height)),
+        FrameStatus::FrameError {
+            render_error,
+            missing_dependency,
+            return_message,
+            selector_crash,
+        } => Err(RenderError::new(
+            Ymm4ErrorCode::FrameError,
+            format!(
+                "AEX frame error {render_error}{}{}{}",
+                // A guarded selector fault, not a value the plug-in returned:
+                // the numeric 512 alone cannot tell the two apart (issue #983).
+                selector_crash
+                    .map(|crash| {
+                        format!(
+                            "; {} crashed with exception 0x{:08X}",
+                            crash.selector, crash.exception_code
+                        )
+                    })
+                    .unwrap_or_default(),
+                missing_dependency
+                    .as_deref()
+                    .map(|value| format!("; missing dependency: {value}"))
+                    .unwrap_or_default(),
+                // The plug-in's own account of the failure, when it left one.
+                return_message
+                    .map(|value| format!("; {}: {}", value.selector, value.text))
+                    .unwrap_or_default()
+            ),
+        )),
+        FrameStatus::SmartOutputUntouched => Err(RenderError::new(
+            Ymm4ErrorCode::FrameError,
+            "AEX Smart frame produced no output",
+        )),
     }
 }
 
@@ -292,12 +252,15 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
         let plugin_sha256 = plugin_sha256(&plugin)?;
         let parameters =
             discover_parameters(&repository, &plugin, &plugin_sha256).unwrap_or_default();
-        let (tx, rx) = channel::<RenderRequest>();
-        let (open_tx, open_rx) = channel::<Result<(), String>>();
-        let join = thread::Builder::new()
-            .name("aex-ymm4-session".to_string())
-            .spawn(move || {
-                let _ = open_session(
+        let actor = RenderSessionActor::open(
+            "aex-ymm4-session",
+            ActorOptions {
+                open_timeout: Some(Duration::from_millis(OPEN_HANDSHAKE_TIMEOUT_MS)),
+                reply_timeout: Some(Duration::from_millis(FRAME_DEADLINE_MS + 1_000)),
+                close_policy: ClosePolicy::Grace(Duration::from_millis(CLOSE_JOIN_GRACE_MS)),
+            },
+            move || {
+                open_session(
                     repository,
                     plugin,
                     plugin_sha256,
@@ -308,36 +271,14 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
                     time_scale,
                     smart != 0,
                     parameters,
-                    open_tx,
-                    rx,
-                );
-            })
-            .map_err(|error| format!("spawn session thread failed: {error}"))?;
-        match open_rx.recv_timeout(Duration::from_millis(OPEN_HANDSHAKE_TIMEOUT_MS)) {
-            Ok(Ok(())) => Ok(AexYmm4Session {
-                tx: Some(tx),
-                join: Some(join),
-                last_error: Mutex::new(String::new()),
-            }),
-            Ok(Err(error)) => {
-                let _ = join.join();
-                Err(error)
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                let _ = join.join();
-                Err("session open handshake failed: session thread stopped".to_string())
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                // The sender is dropped as this scope unwinds, so a session
-                // that eventually finishes opening observes a closed request
-                // channel and cleans itself up. The native ABI must not keep
-                // YMM4 blocked while an AEX or loader is unresponsive.
-                drop(join);
-                Err(format!(
-                    "YMM4 session open exceeded the {OPEN_HANDSHAKE_TIMEOUT_MS}ms deadline"
-                ))
-            }
-        }
+                )
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(AexYmm4Session {
+            actor,
+            last_error: Mutex::new(String::new()),
+        })
     })();
 
     match result {
@@ -401,80 +342,87 @@ pub unsafe extern "C" fn aexcompat_ymm4_render(
 ) -> i32 {
     let result = (|| {
         if session.is_null() || rgba.is_null() || output.is_null() {
-            return Err("null YMM4 render argument".to_string());
+            return Err(RenderError::new(
+                Ymm4ErrorCode::InvalidArgument,
+                "null YMM4 render argument",
+            ));
         }
         if output_width.is_null() || output_height.is_null() {
-            return Err("null YMM4 output dimension argument".to_string());
+            return Err(RenderError::new(
+                Ymm4ErrorCode::InvalidArgument,
+                "null YMM4 output dimension argument",
+            ));
         }
         let parameters = if parameters_len == 0 {
             None
         } else {
             if parameters.is_null() {
-                return Err("null YMM4 parameter payload".to_string());
+                return Err(RenderError::new(
+                    Ymm4ErrorCode::InvalidArgument,
+                    "null YMM4 parameter payload",
+                ));
             }
             let bytes = unsafe { slice::from_raw_parts(parameters, parameters_len) };
-            let decoded = serde_json::from_slice::<Vec<InteractiveParameter>>(bytes)
-                .map_err(|error| format!("invalid YMM4 parameter payload: {error}"))?;
+            let decoded =
+                serde_json::from_slice::<Vec<InteractiveParameter>>(bytes).map_err(|error| {
+                    RenderError::new(
+                        Ymm4ErrorCode::InvalidArgument,
+                        format!("invalid YMM4 parameter payload: {error}"),
+                    )
+                })?;
             let exposed = exposed_parameters(&decoded);
             (!exposed.is_empty()).then_some(exposed)
         };
-        let session = unsafe { &mut *session };
+        let session = unsafe { &*session };
         let rgba = unsafe { slice::from_raw_parts(rgba, rgba_len) }.to_vec();
-        let (reply_tx, reply_rx) = channel();
-        session
-            .tx
-            .as_ref()
-            .ok_or_else(|| "YMM4 session is closed".to_string())?
-            .send(RenderRequest {
+        let outcome = session
+            .actor
+            .request(FrameRequest {
                 frame_index,
                 current_time,
                 rgba,
                 parameters,
-                reply: reply_tx,
             })
-            .map_err(|_| "YMM4 session thread stopped".to_string())?;
-        match reply_rx.recv_timeout(Duration::from_millis(FRAME_DEADLINE_MS + 1_000)) {
-            Ok(reply) => match reply {
-                RenderReply::Rendered {
-                    pixels,
-                    width,
-                    height,
-                } => {
-                    if pixels.len() > output_len {
-                        return Err(format!(
-                            "AEX output {} bytes exceeds YMM4 buffer {output_len}",
-                            pixels.len()
-                        ));
-                    }
-                    unsafe {
-                        ptr::copy_nonoverlapping(pixels.as_ptr(), output, pixels.len());
-                        *output_width = width;
-                        *output_height = height;
-                    }
-                    Ok(())
-                }
-                RenderReply::Error(error) => Err(error),
-            },
-            Err(RecvTimeoutError::Timeout) => {
-                session.tx.take();
-                Err(format!(
-                    "YMM4 render reply exceeded the {}ms deadline",
-                    FRAME_DEADLINE_MS + 1_000
-                ))
-            }
-            Err(RecvTimeoutError::Disconnected) => Err("YMM4 render reply lost".to_string()),
+            .map_err(|error| RenderError::new(Ymm4ErrorCode::SessionLost, error.to_string()))?
+            .map_err(|error| {
+                let code = match error {
+                    SessionRenderError::Rejected(_) => Ymm4ErrorCode::InvalidArgument,
+                    SessionRenderError::Lost(_) => Ymm4ErrorCode::SessionLost,
+                };
+                RenderError::new(code, error.to_string())
+            })?;
+        let (pixels, width, height) = frame_pixels(outcome.status)?;
+        if pixels.len() > output_len {
+            return Err(RenderError::new(
+                Ymm4ErrorCode::OutputTooLarge,
+                format!(
+                    "AEX output {} bytes exceeds YMM4 buffer {output_len}",
+                    pixels.len(),
+                ),
+            ));
         }
+        unsafe {
+            ptr::copy_nonoverlapping(pixels.as_ptr(), output, pixels.len());
+            *output_width = width;
+            *output_height = height;
+        }
+        Ok(())
     })();
 
     match result {
-        Ok(()) => 0,
+        Ok(()) => {
+            if let Ok(mut slot) = unsafe { (&*session).last_error.lock() } {
+                slot.clear();
+            }
+            Ymm4ErrorCode::Success as i32
+        }
         Err(error) => {
             if !session.is_null() {
                 if let Ok(mut slot) = unsafe { (&*session).last_error.lock() } {
-                    *slot = error;
+                    *slot = error.message;
                 }
             }
-            -1
+            error.code as i32
         }
     }
 }
@@ -521,6 +469,153 @@ const _: Option<*mut c_void> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aexcompat_broker::render_session::{FrameOutcome, FramePerformance, FrameReturnMessage};
+    use std::ops::ControlFlow;
+
+    fn fake_session(statuses: Vec<Result<FrameStatus, SessionRenderError>>) -> AexYmm4Session {
+        let actor = RenderSessionActor::spawn(
+            "ymm4-ffi-test",
+            ActorOptions {
+                open_timeout: Some(Duration::from_secs(5)),
+                reply_timeout: Some(Duration::from_secs(5)),
+                close_policy: ClosePolicy::Join,
+            },
+            move || Ok(statuses.into_iter()),
+            |statuses, request| {
+                let result = statuses
+                    .next()
+                    .expect("unexpected render request")
+                    .map(|status| FrameOutcome {
+                        frame_index: request.frame_index,
+                        status,
+                        depth_provenance: None,
+                        performance: FramePerformance::default(),
+                    });
+                if matches!(result, Err(SessionRenderError::Lost(_))) {
+                    ControlFlow::Break(result)
+                } else {
+                    ControlFlow::Continue(result)
+                }
+            },
+            |_| {},
+        )
+        .unwrap();
+        AexYmm4Session {
+            actor,
+            last_error: Mutex::new(String::new()),
+        }
+    }
+
+    fn rendered() -> Result<FrameStatus, SessionRenderError> {
+        Ok(FrameStatus::Rendered {
+            pixels: vec![1, 2, 3, 4],
+            width: 1,
+            height: 1,
+            origin_x: 0,
+            origin_y: 0,
+        })
+    }
+
+    fn render(
+        session: &mut AexYmm4Session,
+        output: &mut [u8],
+        parameters: &[u8],
+    ) -> (i32, u32, u32) {
+        let mut width = 99;
+        let mut height = 99;
+        let result = unsafe {
+            aexcompat_ymm4_render(
+                session,
+                0,
+                0,
+                [0u8; 4].as_ptr(),
+                4,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut width,
+                &mut height,
+                parameters.as_ptr(),
+                parameters.len(),
+            )
+        };
+        (result, width, height)
+    }
+
+    #[test]
+    fn ffi_frame_errors_and_small_buffers_leave_session_usable() {
+        let mut session = fake_session(vec![
+            Ok(FrameStatus::FrameError {
+                render_error: 512,
+                missing_dependency: None,
+                selector_crash: None,
+                // Deliberately resembles the old fatal English prefix: this is
+                // still a frame-local diagnostic, regardless of message text.
+                return_message: Some(FrameReturnMessage {
+                    selector: "RENDER".into(),
+                    text: "YMM4 session thread stopped".into(),
+                    error: 512,
+                    display_requested: true,
+                }),
+            }),
+            Err(SessionRenderError::Rejected(std::io::Error::other(
+                "invalid frame time",
+            ))),
+            Ok(FrameStatus::SmartOutputUntouched),
+            rendered(),
+            rendered(),
+        ]);
+        let mut output = [77; 4];
+        assert_eq!(
+            render(&mut session, &mut output, b"malformed"),
+            (-1, 99, 99)
+        );
+        assert_eq!(output, [77; 4]);
+        assert_eq!(render(&mut session, &mut output, b""), (-2, 99, 99));
+        assert_eq!(output, [77; 4]);
+        assert_eq!(render(&mut session, &mut output, b""), (-1, 99, 99));
+        assert_eq!(render(&mut session, &mut output, b""), (-2, 99, 99));
+        assert_eq!(render(&mut session, &mut output[..3], b""), (-3, 99, 99));
+        assert_eq!(output, [77; 4]);
+        assert_eq!(render(&mut session, &mut output, b""), (0, 1, 1));
+        assert_eq!(output, [1, 2, 3, 4]);
+        assert!(session.last_error.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ffi_session_failure_and_closed_actor_are_fatal_without_string_matching() {
+        let mut session = fake_session(vec![Err(SessionRenderError::Lost(std::io::Error::other(
+            "arbitrary diagnostic",
+        )))]);
+        let mut output = [77; 4];
+        assert_eq!(render(&mut session, &mut output, b""), (-4, 99, 99));
+        assert_eq!(output, [77; 4]);
+        assert_eq!(render(&mut session, &mut output, b""), (-4, 99, 99));
+        assert_eq!(output, [77; 4]);
+    }
+
+    #[test]
+    fn ffi_null_arguments_are_nonfatal_and_do_not_dispatch() {
+        let mut session = fake_session(vec![rendered()]);
+        assert_eq!(
+            unsafe {
+                aexcompat_ymm4_render(
+                    &mut session,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                    0,
+                )
+            },
+            -1
+        );
+        assert_eq!(render(&mut session, &mut [0; 4], b""), (0, 1, 1));
+    }
 
     fn parameter(kind: &str, minimum: f64, maximum: f64) -> InteractiveParameter {
         InteractiveParameter {

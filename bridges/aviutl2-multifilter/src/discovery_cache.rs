@@ -1739,35 +1739,21 @@ struct RenderReq {
     /// session (issue #405); always 0 for a single-plugin session, which
     /// never swaps.
     plugin_index: u32,
-    reply: Sender<FrameReply>,
 }
 
-/// Handle to a resident session. `RenderSession` is `!Send` (it holds the
-/// shared-memory view pointer), so it stays pinned to `join`'s thread and is
-/// reached only through `tx`. This handle is `Send`, so the per-AEX session map
-/// can live behind a `Mutex` reached from any AviUtl2 callback thread.
+type RenderSender = ActorClient<RenderReq, FrameReply>;
+
+/// The shared actor keeps thread-affine state off the host callback threads.
 struct MfSession {
-    tx: Option<Sender<RenderReq>>,
+    actor: SessionActor<RenderReq, FrameReply>,
     identity: GeomIdentity,
     serial: u64,
     last_used: Instant,
-    join: Option<JoinHandle<()>>,
 }
 
 impl MfSession {
-    fn sender(&self) -> Option<Sender<RenderReq>> {
-        self.tx.clone()
-    }
-}
-
-impl Drop for MfSession {
-    fn drop(&mut self) {
-        // Drop the sender first so the owning thread's `rx.recv()` returns and it
-        // closes the session; joining before disconnecting would deadlock.
-        self.tx = None;
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+    fn sender(&self) -> Option<RenderSender> {
+        Some(self.actor.client())
     }
 }
 
@@ -1906,7 +1892,7 @@ fn record_session_close(config: &MfSessionConfig, close: &serde_json::Value) {
 /// otherwise — the C boundary erases the check. Sharing it across threads is
 /// nonetheless sound because: the only genuinely thread-unsafe state, the
 /// `!Send` `RenderSession`, never leaves its owning session thread (only the
-/// `Send` `Sender<RenderReq>` crosses threads); the session map is behind a
+/// `Send` `RenderSender` crosses threads); the session map is behind a
 /// `Mutex`; and the raw item pointers address leaked `'static` (process-global)
 /// memory that is only ever read in `apply_readers`, on the calling AviUtl2
 /// thread. Do not move `readers`/`apply_readers` onto the session thread.

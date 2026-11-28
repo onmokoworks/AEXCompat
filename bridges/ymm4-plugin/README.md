@@ -52,3 +52,24 @@ Copy-Item target\minihost-build\aex_worker.exe $workerDir -Force
 
 The bridge leaves the frame unchanged when the selected AEX is missing,
 parameter discovery fails, the bridge cannot open, or a frame fails.
+
+## Native render results
+
+Deploy the rebuilt managed plugin and native DLL together. The render ABI
+returns stable signed 32-bit codes; `LastError` remains display-only text:
+
+| Code | Meaning | Session action |
+| --- | --- | --- |
+| 0 | Rendered | Keep |
+| -1 | Invalid argument or broker rejection before dispatch | Keep |
+| -2 | Frame-local AEX error or untouched Smart output | Keep |
+| -3 | Rendered output exceeds the caller's buffer | Keep |
+| -4 | Actor timeout/disconnection or broker session invalidation | Close and reopen on the next frame |
+
+Open still returns a null handle on failure, and discovery still returns a
+negative length on failure. The codes above apply to `aexcompat_ymm4_render`.
+The shared broker actor preserves YMM4's 10-second open handshake, 31-second
+reply wait, and 100-ms teardown grace. Parameter discovery runs before the
+open handshake and remains unbounded. The native frame watchdog remains
+30 seconds. After a caller timeout, all actor clients reject further requests;
+an operation already running finishes its broker cleanup on its owning thread.

@@ -809,8 +809,8 @@ fn report_frame_recovered(plugin: &Path) {
 /// (closure identity, geometry, smart) with the frame's plugin selected by
 /// manifest index.
 enum SessionRoute {
-    PerEffect(Sender<RenderReq>, u64),
-    Pooled(Sender<RenderReq>, u64, u32, PoolKey),
+    PerEffect(RenderSender, u64),
+    Pooled(RenderSender, u64, u32, PoolKey),
 }
 
 /// Selects the session for one frame. The pooled cluster session wins
@@ -1179,12 +1179,17 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
         );
     }
     let identity = config.identity.clone();
-    let (tx, rx) = channel::<RenderReq>();
-    let (open_tx, open_rx) = channel::<Result<(), String>>();
-
-    let join = std::thread::Builder::new()
-        .name("aex-multifilter-session".into())
-        .spawn(move || {
+    let actor = SessionActor::spawn(
+        "aex-multifilter-session",
+        ActorOptions {
+            // Preserve AviUtl2's joined lifetime: no detached opener may
+            // outlive DLL unload. Swap/render/fallback retain their broker
+            // deadlines; do not apply a single-frame bound to a pooled queue.
+            open_timeout: None,
+            reply_timeout: None,
+            close_policy: ClosePolicy::Join,
+        },
+        move || {
             // PARAMS_SETUP already installed the plug-in's defaults. Sending
             // the same values back as assignments is observably different
             // from an untouched effect in AE. Frames carry only values that
@@ -1203,8 +1208,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 config.dependency.default_runtime,
             );
             if roots.is_empty() {
-                let _ = open_tx.send(Err("no dependency search roots resolved".to_owned()));
-                return;
+                return Err("no dependency search roots resolved".to_owned());
             }
             let dependencies = Vec::new();
             let dependency_search_dirs = roots.clone();
@@ -1249,25 +1253,23 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
             // LoadLibrary happen once for every member. A structurally
             // infeasible cluster degrades fail-closed to the plain
             // single-plugin session for the requester.
-            let (mut session, cluster_plugin_count) = match &config.cluster {
+            let (session, cluster_plugin_count) = match &config.cluster {
                 Some(cluster) => {
                     let mut plugins = Vec::with_capacity(cluster.plugins.len());
                     for (path, sha) in &cluster.plugins {
                         let Some(expected_sha256) = decode_sha256_hex(sha) else {
-                            let _ = open_tx.send(Err(format!(
+                            return Err(format!(
                                 "cluster member sha256 is undecodable: {}",
                                 path.display()
-                            )));
-                            return;
+                            ));
                         };
                         let expected_size = match std::fs::metadata(path) {
                             Ok(metadata) => metadata.len(),
                             Err(error) => {
-                                let _ = open_tx.send(Err(format!(
+                                return Err(format!(
                                     "cluster member is unreadable: {}: {error}",
                                     path.display()
-                                )));
-                                return;
+                                ));
                             }
                         };
                         plugins.push(ApprovedImageArtifact {
@@ -1302,9 +1304,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         match RenderSession::open(request) {
                             Ok(session) => (session, 0),
                             Err(error) => {
-                                let _ = open_tx
-                                    .send(Err(format!("RenderSession::open failed: {error}")));
-                                return;
+                                return Err(format!("RenderSession::open failed: {error}"));
                             }
                         }
                     } else {
@@ -1318,10 +1318,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         ) {
                             Ok(session) => (session, cluster.plugins.len() as u32),
                             Err(error) => {
-                                let _ = open_tx.send(Err(format!(
-                                    "RenderSession::open_cluster failed: {error}"
-                                )));
-                                return;
+                                return Err(format!("RenderSession::open_cluster failed: {error}"));
                             }
                         }
                     }
@@ -1334,205 +1331,191 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 ) {
                     Ok(session) => (session, 0),
                     Err(error) => {
-                        let _ = open_tx.send(Err(format!("RenderSession::open failed: {error}")));
-                        return;
+                        return Err(format!("RenderSession::open failed: {error}"));
                     }
                 },
             };
-            if open_tx.send(Ok(())).is_err() {
-                record_session_close(&config, &session.close());
-                return;
+            Ok(MfWorker {
+                session: Some(session),
+                config,
+                roots,
+                dynamic_layer_open,
+                cluster_plugin_count,
+                frame_index: 0,
+                current_plugin: 0,
+            })
+        },
+        handle_mf_request,
+        |mut state| {
+            if let Some(session) = state.session.take() {
+                record_session_close(&state.config, &session.close());
             }
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(MfSession {
+        actor,
+        identity,
+        serial: SESSION_SERIAL.fetch_add(1, Ordering::Relaxed),
+        last_used: Instant::now(),
+    })
+}
 
-            // `frame_index` is a transport serial for the worker's non-advancing
-            // check, decoupled from AviUtl2's `object.frame` (the host re-renders
-            // and scrubs the same frame); AE time rides `current_time`.
-            let mut frame_index: u32 = 0;
-            let mut current_plugin: u32 = 0;
-            while let Ok(req) = rx.recv() {
-                let retained = retain_frame_request(&req);
-                // Pooled cluster session: swap to the frame's plugin first
-                // (design §4.1). A plugin-local GLOBAL_SETUP failure is
-                // reported frame-local and the session stays usable; an
-                // invalidation loses the session (design §6).
-                if cluster_plugin_count > 0 && req.plugin_index != current_plugin {
-                    if req.plugin_index >= cluster_plugin_count {
-                        let _ = req.reply.send(FrameReply::SessionLost(
-                            "cluster plugin index is outside the manifest".into(),
-                        ));
-                        break;
-                    }
-                    match session.swap_plugin(req.plugin_index) {
-                        Ok(SwapOutcome::Swapped) => current_plugin = req.plugin_index,
-                        Ok(SwapOutcome::PluginError { global_setup_error }) => {
-                            current_plugin = req.plugin_index;
-                            let _ = req
-                                .reply
-                                .send(FrameReply::FrameLocal(global_setup_error, None));
-                            continue;
-                        }
-                        Err(error) => {
-                            let _ = req.reply.send(FrameReply::SessionLost(format!(
-                                "swap_plugin failed: {error}"
-                            )));
-                            break;
-                        }
-                    }
-                }
-                // The map for this frame goes in before the frame does: the
-                // worker re-reads the layer file when it renders, and this
-                // thread is the only writer, so the request/response cycle is
-                // what keeps a frame from seeing half an update (issue #674).
-                // A rejected update fails the frame rather than rendering the
-                // previous map under a new frame's parameters.
-                //
-                // A session that opened without a dynamic layer - the virtual
-                // buffer had nothing in it when the session opened - has
-                // nothing to update. Dropping it once per frame would reopen it
-                // once per frame forever, so it simply renders without the map
-                // until something else reopens it. A session that HAS the layer
-                // and still rejects the update is the other case: the pixels no
-                // longer fit what the worker was handed, so the session goes
-                // and the next frame opens one at the new geometry.
-                if let Some((slot, pixels)) = &retained.layer
-                    && dynamic_layer_open
-                    && let Err(error) = session.update_dynamic_layer(*slot, pixels)
-                {
-                    let _ = req.reply.send(FrameReply::SessionLost(format!(
-                        "dynamic layer update failed: {error}"
-                    )));
-                    break;
-                }
-                let outcome = session.render_frame_with_parameters(
-                    frame_index,
-                    retained.current_time,
-                    &retained.rgba,
-                    retained.parameters.as_deref(),
+struct MfWorker {
+    session: Option<RenderSession>,
+    config: MfSessionConfig,
+    roots: Vec<PathBuf>,
+    dynamic_layer_open: bool,
+    cluster_plugin_count: u32,
+    frame_index: u32,
+    current_plugin: u32,
+}
+
+fn handle_mf_request(state: &mut MfWorker, req: RenderReq) -> ControlFlow<FrameReply, FrameReply> {
+    let mut session = state.session.take().expect("live actor owns a session");
+    let config = &state.config;
+    let roots = &state.roots;
+    let dynamic_layer_open = state.dynamic_layer_open;
+    let cluster_plugin_count = state.cluster_plugin_count;
+    let frame_index = &mut state.frame_index;
+    let current_plugin = &mut state.current_plugin;
+    let retained = retain_frame_request(&req);
+    // Pooled cluster session: swap to the frame's plugin first
+    // (design §4.1). A plugin-local GLOBAL_SETUP failure is
+    // reported frame-local and the session stays usable; an
+    // invalidation loses the session (design §6).
+    if cluster_plugin_count > 0 && req.plugin_index != *current_plugin {
+        if req.plugin_index >= cluster_plugin_count {
+            state.session = Some(session);
+            return ControlFlow::Break(FrameReply::SessionLost(
+                "cluster plugin index is outside the manifest".into(),
+            ));
+        }
+        match session.swap_plugin(req.plugin_index) {
+            Ok(SwapOutcome::Swapped) => *current_plugin = req.plugin_index,
+            Ok(SwapOutcome::PluginError { global_setup_error }) => {
+                *current_plugin = req.plugin_index;
+                state.session = Some(session);
+                return ControlFlow::Continue(FrameReply::FrameLocal(global_setup_error, None));
+            }
+            Err(error) => {
+                state.session = Some(session);
+                return ControlFlow::Break(FrameReply::SessionLost(format!(
+                    "swap_plugin failed: {error}"
+                )));
+            }
+        }
+    }
+    // The map for this frame goes in before the frame does: the
+    // worker re-reads the layer file when it renders, and this
+    // thread is the only writer, so the request/response cycle is
+    // what keeps a frame from seeing half an update (issue #674).
+    // A rejected update fails the frame rather than rendering the
+    // previous map under a new frame's parameters.
+    //
+    // A session that opened without a dynamic layer - the virtual
+    // buffer had nothing in it when the session opened - has
+    // nothing to update. Dropping it once per frame would reopen it
+    // once per frame forever, so it simply renders without the map
+    // until something else reopens it. A session that HAS the layer
+    // and still rejects the update is the other case: the pixels no
+    // longer fit what the worker was handed, so the session goes
+    // and the next frame opens one at the new geometry.
+    if let Some((slot, pixels)) = &retained.layer
+        && dynamic_layer_open
+        && let Err(error) = session.update_dynamic_layer(*slot, pixels)
+    {
+        state.session = Some(session);
+        return ControlFlow::Break(FrameReply::SessionLost(format!(
+            "dynamic layer update failed: {error}"
+        )));
+    }
+    let outcome = session.render_frame_with_parameters(
+        *frame_index,
+        retained.current_time,
+        &retained.rgba,
+        retained.parameters.as_deref(),
+    );
+    *frame_index = frame_index.wrapping_add(1);
+    let reply = match outcome {
+        Ok(outcome) => match outcome.status {
+            FrameStatus::Rendered {
+                pixels,
+                width,
+                height,
+                origin_x,
+                origin_y,
+            } => FrameReply::Rendered(RenderedFrame {
+                pixels,
+                width,
+                height,
+                origin_x,
+                origin_y,
+            }),
+            FrameStatus::FrameError {
+                render_error,
+                return_message,
+                ..
+            } => FrameReply::FrameLocal(render_error, return_message.map(|message| message.text)),
+            FrameStatus::SmartOutputUntouched => {
+                let smart_close = session.close();
+                let fallback = orchestrate_classic_fallback(
+                    &smart_close,
+                    SmartFallbackEvidence::UntouchedOutput,
+                    || run_classic_fallback_once(config, req.plugin_index, &retained, roots),
                 );
-                frame_index = frame_index.wrapping_add(1);
-                let reply = match outcome {
-                    Ok(outcome) => match outcome.status {
-                        FrameStatus::Rendered {
-                            pixels,
-                            width,
-                            height,
-                            origin_x,
-                            origin_y,
-                        } => FrameReply::Rendered(RenderedFrame {
-                            pixels,
-                            width,
-                            height,
-                            origin_x,
-                            origin_y,
-                        }),
-                        FrameStatus::FrameError {
-                            render_error,
-                            return_message,
-                            ..
-                        } => FrameReply::FrameLocal(
-                            render_error,
-                            return_message.map(|message| message.text),
-                        ),
-                        FrameStatus::SmartOutputUntouched => {
-                            let smart_close = session.close();
-                            let fallback = orchestrate_classic_fallback(
-                                &smart_close,
-                                SmartFallbackEvidence::UntouchedOutput,
-                                || {
-                                    run_classic_fallback_once(
-                                        &config,
-                                        req.plugin_index,
-                                        &retained,
-                                        &roots,
-                                    )
-                                },
-                            );
-                            if !fallback.smart_authorized {
-                                record_session_close(&config, &smart_close);
-                            }
-                            let _ = req.reply.send(fallback.reply);
-                            return;
-                        }
-                    },
-                    Err(error) => {
-                        if config.smart {
-                            let smart_close = session.close();
-                            let fallback = orchestrate_classic_fallback(
-                                &smart_close,
-                                SmartFallbackEvidence::HeapCorruption,
-                                || {
-                                    run_classic_fallback_once(
-                                        &config,
-                                        req.plugin_index,
-                                        &retained,
-                                        &roots,
-                                    )
-                                },
-                            );
-                            if fallback.smart_authorized {
-                                let _ = req.reply.send(fallback.reply);
-                                return;
-                            }
-                            record_session_close(&config, &smart_close);
-                            let _ = req.reply.send(FrameReply::SessionLost(format!(
-                                "render_frame failed: {error}"
-                            )));
-                            return;
-                        }
-                        FrameReply::SessionLost(format!("render_frame failed: {error}"))
-                    }
-                };
-                // A host-protection invariant failure invalidates the whole
-                // session; report it lost so the next frame reopens.
-                let reply = if session.invalidation().is_some() {
-                    FrameReply::SessionLost(match reply {
-                        FrameReply::SessionLost(message) => message,
-                        // The plug-in's own words survive the escalation: an
-                        // invalidated session is where the reason matters most.
-                        FrameReply::FrameLocal(code, said) => match said {
-                            Some(text) => {
-                                format!("session invalidated (render_error {code}: {text})")
-                            }
-                            None => format!("session invalidated (render_error {code})"),
-                        },
-                        FrameReply::Rendered(_) => "session invalidated".to_string(),
-                        FrameReply::RenderedClassicFallback(_) => {
-                            "session invalidated (Classic fallback)".to_string()
-                        }
-                    })
-                } else {
-                    reply
-                };
-                let lost = matches!(reply, FrameReply::SessionLost(_));
-                let _ = req.reply.send(reply);
-                if lost {
-                    break;
+                if !fallback.smart_authorized {
+                    record_session_close(config, &smart_close);
                 }
+                return ControlFlow::Break(fallback.reply);
             }
-            // The close-time checks (module audit, teardown, worker exit) are
-            // part of the session's acceptance criteria (design §5/§7): a
-            // non-clean close invalidates the session's delivered frames and
-            // is recorded structurally, never dropped.
-            record_session_close(&config, &session.close());
+        },
+        Err(error) => {
+            if config.smart {
+                let smart_close = session.close();
+                let fallback = orchestrate_classic_fallback(
+                    &smart_close,
+                    SmartFallbackEvidence::HeapCorruption,
+                    || run_classic_fallback_once(config, req.plugin_index, &retained, roots),
+                );
+                if fallback.smart_authorized {
+                    return ControlFlow::Break(fallback.reply);
+                }
+                record_session_close(config, &smart_close);
+                return ControlFlow::Break(FrameReply::SessionLost(format!(
+                    "render_frame failed: {error}"
+                )));
+            }
+            FrameReply::SessionLost(format!("render_frame failed: {error}"))
+        }
+    };
+    // A host-protection invariant failure invalidates the whole
+    // session; report it lost so the next frame reopens.
+    let reply = if session.invalidation().is_some() {
+        FrameReply::SessionLost(match reply {
+            FrameReply::SessionLost(message) => message,
+            // The plug-in's own words survive the escalation: an
+            // invalidated session is where the reason matters most.
+            FrameReply::FrameLocal(code, said) => match said {
+                Some(text) => {
+                    format!("session invalidated (render_error {code}: {text})")
+                }
+                None => format!("session invalidated (render_error {code})"),
+            },
+            FrameReply::Rendered(_) => "session invalidated".to_string(),
+            FrameReply::RenderedClassicFallback(_) => {
+                "session invalidated (Classic fallback)".to_string()
+            }
         })
-        .map_err(|error| format!("failed to spawn session thread: {error}"))?;
-
-    match open_rx.recv() {
-        Ok(Ok(())) => Ok(MfSession {
-            tx: Some(tx),
-            identity,
-            serial: SESSION_SERIAL.fetch_add(1, Ordering::Relaxed),
-            last_used: Instant::now(),
-            join: Some(join),
-        }),
-        Ok(Err(message)) => {
-            let _ = join.join();
-            Err(message)
-        }
-        Err(_) => {
-            let _ = join.join();
-            Err("session thread exited before reporting open result".into())
-        }
+    } else {
+        reply
+    };
+    let lost = matches!(reply, FrameReply::SessionLost(_));
+    state.session = Some(session);
+    if lost {
+        ControlFlow::Break(reply)
+    } else {
+        ControlFlow::Continue(reply)
     }
 }
 
@@ -1540,31 +1523,21 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
 /// no map lock held. `plugin_index` selects the frame's plugin inside a pooled
 /// cluster session (0 for a single-plugin session, which never swaps).
 fn render_on(
-    tx: &Sender<RenderReq>,
+    tx: &RenderSender,
     plugin_index: u32,
     current_time: i32,
     rgba: Vec<u8>,
     parameters: Option<Vec<InteractiveParameter>>,
     layer: Option<(u32, Vec<u8>)>,
 ) -> FrameReply {
-    let (reply_tx, reply_rx) = channel();
-    if tx
-        .send(RenderReq {
-            current_time,
-            rgba,
-            parameters,
-            layer,
-            plugin_index,
-            reply: reply_tx,
-        })
-        .is_err()
-    {
-        return FrameReply::SessionLost("session thread is gone".to_string());
-    }
-    match reply_rx.recv() {
-        Ok(reply) => reply,
-        Err(_) => FrameReply::SessionLost("session thread dropped the reply".to_string()),
-    }
+    tx.request(RenderReq {
+        current_time,
+        rgba,
+        parameters,
+        layer,
+        plugin_index,
+    })
+    .unwrap_or_else(|error| FrameReply::SessionLost(error.to_string()))
 }
 
 type SessionMap = Mutex<HashMap<i64, MfSession>>;
@@ -1576,7 +1549,7 @@ fn existing_sender(
     sessions: &SessionMap,
     effect_id: i64,
     identity: &GeomIdentity,
-) -> Option<(Sender<RenderReq>, u64)> {
+) -> Option<(RenderSender, u64)> {
     let mut evicted: Option<MfSession> = None;
     let result;
     {
@@ -1608,7 +1581,7 @@ fn open_and_get_sender(
     identity: &GeomIdentity,
     smart: bool,
     open_layers: &dyn Fn() -> Vec<SessionLayer>,
-) -> Result<(Sender<RenderReq>, u64), String> {
+) -> Result<(RenderSender, u64), String> {
     let opened = open_mf_session(MfSessionConfig {
         repository: ctx.repository.clone(),
         plugin: ctx.plugin.clone(),

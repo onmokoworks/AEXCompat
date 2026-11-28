@@ -16,11 +16,14 @@
 //! Deployed as `.aux2` (generic plugin extension); `.auf2` would make AviUtl2
 //! look for the single-filter `GetFilterPluginTable` export and fail.
 
+use aexcompat_broker::render_session::actor::{
+    ActorClient, ActorOptions, ClosePolicy, SessionActor,
+};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -173,7 +176,7 @@ fn cluster_registry_members(key: &PoolKey, requester: &Path) -> Vec<ClusterMembe
 
 /// Returns the sender + serial + this plugin's manifest index of a live
 /// pooled session, or `None` to open one.
-fn pool_sender(key: &PoolKey, plugin: &Path) -> Option<(Sender<RenderReq>, u64, u32)> {
+fn pool_sender(key: &PoolKey, plugin: &Path) -> Option<(RenderSender, u64, u32)> {
     let mut guard = SESSION_POOL.lock().ok()?;
     let entry = guard.as_mut()?.get_mut(key)?;
     let index = entry.plugins.iter().position(|path| path == plugin)? as u32;
