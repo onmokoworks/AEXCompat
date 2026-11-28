@@ -191,7 +191,7 @@ static AE_BUILTIN_CATEGORIES: &[(&str, &str)] = &[
 /// The canonical AE category for a bundled effect's file stem, or `None`
 /// for anything the table does not know (then the bare brand label applies,
 /// exactly as for any other PiPL-less plug-in).
-fn ae_builtin_category(stem: &str) -> Option<&'static str> {
+pub(super) fn ae_builtin_category(stem: &str) -> Option<&'static str> {
     AE_BUILTIN_CATEGORIES
         .iter()
         .find(|(known, _)| known.eq_ignore_ascii_case(stem))
@@ -229,7 +229,7 @@ static STANDARD_CATEGORY_JA: &[(&str, &str)] = &[
 /// The display form of a category under the configured category language
 /// (issue #876): Japanese swaps standard AE categories for Adobe's own
 /// Japanese names; English (or an unknown category) passes through.
-fn localized_category(canonical: &str, japanese: bool) -> &str {
+pub(super) fn localized_category(canonical: &str, japanese: bool) -> &str {
     if !japanese {
         return canonical;
     }

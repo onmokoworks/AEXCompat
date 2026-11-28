@@ -1,3 +1,5 @@
+use super::ae_builtin_categories::localized_category;
+
 // PiPL category extraction (issue #871): the menu label for a registered
 // filter comes from the effect's own PiPL 'catg' property — the string After
 // Effects itself files the effect under. Parsed straight from the AEX bytes
@@ -160,7 +162,7 @@ fn first_pipl_resource(bytes: &[u8]) -> Option<&[u8]> {
 /// u32 property count, then per property the byte-swapped vendor `"MIB8"`
 /// (= '8BIM'), the byte-swapped key (`"gtac"` = 'catg'), a zero u32, a u32
 /// data length (padded to 4), and the data — for 'catg' a Pascal string.
-fn pipl_category_of_blob(blob: &[u8]) -> Option<String> {
+pub(super) fn pipl_category_of_blob(blob: &[u8]) -> Option<String> {
     if u32_at(blob, 0)? != 1 {
         return None;
     }
@@ -218,7 +220,7 @@ fn clean_category(raw: &[u8]) -> Option<String> {
 /// The PiPL 'catg' category of an AEX image, or `None` when the file has no
 /// parseable PiPL category (the filter then registers under the bare
 /// "AEXCompat" label).
-fn pipl_category(bytes: &[u8]) -> Option<String> {
+pub(super) fn pipl_category(bytes: &[u8]) -> Option<String> {
     pipl_category_of_blob(first_pipl_resource(bytes)?)
 }
 
@@ -227,7 +229,7 @@ fn pipl_category(bytes: &[u8]) -> Option<String> {
 /// nested under "AEXCompat", or the bare "AEXCompat" without one. Initial
 /// value only — AviUtl2 persists a user-editable label per effect on first
 /// registration.
-fn filter_label(category: Option<&str>, japanese: bool) -> String {
+pub(super) fn filter_label(category: Option<&str>, japanese: bool) -> String {
     match category {
         Some(category) => format!("AEXCompat\\{}", localized_category(category, japanese)),
         None => "AEXCompat".to_owned(),

@@ -16,47 +16,37 @@
 //! Deployed as `.aux2` (generic plugin extension); `.auf2` would make AviUtl2
 //! look for the single-filter `GetFilterPluginTable` export and fail.
 
-use aexcompat_broker::render_session::actor::{
-    ActorClient, ActorOptions, ClosePolicy, SessionActor,
-};
-use std::collections::{HashMap, HashSet};
-use std::ffi::c_void;
-use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+mod ae_builtin_categories;
+mod config_ui;
+mod discovery_cache;
+mod discovery_inspection;
+mod pipl_category;
+mod runtime;
+#[cfg(test)]
+mod tests;
 
-use aexcompat_broker::after_effects_install::{
-    ae_support_files_for_plugin, latest_after_effects_plugins, latest_after_effects_support_files,
-    mediacore_dir,
+pub use discovery_cache::{
+    DiagnosticScan, DiscoveredPluginKind, PluginName, ProvidedSuite, RegisterPlugin, plugin_name,
+    scan_for_diagnostics,
 };
-use aexcompat_broker::companion_manifest::{ApprovedCompanion, CompanionSuiteIdentity};
-use aexcompat_broker::image_render::{
-    InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
-    initialize_experimental_aegp_in_place, inspect_experimental_cleanup_contained_in_place,
-    inspect_experimental_in_place, inspect_experimental_in_place_plugin_data_effect,
+pub use discovery_inspection::{
+    DiagnosticDiscovery, discover_all_for_diagnostics, discover_all_one_shot_for_diagnostics,
+    discover_records_for_diagnostics, discover_records_for_diagnostics_with_progress,
+    smart_render_route_supported,
 };
-use aexcompat_broker::plugin_dependency_closure::{
-    DependencyProvenance, survey_dependency_closure,
+pub use runtime::{layer_slots_of, pf_error_name};
+
+use self::discovery_cache::{
+    DISCOVERY_SHUTDOWN, DISCOVERY_THREAD, GeomIdentity, MfSession, RenderSender,
 };
-use aexcompat_broker::render_session::{
-    ClusterRenderPlugins, DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest,
-    InspectOutcome, PluginDataEffectSelector, RenderSession, SessionLayer, SessionOpenRequest,
-    SwapOutcome, validate_abandoned_smart_heap_corruption_close,
-    validate_abandoned_smart_untouched_close, validate_completed_session_close,
-};
-use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
-use aviutl2_sys::filter2::{
-    FILTER_ITEM_CHECKBOX, FILTER_ITEM_COLOR, FILTER_ITEM_COLOR_VALUE, FILTER_ITEM_SELECT,
-    FILTER_ITEM_SELECT_ITEM, FILTER_ITEM_TRACK, FILTER_PLUGIN_TABLE, FILTER_PROC_VIDEO,
-    OBJECT_INFO, PIXEL_RGBA, SCENE_INFO,
-};
-use aviutl2_sys::plugin2::{COMMON_PLUGIN_TABLE, HOST_APP_TABLE};
-use libffi::low;
-use libffi::middle::{Cif, Closure, Type};
-use sha2::{Digest, Sha256};
+use self::runtime::SessionMap;
+use aexcompat_broker::companion_manifest::ApprovedCompanion;
+use aviutl2_sys::plugin2::COMMON_PLUGIN_TABLE;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// AviUtl2 minimum supported version (matches the aviutl2 crate constant).
 const REQUIRED_VERSION: u32 = 2010100;
@@ -441,11 +431,3 @@ fn log_info(message: &str) {
 fn log_warn(message: &str) {
     log_line(LogLevel::Warn, message);
 }
-
-include!("config_ui.rs");
-include!("pipl_category.rs");
-include!("ae_builtin_categories.rs");
-include!("discovery_cache.rs");
-include!("discovery_inspection.rs");
-include!("runtime.rs");
-include!("tests.rs");

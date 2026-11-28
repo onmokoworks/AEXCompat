@@ -1,3 +1,38 @@
+use super::discovery_cache::{
+    DependencyConfig, FilterCtx, FrameReply, GeomIdentity, ItemReader, MfSession, RenderReq,
+    RenderSender, RenderedFrame, RetainedFrameRequest, record_session_close, retain_frame_request,
+    search_roots_for,
+};
+use super::discovery_inspection::{decode_sha256_hex, filter_stem};
+use super::{
+    ClusterMember, FRAME_DEADLINE_MS, MAX_CLUSTER_ADMITTED_DIRS, MAX_CLUSTER_MODULE_BOUND,
+    MAX_CLUSTER_PLUGINS, MAX_DIMENSION, MAX_PIXELS, PoolEntry, PoolKey, SESSION_IDLE_TIMEOUT,
+    SESSION_POOL, SESSION_SERIAL, cluster_registry_members, log_info, log_warn, pool_remove,
+    pool_sender, wide_leak,
+};
+use aexcompat_broker::companion_manifest::ApprovedCompanion;
+use aexcompat_broker::image_render::{InteractiveParameter, RenderGpuBackend, RenderPixelFormat};
+use aexcompat_broker::render_session::actor::{ActorOptions, ClosePolicy, SessionActor};
+use aexcompat_broker::render_session::{
+    ClusterRenderPlugins, FrameStatus, PluginDataEffectSelector, RenderSession, SessionLayer,
+    SessionOpenRequest, SwapOutcome, validate_abandoned_smart_heap_corruption_close,
+    validate_abandoned_smart_untouched_close, validate_completed_session_close,
+};
+use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
+use aviutl2_sys::filter2::{
+    FILTER_ITEM_CHECKBOX, FILTER_ITEM_COLOR, FILTER_ITEM_COLOR_VALUE, FILTER_ITEM_SELECT,
+    FILTER_ITEM_SELECT_ITEM, FILTER_ITEM_TRACK, FILTER_PROC_VIDEO, OBJECT_INFO, PIXEL_RGBA,
+    SCENE_INFO,
+};
+use libffi::low;
+use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
 /// The AEX layer-parameter slots (`PF_Param_LAYER`, reported by discovery as
 /// `kind == "layer"`) in declaration order. Taken from the raw discovery
 /// parameters: `build_item` never maps a layer into a config item, so the
@@ -94,7 +129,7 @@ fn read_virtual_buffer_rgba8(video: *mut FILTER_PROC_VIDEO) -> Option<(u32, u32,
 /// floats, `row_pitch`-padded rows) into packed RGBA8, clamping each channel to
 /// [0, 1] (a displacement map's values are normalized; NaN clamps to 0). Returns
 /// `None` if `bytes` is too short for the claimed geometry.
-fn unpack_rgba16f_to_rgba8(
+pub(super) fn unpack_rgba16f_to_rgba8(
     bytes: &[u8],
     width: u32,
     height: u32,
@@ -132,7 +167,7 @@ fn unpack_rgba16f_to_rgba8(
 
 /// One pixel row, `width` RGBA half-float pixels to RGBA8. The reference
 /// conversion: clamp to [0, 1] (NaN clamps to 0), scale by 255, round half up.
-fn unpack_row_scalar(source: &[u8], target: &mut [u8]) {
+pub(super) fn unpack_row_scalar(source: &[u8], target: &mut [u8]) {
     for (pixel, out) in source.chunks_exact(8).zip(target.chunks_exact_mut(4)) {
         for channel in 0..4 {
             let value =
@@ -147,7 +182,7 @@ fn unpack_row_scalar(source: &[u8], target: &mut [u8]) {
 /// x86-64 baseline does not, so the released plug-in converts in software.
 /// Detecting at runtime keeps the baseline where it is while letting every
 /// machine since Ivy Bridge take the hardware path.
-fn f16c_row_available() -> bool {
+pub(super) fn f16c_row_available() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -170,7 +205,7 @@ fn f16c_row_available() -> bool {
 /// `source` must hold `target.len() / 4` pixels of 8 bytes each.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "f16c,avx")]
-unsafe fn unpack_row_f16c(source: &[u8], target: &mut [u8]) {
+pub(super) unsafe fn unpack_row_f16c(source: &[u8], target: &mut [u8]) {
     use std::arch::x86_64::{
         __m128i, _mm_cvttps_epi32, _mm_loadu_si128, _mm_packs_epi32, _mm_packus_epi16,
         _mm_storel_epi64, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtph_ps,
@@ -210,7 +245,7 @@ unsafe fn unpack_row_f16c(source: &[u8], target: &mut [u8]) {
 
 /// Build one leaked FILTER_ITEM for an exposed parameter, plus a reader and the
 /// (range-normalized) parameter to send. Mirrors the aviutl2 bridge's mapping.
-fn build_item(
+pub(super) fn build_item(
     parameter: &InteractiveParameter,
     item_name: &str,
 ) -> Option<(*const c_void, ItemReader, InteractiveParameter)> {
@@ -302,7 +337,7 @@ fn build_item(
 /// name for a unique visible parameter, but add its stable AEX slot to every
 /// duplicate. Empty labels get the same slot-based fallback. The final set is
 /// checked again so a user-supplied label cannot collide with a generated one.
-fn unique_item_names(parameters: &[InteractiveParameter]) -> Vec<Option<String>> {
+pub(super) fn unique_item_names(parameters: &[InteractiveParameter]) -> Vec<Option<String>> {
     let mut counts = HashMap::<String, usize>::new();
     for parameter in parameters.iter().filter(|parameter| parameter.visible) {
         let name = parameter.name.trim();
@@ -410,7 +445,7 @@ fn track_step(span: f64) -> f64 {
 
 // --- Per-frame render ----------------------------------------------------
 
-unsafe extern "C" fn render_callback(
+pub(super) unsafe extern "C" fn render_callback(
     _cif: &low::ffi_cif,
     result: &mut u8,
     args: *const *const c_void,
@@ -644,7 +679,7 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
 }
 
 /// What went wrong with one frame, for [`report_frame_trouble`].
-enum FrameTrouble<'a> {
+pub(super) enum FrameTrouble<'a> {
     /// The plug-in (or the host on its behalf) returned an error for this
     /// frame. The session stays usable. The second field is the plug-in's own
     /// account of it, when it left one (issue #707).
@@ -695,16 +730,16 @@ pub fn pf_error_name(code: i64) -> Option<&'static str> {
 /// How many identical troubles pass silently between reports. A frame that
 /// keeps failing does so at the preview's frame rate, and one line per frame
 /// would bury the log it is supposed to make readable.
-const FRAME_TROUBLE_REPORT_INTERVAL: u32 = 60;
+pub(super) const FRAME_TROUBLE_REPORT_INTERVAL: u32 = 60;
 
 /// What was last reported for one filter, so a run of identical troubles
 /// becomes one line plus a periodic count, and a recovery is reported once.
-struct FrameTroubleState {
-    summary: String,
-    count: u32,
+pub(super) struct FrameTroubleState {
+    pub(super) summary: String,
+    pub(super) count: u32,
 }
 
-type FrameTroubleStates = HashMap<PathBuf, FrameTroubleState>;
+pub(super) type FrameTroubleStates = HashMap<PathBuf, FrameTroubleState>;
 
 static FRAME_TROUBLE: Mutex<Option<FrameTroubleStates>> = Mutex::new(None);
 
@@ -714,7 +749,7 @@ static FRAME_TROUBLE: Mutex<Option<FrameTroubleStates>> = Mutex::new(None);
 /// Kept apart from the logging so the rule - one line when it starts, one every
 /// `FRAME_TROUBLE_REPORT_INTERVAL` after that - is testable without a host
 /// logger or a global.
-fn frame_trouble_report(
+pub(super) fn frame_trouble_report(
     states: &mut FrameTroubleStates,
     plugin: &Path,
     trouble: FrameTrouble<'_>,
@@ -761,7 +796,10 @@ fn frame_trouble_report(
 
 /// What to say when a filter renders again, or nothing when it was never
 /// reported as failing - a healthy filter stays silent.
-fn frame_recovered_report(states: &mut FrameTroubleStates, plugin: &Path) -> Option<String> {
+pub(super) fn frame_recovered_report(
+    states: &mut FrameTroubleStates,
+    plugin: &Path,
+) -> Option<String> {
     states.remove(plugin).map(|state| {
         format!(
             "{}: rendering again after {} frame(s) of {}",
@@ -960,26 +998,26 @@ fn pool_open_route(
 
 /// The owned launch config moved into a session's thread.
 #[derive(Clone)]
-struct MfSessionConfig {
-    repository: PathBuf,
-    plugin: PathBuf,
-    dependency: DependencyConfig,
-    sha: String,
-    smart: bool,
-    plugin_data_selector: Option<PluginDataEffectSelector>,
-    identity: GeomIdentity,
+pub(super) struct MfSessionConfig {
+    pub(super) repository: PathBuf,
+    pub(super) plugin: PathBuf,
+    pub(super) dependency: DependencyConfig,
+    pub(super) sha: String,
+    pub(super) smart: bool,
+    pub(super) plugin_data_selector: Option<PluginDataEffectSelector>,
+    pub(super) identity: GeomIdentity,
     /// Secondary layers read once at open (issue #645): AviUtl2's virtual buffer
     /// feeding an AEX layer parameter. Read on the AviUtl2 callback thread (only
     /// there can the host texture be read) and moved here for the session thread.
-    layers: Vec<SessionLayer>,
-    companions: Vec<ApprovedCompanion>,
+    pub(super) layers: Vec<SessionLayer>,
+    pub(super) companions: Vec<ApprovedCompanion>,
     /// Cluster launch (issue #405): when set, the session opens over the
     /// whole same-closure cluster and swaps plugins per request instead of
     /// serving a single AEX.
-    cluster: Option<ClusterLaunch>,
+    pub(super) cluster: Option<ClusterLaunch>,
 }
 
-fn route_plugin_data_session<R, T, E>(
+pub(super) fn route_plugin_data_session<R, T, E>(
     request: R,
     selector: Option<&PluginDataEffectSelector>,
     open_default: impl FnOnce(R) -> Result<T, E>,
@@ -995,12 +1033,12 @@ fn route_plugin_data_session<R, T, E>(
 /// (requester first) and each member's swap payload. `plugins[0]` is always
 /// the requesting AEX, matching the base request's positional contract.
 #[derive(Clone)]
-struct ClusterLaunch {
-    plugins: Vec<(PathBuf, String)>,
-    swap_payloads: Vec<Option<String>>,
+pub(super) struct ClusterLaunch {
+    pub(super) plugins: Vec<(PathBuf, String)>,
+    pub(super) swap_payloads: Vec<Option<String>>,
 }
 
-fn classic_fallback_identity(
+pub(super) fn classic_fallback_identity(
     plugin: &Path,
     sha: &str,
     cluster: Option<&ClusterLaunch>,
@@ -1017,7 +1055,7 @@ fn classic_fallback_identity(
     }
 }
 
-fn completed_classic_fallback_reply(
+pub(super) fn completed_classic_fallback_reply(
     rendered: Option<RenderedFrame>,
     close_clean: bool,
 ) -> FrameReply {
@@ -1027,18 +1065,18 @@ fn completed_classic_fallback_reply(
     }
 }
 
-struct ClassicFallbackRun {
-    reply: FrameReply,
-    smart_authorized: bool,
+pub(super) struct ClassicFallbackRun {
+    pub(super) reply: FrameReply,
+    pub(super) smart_authorized: bool,
 }
 
 #[derive(Clone, Copy)]
-enum SmartFallbackEvidence {
+pub(super) enum SmartFallbackEvidence {
     UntouchedOutput,
     HeapCorruption,
 }
 
-fn orchestrate_classic_fallback<F>(
+pub(super) fn orchestrate_classic_fallback<F>(
     smart_close: &serde_json::Value,
     evidence: SmartFallbackEvidence,
     launch_classic_once: F,
@@ -1172,7 +1210,7 @@ fn run_classic_fallback_once(
 
 /// Opens a session on its own thread, which owns the `!Send` `RenderSession` and
 /// serves render requests until the channel closes or the session is lost.
-fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
+pub(super) fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
     if config.cluster.is_some() && config.plugin_data_selector.is_some() {
         return Err(
             "PluginData secondary effects cannot use a DLL-indexed cluster session".to_owned(),
@@ -1522,7 +1560,7 @@ fn handle_mf_request(state: &mut MfWorker, req: RenderReq) -> ControlFlow<FrameR
 /// Renders one frame by round-tripping through a session's owning thread, with
 /// no map lock held. `plugin_index` selects the frame's plugin inside a pooled
 /// cluster session (0 for a single-plugin session, which never swaps).
-fn render_on(
+pub(super) fn render_on(
     tx: &RenderSender,
     plugin_index: u32,
     current_time: i32,
@@ -1540,7 +1578,7 @@ fn render_on(
     .unwrap_or_else(|error| FrameReply::SessionLost(error.to_string()))
 }
 
-type SessionMap = Mutex<HashMap<i64, MfSession>>;
+pub(super) type SessionMap = Mutex<HashMap<i64, MfSession>>;
 
 /// Returns the sender + serial of a live session matching `identity`, refreshing
 /// its `last_used`, or `None` to open one. A mismatched session (object resized/
@@ -1699,7 +1737,7 @@ fn apply_readers(parameters: &mut [InteractiveParameter], readers: &[ItemReader]
 
 /// Selects values whose typed payload differs from the PARAMS_SETUP default.
 /// Metadata changes do not mutate a rendered parameter and are ignored.
-fn changed_interactive_parameters(
+pub(super) fn changed_interactive_parameters(
     defaults: &[InteractiveParameter],
     current: &[InteractiveParameter],
 ) -> Vec<InteractiveParameter> {
@@ -1746,7 +1784,7 @@ fn bytes_to_pixels(bytes: &[u8]) -> Vec<PIXEL_RGBA> {
         .collect()
 }
 
-fn place_frame_at_origin(
+pub(super) fn place_frame_at_origin(
     destination: &mut [PIXEL_RGBA],
     destination_width: u32,
     destination_height: u32,
