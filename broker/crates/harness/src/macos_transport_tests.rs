@@ -1,4 +1,5 @@
-// Behavioral tests included in macos::tests.
+use super::*;
+
 fn transport_root(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("aexcompat-x07-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();

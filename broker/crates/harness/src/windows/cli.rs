@@ -1,4 +1,22 @@
-fn inspect_dependency_roots(
+use super::app::{canonical_runtime_dependency_root, same_windows_path};
+use super::independent_cases::run_independent_case_batch;
+use super::preflight::{
+    CLI_CONTRACT_SCHEMA, CLI_CONTRACT_VERSION, DIAGNOSTIC_SCHEMA, DIAGNOSTIC_VERSION,
+    approved_adjacent_dependencies, bounded_summary, decode_sha256, discover_adjacent_imports,
+};
+use super::render_contract::{
+    ConformanceRenderSettingsGuard, apply_typed_assignments, apply_typed_render_assignments,
+    assign_layer_paths, compare_images, emit_host_request_validation_failure, emit_typed_failure,
+    emit_typed_failure_with_parameter_metadata, run_effect_matrix, typed_failure_document,
+    typed_request_dependencies, typed_request_host_context, typed_request_render_settings,
+    typed_request_timing,
+};
+use super::viewer::{canonical_deverbatim, run_gui};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+pub(super) fn inspect_dependency_roots(
     plugin: &Path,
     requested_roots: &[std::ffi::OsString],
 ) -> Result<Vec<PathBuf>, String> {
@@ -133,7 +151,7 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
         })
 }
 
-fn repository_root_from_runtime_paths(
+pub(super) fn repository_root_from_runtime_paths(
     current_dir: Option<PathBuf>,
     current_exe: Option<PathBuf>,
 ) -> Option<PathBuf> {
@@ -348,12 +366,12 @@ mod artifact_cli_contract_tests {
     }
 }
 
-fn read_plugin_hash(plugin: &Path) -> Result<String, std::io::Error> {
+pub(super) fn read_plugin_hash(plugin: &Path) -> Result<String, std::io::Error> {
     let bytes = fs::read(plugin)?;
     Ok(format!("{:X}", Sha256::digest(bytes)))
 }
 
-fn plugin_read_diagnostic(plugin: &Path, error: &std::io::Error) -> serde_json::Value {
+pub(super) fn plugin_read_diagnostic(plugin: &Path, error: &std::io::Error) -> serde_json::Value {
     let _ = plugin;
     serde_json::json!({
         "schema": DIAGNOSTIC_SCHEMA,
@@ -379,7 +397,7 @@ fn required_plugin_hash(plugin: &Path) -> String {
     }
 }
 
-fn cli_inspection_failure_document(message: &str) -> serde_json::Value {
+pub(super) fn cli_inspection_failure_document(message: &str) -> serde_json::Value {
     typed_failure_document(message).unwrap_or_else(|| {
         serde_json::json!({
             "classification": "inspection_error",
@@ -399,7 +417,7 @@ fn registered_cli_runtime_roots(plugin: &Path) -> Result<Vec<PathBuf>, String> {
     registered_cli_runtime_roots_for_unresolved(&plugin, &unresolved)
 }
 
-fn registered_cli_runtime_roots_for_unresolved(
+pub(super) fn registered_cli_runtime_roots_for_unresolved(
     plugin: &Path,
     unresolved: &[String],
 ) -> Result<Vec<PathBuf>, String> {
@@ -430,7 +448,7 @@ fn registered_cli_runtime_roots_for_unresolved(
     admit_cli_runtime_roots(plugin, unresolved, &found, associated.is_empty())
 }
 
-fn admit_cli_runtime_roots(
+pub(super) fn admit_cli_runtime_roots(
     plugin: &Path,
     unresolved: &[String],
     found: &std::collections::BTreeMap<String, Vec<PathBuf>>,
@@ -461,7 +479,7 @@ fn admit_cli_runtime_roots(
     Ok(roots)
 }
 
-fn cli_runtime_candidates_for_plugin(
+pub(super) fn cli_runtime_candidates_for_plugin(
     plugin: &Path,
     candidates: Vec<PathBuf>,
     require_ancestor: bool,
@@ -477,7 +495,7 @@ fn cli_runtime_candidates_for_plugin(
         .collect()
 }
 
-fn unique_cli_runtime_candidate(
+pub(super) fn unique_cli_runtime_candidate(
     basename: &str,
     candidates: Vec<PathBuf>,
 ) -> Result<Option<PathBuf>, String> {
@@ -559,7 +577,7 @@ fn print_cli_help() {
 /// (`AEXCOMPAT_FRAME_DEADLINE_MS`, issue #1769). `--render-differential`,
 /// `--render-performance-diagnostics` and `--render-memory-diagnostics` keep
 /// a fixed 30 s, and the options-dialog probes their own short timeouts.
-fn uses_interactive_frame_deadline(command: &str) -> bool {
+pub(super) fn uses_interactive_frame_deadline(command: &str) -> bool {
     command.starts_with("--render-experimental")
         || (command.starts_with("--probe-experimental") && !command.ends_with("options-dialog"))
         || matches!(
@@ -568,7 +586,7 @@ fn uses_interactive_frame_deadline(command: &str) -> bool {
         )
 }
 
-fn main() -> eframe::Result {
+pub(super) fn run() -> eframe::Result {
     aexcompat_broker::observability::init();
     let mut args: Vec<_> = std::env::args_os().collect();
     let headless = args.get(1).is_some_and(|arg| arg == "--headless");

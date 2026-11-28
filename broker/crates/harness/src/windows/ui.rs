@@ -1,20 +1,22 @@
+use eframe::egui;
+
 use egui_shadcn::{
     Button as ShadcnButton, ButtonSize, ButtonStyle, ButtonVariant, CardProps, CardSize,
     CardVariant, ColorPalette, ControlSize, ControlVariant, ShadcnBaseColor, Theme, card, checkbox,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum UiLanguage {
+pub(super) enum UiLanguage {
     #[default]
     English,
     Japanese,
 }
 
 #[derive(Clone, Debug)]
-struct AexUiKit {
-    theme: Theme,
-    dark_mode: bool,
-    language: UiLanguage,
+pub(super) struct AexUiKit {
+    pub(super) theme: Theme,
+    pub(super) dark_mode: bool,
+    pub(super) language: UiLanguage,
     fonts_installed: bool,
 }
 
@@ -30,7 +32,7 @@ impl Default for AexUiKit {
 }
 
 impl AexUiKit {
-    fn install(&mut self, ctx: &egui::Context) {
+    pub(super) fn install(&mut self, ctx: &egui::Context) {
         if !self.fonts_installed {
             self.install_japanese_font(ctx);
             self.fonts_installed = true;
@@ -84,7 +86,7 @@ impl AexUiKit {
         ));
     }
 
-    fn toggle_color_mode(&mut self) {
+    pub(super) fn toggle_color_mode(&mut self) {
         self.dark_mode = !self.dark_mode;
         let palette = if self.dark_mode {
             ColorPalette::shadcn_dark(ShadcnBaseColor::Neutral)
@@ -94,22 +96,22 @@ impl AexUiKit {
         self.theme = Theme::new(palette);
     }
 
-    fn set_language(&mut self, language: UiLanguage) {
+    pub(super) fn set_language(&mut self, language: UiLanguage) {
         self.language = language;
     }
 
-    fn language_is(&self, language: UiLanguage) -> bool {
+    pub(super) fn language_is(&self, language: UiLanguage) -> bool {
         self.language == language
     }
 
-    fn text(&self, english: &'static str, japanese: &'static str) -> &'static str {
+    pub(super) fn text(&self, english: &'static str, japanese: &'static str) -> &'static str {
         match self.language {
             UiLanguage::English => english,
             UiLanguage::Japanese => japanese,
         }
     }
 
-    fn status_text<'a>(&self, status: &'a str) -> std::borrow::Cow<'a, str> {
+    pub(super) fn status_text<'a>(&self, status: &'a str) -> std::borrow::Cow<'a, str> {
         if self.language == UiLanguage::English {
             return status.into();
         }
@@ -163,11 +165,11 @@ impl AexUiKit {
         translated.into()
     }
 
-    fn muted_foreground(&self) -> egui::Color32 {
+    pub(super) fn muted_foreground(&self) -> egui::Color32 {
         self.theme.palette.muted_foreground
     }
 
-    fn success_foreground(&self) -> egui::Color32 {
+    pub(super) fn success_foreground(&self) -> egui::Color32 {
         if self.dark_mode {
             egui::Color32::from_rgb(100, 205, 150)
         } else {
@@ -175,7 +177,7 @@ impl AexUiKit {
         }
     }
 
-    fn workflow_label(
+    pub(super) fn workflow_label(
         &self,
         ui: &mut egui::Ui,
         text: &str,
@@ -198,7 +200,7 @@ impl AexUiKit {
         response
     }
 
-    fn primary_button(
+    pub(super) fn primary_button(
         &self,
         ui: &mut egui::Ui,
         label: impl Into<egui::WidgetText>,
@@ -207,7 +209,7 @@ impl AexUiKit {
         self.button_with_variant(ui, label, enabled, ControlVariant::Primary, ControlSize::Md)
     }
 
-    fn compact_button(
+    pub(super) fn compact_button(
         &self,
         ui: &mut egui::Ui,
         label: impl Into<egui::WidgetText>,
@@ -222,7 +224,7 @@ impl AexUiKit {
         )
     }
 
-    fn compact_primary_button(
+    pub(super) fn compact_primary_button(
         &self,
         ui: &mut egui::Ui,
         label: impl Into<egui::WidgetText>,
@@ -231,7 +233,7 @@ impl AexUiKit {
         self.button_with_variant(ui, label, enabled, ControlVariant::Primary, ControlSize::Sm)
     }
 
-    fn eye_button(
+    pub(super) fn eye_button(
         &self,
         ui: &mut egui::Ui,
         effect_visible: bool,
@@ -297,7 +299,7 @@ impl AexUiKit {
         response
     }
 
-    fn segmented_toggle(
+    pub(super) fn segmented_toggle(
         &self,
         ui: &mut egui::Ui,
         id_source: impl std::hash::Hash,
@@ -374,7 +376,7 @@ impl AexUiKit {
         crate::shared_ui::modern_slider(ui, value, range, accessible_label)
     }
 
-    fn tab_button(
+    pub(super) fn tab_button(
         &self,
         ui: &mut egui::Ui,
         label: impl Into<egui::WidgetText>,
@@ -388,7 +390,7 @@ impl AexUiKit {
         self.button_with_variant(ui, label, true, variant, ControlSize::Sm)
     }
 
-    fn checkbox(
+    pub(super) fn checkbox(
         &self,
         ui: &mut egui::Ui,
         checked: &mut bool,
@@ -491,7 +493,7 @@ impl AexUiKit {
         style
     }
 
-    fn secondary_button(
+    pub(super) fn secondary_button(
         &self,
         ui: &mut egui::Ui,
         label: impl Into<egui::WidgetText>,
@@ -506,7 +508,11 @@ impl AexUiKit {
         )
     }
 
-    fn onboarding_card(&self, ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    pub(super) fn onboarding_card(
+        &self,
+        ui: &mut egui::Ui,
+        add_contents: impl FnOnce(&mut egui::Ui),
+    ) {
         let props = CardProps::default()
             .with_id(ui.make_persistent_id("aexcompat-onboarding-card"))
             .with_variant(CardVariant::Surface)

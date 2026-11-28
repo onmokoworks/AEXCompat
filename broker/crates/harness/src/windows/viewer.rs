@@ -1,4 +1,9 @@
-fn load_preview(
+use super::app::HarnessApp;
+use eframe::egui;
+use eframe::egui::{Color32, RichText};
+use std::path::{Path, PathBuf};
+
+pub(super) fn load_preview(
     ctx: &egui::Context,
     texture_name: &str,
     path: &Path,
@@ -10,12 +15,12 @@ fn load_preview(
 /// Previews scaled above 100% keep each source pixel square so 1px results
 /// (dither, halftone, anti-aliasing) stay readable; downscaled previews stay
 /// smooth.
-const PREVIEW_TEXTURE_OPTIONS: egui::TextureOptions = egui::TextureOptions {
+pub(super) const PREVIEW_TEXTURE_OPTIONS: egui::TextureOptions = egui::TextureOptions {
     magnification: egui::TextureFilter::Nearest,
     ..egui::TextureOptions::LINEAR
 };
 
-fn decode_preview_image(path: &Path) -> Result<egui::ColorImage, String> {
+pub(super) fn decode_preview_image(path: &Path) -> Result<egui::ColorImage, String> {
     let image = image::open(path).map_err(|error| format!("image decode failed: {error}"))?;
     let rgba = image.into_rgba8();
     if rgba.width() == 0 || rgba.height() == 0 {
@@ -28,7 +33,7 @@ fn decode_preview_image(path: &Path) -> Result<egui::ColorImage, String> {
     ))
 }
 
-fn is_supported_input_image(path: &Path) -> bool {
+pub(super) fn is_supported_input_image(path: &Path) -> bool {
     path.is_file()
         && path
             .extension()
@@ -41,7 +46,7 @@ fn is_supported_input_image(path: &Path) -> bool {
             })
 }
 
-fn canonical_deverbatim(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn canonical_deverbatim(path: &Path) -> Result<PathBuf, String> {
     let canonical = path
         .canonicalize()
         .map_err(|error| format!("path could not be resolved: {error}"))?;
@@ -55,7 +60,7 @@ fn canonical_deverbatim(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn show_preview(ui: &mut egui::Ui, label: &str, texture: Option<&egui::TextureHandle>) {
+pub(super) fn show_preview(ui: &mut egui::Ui, label: &str, texture: Option<&egui::TextureHandle>) {
     ui.label(RichText::new(label).strong());
     let Some(texture) = texture else {
         ui.label("Not available");
@@ -72,7 +77,7 @@ fn show_preview(ui: &mut egui::Ui, label: &str, texture: Option<&egui::TextureHa
     ));
 }
 
-fn show_viewer_texture(
+pub(super) fn show_viewer_texture(
     ui: &mut egui::Ui,
     label: &str,
     texture: Option<&egui::TextureHandle>,
@@ -120,7 +125,7 @@ fn show_viewer_texture(
     );
 }
 
-fn run_gui(repository: PathBuf) -> eframe::Result {
+pub(super) fn run_gui(repository: PathBuf) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])

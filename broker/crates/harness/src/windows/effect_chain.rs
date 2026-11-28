@@ -1,3 +1,17 @@
+use super::app::{HarnessApp, approved_dependency_search_dirs, parameters_for_native_action};
+use super::live_session::{InspectedRenderCapability, selected_interactive_session_selection};
+use super::preflight::{DiagnosticHistory, PreflightImportWarning, Selection, SessionDependency};
+use super::render_contract::{
+    ParameterInspectionState, TaskKind, render_action_enabled, render_timing,
+};
+use eframe::egui;
+use eframe::egui::RichText;
+use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+
 // The active stage uses the existing Effect Controls editor. Parked stages own
 // complete editor snapshots, not just parameter values or an AEX basename.
 use crate::gui_state::MAX_EFFECT_CHAIN_STAGES;
@@ -5,14 +19,14 @@ use crate::gui_state::MAX_EFFECT_CHAIN_STAGES;
 macro_rules! effect_editor_state {
     ($($field:ident: $ty:ty),+ $(,)?) => {
         #[derive(Clone)]
-        struct EffectEditorState { $( $field: $ty, )+ }
+        pub(super) struct EffectEditorState { $( pub(super) $field: $ty, )+ }
 
         impl HarnessApp {
-            fn capture_effect(&self) -> EffectEditorState {
+            pub(super) fn capture_effect(&self) -> EffectEditorState {
                 EffectEditorState { $( $field: self.$field.clone(), )+ }
             }
 
-            fn restore_effect(&mut self, state: EffectEditorState) {
+            pub(super) fn restore_effect(&mut self, state: EffectEditorState) {
                 $( self.$field = state.$field; )+
             }
         }
@@ -52,32 +66,32 @@ effect_editor_state! {
     custom_ui_key_modifiers: u16,
 }
 
-type EffectChainSlot = crate::gui_state::EffectChainSlot<EffectEditorState>;
+pub(super) type EffectChainSlot = crate::gui_state::EffectChainSlot<EffectEditorState>;
 
 #[derive(Clone)]
-struct ChainRenderStage {
-    ordinal: usize,
-    plugin: PathBuf,
-    hash: String,
-    pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
-    parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
-    selection: aexcompat_broker::image_render::InteractiveSessionSelection,
-    dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
-    search_dirs: Vec<PathBuf>,
-    host_context: Option<aexcompat_broker::render_request::HostContext>,
-    custom_ui_action: Option<aexcompat_broker::image_render::RenderUiAction>,
+pub(super) struct ChainRenderStage {
+    pub(super) ordinal: usize,
+    pub(super) plugin: PathBuf,
+    pub(super) hash: String,
+    pub(super) pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
+    pub(super) parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    pub(super) selection: aexcompat_broker::image_render::InteractiveSessionSelection,
+    pub(super) dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
+    pub(super) search_dirs: Vec<PathBuf>,
+    pub(super) host_context: Option<aexcompat_broker::render_request::HostContext>,
+    pub(super) custom_ui_action: Option<aexcompat_broker::image_render::RenderUiAction>,
 }
 
 impl HarnessApp {
-    fn chain_edit_ready(&self) -> bool {
+    pub(super) fn chain_edit_ready(&self) -> bool {
         !self.busy && self.pending_parameter_slot.is_none()
     }
 
-    fn uses_chain_renderer(&self) -> bool {
+    pub(super) fn uses_chain_renderer(&self) -> bool {
         self.effect_chain.len() > 1 || self.effect_chain.first().is_some_and(|slot| !slot.enabled)
     }
 
-    fn current_image_render_ready(&self) -> bool {
+    pub(super) fn current_image_render_ready(&self) -> bool {
         if !self.chain_edit_ready() || self.input_image.is_none() {
             return false;
         }
@@ -95,7 +109,7 @@ impl HarnessApp {
             )
     }
 
-    fn save_active_effect(&mut self) {
+    pub(super) fn save_active_effect(&mut self) {
         if self.effect_chain.is_empty() {
             if self.selection.is_some() {
                 self.effect_chain.push(EffectChainSlot {
@@ -120,7 +134,7 @@ impl HarnessApp {
         self.invalidate_render_output();
     }
 
-    fn select_chain_effect(&mut self, index: usize) {
+    pub(super) fn select_chain_effect(&mut self, index: usize) {
         if !self.chain_edit_ready()
             || index >= self.effect_chain.len()
             || index == self.active_effect
@@ -144,7 +158,7 @@ impl HarnessApp {
         );
     }
 
-    fn add_chain_effect(&mut self) {
+    pub(super) fn add_chain_effect(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("After Effects plug-in", &["aex"])
             .pick_file()
@@ -154,7 +168,7 @@ impl HarnessApp {
         self.add_chain_effect_path(path);
     }
 
-    fn add_chain_effect_path(&mut self, path: PathBuf) {
+    pub(super) fn add_chain_effect_path(&mut self, path: PathBuf) {
         if !self.chain_edit_ready() {
             return;
         }
@@ -172,7 +186,7 @@ impl HarnessApp {
         self.choose_aex_path(path);
     }
 
-    fn remove_chain_effect(&mut self) {
+    pub(super) fn remove_chain_effect(&mut self) {
         if !self.chain_edit_ready() {
             return;
         }
@@ -191,7 +205,7 @@ impl HarnessApp {
         self.invalidate_chain();
     }
 
-    fn move_chain_effect(&mut self, target: usize) {
+    pub(super) fn move_chain_effect(&mut self, target: usize) {
         if !self.chain_edit_ready() || target >= self.effect_chain.len() {
             return;
         }
@@ -201,7 +215,7 @@ impl HarnessApp {
         self.invalidate_chain();
     }
 
-    fn show_effect_chain(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn show_effect_chain(&mut self, ui: &mut egui::Ui) {
         let edit_ready = self.chain_edit_ready();
         if self.effect_chain.is_empty() {
             self.save_active_effect();
@@ -313,7 +327,7 @@ impl HarnessApp {
         }
     }
 
-    fn chain_render_plan(&self) -> Result<Vec<ChainRenderStage>, String> {
+    pub(super) fn chain_render_plan(&self) -> Result<Vec<ChainRenderStage>, String> {
         use aexcompat_broker::image_render::{RenderGpuBackend, RenderUiAction};
         if !matches!(
             self.gpu_backend,
@@ -407,7 +421,7 @@ impl HarnessApp {
         Ok(plan)
     }
 
-    fn render_chain_to(&mut self, output: PathBuf) {
+    pub(super) fn render_chain_to(&mut self, output: PathBuf) {
         self.clear_render_output();
         let plan = match self.chain_render_plan() {
             Ok(plan) => plan,
@@ -519,7 +533,7 @@ impl Drop for ChainScratch {
 
 // Shared by GUI dispatch and behavioral tests. Never publish a partial chain;
 // all intermediate outputs live in one freshly owned directory and are removed.
-fn run_effect_chain(
+pub(super) fn run_effect_chain(
     repository: &Path,
     input: &Path,
     output: &Path,
@@ -668,7 +682,7 @@ fn run_effect_chain(
     report
 }
 
-fn chain_raw_extension(
+pub(super) fn chain_raw_extension(
     format: aexcompat_broker::image_render::RenderPixelFormat,
 ) -> Option<&'static str> {
     use aexcompat_broker::image_render::RenderPixelFormat;

@@ -1,12 +1,25 @@
+#[cfg(windows)]
+use super::preflight::{DispatchIdentity, TaskResult};
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
+#[cfg(windows)]
+use std::io::Read;
+#[cfg(windows)]
+use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::mpsc;
+#[cfg(windows)]
+use std::{fs, thread};
+
 const INTERACTIVE_CAPABILITY_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct InspectedRenderCapability {
-    smart_render_advertised: bool,
-    out_flags2: u64,
+pub(super) struct InspectedRenderCapability {
+    pub(super) smart_render_advertised: bool,
+    pub(super) out_flags2: u64,
 }
 
-fn inspected_render_capability(
+pub(super) fn inspected_render_capability(
     report: &serde_json::Value,
 ) -> Result<InspectedRenderCapability, String> {
     let diagnostics = report
@@ -31,7 +44,7 @@ fn inspected_render_capability(
     })
 }
 
-fn selected_interactive_session_selection(
+pub(super) fn selected_interactive_session_selection(
     capability: InspectedRenderCapability,
     requested_smart: bool,
     manual_override: bool,
@@ -74,34 +87,34 @@ fn selected_interactive_session_selection(
 /// again; the reopen is visible in the report's `resident_session` facts).
 #[cfg(windows)]
 #[derive(Clone, PartialEq)]
-struct LiveSessionKey {
-    plugin_sha256: String,
-    input_content_sha256: [u8; 32],
+pub(super) struct LiveSessionKey {
+    pub(super) plugin_sha256: String,
+    pub(super) input_content_sha256: [u8; 32],
     /// Identity of every approved dependency: staged basename, size, and
     /// content hash. The sealed tree stages dependencies by basename, so a
     /// renamed DLL with identical bytes still needs a fresh session.
-    dependency_identities: Vec<String>,
+    pub(super) dependency_identities: Vec<String>,
     /// Canonical operator-approved runtime roots. A root-set change must
     /// reopen the worker even when every explicit DLL identity is unchanged.
-    dependency_search_dirs: Vec<PathBuf>,
+    pub(super) dependency_search_dirs: Vec<PathBuf>,
     /// Parameter structure only (slots, kinds, ranges, choices); values ride
     /// each frame's v:2 message and must not force a reopen.
-    parameter_signature: String,
+    pub(super) parameter_signature: String,
     /// The inspection snapshot includes path, provenance, schema version, and
     /// capability identity, so each of those changes forces a clean reopen.
-    selection: aexcompat_broker::image_render::InteractiveSessionSelection,
-    width: u32,
-    height: u32,
-    pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
-    time_step: i32,
-    total_time: i32,
-    time_scale: u32,
+    pub(super) selection: aexcompat_broker::image_render::InteractiveSessionSelection,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
+    pub(super) time_step: i32,
+    pub(super) total_time: i32,
+    pub(super) time_scale: u32,
 }
 
 // Platform-independent (and unit-tested) even though the resident session
 // that consumes it is Windows-only.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn parameter_structure_signature(
+pub(super) fn parameter_structure_signature(
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
 ) -> String {
     serde_json::to_string(
@@ -124,25 +137,25 @@ fn parameter_structure_signature(
 }
 
 #[cfg(windows)]
-struct LiveRenderRequest {
-    repository: PathBuf,
-    plugin_path: PathBuf,
-    plugin_sha256: String,
-    dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
-    dependency_search_dirs: Vec<PathBuf>,
-    parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
-    selection: aexcompat_broker::image_render::InteractiveSessionSelection,
-    input_path: PathBuf,
-    timing: aexcompat_broker::image_render::RenderTiming,
-    pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
-    output: PathBuf,
-    respond: mpsc::Sender<TaskResult>,
-    identity: DispatchIdentity,
-    diagnostic_eligible: bool,
+pub(super) struct LiveRenderRequest {
+    pub(super) repository: PathBuf,
+    pub(super) plugin_path: PathBuf,
+    pub(super) plugin_sha256: String,
+    pub(super) dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
+    pub(super) dependency_search_dirs: Vec<PathBuf>,
+    pub(super) parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    pub(super) selection: aexcompat_broker::image_render::InteractiveSessionSelection,
+    pub(super) input_path: PathBuf,
+    pub(super) timing: aexcompat_broker::image_render::RenderTiming,
+    pub(super) pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
+    pub(super) output: PathBuf,
+    pub(super) respond: mpsc::Sender<TaskResult>,
+    pub(super) identity: DispatchIdentity,
+    pub(super) diagnostic_eligible: bool,
 }
 
 #[cfg(windows)]
-enum LiveCommand {
+pub(super) enum LiveCommand {
     Render(Box<LiveRenderRequest>),
     /// AEX change, approval invalidation, or shutdown: the resident worker
     /// must not outlive the selection it was opened for.
@@ -150,12 +163,12 @@ enum LiveCommand {
 }
 
 #[cfg(windows)]
-struct LiveSessionHandle {
-    sender: mpsc::Sender<LiveCommand>,
+pub(super) struct LiveSessionHandle {
+    pub(super) sender: mpsc::Sender<LiveCommand>,
 }
 
 #[cfg(windows)]
-struct DecodedInput {
+pub(super) struct DecodedInput {
     path: PathBuf,
     content_sha256: [u8; 32],
     width: u32,
@@ -167,22 +180,22 @@ struct DecodedInput {
 /// design: one async session thread inside the GUI process drives the
 /// out-of-process resident worker; the UI thread never blocks on it).
 #[cfg(windows)]
-struct LiveSessionState {
-    decoded: Option<DecodedInput>,
-    open: Option<(
+pub(super) struct LiveSessionState {
+    pub(super) decoded: Option<DecodedInput>,
+    pub(super) open: Option<(
         LiveSessionKey,
         aexcompat_broker::image_render::InteractiveRenderSession,
     )>,
     /// Counts session opens; each reopen means temporal state restarted.
-    session_generation: u64,
+    pub(super) session_generation: u64,
     /// Unclean close summary of the previous session, surfaced in the next
     /// render report instead of being dropped silently.
-    pending_close_summary: Option<serde_json::Value>,
+    pub(super) pending_close_summary: Option<serde_json::Value>,
 }
 
 #[cfg(windows)]
 impl LiveSessionState {
-    fn close_current(&mut self) {
+    pub(super) fn close_current(&mut self) {
         if let Some((_, session)) = self.open.take() {
             let summary = session.close();
             if summary.get("session_clean") != Some(&serde_json::json!(true)) {
@@ -239,7 +252,7 @@ impl LiveSessionState {
 /// carry the render (open failure or invalidation), mirroring the broker's
 /// length-1 wrapper fallback policy.
 #[cfg(windows)]
-fn live_render(
+pub(super) fn live_render(
     state: &mut LiveSessionState,
     request: &LiveRenderRequest,
 ) -> Result<(String, Option<PathBuf>), String> {
@@ -412,7 +425,7 @@ fn live_render(
     }
 }
 
-fn interactive_selection_failure(
+pub(super) fn interactive_selection_failure(
     selection: aexcompat_broker::image_render::InteractiveSessionSelection,
     error: String,
 ) -> String {
@@ -430,7 +443,7 @@ fn interactive_selection_failure(
 }
 
 #[cfg(windows)]
-fn spawn_live_session_thread(receiver: mpsc::Receiver<LiveCommand>) {
+pub(super) fn spawn_live_session_thread(receiver: mpsc::Receiver<LiveCommand>) {
     thread::spawn(move || {
         let mut state = LiveSessionState {
             decoded: None,

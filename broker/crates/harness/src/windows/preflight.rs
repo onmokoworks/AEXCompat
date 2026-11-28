@@ -1,27 +1,26 @@
-use eframe::egui::{self, Color32, RichText};
-use sha2::{Digest, Sha256};
-use std::{
-    fs::{self, OpenOptions},
-    io::{Read, Write},
-    path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
-    thread,
-    time::{Duration, Instant, SystemTime},
+use super::render_contract::{
+    MissingSuite, failure_diagnostics, render_diagnostics, valid_suite_name,
 };
+use sha2::{Digest, Sha256};
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+use std::{fs, thread};
 
-const DIAGNOSTIC_SCHEMA: &str = "aexcompat.harness-diagnostic";
-const DIAGNOSTIC_VERSION: u64 = 1;
-const MAX_DIAGNOSTIC_FILE_BYTES: u64 = 64 * 1024;
+pub(super) const DIAGNOSTIC_SCHEMA: &str = "aexcompat.harness-diagnostic";
+pub(super) const DIAGNOSTIC_VERSION: u64 = 1;
+pub(super) const MAX_DIAGNOSTIC_FILE_BYTES: u64 = 64 * 1024;
 const MAX_DIAGNOSTIC_FILES: usize = 256;
 const MAX_DIAGNOSTIC_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_DIAGNOSTIC_SUMMARY_BYTES: usize = 1024;
+pub(super) const MAX_DIAGNOSTIC_SUMMARY_BYTES: usize = 1024;
 const MAX_AGGREGATE_SHAS: usize = 4096;
 const MAX_AGGREGATE_FILES: usize = 65_536;
 const MAX_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
-const CLI_CONTRACT_SCHEMA: &str = "aexcompat.harness-cli-contract";
-const CLI_CONTRACT_VERSION: u64 = 1;
+pub(super) const CLI_CONTRACT_SCHEMA: &str = "aexcompat.harness-cli-contract";
+pub(super) const CLI_CONTRACT_VERSION: u64 = 1;
 
-fn decode_sha256(value: &str) -> Result<[u8; 32], String> {
+pub(super) fn decode_sha256(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("SHA-256 must be exactly 64 hexadecimal characters".into());
     }
@@ -34,28 +33,28 @@ fn decode_sha256(value: &str) -> Result<[u8; 32], String> {
 }
 
 #[derive(Clone)]
-struct Selection {
-    path: PathBuf,
-    size: u64,
-    sha256: String,
-    modified: Option<SystemTime>,
+pub(super) struct Selection {
+    pub(super) path: PathBuf,
+    pub(super) size: u64,
+    pub(super) sha256: String,
+    pub(super) modified: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug)]
-struct SessionDependency {
-    path: PathBuf,
-    size: u64,
-    sha256: String,
+pub(super) struct SessionDependency {
+    pub(super) path: PathBuf,
+    pub(super) size: u64,
+    pub(super) sha256: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum ImportKind {
+pub(super) enum ImportKind {
     Normal,
     Delay,
 }
 
 impl ImportKind {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Normal => "normal",
             Self::Delay => "delay",
@@ -64,18 +63,18 @@ impl ImportKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PreflightImportWarning {
-    basename: String,
-    kind: ImportKind,
+pub(super) struct PreflightImportWarning {
+    pub(super) basename: String,
+    pub(super) kind: ImportKind,
 }
 
 #[derive(Debug, Default)]
-struct AdjacentImportDiscovery {
-    dependencies: Vec<SessionDependency>,
-    warnings: Vec<PreflightImportWarning>,
+pub(super) struct AdjacentImportDiscovery {
+    pub(super) dependencies: Vec<SessionDependency>,
+    pub(super) warnings: Vec<PreflightImportWarning>,
 }
 
-fn resolve_adjacent_import(
+pub(super) fn resolve_adjacent_import(
     imported_name: &str,
     kind: ImportKind,
     adjacent: &std::collections::HashMap<String, PathBuf>,
@@ -102,11 +101,11 @@ fn resolve_adjacent_import(
     }
 }
 
-const MAX_DISCOVERY_FILE_BYTES: u64 = 512 * 1024 * 1024;
+pub(super) const MAX_DISCOVERY_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DISCOVERY_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_ADJACENT_ENTRIES: usize = 4096;
 
-fn read_bounded_pe(path: &Path) -> Result<Vec<u8>, String> {
+pub(super) fn read_bounded_pe(path: &Path) -> Result<Vec<u8>, String> {
     let size = fs::metadata(path).map_err(|error| error.to_string())?.len();
     if size == 0 || size > MAX_DISCOVERY_FILE_BYTES {
         return Err(format!(
@@ -117,7 +116,7 @@ fn read_bounded_pe(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| error.to_string())
 }
 
-fn is_system_import_name(name: &str) -> bool {
+pub(super) fn is_system_import_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if lower.starts_with("api-ms-win-") || lower.starts_with("ext-ms-win-") {
         return true;
@@ -126,7 +125,7 @@ fn is_system_import_name(name: &str) -> bool {
         .is_some_and(|windows| PathBuf::from(windows).join("System32").join(name).is_file())
 }
 
-fn parse_delay_import_table(
+pub(super) fn parse_delay_import_table(
     bytes: &[u8],
     table_offset: usize,
     size: usize,
@@ -240,7 +239,9 @@ fn delay_import_libraries(bytes: &[u8], pe: &goblin::pe::PE<'_>) -> Result<Vec<S
     )
 }
 
-fn discover_adjacent_imports(aex_path: &Path) -> Result<AdjacentImportDiscovery, String> {
+pub(super) fn discover_adjacent_imports(
+    aex_path: &Path,
+) -> Result<AdjacentImportDiscovery, String> {
     const MAX_DEPENDENCIES: usize = 64;
     let directory = aex_path
         .parent()
@@ -354,7 +355,7 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<AdjacentImportDiscovery,
     })
 }
 
-fn approved_adjacent_dependencies(
+pub(super) fn approved_adjacent_dependencies(
     aex_path: &Path,
     approved_sha256: &str,
 ) -> Result<Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>, String> {
@@ -401,42 +402,42 @@ fn approved_adjacent_dependencies(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DispatchIdentity {
-    sha256: String,
-    size: u64,
+pub(super) struct DispatchIdentity {
+    pub(super) sha256: String,
+    pub(super) size: u64,
 }
 
-struct TaskResult {
-    success: bool,
-    body: String,
-    output: Option<PathBuf>,
-    identity: Option<DispatchIdentity>,
-    operation: Option<String>,
-    diagnostic_eligible: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct DiagnosticHistory {
-    count: usize,
-    latest: Option<String>,
+pub(super) struct TaskResult {
+    pub(super) success: bool,
+    pub(super) body: String,
+    pub(super) output: Option<PathBuf>,
+    pub(super) identity: Option<DispatchIdentity>,
+    pub(super) operation: Option<String>,
+    pub(super) diagnostic_eligible: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct MissingSuiteGap {
-    name: String,
-    version: i32,
-    sha_count: usize,
-    event_count: usize,
+pub(super) struct DiagnosticHistory {
+    pub(super) count: usize,
+    pub(super) latest: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct MissingSuiteAggregate {
-    top: Vec<MissingSuiteGap>,
-    discovered_sha_count: usize,
-    scanned_sha_count: usize,
-    valid_failure_event_count: usize,
-    skipped_count: usize,
-    truncated: bool,
+pub(super) struct MissingSuiteGap {
+    pub(super) name: String,
+    pub(super) version: i32,
+    pub(super) sha_count: usize,
+    pub(super) event_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct MissingSuiteAggregate {
+    pub(super) top: Vec<MissingSuiteGap>,
+    pub(super) discovered_sha_count: usize,
+    pub(super) scanned_sha_count: usize,
+    pub(super) valid_failure_event_count: usize,
+    pub(super) skipped_count: usize,
+    pub(super) truncated: bool,
 }
 
 fn is_plain_directory(metadata: &fs::Metadata) -> bool {
@@ -518,7 +519,7 @@ fn validated_event_suites(value: &serde_json::Value, sha: &str) -> Option<Vec<Mi
     )
 }
 
-fn aggregate_missing_suites(repository: &Path) -> MissingSuiteAggregate {
+pub(super) fn aggregate_missing_suites(repository: &Path) -> MissingSuiteAggregate {
     let root = repository.join("target/harness-diagnostics");
     let Ok(entries) = fs::read_dir(root) else {
         return MissingSuiteAggregate::default();
@@ -653,7 +654,7 @@ fn aggregate_missing_suites(repository: &Path) -> MissingSuiteAggregate {
     aggregate
 }
 
-fn bounded_summary(value: &str) -> String {
+pub(super) fn bounded_summary(value: &str) -> String {
     if value.contains(['\\', '/', ':']) {
         return "redacted".into();
     }
@@ -683,7 +684,7 @@ fn summary_component(value: &str) -> String {
     )
 }
 
-fn diagnostic_summary(success: bool, body: &str) -> String {
+pub(super) fn diagnostic_summary(success: bool, body: &str) -> String {
     if success {
         if let Some(value) = serde_json::from_str::<serde_json::Value>(body)
             .ok()
@@ -715,7 +716,7 @@ fn diagnostic_summary(success: bool, body: &str) -> String {
     "failed safely".into()
 }
 
-fn diagnostic_details(success: bool, body: &str) -> serde_json::Value {
+pub(super) fn diagnostic_details(success: bool, body: &str) -> serde_json::Value {
     if let Some(value) = (!success).then(|| failure_diagnostics(body)).flatten() {
         return serde_json::json!({
             "classification": value.classification,
@@ -745,7 +746,7 @@ fn diagnostic_details(success: bool, body: &str) -> serde_json::Value {
     serde_json::json!({"classification": if success { "completed" } else { "failed_safely" }})
 }
 
-fn diagnostic_directory(repository: &Path, sha256: &str) -> Option<PathBuf> {
+pub(super) fn diagnostic_directory(repository: &Path, sha256: &str) -> Option<PathBuf> {
     decode_sha256(sha256).ok()?;
     Some(
         repository
@@ -754,7 +755,7 @@ fn diagnostic_directory(repository: &Path, sha256: &str) -> Option<PathBuf> {
     )
 }
 
-fn persist_diagnostic_with_nonce(
+pub(super) fn persist_diagnostic_with_nonce(
     repository: &Path,
     identity: &DispatchIdentity,
     operation: &str,
@@ -804,7 +805,7 @@ fn persist_diagnostic_with_nonce(
     Ok(destination)
 }
 
-fn persist_diagnostic(
+pub(super) fn persist_diagnostic(
     repository: &Path,
     identity: &DispatchIdentity,
     operation: &str,
@@ -827,7 +828,7 @@ fn persist_diagnostic(
     )
 }
 
-fn persist_preflight_warnings(
+pub(super) fn persist_preflight_warnings(
     repository: &Path,
     identity: &DispatchIdentity,
     warnings: &[PreflightImportWarning],
@@ -852,7 +853,7 @@ fn persist_preflight_warnings(
     Ok(())
 }
 
-fn load_diagnostic_history(repository: &Path, sha256: &str) -> DiagnosticHistory {
+pub(super) fn load_diagnostic_history(repository: &Path, sha256: &str) -> DiagnosticHistory {
     let Some(directory) = diagnostic_directory(repository, sha256) else {
         return DiagnosticHistory::default();
     };
