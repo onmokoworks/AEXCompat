@@ -1,3 +1,24 @@
+use super::inspection_and_probes::encode_interactive_payload;
+use super::session::{
+    InteractiveGateFacts, InteractiveImageReportFacts, SessionWrapperOutcome,
+    in_place_session_search_dirs, validate_interactive_worker_report,
+};
+#[cfg(windows)]
+use super::session::{
+    SessionWrapperRequest, build_interactive_image_report, render_with_artifact_using,
+};
+use super::types_and_transport::{RenderGpuBackend, RenderTiming, invalid};
+use super::{InteractiveParameter, RenderPixelFormat, visual_diagnostics};
+use crate::decoded_image::native_rgba_to_preview;
+use crate::secure_image_dispatch::ApprovedImageArtifact;
+use image::ImageFormat;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::Path;
+use std::time::Duration;
+
 #[cfg(windows)]
 /// Finite independent-instance execution. Call `render` for every case in the
 /// initial preflight phase, then `start` and replay. The caller owns the bounded
@@ -87,7 +108,7 @@ impl IndependentCaseBatch {
         )
     }
 
-    fn execute(&mut self, request: &SessionWrapperRequest<'_>) -> SessionWrapperOutcome {
+    pub(super) fn execute(&mut self, request: &SessionWrapperRequest<'_>) -> SessionWrapperOutcome {
         match self.execute_inner(request) {
             Ok(report) => SessionWrapperOutcome::Report(report),
             Err(error) => SessionWrapperOutcome::Failure(error),

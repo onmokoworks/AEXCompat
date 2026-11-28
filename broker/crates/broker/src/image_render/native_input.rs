@@ -1,3 +1,22 @@
+#[cfg(test)]
+use super::diagnostics::decode_bounded_image;
+use super::diagnostics::{
+    MAX_DIMENSION, MAX_PIXELS, decode_bounded_image_for_format, interactive_frame_deadline_ms,
+};
+use super::inspection_and_probes::encode_interactive_payload;
+#[cfg(windows)]
+use super::session::render_with_artifact;
+use super::types_and_transport::{
+    RenderGpuBackend, RenderTiming, RenderUiAction, TimedLayerImage, invalid,
+    observe_selected_plugin_bytes,
+};
+use super::{InteractiveParameter, RenderPixelFormat};
+use crate::secure_image_dispatch::ApprovedImageArtifact;
+use serde_json::Value;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
 /// Packed little-endian RGBA at the requested AE depth (16-bit white = 32768).
 /// The dimensions and format travel with the bytes; PNG previews are never inputs.
 /// Float input preserves all IEEE-754 words. Callers reading rendered output
@@ -39,7 +58,7 @@ impl NativeImageInput {
         Ok(())
     }
 
-    fn validated_world_layout(
+    pub(super) fn validated_world_layout(
         &self,
     ) -> io::Result<Option<&crate::render_fixture::FixtureWorldLayout>> {
         let Some(world) = &self.world_layout else {
@@ -69,7 +88,7 @@ impl NativeImageInput {
     }
 
     #[cfg(windows)]
-    fn diagnostic_layout(
+    pub(super) fn diagnostic_layout(
         &self,
     ) -> io::Result<Option<crate::render_session::DiagnosticWorldLayout>> {
         let Some(world) = self.validated_world_layout()? else {
@@ -95,7 +114,10 @@ impl NativeImageInput {
         Self::from_decoded(decoded, format)
     }
 
-    fn from_decoded(decoded: image::DynamicImage, format: RenderPixelFormat) -> io::Result<Self> {
+    pub(super) fn from_decoded(
+        decoded: image::DynamicImage,
+        format: RenderPixelFormat,
+    ) -> io::Result<Self> {
         let (width, height) = (decoded.width(), decoded.height());
         let rgba = crate::decoded_image::decoded_rgba(decoded, format);
         let image = Self {

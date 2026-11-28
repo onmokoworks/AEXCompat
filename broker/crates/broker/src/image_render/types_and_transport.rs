@@ -1,3 +1,17 @@
+#[cfg(windows)]
+use super::declarative_fixture::fixture_world_dump_override;
+use super::diagnostics::{MAX_DIMENSION, MAX_PIXELS};
+use super::{AnimationTime, AnimationValue, InteractiveParameter, ParameterAnimation};
+use crate::parameter_limits::MAX_PARAMETERS;
+use crate::runtime_module_policy::{ApprovedClassifiedModule, RuntimeBackend, RuntimeModulePolicy};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
 #[derive(Clone, Copy, Debug)]
 pub struct RenderTiming {
     pub current_time: i32,
@@ -18,7 +32,7 @@ impl Default for RenderTiming {
 }
 
 impl RenderTiming {
-    fn is_valid(self) -> bool {
+    pub(super) fn is_valid(self) -> bool {
         self.current_time >= 0
             && self.time_step > 0
             && self.total_time >= self.current_time
@@ -63,8 +77,6 @@ pub(crate) fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBacken
     }
 }
 
-pub(crate) use crate::decoded_image::{native_rgba_to_preview, rgba16_transport_to_png16};
-
 /// Opt-in world snapshot dumps and output checksum detail (issue #19). Both
 /// default off and only take effect for broker-dispatched image renders.
 const WORLD_DUMP_DIR_ENV: &str = "AEXCOMPAT_DUMP_WORLDS_DIR";
@@ -72,7 +84,7 @@ const OUTPUT_CHECKSUM_DETAIL_ENV: &str = "AEXCOMPAT_CHECKSUM_DETAIL";
 
 pub(crate) struct WorldDumpDir {
     pub(crate) path: PathBuf,
-    display: String,
+    pub(super) display: String,
 }
 
 /// Opt-in crash minidump directory (issue #18), resolved for the report only.
@@ -80,12 +92,12 @@ pub(crate) struct WorldDumpDir {
 /// creates the dump file at the Windows launch boundary and hands the worker an
 /// inherited pipe (see `minidump_policy`). Dumps contain plug-in memory, so
 /// they stay local and the broker-owned file name is never serialized.
-fn requested_minidump_directory(repository: &Path) -> io::Result<Option<String>> {
+pub(super) fn requested_minidump_directory(repository: &Path) -> io::Result<Option<String>> {
     crate::minidump_policy::configured_directory_display(repository)
 }
 
 #[cfg(windows)]
-fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
+pub(super) fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
     if let Some(path) = fixture_world_dump_override() {
         return resolve_world_dump_dir(repository, &path).map(Some);
     }
@@ -99,7 +111,10 @@ fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir
 /// a broker-managed location under `<repository>/target/`, must not use
 /// traversal components, and must start empty so stale snapshots can never be
 /// mistaken for this run's output.
-fn resolve_world_dump_dir(repository: &Path, requested: &Path) -> io::Result<WorldDumpDir> {
+pub(super) fn resolve_world_dump_dir(
+    repository: &Path,
+    requested: &Path,
+) -> io::Result<WorldDumpDir> {
     resolve_managed_dump_dir(repository, requested, true)
 }
 
@@ -170,7 +185,7 @@ pub(crate) fn resolve_managed_dump_dir(
     })
 }
 
-fn output_checksum_detail_requested() -> bool {
+pub(super) fn output_checksum_detail_requested() -> bool {
     matches!(
         std::env::var(OUTPUT_CHECKSUM_DETAIL_ENV),
         Ok(value) if value == "1" || value.eq_ignore_ascii_case("true")
@@ -222,7 +237,7 @@ pub struct TimedLayerImage {
     pub image_path: PathBuf,
 }
 
-fn validate_timed_layer_identities(
+pub(super) fn validate_timed_layer_identities(
     timed_layers: &[TimedLayerImage],
     layer_slots: &HashSet<u32>,
 ) -> io::Result<()> {
@@ -307,12 +322,18 @@ pub(crate) fn validate_animation_bindings(
 /// what binds the dispatch and travels into the report, and the caller's
 /// stale selection is logged. The worker still re-hashes the file it is
 /// asked to load, so what executed is still recorded.
-fn observe_selected_plugin(plugin_path: &Path, selected_sha256: &str) -> io::Result<String> {
+pub(super) fn observe_selected_plugin(
+    plugin_path: &Path,
+    selected_sha256: &str,
+) -> io::Result<String> {
     observe_selected_plugin_bytes(&fs::read(plugin_path)?, selected_sha256)
 }
 
 /// The same, for callers that already read the bytes.
-fn observe_selected_plugin_bytes(bytes: &[u8], selected_sha256: &str) -> io::Result<String> {
+pub(super) fn observe_selected_plugin_bytes(
+    bytes: &[u8],
+    selected_sha256: &str,
+) -> io::Result<String> {
     let observed = format!("{:X}", Sha256::digest(bytes));
     if !observed.eq_ignore_ascii_case(selected_sha256) {
         tracing::warn!(
@@ -322,11 +343,11 @@ fn observe_selected_plugin_bytes(bytes: &[u8], selected_sha256: &str) -> io::Res
     Ok(observed)
 }
 
-fn invalid(message: impl Into<String>) -> io::Error {
+pub(super) fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-struct Cleanup(Vec<PathBuf>);
+pub(super) struct Cleanup(pub(super) Vec<PathBuf>);
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -343,12 +364,12 @@ const MAX_AUX_SAMPLES: usize = 256;
 const MAX_AUX_SAMPLE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_AUX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
-struct AuxTransport {
-    manifest_path: PathBuf,
-    _cleanup: Cleanup,
+pub(super) struct AuxTransport {
+    pub(super) manifest_path: PathBuf,
+    pub(super) _cleanup: Cleanup,
 }
 
-const AUX_CHANNEL_DEPTH: i32 = i32::from_be_bytes(*b"DPTH");
+pub(super) const AUX_CHANNEL_DEPTH: i32 = i32::from_be_bytes(*b"DPTH");
 const AUX_CHANNEL_NORMALS: i32 = i32::from_be_bytes(*b"NRML");
 const AUX_CHANNEL_MOTION_VECTORS: i32 = i32::from_be_bytes(*b"MTVR");
 
@@ -385,7 +406,7 @@ fn aux_type_dimension_matches(
 /// trace_policy.rs); the aux manifest and its sidecars must follow suit. The
 /// string form is identity on any path without the prefix, so this is a no-op on
 /// non-Windows and on already-plain paths.
-fn strip_extended_prefix(path: &Path) -> PathBuf {
+pub(super) fn strip_extended_prefix(path: &Path) -> PathBuf {
     let text = path.as_os_str().to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
@@ -396,7 +417,7 @@ fn strip_extended_prefix(path: &Path) -> PathBuf {
     }
 }
 
-fn prepare_aux_transport(
+pub(super) fn prepare_aux_transport(
     repository: &Path,
     channels: &[crate::render_request::AuxChannel],
     root: &Path,

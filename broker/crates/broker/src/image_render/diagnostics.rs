@@ -1,26 +1,26 @@
-use crate::host_core::descriptor_manifest::load as load_manifest;
-use crate::host_core::parameter::{ValidatedAssignments, apply_defaults, encode_worker_payload};
+use super::RenderPixelFormat;
+#[cfg(windows)]
+use super::declarative_fixture::fixture_render_settings_override;
+use super::types_and_transport::{
+    GpuRuntimePolicyInput, RenderGpuBackend, invalid, runtime_backend,
+};
+use crate::parameter_limits::MAX_PARAMETERS;
 use crate::runtime_module_authorization::prepare_runtime_authorization_transport;
 use crate::runtime_module_policy::{
-    ApprovedClassifiedModule, RuntimeBackend, RuntimeModulePolicy, WorkerModuleValidation,
-    authenticate_gpu_worker_report,
+    RuntimeModulePolicy, WorkerModuleValidation, authenticate_gpu_worker_report,
 };
 use crate::secure_image_dispatch::{
     ApprovedImageArtifact, SecureImageDispatch, WorkerKind, dispatch_secure_image,
 };
-use image::ImageFormat;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::collections::BTreeSet;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 pub(crate) const MAX_DIMENSION: u32 = 4096;
 pub(crate) const MAX_PIXELS: u64 = 16_777_216;
-use crate::parameter_limits::MAX_PARAMETERS;
 pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 /// Overrides the interactive frame deadline for one process (issue #1769):
 /// a plug-in whose first frame legitimately outlasts 30 s otherwise has no
@@ -40,7 +40,7 @@ pub fn interactive_frame_deadline_ms() -> io::Result<u64> {
     parse_frame_deadline_ms(std::env::var_os(FRAME_DEADLINE_ENV).as_deref())
 }
 
-fn parse_frame_deadline_ms(value: Option<&std::ffi::OsStr>) -> io::Result<u64> {
+pub(super) fn parse_frame_deadline_ms(value: Option<&std::ffi::OsStr>) -> io::Result<u64> {
     let Some(value) = value else {
         return Ok(INTERACTIVE_RENDER_TIMEOUT_MS);
     };
@@ -58,27 +58,27 @@ fn parse_frame_deadline_ms(value: Option<&std::ffi::OsStr>) -> io::Result<u64> {
             )
         })
 }
-const MAX_STAGE_EVENTS: usize = 32;
-const MAX_ACTIVE_STAGES: usize = MAX_STAGE_EVENTS;
-const MAX_MISSING_SUITES: usize = 16;
-const MAX_UNSUPPORTED_SUITE_CALLS: usize = 32;
+pub(super) const MAX_STAGE_EVENTS: usize = 32;
+pub(super) const MAX_ACTIVE_STAGES: usize = MAX_STAGE_EVENTS;
+pub(super) const MAX_MISSING_SUITES: usize = 16;
+pub(super) const MAX_UNSUPPORTED_SUITE_CALLS: usize = 32;
 const MAX_SUITE_CALL_SLOT_PROBE_SLOTS: u64 = 32;
 const MAX_SUITE_CALL_SLOT_PROBE_TARGETS: usize = 8;
-const MAX_SUITE_NAME_LEN: usize = 64;
-const MAX_SUITE_TIMELINE_EVENTS: usize = 512;
+pub(super) const MAX_SUITE_NAME_LEN: usize = 64;
+pub(super) const MAX_SUITE_TIMELINE_EVENTS: usize = 512;
 const MAX_SELECTOR_INVOCATIONS: usize = 64;
 const MAX_SELECTOR_UNWIND_FRAMES: usize = 12;
 const MAX_HOST_CALLBACK_TIMELINE_RECORDS: usize = 128;
-const MAX_COMPUTE_CACHE_TIMELINE_RECORDS: usize = 128;
-const MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS: usize = 128;
+pub(super) const MAX_COMPUTE_CACHE_TIMELINE_RECORDS: usize = 128;
+pub(super) const MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS: usize = 128;
 const MAX_EXTENDED_ALLOCATION_TIMELINE_RECORDS: usize = 128;
-const MAX_SUITE_VERSION: i64 = u16::MAX as i64;
+pub(super) const MAX_SUITE_VERSION: i64 = u16::MAX as i64;
 const MAX_UNSUPPORTED_SUITE_SLOT: u64 = 1023;
 const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
 
 #[cfg(windows)]
-fn conformance_render_settings_transport() -> io::Result<Option<String>> {
+pub(super) fn conformance_render_settings_transport() -> io::Result<Option<String>> {
     let encoded = if let Some(value) = fixture_render_settings_override() {
         value
     } else if let Ok(value) = std::env::var(CONFORMANCE_RENDER_SETTINGS_ENV) {
@@ -103,7 +103,7 @@ fn conformance_render_settings_transport() -> io::Result<Option<String>> {
     Ok(Some(encoded))
 }
 
-fn apply_conformance_premultiplication(rgba: &mut [u8], mode: &str) {
+pub(super) fn apply_conformance_premultiplication(rgba: &mut [u8], mode: &str) {
     if mode == "straight" {
         return;
     }
@@ -132,14 +132,14 @@ pub fn smart_render_advertised(out_flags2: u64) -> bool {
 
 // #816 made a non-empty search root set part of the in-place protocol. Use the
 // same AE Support Files default as other in-place entry points (#1641).
-fn search_root(plugin_path: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+pub(super) fn search_root(plugin_path: &Path) -> io::Result<Vec<std::path::PathBuf>> {
     plugin_path
         .parent()
         .ok_or_else(|| invalid("plugin path has no parent directory to search for dependencies"))?;
     Ok(crate::after_effects_install::in_place_dependency_search_dirs(plugin_path))
 }
 
-fn dispatch_approved_image(
+pub(super) fn dispatch_approved_image(
     repository: &Path,
     worker_kind: WorkerKind,
     plugin_path: &Path,
@@ -439,7 +439,7 @@ fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn cleanup_stale_image_transport_before(
+pub(super) fn cleanup_stale_image_transport_before(
     root: &Path,
     now: SystemTime,
     stale_age: Duration,
@@ -494,7 +494,7 @@ fn cleanup_stale_image_transport_before(
     Ok(())
 }
 
-fn cleanup_stale_image_transport(root: &Path, now: SystemTime) -> io::Result<()> {
+pub(super) fn cleanup_stale_image_transport(root: &Path, now: SystemTime) -> io::Result<()> {
     cleanup_stale_image_transport_before(root, now, STALE_IMAGE_TRANSPORT_AGE)
 }
 
@@ -693,7 +693,7 @@ pub(crate) fn isolated_worker_diagnostics(
     diagnostics
 }
 
-fn worker_diagnostics(
+pub(super) fn worker_diagnostics(
     stderr: &str,
     stderr_truncated: bool,
     classification: &str,
@@ -938,7 +938,7 @@ fn worker_diagnostics(
 /// Worker stderr is shared with plug-ins. Admit only the exact bounded host
 /// vocabulary/numeric shapes, not truncated free text from a forged marker.
 /// This is an advisory diagnostic hint, not authenticated provenance.
-fn launch_validation_failure(stderr: &str) -> Value {
+pub(super) fn launch_validation_failure(stderr: &str) -> Value {
     stderr
         .lines()
         .find_map(|line| {
@@ -1006,7 +1006,11 @@ fn launch_validation_failure(stderr: &str) -> Value {
 /// Accept only the bounded, path-free last-chance marker from a worker that
 /// actually exited with that exception code. stderr is shared with the
 /// plug-in, so this is a diagnostic hint, not authenticated provenance.
-fn unhandled_exception_marker(stderr: &str, classification: &str, exit_code: u32) -> Option<Value> {
+pub(super) fn unhandled_exception_marker(
+    stderr: &str,
+    classification: &str,
+    exit_code: u32,
+) -> Option<Value> {
     if classification != "crashed" {
         return None;
     }
@@ -1119,7 +1123,7 @@ fn suite_acquire_failures(stderr: &str) -> (Vec<Value>, bool) {
 /// How many distinct refused `get_callback_addr` requests a single run may
 /// report. One id per call site is the observed shape; the bound exists so a
 /// plug-in probing ids in a loop cannot grow the diagnostic without bound.
-const MAX_CALLBACK_ADDR_DENIALS: usize = 32;
+pub(super) const MAX_CALLBACK_ADDR_DENIALS: usize = 32;
 
 /// The utility `get_callback_addr` requests the worker refused, from its
 /// `stage:callback_addr_denied` lines, and whether the list was cut short.
@@ -1131,7 +1135,7 @@ const MAX_CALLBACK_ADDR_DENIALS: usize = 32;
 /// Anything that does not parse is dropped and flagged rather than passed
 /// through, for the same reason `suite_acquire_failures` does it: a value
 /// this cannot vouch for must not reach a shareable report.
-fn callback_addr_denials(stderr: &str) -> (Vec<Value>, bool) {
+pub(super) fn callback_addr_denials(stderr: &str) -> (Vec<Value>, bool) {
     let mut denials: Vec<(i64, i64, i64)> = Vec::new();
     let mut truncated = false;
     for line in stderr.lines() {
@@ -1180,7 +1184,7 @@ fn callback_addr_denials(stderr: &str) -> (Vec<Value>, bool) {
 /// worker-owned vocabulary, never plug-in text. Callback names share the
 /// 64-byte schema bound used by the structured callback timeline; refusal
 /// reasons remain the smaller 32-byte vocabulary.
-const MAX_CALLBACK_DENIALS: usize = 32;
+pub(super) const MAX_CALLBACK_DENIALS: usize = 32;
 
 fn worker_denial_callback(value: &str) -> bool {
     !value.is_empty()
@@ -1209,7 +1213,7 @@ fn worker_denial_reason(value: &str) -> bool {
 /// Same discipline as the parsers above: exactly two fields of worker-owned
 /// identifier shape, dedup on the pair, bounded, and anything else is dropped
 /// and flagged rather than passed through.
-fn callback_denials(stderr: &str) -> (Vec<Value>, bool) {
+pub(super) fn callback_denials(stderr: &str) -> (Vec<Value>, bool) {
     let mut denials: Vec<(String, String, Option<i64>)> = Vec::new();
     let mut truncated = false;
     for line in stderr.lines() {
@@ -1263,7 +1267,7 @@ fn callback_denials(stderr: &str) -> (Vec<Value>, bool) {
     (denials, truncated)
 }
 
-fn load_failure_marker(stderr: &str, exit_code: u32) -> Option<Value> {
+pub(super) fn load_failure_marker(stderr: &str, exit_code: u32) -> Option<Value> {
     if exit_code != 11 {
         return None;
     }
@@ -1296,7 +1300,7 @@ fn load_failure_marker(stderr: &str, exit_code: u32) -> Option<Value> {
 /// `stage:minidump_written name=C:\...` and smuggle a private path into
 /// shareable diagnostics; anything not matching a worker-owned shape is
 /// dropped. The broker-owned file name is deliberately never serialized.
-fn minidump_marker(line: &str) -> Option<String> {
+pub(super) fn minidump_marker(line: &str) -> Option<String> {
     let body = line.strip_prefix("stage:minidump_")?;
     if let Some(bytes) = body.strip_prefix("written bytes=") {
         if bytes.bytes().all(|b| b.is_ascii_digit()) && !bytes.is_empty() && bytes.len() <= 20 {
@@ -1346,7 +1350,7 @@ fn reported_truncation(worker_report: &Value, key: &str) -> bool {
     }
 }
 
-fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
+pub(super) fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
     let mut suites = Vec::new();
     let mut seen = BTreeSet::new();
     let mut truncated = reported_truncation(worker_report, "missing_suites_truncated");
@@ -1452,7 +1456,7 @@ pub(crate) fn propagate_bee_facade(diagnostics: &mut Value, worker_report: &Valu
     });
 }
 
-fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Value) {
+pub(super) fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Value) {
     let mut calls = Vec::new();
     let mut seen = BTreeSet::new();
     let mut truncated = reported_truncation(worker_report, "unsupported_suite_calls_truncated");
@@ -1694,7 +1698,7 @@ fn safe_effect_ref_entry(value: &Value) -> Option<Value> {
     }))
 }
 
-fn safe_application_id_entry(value: &Value) -> Option<Value> {
+pub(super) fn safe_application_id_entry(value: &Value) -> Option<Value> {
     if value.is_null() {
         return Some(Value::Null);
     }
@@ -1736,7 +1740,7 @@ fn safe_application_id_entry(value: &Value) -> Option<Value> {
     }))
 }
 
-fn safe_spec_version_entry(value: &Value) -> Option<Value> {
+pub(super) fn safe_spec_version_entry(value: &Value) -> Option<Value> {
     if value.is_null() {
         return Some(Value::Null);
     }
@@ -1779,7 +1783,7 @@ fn safe_spec_version_entry(value: &Value) -> Option<Value> {
     }))
 }
 
-fn propagate_suite_call_slot_probe(diagnostics: &mut Value, worker_report: &Value) {
+pub(super) fn propagate_suite_call_slot_probe(diagnostics: &mut Value, worker_report: &Value) {
     let Some(probe) = worker_report
         .get("suite_call_slot_probe")
         .and_then(Value::as_object)
@@ -1978,7 +1982,7 @@ fn propagate_suite_call_slot_probe(diagnostics: &mut Value, worker_report: &Valu
     });
 }
 
-fn propagate_selector_invocations(diagnostics: &mut Value, worker_report: &Value) {
+pub(super) fn propagate_selector_invocations(diagnostics: &mut Value, worker_report: &Value) {
     let Some(container) = worker_report
         .get("selector_invocations")
         .and_then(Value::as_object)
@@ -2312,7 +2316,7 @@ fn schema_safe_callback_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn propagate_host_callback_timeline(diagnostics: &mut Value, worker_report: &Value) {
+pub(super) fn propagate_host_callback_timeline(diagnostics: &mut Value, worker_report: &Value) {
     let Some(container) = worker_report
         .get("host_callback_timeline")
         .and_then(Value::as_object)
@@ -2437,7 +2441,7 @@ fn fail_closed_compute_cache_timeline(diagnostics: &mut Value) {
     });
 }
 
-fn propagate_compute_cache_timeline(diagnostics: &mut Value, worker_report: &Value) {
+pub(super) fn propagate_compute_cache_timeline(diagnostics: &mut Value, worker_report: &Value) {
     let Some(reported_container) = worker_report.get("compute_cache_timeline") else {
         return;
     };
@@ -2587,7 +2591,7 @@ fn propagate_compute_cache_timeline(diagnostics: &mut Value, worker_report: &Val
     });
 }
 
-fn propagate_extended_lookup_timeline(diagnostics: &mut Value, worker_report: &Value) {
+pub(super) fn propagate_extended_lookup_timeline(diagnostics: &mut Value, worker_report: &Value) {
     let Some(reported_container) = worker_report.get("extended_lookup_timeline") else {
         return;
     };
@@ -2752,7 +2756,10 @@ fn propagate_extended_lookup_timeline(diagnostics: &mut Value, worker_report: &V
     });
 }
 
-fn propagate_extended_allocation_timeline(diagnostics: &mut Value, worker_report: &Value) {
+pub(super) fn propagate_extended_allocation_timeline(
+    diagnostics: &mut Value,
+    worker_report: &Value,
+) {
     let Some(container) = worker_report
         .get("extended_allocation_timeline")
         .and_then(Value::as_object)
@@ -2922,7 +2929,7 @@ fn propagate_extended_allocation_timeline(diagnostics: &mut Value, worker_report
     });
 }
 
-fn propagate_suite_timeline(diagnostics: &mut Value, worker_report: &Value) {
+pub(super) fn propagate_suite_timeline(diagnostics: &mut Value, worker_report: &Value) {
     let mut timeline = Vec::new();
     let mut truncated = reported_truncation(worker_report, "suite_timeline_truncated");
     let reported = match worker_report.get("suite_timeline") {
@@ -2993,7 +3000,7 @@ fn propagate_suite_timeline(diagnostics: &mut Value, worker_report: &Value) {
     diagnostics["suite_timeline_truncated"] = Value::Bool(truncated);
 }
 
-fn module_audit_summary(audit: &Value) -> Option<Value> {
+pub(super) fn module_audit_summary(audit: &Value) -> Option<Value> {
     let union = audit.get("observed_union")?;
     let safe_names = |field: &str| -> Option<Vec<&str>> {
         Some(
@@ -3025,7 +3032,7 @@ fn module_audit_summary(audit: &Value) -> Option<Value> {
     }))
 }
 
-fn module_audit_failure_summary(
+pub(super) fn module_audit_failure_summary(
     worker_report: &Value,
     selector_phase: Option<&str>,
 ) -> Option<Value> {
@@ -3125,7 +3132,7 @@ fn module_audit_failure_summary(
     }))
 }
 
-fn failed_module_audit_summary(stdout: &str) -> Option<Value> {
+pub(super) fn failed_module_audit_summary(stdout: &str) -> Option<Value> {
     let report: Value = serde_json::from_str(stdout.trim()).ok()?;
     if report.get("stage")? != "module_audit" {
         return None;

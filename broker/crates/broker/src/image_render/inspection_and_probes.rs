@@ -1,5 +1,28 @@
+use super::InteractiveParameter;
 #[cfg(windows)]
-fn inspect_experimental_with_diagnostics_and_runtime_policy(
+use super::diagnostics::isolated_worker_diagnostics;
+use super::diagnostics::{
+    decode_sha256_hex, dispatch_approved_image, failed_module_audit_summary,
+    module_audit_failure_summary, module_audit_summary, propagate_bee_facade,
+    propagate_compute_cache_timeline, propagate_extended_allocation_timeline,
+    propagate_extended_lookup_timeline, propagate_host_callback_timeline, propagate_missing_suites,
+    propagate_selector_invocations, propagate_suite_call_slot_probe, propagate_suite_timeline,
+    propagate_unsupported_suite_calls, smart_render_advertised,
+};
+use super::types_and_transport::{invalid, observe_selected_plugin};
+use crate::parameter_limits::MAX_PARAMETERS;
+use crate::runtime_module_authorization::prepare_runtime_authorization_transport;
+use crate::runtime_module_policy::{RuntimeBackend, RuntimeModulePolicy};
+use crate::secure_image_dispatch::{ApprovedImageArtifact, SecureImageDispatch, WorkerKind};
+use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+pub(super) fn inspect_experimental_with_diagnostics_and_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
     approved_sha256: &str,
@@ -20,7 +43,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
 
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
-fn inspect_experimental_impl(
+pub(super) fn inspect_experimental_impl(
     repository: &Path,
     plugin_path: &Path,
     approved_sha256: &str,
@@ -148,7 +171,7 @@ fn inspect_experimental_impl(
     inspection_result_from_report(report, diagnostics, runtime_policy.is_some())
 }
 
-fn inspection_result_from_report(
+pub(super) fn inspection_result_from_report(
     report: Value,
     mut diagnostics: Value,
     runtime_module_policy_applied: bool,
@@ -902,7 +925,7 @@ fn initialize_experimental_aegp_impl(
     Ok(report)
 }
 
-fn valid_dynamic_suite_report(report: &Value) -> bool {
+pub(super) fn valid_dynamic_suite_report(report: &Value) -> bool {
     let Some(suites) = report.get("dynamic_suites").and_then(Value::as_array) else {
         return false;
     };

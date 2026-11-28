@@ -1,10 +1,22 @@
 #[cfg(windows)]
+use super::render_operations::render_experimental_artifact_at_time_with_context;
+use super::types_and_transport::{RenderTiming, invalid};
+use super::{
+    InteractiveParameter, RenderArtifactConditions, RenderArtifactKind, RenderPixelFormat,
+    read_captured_world, write_raw_world_checkpoint_artifact,
+    write_strided_world_checkpoint_artifact,
+};
+#[cfg(windows)]
 use crate::render_fixture::{
     FixtureCase, FixtureCaseIdentity, FixtureFinalArtifact, LoadedRenderFixture,
     expand_fixture_cases, fixture_case_identity, load_render_fixture,
 };
-use sha2::Sha256 as FixtureSha256;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256 as FixtureSha256};
 use std::cell::RefCell;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 thread_local! {
@@ -17,38 +29,40 @@ thread_local! {
 }
 
 #[derive(Clone)]
-struct FixtureCapture {
-    stage: String,
-    path: PathBuf,
+pub(super) struct FixtureCapture {
+    pub(super) stage: String,
+    pub(super) path: PathBuf,
 }
 
 #[cfg(windows)]
-fn fixture_world_dump_override() -> Option<PathBuf> {
+pub(super) fn fixture_world_dump_override() -> Option<PathBuf> {
     FIXTURE_WORLD_DUMP_OVERRIDE.with(|value| value.borrow().clone())
 }
 
 #[cfg(windows)]
-fn fixture_render_settings_override() -> Option<String> {
+pub(super) fn fixture_render_settings_override() -> Option<String> {
     FIXTURE_RENDER_SETTINGS_OVERRIDE.with(|value| value.borrow().clone())
 }
 
 #[cfg(windows)]
-fn fixture_case_identity_override() -> Option<FixtureCaseIdentity> {
+pub(super) fn fixture_case_identity_override() -> Option<FixtureCaseIdentity> {
     FIXTURE_CASE_IDENTITY_OVERRIDE.with(|value| value.borrow().clone())
 }
 
 #[cfg(windows)]
-fn fixture_world_layout_override() -> Option<crate::render_session::DiagnosticWorldLayout> {
+pub(super) fn fixture_world_layout_override() -> Option<crate::render_session::DiagnosticWorldLayout>
+{
     FIXTURE_WORLD_LAYOUT_OVERRIDE.with(|value| *value.borrow())
 }
 
 #[cfg(windows)]
-fn fixture_secondary_layouts_override() -> Option<Vec<crate::render_session::SessionLayerLayout>> {
+pub(super) fn fixture_secondary_layouts_override()
+-> Option<Vec<crate::render_session::SessionLayerLayout>> {
     FIXTURE_SECONDARY_LAYOUTS_OVERRIDE.with(|value| value.borrow().clone())
 }
 
 #[cfg(windows)]
-fn fixture_capture_override() -> Option<Vec<FixtureCapture>> {
+pub(super) fn fixture_capture_override() -> Option<Vec<FixtureCapture>> {
     FIXTURE_CAPTURE_OVERRIDE.with(|value| value.borrow().clone())
 }
 
