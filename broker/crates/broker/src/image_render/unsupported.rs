@@ -1,3 +1,10 @@
+use super::types_and_transport::RenderTiming;
+use super::{InteractiveParameter, RenderPixelFormat};
+use crate::secure_image_dispatch::ApprovedImageArtifact;
+use serde_json::Value;
+use std::io;
+use std::path::Path;
+
 // macOS などネイティブ worker が無い OS 向けの代わり。GUI から呼ばれる関数と同じ形で、
 // 呼ぶと Unsupported を返す。Mac での実処理は harness 側の guest バックエンドが受け持つ。
 

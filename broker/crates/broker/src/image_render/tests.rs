@@ -1,1854 +1,1637 @@
-#[cfg(all(test, windows))]
-mod tests {
-    use super::*;
+#[cfg(windows)]
+use super::diagnostics::isolated_worker_diagnostics;
+use super::diagnostics::{
+    FRAME_DEADLINE_ENV, INTERACTIVE_RENDER_TIMEOUT_MS, MAX_ACTIVE_STAGES,
+    MAX_CALLBACK_ADDR_DENIALS, MAX_CALLBACK_DENIALS, MAX_COMPUTE_CACHE_TIMELINE_RECORDS,
+    MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS, MAX_MISSING_SUITES, MAX_STAGE_EVENTS, MAX_SUITE_NAME_LEN,
+    MAX_SUITE_TIMELINE_EVENTS, MAX_SUITE_VERSION, MAX_UNSUPPORTED_SUITE_CALLS,
+    PF_OUTFLAG2_SUPPORTS_SMART_RENDER, apply_conformance_premultiplication,
+    cleanup_stale_image_transport_before, decode_bounded_image, load_failure_marker,
+    minidump_marker, module_audit_failure_summary, module_audit_summary, parse_frame_deadline_ms,
+    propagate_bee_facade, propagate_compute_cache_timeline, propagate_extended_allocation_timeline,
+    propagate_extended_lookup_timeline, propagate_host_callback_timeline, propagate_missing_suites,
+    propagate_selector_invocations, propagate_suite_call_slot_probe, propagate_suite_timeline,
+    propagate_unsupported_suite_calls, safe_application_id_entry, safe_spec_version_entry,
+    search_root, smart_render_advertised, unhandled_exception_marker, worker_diagnostics,
+};
+#[cfg(windows)]
+use super::inspection_and_probes::initialize_experimental_aegp_in_place;
+use super::inspection_and_probes::{
+    encode_default_interactive_payload, encode_interactive_payload, inspection_result_from_report,
+    probe_experimental_custom_ui_idle, valid_dynamic_suite_report,
+};
+use super::render_operations::cleanup_contained_report_is_valid;
+#[cfg(windows)]
+use super::render_operations::{
+    finish_discovery_inspection, inspect_experimental, inspect_experimental_in_place,
+    inspect_experimental_via_discovery_in_place,
+    render_experimental_image_at_time_with_format_context_and_ui_action,
+    render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend,
+};
+use super::session::{
+    InteractiveGateFacts, InteractiveImageReportFacts, in_place_session_search_dirs,
+    validate_interactive_worker_report,
+};
+#[cfg(windows)]
+use super::session::{
+    build_interactive_image_report, close_failure_diagnostic, validated_wrapper_final_report,
+};
+use super::types_and_transport::{
+    AUX_CHANNEL_DEPTH, RenderGpuBackend, RenderTiming, RenderUiAction, TimedLayerImage,
+    prepare_aux_transport, resolve_managed_dump_dir, resolve_world_dump_dir, runtime_backend,
+    strip_extended_prefix, validate_timed_layer_identities,
+};
+use super::{AnimationTime, InteractiveParameter, RenderPixelFormat};
+use crate::decoded_image::{native_rgba_to_preview, rgba16_transport_to_png16};
+use crate::runtime_module_policy::RuntimeBackend;
+use crate::secure_image_dispatch::ApprovedImageArtifact;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn reclaimed_world_warning_survives_image_result_projection() {
-        let worker = json!({"world_lifetimes_balanced":true,
-            "plugin_world_leak_warning":true,"plugin_leaked_worlds_reclaimed":4,
-            "plugin_leaked_world_bytes_reclaimed":8192});
-        let result = build_interactive_image_report(&worker, audio_report_facts(None));
-        assert_eq!(result["plugin_world_leak_warning"], true);
-        assert_eq!(result["plugin_leaked_worlds_reclaimed"], 4);
-        assert_eq!(result["plugin_leaked_world_bytes_reclaimed"], 8192);
-        assert_eq!(result["world_lifetimes_balanced"], true);
-    }
+#[test]
+#[cfg(windows)]
+fn reclaimed_world_warning_survives_image_result_projection() {
+    let worker = json!({"world_lifetimes_balanced":true,
+        "plugin_world_leak_warning":true,"plugin_leaked_worlds_reclaimed":4,
+        "plugin_leaked_world_bytes_reclaimed":8192});
+    let result = build_interactive_image_report(&worker, audio_report_facts(None));
+    assert_eq!(result["plugin_world_leak_warning"], true);
+    assert_eq!(result["plugin_leaked_worlds_reclaimed"], 4);
+    assert_eq!(result["plugin_leaked_world_bytes_reclaimed"], 8192);
+    assert_eq!(result["world_lifetimes_balanced"], true);
+}
 
-    #[test]
-    fn frame_deadline_override_accepts_the_range_and_rejects_everything_else() {
-        use std::ffi::OsStr;
+#[test]
+#[cfg(windows)]
+fn frame_deadline_override_accepts_the_range_and_rejects_everything_else() {
+    use std::ffi::OsStr;
+    assert_eq!(
+        parse_frame_deadline_ms(None).unwrap(),
+        INTERACTIVE_RENDER_TIMEOUT_MS
+    );
+    for (text, expected) in [
+        ("1000", 1_000),
+        ("120000", 120_000),
+        ("600000", 600_000),
+        // `u64::from_str` accepts a leading plus sign.
+        ("+5000", 5_000),
+    ] {
         assert_eq!(
-            parse_frame_deadline_ms(None).unwrap(),
-            INTERACTIVE_RENDER_TIMEOUT_MS
+            parse_frame_deadline_ms(Some(OsStr::new(text))).unwrap(),
+            expected,
+            "{text}"
         );
-        for (text, expected) in [
-            ("1000", 1_000),
-            ("120000", 120_000),
-            ("600000", 600_000),
-            // `u64::from_str` accepts a leading plus sign.
-            ("+5000", 5_000),
-        ] {
-            assert_eq!(
-                parse_frame_deadline_ms(Some(OsStr::new(text))).unwrap(),
-                expected,
-                "{text}"
-            );
+    }
+    for text in [
+        "", "999", "600001", "0", "-5000", "1.5", "60s", " 5000", "abc",
+    ] {
+        let error = parse_frame_deadline_ms(Some(OsStr::new(text))).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{text:?}");
+        assert!(error.to_string().contains(FRAME_DEADLINE_ENV), "{text:?}");
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn default_inspection_search_roots_include_the_owning_ae_support_files() {
+    let root = std::env::temp_dir().join(format!(
+        "aexcompat-inspection-support-roots-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let support = root
+        .join("Adobe")
+        .join("Adobe After Effects 2025")
+        .join("Support Files");
+    let plugin_dir = support.join("Plug-ins").join("Effect");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(support.join("libmmd.dll"), b"runtime").unwrap();
+    let plugin = plugin_dir.join("Effect.aex");
+    std::fs::write(&plugin, b"fixture").unwrap();
+
+    let roots = search_root(&plugin).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(roots, vec![plugin_dir, support]);
+}
+
+#[test]
+#[cfg(windows)]
+fn session_search_roots_use_ae_defaults_only_without_explicit_roots() {
+    let root = std::env::temp_dir().join(format!(
+        "aexcompat-session-support-roots-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let support = root
+        .join("Adobe")
+        .join("Adobe After Effects 2025")
+        .join("Support Files");
+    let plugin_dir = support.join("Plug-ins").join("Effect");
+    let explicit = root.join("caller-runtime");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::create_dir_all(&explicit).unwrap();
+    let plugin = plugin_dir.join("Effect.aex");
+    std::fs::write(&plugin, b"fixture").unwrap();
+    let dependency = ApprovedImageArtifact {
+        path: support.join("libmmd.dll"),
+        expected_sha256: [0; 32],
+        expected_size: 0,
+    };
+
+    let defaults = in_place_session_search_dirs(&plugin, &[dependency], &[]).unwrap();
+    let caller_roots = in_place_session_search_dirs(&plugin, &[], &[explicit.clone()]).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(defaults, vec![plugin_dir.clone(), support]);
+    assert_eq!(caller_roots, vec![plugin_dir, explicit]);
+}
+
+/// Minimal facts for the public-report flattening; only the audio field
+/// varies across the audio projection tests below.
+#[cfg(windows)]
+fn audio_report_facts(audio_input_sha256: Option<&str>) -> InteractiveImageReportFacts {
+    InteractiveImageReportFacts {
+        plugin_id: "probe".into(),
+        smart: false,
+        pixel_format: RenderPixelFormat::Argb8,
+        rendered_width: 4,
+        rendered_height: 4,
+        input_width: 4,
+        input_height: 4,
+        output_png: PathBuf::from("out.png"),
+        timing: RenderTiming::default(),
+        worker_classification: "ok".into(),
+        diagnostics: json!({}),
+        gpu_fallback_used: false,
+        gpu_fallback_reason: None,
+        gpu_attempt: None,
+        secondary_layers: json!([]),
+        empty_smart_result: false,
+        output_raw: None,
+        deep_png_output: false,
+        deep_overrange_samples: None,
+        world_dump_display: None,
+        minidump_display: None,
+        output_checksum_detail: false,
+        output_origin_ok: true,
+        parameter_count_ok: true,
+        spatial_ok: true,
+        audio_input_sha256: audio_input_sha256.map(str::to_owned),
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn native_nonfinite_output_diagnostic_survives_public_report_projection() {
+    for finite in [false, true] {
+        let worker = json!({"output_pixels_valid": true, "output_samples_finite": finite});
+        let mut facts = audio_report_facts(None);
+        facts.smart = true;
+        facts.pixel_format = RenderPixelFormat::Argb32f;
+        let report = build_interactive_image_report(&worker, facts);
+        assert_eq!(report["output_pixels_valid"], true);
+        assert_eq!(report["output_samples_finite"], finite);
+    }
+    // Old or unexecuted workers must not get a fabricated finite verdict.
+    let report = build_interactive_image_report(&json!({}), audio_report_facts(None));
+    assert_eq!(report["output_samples_finite"], Value::Null);
+}
+
+#[test]
+#[cfg(windows)]
+fn close_failure_diagnostic_names_a_bounded_invariant_without_worker_strings() {
+    let close = json!({
+        "invalidated": false,
+        "worker": {"classification": "ok", "detail": "C:\\\\secret\\\\plugin.aex"},
+        "final_report": {
+            "suite_acquires": 8,
+            "suite_releases": 7,
+            "live_suite_lease_count": 1,
+            "live_suite_leases": "C:\\\\secret\\\\plugin.aex"
         }
-        for text in [
-            "", "999", "600001", "0", "-5000", "1.5", "60s", " 5000", "abc",
-        ] {
-            let error = parse_frame_deadline_ms(Some(OsStr::new(text))).unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{text:?}");
-            assert!(error.to_string().contains(FRAME_DEADLINE_ENV), "{text:?}");
-        }
-    }
+    });
+    let diagnostic = close_failure_diagnostic(
+        &close,
+        crate::render_session::CloseReportInvariant::SuiteFaultObserved,
+    );
+    assert_eq!(
+        diagnostic,
+        "render session close rejected invariant=suite_fault_observed invalidated=false worker_ok=true suite_acquires=8 suite_releases=7 live_suite_lease_count=1 live_suite_reference_count=unknown"
+    );
+    assert!(!diagnostic.contains("secret"));
+}
 
-    #[test]
-    fn default_inspection_search_roots_include_the_owning_ae_support_files() {
-        let root = std::env::temp_dir().join(format!(
-            "aexcompat-inspection-support-roots-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let support = root
-            .join("Adobe")
-            .join("Adobe After Effects 2025")
-            .join("Support Files");
-        let plugin_dir = support.join("Plug-ins").join("Effect");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(support.join("libmmd.dll"), b"runtime").unwrap();
-        let plugin = plugin_dir.join("Effect.aex");
-        std::fs::write(&plugin, b"fixture").unwrap();
-
-        let roots = search_root(&plugin).unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-        assert_eq!(roots, vec![plugin_dir, support]);
-    }
-
-    #[test]
-    fn session_search_roots_use_ae_defaults_only_without_explicit_roots() {
-        let root = std::env::temp_dir().join(format!(
-            "aexcompat-session-support-roots-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let support = root
-            .join("Adobe")
-            .join("Adobe After Effects 2025")
-            .join("Support Files");
-        let plugin_dir = support.join("Plug-ins").join("Effect");
-        let explicit = root.join("caller-runtime");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::create_dir_all(&explicit).unwrap();
-        let plugin = plugin_dir.join("Effect.aex");
-        std::fs::write(&plugin, b"fixture").unwrap();
-        let dependency = ApprovedImageArtifact {
-            path: support.join("libmmd.dll"),
-            expected_sha256: [0; 32],
-            expected_size: 0,
-        };
-
-        let defaults = in_place_session_search_dirs(&plugin, &[dependency], &[]).unwrap();
-        let caller_roots = in_place_session_search_dirs(&plugin, &[], &[explicit.clone()]).unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-        assert_eq!(defaults, vec![plugin_dir.clone(), support]);
-        assert_eq!(caller_roots, vec![plugin_dir, explicit]);
-    }
-
-    /// Minimal facts for the public-report flattening; only the audio field
-    /// varies across the audio projection tests below.
-    fn audio_report_facts(audio_input_sha256: Option<&str>) -> InteractiveImageReportFacts {
-        InteractiveImageReportFacts {
-            plugin_id: "probe".into(),
-            smart: false,
-            pixel_format: RenderPixelFormat::Argb8,
-            rendered_width: 4,
-            rendered_height: 4,
-            input_width: 4,
-            input_height: 4,
-            output_png: PathBuf::from("out.png"),
-            timing: RenderTiming::default(),
-            worker_classification: "ok".into(),
-            diagnostics: json!({}),
-            gpu_fallback_used: false,
-            gpu_fallback_reason: None,
-            gpu_attempt: None,
-            secondary_layers: json!([]),
-            empty_smart_result: false,
-            output_raw: None,
-            deep_png_output: false,
-            deep_overrange_samples: None,
-            world_dump_display: None,
-            minidump_display: None,
-            output_checksum_detail: false,
-            output_origin_ok: true,
-            parameter_count_ok: true,
-            spatial_ok: true,
-            audio_input_sha256: audio_input_sha256.map(str::to_owned),
-        }
-    }
-
-    #[test]
-    fn native_nonfinite_output_diagnostic_survives_public_report_projection() {
-        for finite in [false, true] {
-            let worker = json!({"output_pixels_valid": true, "output_samples_finite": finite});
-            let mut facts = audio_report_facts(None);
-            facts.smart = true;
-            facts.pixel_format = RenderPixelFormat::Argb32f;
-            let report = build_interactive_image_report(&worker, facts);
-            assert_eq!(report["output_pixels_valid"], true);
-            assert_eq!(report["output_samples_finite"], finite);
-        }
-        // Old or unexecuted workers must not get a fabricated finite verdict.
-        let report = build_interactive_image_report(&json!({}), audio_report_facts(None));
-        assert_eq!(report["output_samples_finite"], Value::Null);
-    }
-
-    #[test]
-    fn close_failure_diagnostic_names_a_bounded_invariant_without_worker_strings() {
-        let close = json!({
-            "invalidated": false,
-            "worker": {"classification": "ok", "detail": "C:\\\\secret\\\\plugin.aex"},
-            "final_report": {
-                "suite_acquires": 8,
-                "suite_releases": 7,
-                "live_suite_lease_count": 1,
-                "live_suite_leases": "C:\\\\secret\\\\plugin.aex"
-            }
-        });
-        let diagnostic = close_failure_diagnostic(
-            &close,
-            crate::render_session::CloseReportInvariant::SuiteFaultObserved,
-        );
-        assert_eq!(
-            diagnostic,
-            "render session close rejected invariant=suite_fault_observed invalidated=false worker_ok=true suite_acquires=8 suite_releases=7 live_suite_lease_count=1 live_suite_reference_count=unknown"
-        );
-        assert!(!diagnostic.contains("secret"));
-    }
-
-    #[test]
-    fn rejected_close_does_not_supply_stale_state_to_the_next_wrapper_report() {
-        let rejected = json!({
-            "invalidated": false,
-            "worker": {"classification": "ok"},
-            "final_report": {
-                "status": "render_completed",
-                "render_error": 0,
-                "global_setdown_error": 0,
-                "persistent_sequence_setup_error": 0,
-                "persistent_sequence_setdown_error": 0,
-                "guard_bytes_intact": true,
-                "suite_leases_balanced": false,
-                "suite_lease_warning": true,
-                "suite_fault_observed": false,
-                "suite_acquires": 8,
-                "suite_releases": 7,
-                "live_suite_lease_count": 1,
-                "live_suite_reference_count": 1,
-                "live_suite_leases": "C:\\\\secret\\\\plugin.aex",
-                "handle_lifetimes_balanced": true,
-                "world_lifetimes_balanced": true,
-                "param_checkouts_balanced": true,
-            }
-        });
-        assert_eq!(
-            validated_wrapper_final_report(&rejected, false),
-            Err(crate::render_session::CloseReportInvariant::SuiteLeaseList)
-        );
-        let diagnostic = close_failure_diagnostic(
-            &rejected,
-            crate::render_session::CloseReportInvariant::SuiteLeaseList,
-        );
-        assert!(!diagnostic.contains("secret"));
-
-        let next_clean = json!({
-            "invalidated": false,
-            "worker": {"classification": "ok"},
-            "final_report": {
-                "status": "render_completed",
-                "render_error": 0,
-                "global_setdown_error": 0,
-                "persistent_sequence_setup_error": 0,
-                "persistent_sequence_setdown_error": 0,
-                "guard_bytes_intact": true,
-                "suite_leases_balanced": true,
-                "suite_lease_warning": false,
-                "suite_fault_observed": false,
-                "suite_acquires": 2,
-                "suite_releases": 2,
-                "live_suite_lease_count": 0,
-                "live_suite_leases": "",
-                "handle_lifetimes_balanced": true,
-                "world_lifetimes_balanced": true,
-                "param_checkouts_balanced": true,
-            }
-        });
-        let report = validated_wrapper_final_report(&next_clean, false)
-            .expect("a new clean close must not inherit the rejected close");
-        assert_eq!(report["live_suite_leases"], json!(""));
-        assert_eq!(report["suite_lease_warning"], json!(false));
-    }
-
-    #[test]
-    fn suite_call_slot_probe_keeps_shape_but_drops_raw_process_values() {
-        let raw_sentinel = "0xfeedfacecafebeef";
-        let worker_report = json!({
-            "suite_call_slot_probe": {
-                "enabled": true,
-                "slot_count": 32,
-                "maximum_targets": 8,
-                "targets": [{
-                    "name": "PF AE Private Effect Suite",
-                    "version": 3,
-                    "enabled": true,
-                    "calls": [{
-                        "slot": 7,
-                        "call_count": 1,
-                        "exception_code": 3762452487u64,
-                        "argument_word_count": 8,
-                        "nonzero_word_count": 4,
-                        "registers": {
-                            "rcx": "nonzero",
-                            "rdx": "zero",
-                            "r8": "nonzero",
-                            "r9": "zero"
-                        },
-                        "stack": ["nonzero", "zero", "nonzero", "zero"],
-                        "caller_rva": "0x0000000000001234",
-                        "raw_sentinel": raw_sentinel
-                    }, {
-                        "slot": 8,
-                        "call_count": 1,
-                        "exception_code": 3762452488u64,
-                        "argument_word_count": 8,
-                        "nonzero_word_count": 8,
-                        "registers": {
-                            "rcx": raw_sentinel,
-                            "rdx": raw_sentinel,
-                            "r8": raw_sentinel,
-                            "r9": raw_sentinel
-                        },
-                        "stack": [raw_sentinel, raw_sentinel, raw_sentinel, raw_sentinel],
-                        "caller_rva": "0x0000000000001234"
-                    }],
-                    "truncated": false
-                }],
-                "configuration_truncated": false
-            }
-        });
-        let mut diagnostics = json!({});
-        propagate_suite_call_slot_probe(&mut diagnostics, &worker_report);
-        let serialized = serde_json::to_string(&diagnostics).unwrap();
-        assert!(!serialized.contains(raw_sentinel));
-        assert_eq!(
-            diagnostics["suite_call_slot_probe"]["targets"][0]["calls"][0]["registers"]["rcx"],
-            "nonzero"
-        );
-        assert_eq!(
-            diagnostics["suite_call_slot_probe"]["targets"][0]["calls"][0]["nonzero_word_count"],
-            4
-        );
-        assert_eq!(
-            diagnostics["suite_call_slot_probe"]["targets"][0]["calls"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            diagnostics["suite_call_slot_probe"]["targets"][0]["truncated"],
-            true
-        );
-    }
-
-    #[test]
-    fn redundant_param_checkins_are_retained_in_image_reports() {
-        let report = build_interactive_image_report(
-            &json!({"param_checkouts_balanced": true, "redundant_param_checkins": 3}),
-            audio_report_facts(None),
-        );
-        assert_eq!(report["redundant_param_checkins"], 3);
-        assert_eq!(report["param_checkouts_balanced"], true);
-    }
-
-    /// The session route synthesizes the public report from its own final
-    /// report, so the audio telemetry must be projected from the same facts the
-    /// one-shot uses. Before issue #339 the session passed `None` here and the
-    /// whole audio block silently vanished from an audio render's report.
-    #[test]
-    fn audio_telemetry_is_projected_exactly_when_a_sidecar_was_supplied() {
-        let worker_report = json!({
-            "audio_usage_advertised": true,
-            "audio_checkout_allowed": true,
-            "audio_checkout_calls": 1,
-            "audio_checkin_calls": 1,
-            "automatic_audio_checkins": 0,
-            "audio_get_data_calls": 1,
-            "unadvertised_audio_checkout_calls": 0,
-            "last_audio_checkout_index": 2,
-            "invalid_audio_operations": 0,
-            "audio_lifetimes_balanced": true,
-            "last_audio_window_sample_count": 6,
-        });
-        let with_audio =
-            build_interactive_image_report(&worker_report, audio_report_facts(Some("abc123")));
-        assert_eq!(
-            with_audio.get("audio_sidecar_transport"),
-            Some(&json!("mono_f32le_44100"))
-        );
-        assert_eq!(
-            with_audio.get("audio_sidecar_input_sha256"),
-            Some(&json!("abc123"))
-        );
-        for field in [
-            "audio_usage_advertised",
-            "audio_checkout_allowed",
-            "audio_checkout_calls",
-            "automatic_audio_checkins",
-            "unadvertised_audio_checkout_calls",
-            "last_audio_checkout_index",
-            "audio_lifetimes_balanced",
-            "last_audio_window_sample_count",
-        ] {
-            assert_eq!(
-                with_audio.get(field),
-                worker_report.get(field),
-                "{field} must reach the public report"
-            );
-        }
-
-        // A render without a sidecar must not grow audio keys, so the absence
-        // of the block stays a reliable signal that no audio was carried.
-        let without_audio =
-            build_interactive_image_report(&worker_report, audio_report_facts(None));
-        assert!(
-            without_audio
-                .as_object()
-                .unwrap()
-                .keys()
-                .all(|key| !key.contains("audio")),
-            "a render with no sidecar reported audio keys: {without_audio}"
-        );
-    }
-
-    /// The audio gate rejects a plug-in that never advertised audio usage. The
-    /// session route hardcoded `audio_present: false` before issue #339, which
-    /// let exactly this report pass the session while the one-shot rejected it.
-    #[test]
-    fn the_audio_gate_rejects_an_unadvertised_plugin_when_a_sidecar_is_present() {
-        let unadvertised = json!({
-            "guard_bytes_intact": true,
+#[test]
+#[cfg(windows)]
+fn rejected_close_does_not_supply_stale_state_to_the_next_wrapper_report() {
+    let rejected = json!({
+        "invalidated": false,
+        "worker": {"classification": "ok"},
+        "final_report": {
+            "status": "render_completed",
             "render_error": 0,
-            "gpu_memory_lifetimes_balanced": true,
-            "pf_path_lifetimes_balanced": true,
-            "pixel_format": "argb8",
-            "audio_usage_advertised": false,
-            "audio_checkout_allowed": false,
-            "audio_source_available": true,
-            "audio_lifetimes_balanced": true,
-            "invalid_audio_operations": 0,
-        });
-        let unit = crate::render_request::RationalScale {
-            numerator: 1,
-            denominator: 1,
-        };
-        let facts = |audio_present| InteractiveGateFacts {
-            smart: false,
-            pixel_format: RenderPixelFormat::Argb8,
-            spatial: crate::render_request::SpatialContext {
-                downsample_x: unit,
-                downsample_y: unit,
-                pixel_aspect_ratio: unit,
-                full_resolution_width: None,
-                full_resolution_height: None,
-                pre_effect_source_origin_x: None,
-                pre_effect_source_origin_y: None,
-            },
-            expected_quality: 1,
-            expected_field: 0,
-            expected_shutter_angle: 0,
-            expected_shutter_phase: 0,
-            custom_ui_action: None,
-            audio_present,
-            interactive_parameters: None,
-            classification: "ok",
-            time_step: 1,
-            input_width: 4,
-            input_height: 4,
-        };
-        assert!(
-            validate_interactive_worker_report(&unadvertised, &json!({}), &facts(true)).is_err(),
-            "an unadvertised plug-in must not pass the gate once a sidecar is present"
-        );
-        assert!(
-            validate_interactive_worker_report(&unadvertised, &json!({}), &facts(false)).is_ok(),
-            "the same report is fine when the render carried no audio"
-        );
-    }
-
-    #[test]
-    fn smart_render_advertised_follows_out_flags2_bit_10() {
-        assert!(!smart_render_advertised(0));
-        assert!(smart_render_advertised(PF_OUTFLAG2_SUPPORTS_SMART_RENDER));
-        // ntsc-rs (SmartFX-only) and the ONMK MaskOffset fixture advertise the
-        // bit inside larger flag words (issue #105).
-        assert!(smart_render_advertised(142_611_592));
-        assert!(smart_render_advertised(525_312));
-        // Every other flag set without bit 10 stays Classic.
-        assert!(!smart_render_advertised(
-            u64::MAX & !PF_OUTFLAG2_SUPPORTS_SMART_RENDER
-        ));
-    }
-
-    #[test]
-    fn conformance_alpha_mode_transforms_rgba_transports_consistently() {
-        let source = [200, 100, 50, 128, 9, 8, 7, 0];
-        for mode in ["straight", "premultiplied", "opaque"] {
-            let mut primary = source;
-            let mut secondary = source;
-            let mut timed_secondary = source;
-            apply_conformance_premultiplication(&mut primary, mode);
-            apply_conformance_premultiplication(&mut secondary, mode);
-            apply_conformance_premultiplication(&mut timed_secondary, mode);
-            assert_eq!(secondary, primary);
-            assert_eq!(timed_secondary, primary);
+            "global_setdown_error": 0,
+            "persistent_sequence_setup_error": 0,
+            "persistent_sequence_setdown_error": 0,
+            "guard_bytes_intact": true,
+            "suite_leases_balanced": false,
+            "suite_lease_warning": true,
+            "suite_fault_observed": false,
+            "suite_acquires": 8,
+            "suite_releases": 7,
+            "live_suite_lease_count": 1,
+            "live_suite_reference_count": 1,
+            "live_suite_leases": "C:\\\\secret\\\\plugin.aex",
+            "handle_lifetimes_balanced": true,
+            "world_lifetimes_balanced": true,
+            "param_checkouts_balanced": true,
         }
+    });
+    assert_eq!(
+        validated_wrapper_final_report(&rejected, false),
+        Err(crate::render_session::CloseReportInvariant::SuiteLeaseList)
+    );
+    let diagnostic = close_failure_diagnostic(
+        &rejected,
+        crate::render_session::CloseReportInvariant::SuiteLeaseList,
+    );
+    assert!(!diagnostic.contains("secret"));
 
-        let mut premultiplied = source;
-        apply_conformance_premultiplication(&mut premultiplied, "premultiplied");
-        assert_eq!(premultiplied, [100, 50, 25, 128, 0, 0, 0, 0]);
-        let mut opaque = source;
-        apply_conformance_premultiplication(&mut opaque, "opaque");
-        assert_eq!(opaque, [200, 100, 50, 255, 9, 8, 7, 255]);
-    }
-
-    #[test]
-    fn bounded_decode_rejects_header_only_images() {
-        let path = std::env::temp_dir().join(format!(
-            "aexcompat-truncated-input-{}-{}.png",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]))
-            .save(&path)
-            .unwrap();
-        let complete = fs::read(&path).unwrap();
-        let header_only = (33..complete.len())
-            .find(|&length| {
-                fs::write(&path, &complete[..length]).unwrap();
-                matches!(image::image_dimensions(&path), Ok((1, 1)))
-                    && decode_bounded_image(&path, "input preflight").is_err()
-            })
-            .expect("fixture with readable dimensions and truncated pixels");
-        fs::write(&path, &complete[..header_only]).unwrap();
-
-        assert_eq!(image::image_dimensions(&path).unwrap(), (1, 1));
-        assert!(decode_bounded_image(&path, "input preflight").is_err());
-        fs::remove_file(path).unwrap();
-    }
-
-    fn timed_layer(slot: u32, value: i32, scale: u32) -> TimedLayerImage {
-        TimedLayerImage {
-            slot,
-            time: AnimationTime { value, scale },
-            image_path: PathBuf::from("unused.png"),
+    let next_clean = json!({
+        "invalidated": false,
+        "worker": {"classification": "ok"},
+        "final_report": {
+            "status": "render_completed",
+            "render_error": 0,
+            "global_setdown_error": 0,
+            "persistent_sequence_setup_error": 0,
+            "persistent_sequence_setdown_error": 0,
+            "guard_bytes_intact": true,
+            "suite_leases_balanced": true,
+            "suite_lease_warning": false,
+            "suite_fault_observed": false,
+            "suite_acquires": 2,
+            "suite_releases": 2,
+            "live_suite_lease_count": 0,
+            "live_suite_leases": "",
+            "handle_lifetimes_balanced": true,
+            "world_lifetimes_balanced": true,
+            "param_checkouts_balanced": true,
         }
-    }
+    });
+    let report = validated_wrapper_final_report(&next_clean, false)
+        .expect("a new clean close must not inherit the rejected close");
+    assert_eq!(report["live_suite_leases"], json!(""));
+    assert_eq!(report["suite_lease_warning"], json!(false));
+}
 
-    #[test]
-    fn timed_layer_identities_are_slot_bound_bounded_and_rationally_unique() {
-        let slots = HashSet::from([6]);
-        validate_timed_layer_identities(&[timed_layer(6, 1, 2), timed_layer(6, 3, 4)], &slots)
-            .unwrap();
-        assert!(
-            validate_timed_layer_identities(&[timed_layer(6, 1, 2), timed_layer(6, 2, 4)], &slots,)
-                .is_err()
-        );
-        assert!(validate_timed_layer_identities(&[timed_layer(7, 1, 2)], &slots).is_err());
-        assert!(validate_timed_layer_identities(&[timed_layer(6, 1, 0)], &slots).is_err());
-        assert!(validate_timed_layer_identities(&vec![timed_layer(6, 1, 2); 65], &slots).is_err());
-    }
-
-    #[test]
-    fn stale_transport_cleanup_removes_only_old_owned_regular_files() {
-        let root = std::env::temp_dir().join(format!(
-            "aexcompat-stale-transport-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let now = SystemTime::now();
-        let old_time = now - Duration::from_secs(120);
-        let old_names = [
-            "input-123.rgba",
-            "output-123.rgba",
-            "audio-123.f32",
-            "layer-123-0.rgba",
-            "layer-session-123-0.rgba",
-            "report-123.json",
-            "parameter-animation-123.json",
-            "aux-manifest-123.json",
-            "aux-123-0.f32le",
-        ];
-        for name in old_names {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(root.join(name))
-                .unwrap();
-            file.set_times(fs::FileTimes::new().set_modified(old_time))
-                .unwrap();
-        }
-        let new_file = root.join("input-456.rgba");
-        fs::write(&new_file, b"new").unwrap();
-        let unknown = root.join("input-123.rgba.bak");
-        fs::write(&unknown, b"unknown").unwrap();
-        let directory = root.join("output-789.rgba");
-        fs::create_dir(&directory).unwrap();
-
-        cleanup_stale_image_transport_before(&root, now, Duration::from_secs(60)).unwrap();
-
-        for name in old_names {
-            assert!(
-                !root.join(name).exists(),
-                "old owned file was retained: {name}"
-            );
-        }
-        assert!(new_file.exists());
-        assert!(unknown.exists());
-        assert!(directory.is_dir());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn stale_transport_cleanup_keeps_symlinks() {
-        let root = std::env::temp_dir().join(format!(
-            "aexcompat-stale-transport-link-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let target = root.join("unknown-target");
-        fs::write(&target, b"target").unwrap();
-        let link = root.join("input-999.rgba");
-        #[cfg(windows)]
-        let linked = std::os::windows::fs::symlink_file(&target, &link).is_ok();
-        #[cfg(unix)]
-        let linked = std::os::unix::fs::symlink(&target, &link).is_ok();
-        #[cfg(not(any(windows, unix)))]
-        let linked = false;
-
-        cleanup_stale_image_transport_before(
-            &root,
-            SystemTime::now() + Duration::from_secs(120),
-            Duration::from_secs(60),
-        )
-        .unwrap();
-
-        assert_eq!(fs::read(&target).unwrap(), b"target");
-        if linked {
-            assert!(
-                fs::symlink_metadata(&link)
-                    .unwrap()
-                    .file_type()
-                    .is_symlink()
-            );
-        }
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    fn aux_fixture(root: &Path, name: &str, values: &[f32]) -> crate::render_request::AuxChannel {
-        let path = root.join(name);
-        let bytes = values
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-        fs::write(&path, bytes).unwrap();
-        crate::render_request::AuxChannel {
-            param_index: 0,
-            channel: crate::render_request::AuxChannelDescriptor {
-                channel_type: AUX_CHANNEL_DEPTH,
-                name: "depth".into(),
-                data_type: crate::render_request::AuxDataType::F32le,
-                dimension: 1,
-                width: values.len() as u32,
-                height: 1,
-                row_bytes: None,
-                origin_x: 0,
-                origin_y: 0,
-                downsample_x: crate::render_request::RationalScale {
-                    numerator: 1,
-                    denominator: 1,
-                },
-                downsample_y: crate::render_request::RationalScale {
-                    numerator: 1,
-                    denominator: 1,
-                },
-                coordinate_space: "source_pixel".into(),
-                units: "unitless".into(),
-                samples: vec![crate::render_request::AuxChannelSample {
-                    time: 0,
-                    time_scale: 30,
-                    path,
-                    sampling: crate::render_request::AuxSampling::Exact,
-                    interpretation: crate::render_request::AuxInterpretation::Depth,
+#[test]
+#[cfg(windows)]
+fn suite_call_slot_probe_keeps_shape_but_drops_raw_process_values() {
+    let raw_sentinel = "0xfeedfacecafebeef";
+    let worker_report = json!({
+        "suite_call_slot_probe": {
+            "enabled": true,
+            "slot_count": 32,
+            "maximum_targets": 8,
+            "targets": [{
+                "name": "PF AE Private Effect Suite",
+                "version": 3,
+                "enabled": true,
+                "calls": [{
+                    "slot": 7,
+                    "call_count": 1,
+                    "exception_code": 3762452487u64,
+                    "argument_word_count": 8,
+                    "nonzero_word_count": 4,
+                    "registers": {
+                        "rcx": "nonzero",
+                        "rdx": "zero",
+                        "r8": "nonzero",
+                        "r9": "zero"
+                    },
+                    "stack": ["nonzero", "zero", "nonzero", "zero"],
+                    "caller_rva": "0x0000000000001234",
+                    "raw_sentinel": raw_sentinel
+                }, {
+                    "slot": 8,
+                    "call_count": 1,
+                    "exception_code": 3762452488u64,
+                    "argument_word_count": 8,
+                    "nonzero_word_count": 8,
+                    "registers": {
+                        "rcx": raw_sentinel,
+                        "rdx": raw_sentinel,
+                        "r8": raw_sentinel,
+                        "r9": raw_sentinel
+                    },
+                    "stack": [raw_sentinel, raw_sentinel, raw_sentinel, raw_sentinel],
+                    "caller_rva": "0x0000000000001234"
                 }],
-            },
+                "truncated": false
+            }],
+            "configuration_truncated": false
         }
-    }
-
-    #[test]
-    fn aux_manifest_owns_raw_data_and_cleans_everything() {
-        let repository = std::env::temp_dir().join(format!(
-            "aexcompat-aux-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let transport_root = repository.join("transport");
-        fs::create_dir_all(&transport_root).unwrap();
-        let channel = aux_fixture(&repository, "source.f32", &[1.0, 2.5]);
-        let transport = prepare_aux_transport(&repository, &[channel], &transport_root, 7)
+    });
+    let mut diagnostics = json!({});
+    propagate_suite_call_slot_probe(&mut diagnostics, &worker_report);
+    let serialized = serde_json::to_string(&diagnostics).unwrap();
+    assert!(!serialized.contains(raw_sentinel));
+    assert_eq!(
+        diagnostics["suite_call_slot_probe"]["targets"][0]["calls"][0]["registers"]["rcx"],
+        "nonzero"
+    );
+    assert_eq!(
+        diagnostics["suite_call_slot_probe"]["targets"][0]["calls"][0]["nonzero_word_count"],
+        4
+    );
+    assert_eq!(
+        diagnostics["suite_call_slot_probe"]["targets"][0]["calls"]
+            .as_array()
             .unwrap()
-            .unwrap();
-        let manifest: Value =
-            serde_json::from_slice(&fs::read(&transport.manifest_path).unwrap()).unwrap();
-        assert_eq!(manifest["schema"], "aux-manifest-v1");
-        assert_eq!(manifest["channels"][0]["data_type"], "f32le");
-        assert_eq!(manifest["channels"][0]["samples"][0]["time_scale"], 30);
+            .len(),
+        1
+    );
+    assert_eq!(
+        diagnostics["suite_call_slot_probe"]["targets"][0]["truncated"],
+        true
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn redundant_param_checkins_are_retained_in_image_reports() {
+    let report = build_interactive_image_report(
+        &json!({"param_checkouts_balanced": true, "redundant_param_checkins": 3}),
+        audio_report_facts(None),
+    );
+    assert_eq!(report["redundant_param_checkins"], 3);
+    assert_eq!(report["param_checkouts_balanced"], true);
+}
+
+/// The session route synthesizes the public report from its own final
+/// report, so the audio telemetry must be projected from the same facts the
+/// one-shot uses. Before issue #339 the session passed `None` here and the
+/// whole audio block silently vanished from an audio render's report.
+#[test]
+#[cfg(windows)]
+fn audio_telemetry_is_projected_exactly_when_a_sidecar_was_supplied() {
+    let worker_report = json!({
+        "audio_usage_advertised": true,
+        "audio_checkout_allowed": true,
+        "audio_checkout_calls": 1,
+        "audio_checkin_calls": 1,
+        "automatic_audio_checkins": 0,
+        "audio_get_data_calls": 1,
+        "unadvertised_audio_checkout_calls": 0,
+        "last_audio_checkout_index": 2,
+        "invalid_audio_operations": 0,
+        "audio_lifetimes_balanced": true,
+        "last_audio_window_sample_count": 6,
+    });
+    let with_audio =
+        build_interactive_image_report(&worker_report, audio_report_facts(Some("abc123")));
+    assert_eq!(
+        with_audio.get("audio_sidecar_transport"),
+        Some(&json!("mono_f32le_44100"))
+    );
+    assert_eq!(
+        with_audio.get("audio_sidecar_input_sha256"),
+        Some(&json!("abc123"))
+    );
+    for field in [
+        "audio_usage_advertised",
+        "audio_checkout_allowed",
+        "audio_checkout_calls",
+        "automatic_audio_checkins",
+        "unadvertised_audio_checkout_calls",
+        "last_audio_checkout_index",
+        "audio_lifetimes_balanced",
+        "last_audio_window_sample_count",
+    ] {
         assert_eq!(
-            manifest["channels"][0]["samples"][0]["expected_byte_length"],
-            8
+            with_audio.get(field),
+            worker_report.get(field),
+            "{field} must reach the public report"
         );
-        let raw = PathBuf::from(
-            manifest["channels"][0]["samples"][0]["path"]
-                .as_str()
-                .unwrap(),
-        );
-        let raw_bytes = fs::read(&raw).unwrap();
-        assert_eq!(raw_bytes.len(), 8);
-        assert_eq!(
-            manifest["channels"][0]["samples"][0]["sha256"],
-            format!("{:x}", Sha256::digest(&raw_bytes))
-        );
-        let manifest_path = transport.manifest_path.clone();
-        drop(transport);
-        assert!(!manifest_path.exists());
-        assert!(!raw.exists());
-        fs::remove_dir_all(repository).unwrap();
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn aux_sample_under_target_junction_is_owned_but_external_sample_is_not() {
-        let nonce = SystemTime::now()
+    // A render without a sidecar must not grow audio keys, so the absence
+    // of the block stays a reliable signal that no audio was carried.
+    let without_audio = build_interactive_image_report(&worker_report, audio_report_facts(None));
+    assert!(
+        without_audio
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| !key.contains("audio")),
+        "a render with no sidecar reported audio keys: {without_audio}"
+    );
+}
+
+/// The audio gate rejects a plug-in that never advertised audio usage. The
+/// session route hardcoded `audio_present: false` before issue #339, which
+/// let exactly this report pass the session while the one-shot rejected it.
+#[test]
+#[cfg(windows)]
+fn the_audio_gate_rejects_an_unadvertised_plugin_when_a_sidecar_is_present() {
+    let unadvertised = json!({
+        "guard_bytes_intact": true,
+        "render_error": 0,
+        "gpu_memory_lifetimes_balanced": true,
+        "pf_path_lifetimes_balanced": true,
+        "pixel_format": "argb8",
+        "audio_usage_advertised": false,
+        "audio_checkout_allowed": false,
+        "audio_source_available": true,
+        "audio_lifetimes_balanced": true,
+        "invalid_audio_operations": 0,
+    });
+    let unit = crate::render_request::RationalScale {
+        numerator: 1,
+        denominator: 1,
+    };
+    let facts = |audio_present| InteractiveGateFacts {
+        smart: false,
+        pixel_format: RenderPixelFormat::Argb8,
+        spatial: crate::render_request::SpatialContext {
+            downsample_x: unit,
+            downsample_y: unit,
+            pixel_aspect_ratio: unit,
+            full_resolution_width: None,
+            full_resolution_height: None,
+            pre_effect_source_origin_x: None,
+            pre_effect_source_origin_y: None,
+        },
+        expected_quality: 1,
+        expected_field: 0,
+        expected_shutter_angle: 0,
+        expected_shutter_phase: 0,
+        custom_ui_action: None,
+        audio_present,
+        interactive_parameters: None,
+        classification: "ok",
+        time_step: 1,
+        input_width: 4,
+        input_height: 4,
+    };
+    assert!(
+        validate_interactive_worker_report(&unadvertised, &json!({}), &facts(true)).is_err(),
+        "an unadvertised plug-in must not pass the gate once a sidecar is present"
+    );
+    assert!(
+        validate_interactive_worker_report(&unadvertised, &json!({}), &facts(false)).is_ok(),
+        "the same report is fine when the render carried no audio"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn smart_render_advertised_follows_out_flags2_bit_10() {
+    assert!(!smart_render_advertised(0));
+    assert!(smart_render_advertised(PF_OUTFLAG2_SUPPORTS_SMART_RENDER));
+    // ntsc-rs (SmartFX-only) and the ONMK MaskOffset fixture advertise the
+    // bit inside larger flag words (issue #105).
+    assert!(smart_render_advertised(142_611_592));
+    assert!(smart_render_advertised(525_312));
+    // Every other flag set without bit 10 stays Classic.
+    assert!(!smart_render_advertised(
+        u64::MAX & !PF_OUTFLAG2_SUPPORTS_SMART_RENDER
+    ));
+}
+
+#[test]
+#[cfg(windows)]
+fn conformance_alpha_mode_transforms_rgba_transports_consistently() {
+    let source = [200, 100, 50, 128, 9, 8, 7, 0];
+    for mode in ["straight", "premultiplied", "opaque"] {
+        let mut primary = source;
+        let mut secondary = source;
+        let mut timed_secondary = source;
+        apply_conformance_premultiplication(&mut primary, mode);
+        apply_conformance_premultiplication(&mut secondary, mode);
+        apply_conformance_premultiplication(&mut timed_secondary, mode);
+        assert_eq!(secondary, primary);
+        assert_eq!(timed_secondary, primary);
+    }
+
+    let mut premultiplied = source;
+    apply_conformance_premultiplication(&mut premultiplied, "premultiplied");
+    assert_eq!(premultiplied, [100, 50, 25, 128, 0, 0, 0, 0]);
+    let mut opaque = source;
+    apply_conformance_premultiplication(&mut opaque, "opaque");
+    assert_eq!(opaque, [200, 100, 50, 255, 9, 8, 7, 255]);
+}
+
+#[test]
+#[cfg(windows)]
+fn bounded_decode_rejects_header_only_images() {
+    let path = std::env::temp_dir().join(format!(
+        "aexcompat-truncated-input-{}-{}.png",
+        std::process::id(),
+        SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos();
-        let repository = std::env::temp_dir().join(format!("aexcompat-aux-junction-repo-{nonce}"));
-        let physical_target =
-            std::env::temp_dir().join(format!("aexcompat-aux-junction-target-{nonce}"));
-        let outside = std::env::temp_dir().join(format!("aexcompat-aux-junction-outside-{nonce}"));
-        fs::create_dir_all(&repository).unwrap();
-        fs::create_dir_all(&physical_target).unwrap();
-        fs::create_dir_all(&outside).unwrap();
-        let linked = std::process::Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(repository.join("target"))
-            .arg(&physical_target)
-            .output()
-            .unwrap();
-        assert!(
-            linked.status.success(),
-            "mklink /J failed: {}",
-            String::from_utf8_lossy(&linked.stderr)
-        );
+            .as_nanos()
+    ));
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]))
+        .save(&path)
+        .unwrap();
+    let complete = fs::read(&path).unwrap();
+    let header_only = (33..complete.len())
+        .find(|&length| {
+            fs::write(&path, &complete[..length]).unwrap();
+            matches!(image::image_dimensions(&path), Ok((1, 1)))
+                && decode_bounded_image(&path, "input preflight").is_err()
+        })
+        .expect("fixture with readable dimensions and truncated pixels");
+    fs::write(&path, &complete[..header_only]).unwrap();
 
-        let transport_root = repository.join("target/image-transport");
-        fs::create_dir_all(&transport_root).unwrap();
-        let mut channel = aux_fixture(&physical_target, "depth.f32", &[0.0, 0.5]);
-        channel.channel.samples[0].path = repository.join("target/depth.f32");
-        let transport =
-            prepare_aux_transport(&repository, &[channel.clone()], &transport_root, nonce)
-                .expect("target junction is an owned source root")
-                .expect("manifest produced");
-        assert!(transport.manifest_path.is_file());
-        drop(transport);
+    assert_eq!(image::image_dimensions(&path).unwrap(), (1, 1));
+    assert!(decode_bounded_image(&path, "input preflight").is_err());
+    fs::remove_file(path).unwrap();
+}
 
-        let mut external = aux_fixture(&outside, "outside.f32", &[0.0, 0.5]);
-        external.channel.samples[0].path = outside.join("outside.f32");
-        assert!(
-            prepare_aux_transport(&repository, &[external], &transport_root, nonce + 1).is_err()
-        );
-        let mut alias = channel.clone();
-        alias.channel.channel_type = i32::from_be_bytes(*b"GEN1");
-        alias.channel.name = "generic-alias".into();
-        alias.channel.samples[0].interpretation = crate::render_request::AuxInterpretation::Generic;
-        assert!(
-            prepare_aux_transport(&repository, &[channel, alias], &transport_root, nonce + 2)
-                .is_err()
-        );
-
-        fs::remove_dir(repository.join("target")).unwrap();
-        fs::remove_dir_all(repository).unwrap();
-        fs::remove_dir_all(physical_target).unwrap();
-        fs::remove_dir_all(outside).unwrap();
+#[cfg(windows)]
+fn timed_layer(slot: u32, value: i32, scale: u32) -> TimedLayerImage {
+    TimedLayerImage {
+        slot,
+        time: AnimationTime { value, scale },
+        image_path: PathBuf::from("unused.png"),
     }
+}
 
-    #[test]
-    fn prepare_aux_transport_output_satisfies_the_session_aux_manifest_contract() {
-        // #211: the length-1 session wrapper now carries aux channels through
-        // the same broker-built manifest the one-shot path uses, passing its
-        // path to SessionOpenRequest::aux_manifest. This guards the handoff:
-        // the manifest prepare_aux_transport produces must satisfy the session's
-        // `--aux-manifest-v1` precondition (render_session.rs requires an
-        // absolute, existing file) and the worker's top-level manifest gate
-        // (session_protocol_worker mirrors the real load_aux_manifest contract:
-        // exactly {schema, nonce, channels}, the v1 schema string, a digit
-        // nonce, and a non-empty channel list). A manifest that failed any of
-        // these would make the wrapper's session route dead-on-arrival while the
-        // one-shot route kept working, exactly the silent split #211 removes.
-        let repository = std::env::temp_dir().join(format!(
-            "aexcompat-aux-session-contract-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let transport_root = repository.join("transport");
-        fs::create_dir_all(&transport_root).unwrap();
-        let channel = aux_fixture(&repository, "depth.f32", &[0.0, 0.25, 1.0, 2.0]);
-        let transport = prepare_aux_transport(&repository, &[channel], &transport_root, 42)
-            .unwrap()
-            .expect("aux channels present, so a manifest is produced");
+#[test]
+#[cfg(windows)]
+fn timed_layer_identities_are_slot_bound_bounded_and_rationally_unique() {
+    let slots = HashSet::from([6]);
+    validate_timed_layer_identities(&[timed_layer(6, 1, 2), timed_layer(6, 3, 4)], &slots).unwrap();
+    assert!(
+        validate_timed_layer_identities(&[timed_layer(6, 1, 2), timed_layer(6, 2, 4)], &slots,)
+            .is_err()
+    );
+    assert!(validate_timed_layer_identities(&[timed_layer(7, 1, 2)], &slots).is_err());
+    assert!(validate_timed_layer_identities(&[timed_layer(6, 1, 0)], &slots).is_err());
+    assert!(validate_timed_layer_identities(&vec![timed_layer(6, 1, 2); 65], &slots).is_err());
+}
 
-        // The session gate rejects a non-absolute or missing manifest before it
-        // ever launches the worker (render_session.rs `aux_manifest` handling).
-        assert!(
-            transport.manifest_path.is_absolute(),
-            "session aux_manifest must be an absolute path"
-        );
-        assert!(
-            transport.manifest_path.is_file(),
-            "session aux_manifest must point at an existing file"
-        );
-
-        // The worker's top-level manifest gate.
-        let document: Value =
-            serde_json::from_slice(&fs::read(&transport.manifest_path).unwrap()).unwrap();
-        let object = document.as_object().expect("manifest is a JSON object");
-        assert_eq!(
-            object.len(),
-            3,
-            "manifest carries exactly schema/nonce/channels"
-        );
-        assert_eq!(object["schema"], "aux-manifest-v1");
-        let nonce = object["nonce"].as_str().expect("nonce is a string");
-        assert!(
-            !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_digit()),
-            "nonce is a non-empty digit string"
-        );
-        let channels = object["channels"].as_array().expect("channels is an array");
-        assert!(
-            !channels.is_empty() && channels.iter().all(Value::is_object),
-            "channels is a non-empty list of objects"
-        );
-
-        drop(transport);
-        fs::remove_dir_all(repository).unwrap();
-    }
-
-    // Issue #231: canonicalize() returns verbatim Windows paths, but the worker
-    // transport wire format remains plain absolute paths. This guards the
-    // de-verbatim contract without needing the real worker.
-    #[cfg(windows)]
-    #[test]
-    fn aux_transport_de_verbatims_manifest_and_sidecar_paths() {
-        let repository = std::env::temp_dir().join(format!(
-            "aexcompat-aux-verbatim-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&repository).unwrap();
-        // canonicalize() yields the `\\?\C:\...` verbatim form that reproduced
-        // the bug; derive the transport root from it exactly as the render path
-        // does (repository.join("target/image-transport")).
-        let canonical_repository = repository.canonicalize().unwrap();
-        assert!(
-            canonical_repository
-                .as_os_str()
-                .to_string_lossy()
-                .starts_with(r"\\?\"),
-            "canonicalize() is expected to produce a verbatim root on Windows"
-        );
-        let transport_root = canonical_repository.join("transport");
-        fs::create_dir_all(&transport_root).unwrap();
-        let channel = aux_fixture(&canonical_repository, "depth.f32", &[0.0, 0.5, 1.0, 2.0]);
-        let transport =
-            prepare_aux_transport(&canonical_repository, &[channel], &transport_root, 231)
-                .unwrap()
-                .expect("aux channels present, so a manifest is produced");
-
-        assert!(
-            !transport
-                .manifest_path
-                .as_os_str()
-                .to_string_lossy()
-                .starts_with(r"\\?\"),
-            "manifest path handed to the worker must not carry the \\?\\ prefix"
-        );
-        let document: Value =
-            serde_json::from_slice(&fs::read(&transport.manifest_path).unwrap()).unwrap();
-        let sample_path = document["channels"][0]["samples"][0]["path"]
-            .as_str()
-            .expect("sample path is a string");
-        assert!(
-            !sample_path.starts_with(r"\\?\"),
-            "sidecar path written into the manifest must not carry the \\?\\ prefix, got {sample_path}"
-        );
-        // The de-verbatimed manifest path still resolves to the written file.
-        assert!(transport.manifest_path.is_file());
-        assert!(Path::new(sample_path).is_file());
-
-        drop(transport);
-        fs::remove_dir_all(repository).unwrap();
-    }
-
-    #[test]
-    fn aux_transport_rejects_nonfinite_duplicate_time_and_path_aliases() {
-        let repository = std::env::temp_dir().join(format!(
-            "aexcompat-aux-reject-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let transport_root = repository.join("transport");
-        fs::create_dir_all(&transport_root).unwrap();
-        let nonfinite = aux_fixture(&repository, "nan.f32", &[f32::NAN]);
-        assert!(prepare_aux_transport(&repository, &[nonfinite], &transport_root, 1).is_err());
-
-        let mut duplicate = aux_fixture(&repository, "valid.f32", &[1.0]);
-        duplicate
-            .channel
-            .samples
-            .push(duplicate.channel.samples[0].clone());
-        assert!(prepare_aux_transport(&repository, &[duplicate], &transport_root, 2).is_err());
-
-        let mut wrong_dimension = aux_fixture(&repository, "wrong-dimension.f32", &[1.0]);
-        wrong_dimension.channel.dimension = 2;
-        assert!(
-            prepare_aux_transport(&repository, &[wrong_dimension], &transport_root, 4).is_err()
-        );
-
-        let first = aux_fixture(&repository, "alias.f32", &[1.0]);
-        let mut second = first.clone();
-        second.channel.name = "other".into();
-        assert!(prepare_aux_transport(&repository, &[first, second], &transport_root, 3).is_err());
-        assert!(fs::read_dir(&transport_root).unwrap().next().is_none());
-        fs::remove_dir_all(repository).unwrap();
-    }
-
-    fn crashkit_parameters(mode: f64) -> Vec<InteractiveParameter> {
-        [
-            (1, "Fault mode", mode, 1.0, 5.0),
-            (2, "Fault stage", 2.0, 1.0, 2.0),
-        ]
-        .into_iter()
-        .map(
-            |(slot, name, value, minimum, maximum)| InteractiveParameter {
-                slot,
-                name: name.into(),
-                kind: "integer".into(),
-                minimum,
-                maximum,
-                value,
-                choices: vec![],
-                use_declared_default: false,
-                color_float: None,
-                color: [0; 4],
-                components: [0.0; 3],
-                component_count: 0,
-                layer_path: None,
-                enabled: true,
-                visible: true,
-                supervised: false,
-                debug_summary: None,
-                custom_ui_events: 4,
-                control_size: [0, 0],
-            },
-        )
-        .collect()
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn crashkit_event_crash_and_hang_remain_inside_the_worker() {
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(3)
-            .unwrap();
-        let plugin = repository
-            .join("target/instruments-sdk-build/pf-crashkit")
-            .join(["pf_crashkit", "aex"].join("."));
-        if !plugin.exists() {
-            return;
-        }
-        let hash = format!("{:X}", Sha256::digest(fs::read(&plugin).unwrap()));
-
-        let crash = probe_experimental_custom_ui_idle(
-            repository,
-            &plugin,
-            &hash,
-            &crashkit_parameters(2.0),
-        )
-        .unwrap_err();
-        assert!(crash.to_string().contains("failed safely"));
-
-        let started = Instant::now();
-        let hang = probe_experimental_custom_ui_idle(
-            repository,
-            &plugin,
-            &hash,
-            &crashkit_parameters(3.0),
-        )
-        .unwrap_err();
-        assert!(hang.to_string().contains("failed safely"));
-        assert!(started.elapsed() < Duration::from_secs(8));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn histogrid_draw_and_smartfx_render_share_one_isolated_worker() {
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(3)
-            .unwrap();
-        let plugin = repository
-            .join("target/sdk-fixtures/histogrid")
-            .join(["HistoGrid", "aex"].join("."));
-        if !plugin.exists()
-            || !repository
-                .join("target/minihost-build/aex_worker.exe")
-                .exists()
-        {
-            return;
-        }
-        let hash = format!("{:X}", Sha256::digest(fs::read(&plugin).unwrap()));
-        let nonce = SystemTime::now()
+#[test]
+#[cfg(windows)]
+fn stale_transport_cleanup_removes_only_old_owned_regular_files() {
+    let root = std::env::temp_dir().join(format!(
+        "aexcompat-stale-transport-{}",
+        SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos();
-        let input = repository.join(format!("target/histogrid-broker-input-{nonce}.png"));
-        let pixels = image::RgbaImage::from_fn(37, 23, |x, y| {
-            image::Rgba([x as u8 * 7, y as u8 * 11, ((x + y) % 23) as u8 * 11, 255])
-        });
-        pixels.save(&input).unwrap();
-        let formats = [
-            RenderPixelFormat::Argb8,
-            RenderPixelFormat::Argb16,
-            RenderPixelFormat::Argb32f,
-        ];
-        let outputs = formats
-            .iter()
-            .map(|format| {
-                repository.join(format!(
-                    "target/histogrid-broker-output-{}-{nonce}.png",
-                    format.report_name()
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        let result = (|| {
-            let parameters = inspect_experimental(repository, &plugin, &hash)?;
-            formats
-                .iter()
-                .zip(&outputs)
-                .map(|(format, output)| {
-                    if *format == RenderPixelFormat::Argb32f {
-                        render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
-                            repository,
-                            &plugin,
-                            &hash,
-                            &input,
-                            output,
-                            &parameters,
-                            RenderTiming::default(),
-                            true,
-                            *format,
-                            None,
-                            Some(RenderUiAction::Draw),
-                            RenderGpuBackend::Cpu,
-                        )
-                    } else {
-                        render_experimental_image_at_time_with_format_context_and_ui_action(
-                            repository,
-                            &plugin,
-                            &hash,
-                            &input,
-                            output,
-                            &parameters,
-                            RenderTiming::default(),
-                            true,
-                            *format,
-                            None,
-                            Some(RenderUiAction::Draw),
-                        )
-                    }
-                })
-                .collect::<io::Result<Vec<_>>>()
-        })();
-        let _ = fs::remove_file(&input);
-        let outputs_exist = outputs.iter().all(|output| output.exists());
-        for output in &outputs {
-            let _ = fs::remove_file(output);
-        }
-
-        let reports = result.unwrap();
-        assert!(outputs_exist);
-        let mut output_hashes = std::collections::HashSet::new();
-        for (report, format) in reports.iter().zip(formats) {
-            assert_eq!(report["pixel_format"], format.report_name());
-            assert_eq!(report["custom_ui_draw_dispatched"], true);
-            assert_eq!(report["custom_ui_draw_error"], 0);
-            assert_eq!(report["custom_ui_draw_out_flags"], 1);
-            assert_eq!(report["custom_ui_lifecycle_errors"], json!([0, 0, 0, 0]));
-            assert_eq!(report["custom_ui_context_closed"], true);
-            assert_eq!(report["passed"], true);
-            output_hashes.insert(report["output_sha256"].as_str().unwrap().to_owned());
-        }
-        assert_eq!(output_hashes.len(), 3);
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let now = SystemTime::now();
+    let old_time = now - Duration::from_secs(120);
+    let old_names = [
+        "input-123.rgba",
+        "output-123.rgba",
+        "audio-123.f32",
+        "layer-123-0.rgba",
+        "layer-session-123-0.rgba",
+        "report-123.json",
+        "parameter-animation-123.json",
+        "aux-manifest-123.json",
+        "aux-123-0.f32le",
+    ];
+    for name in old_names {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(root.join(name))
+            .unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
     }
+    let new_file = root.join("input-456.rgba");
+    fs::write(&new_file, b"new").unwrap();
+    let unknown = root.join("input-123.rgba.bak");
+    fs::write(&unknown, b"unknown").unwrap();
+    let directory = root.join("output-789.rgba");
+    fs::create_dir(&directory).unwrap();
 
-    #[test]
-    fn default_interactive_payload_is_slot_bound_and_distinct_from_explicit() {
-        let parameters = vec![InteractiveParameter {
-            slot: 2,
-            name: "Direction".into(),
-            kind: "integer".into(),
-            minimum: 1.0,
-            maximum: 3.0,
-            value: 2.0,
-            choices: vec!["Horizontal".into(), "Vertical".into(), "Both".into()],
-            use_declared_default: false,
-            color_float: None,
-            color: [255, 0, 0, 0],
-            components: [0.0; 3],
-            component_count: 0,
-            layer_path: None,
-            enabled: true,
-            visible: true,
-            supervised: false,
-            debug_summary: None,
-            custom_ui_events: 0,
-            control_size: [0, 0],
-        }];
-        assert_eq!(
-            encode_interactive_payload(&parameters).unwrap(),
-            "v2|param_2@2:i32=2"
-        );
-        let mut invalid = parameters;
-        invalid[0].value = 4.0;
-        assert!(encode_interactive_payload(&invalid).is_err());
-        assert_eq!(
-            encode_default_interactive_payload(&invalid).unwrap(),
-            "v7|param_2@2:i32=default"
-        );
-        let mut malformed = invalid;
-        malformed[0].minimum = 4.0;
-        malformed[0].maximum = 1.0;
-        assert!(encode_interactive_payload(&malformed).is_err());
-    }
+    cleanup_stale_image_transport_before(&root, now, Duration::from_secs(60)).unwrap();
 
-    #[test]
-    fn float_color_payload_preserves_words_and_legacy_bytes() {
-        let mut p: InteractiveParameter = serde_json::from_value(json!({
-            "slot":1,"name":"Color","kind":"color","minimum":0,"maximum":0,"value":0,
-            "choices":[],"color":[255,64,128,192],"components":[0,0,0],"component_count":0,
-            "layer_path":null,"enabled":true,"visible":true,"supervised":false
-        }))
-        .unwrap();
-        assert_eq!(
-            encode_interactive_payload(&[p.clone()]).unwrap(),
-            "v3|param_1@1:argb8=255,64,128,192"
-        );
-        p.color_float = Some([1.0, f32::from_bits(0x3e800001), -0.0, 2.0]);
-        assert_eq!(
-            encode_interactive_payload(&[p.clone()]).unwrap(),
-            "v6|param_1@1:argb8f=255,64,128,192/3f800000,3e800001,80000000,40000000"
-        );
-        p.color_float.as_mut().unwrap()[1] = f32::NAN;
-        assert!(encode_interactive_payload(&[p.clone()]).is_err());
-        p.color_float = Some([0.0; 4]);
-        p.slot = 0;
-        assert!(encode_interactive_payload(&[p]).is_err());
-    }
-
-    #[test]
-    fn declared_default_mode_ignores_caller_value_but_keeps_slot_and_kind() {
-        let mut p: InteractiveParameter = serde_json::from_value(json!({
-            "slot":5,"name":"Gain","kind":"float","minimum":1,"maximum":100,"value":0.1,
-            "choices":[],"color":[255,0,0,0],"components":[0,0,0],"component_count":0,
-            "layer_path":null,"enabled":true,"visible":true,"supervised":false
-        }))
-        .unwrap();
-        assert!(!p.use_declared_default);
-        assert!(encode_interactive_payload(&[p.clone()]).is_err());
-        p.use_declared_default = true;
-        let wire = "v7|param_5@5:f64=default";
-        assert_eq!(encode_interactive_payload(&[p.clone()]).unwrap(), wire);
-        p.value = 99.0;
-        assert_eq!(encode_interactive_payload(&[p.clone()]).unwrap(), wire);
-        let roundtrip: InteractiveParameter =
-            serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
-        assert!(roundtrip.use_declared_default);
-        p.slot = 0;
-        assert!(encode_interactive_payload(&[p.clone()]).is_err());
-        p.slot = 5;
-        p.kind = "color".into();
-        assert!(encode_interactive_payload(&[p.clone()]).is_err());
-        p.kind = "float".into();
-        p.use_declared_default = false;
-        p.value = 1.0;
-        assert_eq!(
-            encode_interactive_payload(&[p]).unwrap(),
-            "v2|param_5@5:f64=1"
-        );
-    }
-
-    #[test]
-    fn empty_parameter_set_uses_valid_default_payload() {
-        assert_eq!(encode_interactive_payload(&[]).unwrap(), "v2|");
-    }
-
-    #[test]
-    fn arbitrary_payload_is_hex_encoded_and_bounded() {
-        let parameter = InteractiveParameter {
-            slot: 1,
-            name: "Grid".into(),
-            kind: "arbitrary_data".into(),
-            minimum: 0.0,
-            maximum: 0.0,
-            value: 0.0,
-            choices: vec![],
-            use_declared_default: false,
-            color_float: None,
-            color: [0; 4],
-            components: [0.0; 3],
-            component_count: 0,
-            layer_path: None,
-            enabled: true,
-            visible: true,
-            supervised: false,
-            debug_summary: Some("value=7".into()),
-            custom_ui_events: 0,
-            control_size: [0, 0],
-        };
-        assert_eq!(
-            encode_interactive_payload(std::slice::from_ref(&parameter)).unwrap(),
-            "v5|param_1@1:arbhex=76616c75653d37"
-        );
-        let mut invalid = parameter.clone();
-        invalid.debug_summary = Some("\0".into());
-        assert!(encode_interactive_payload(&[invalid]).is_err());
-        let mut too_long = parameter;
-        too_long.debug_summary = Some("x".repeat(4097));
-        assert!(encode_interactive_payload(&[too_long]).is_err());
-    }
-
-    #[test]
-    fn arbitrary_without_printable_text_keeps_the_plugin_default() {
-        let parameter = InteractiveParameter {
-            slot: 1,
-            name: "Grid".into(),
-            kind: "arbitrary_data".into(),
-            // Scalar bounds do not describe an arbitrary-data value. Real
-            // descriptors may leave these union bytes as unrelated data.
-            minimum: 10.0,
-            maximum: -10.0,
-            value: f64::NAN,
-            choices: vec![],
-            use_declared_default: false,
-            color_float: None,
-            color: [0; 4],
-            components: [0.0; 3],
-            component_count: 0,
-            layer_path: None,
-            enabled: true,
-            visible: true,
-            supervised: false,
-            debug_summary: None,
-            custom_ui_events: 0,
-            control_size: [0, 0],
-        };
-        assert_eq!(
-            encode_default_interactive_payload(&[parameter]).unwrap(),
-            "v2|"
-        );
-    }
-
-    #[test]
-    fn ui_only_descriptors_are_filtered_but_path_is_render_assignable() {
-        let parameters = [
-            "group_start",
-            "group_end",
-            "button",
-            "custom",
-            "no_data",
-            "path",
-        ]
-        .map(|kind| InteractiveParameter {
-            slot: 1,
-            name: kind.into(),
-            kind: kind.into(),
-            minimum: 0.0,
-            maximum: 0.0,
-            value: 0.0,
-            choices: vec![],
-            use_declared_default: false,
-            color_float: None,
-            color: [0; 4],
-            components: [0.0; 3],
-            component_count: 0,
-            layer_path: None,
-            enabled: true,
-            visible: true,
-            supervised: false,
-            debug_summary: None,
-            custom_ui_events: 0,
-            control_size: [0, 0],
-        });
-        assert_eq!(
-            encode_interactive_payload(&parameters).unwrap(),
-            "v2|param_1@1:i32=0"
-        );
-    }
-
-    #[test]
-    fn component_payload_is_slot_bound_and_range_checked() {
-        let parameters = vec![InteractiveParameter {
-            slot: 2,
-            name: "Center".into(),
-            kind: "point".into(),
-            minimum: 0.0,
-            maximum: 0.0,
-            value: 0.0,
-            choices: vec![],
-            use_declared_default: false,
-            color_float: None,
-            color: [0; 4],
-            components: [50.0, 25.5, 0.0],
-            component_count: 2,
-            layer_path: None,
-            enabled: true,
-            visible: true,
-            supervised: false,
-            debug_summary: None,
-            custom_ui_events: 0,
-            control_size: [0, 0],
-        }];
-        assert_eq!(
-            encode_interactive_payload(&parameters).unwrap(),
-            "v4|param_2@2:point=50,25.5"
-        );
-        let mut invalid = parameters;
-        invalid[0].components[1] = 40_000.0;
-        assert!(encode_interactive_payload(&invalid).is_err());
-    }
-
-    #[test]
-    fn render_timing_is_bounded_and_monotonic() {
+    for name in old_names {
         assert!(
-            RenderTiming {
-                current_time: 3,
-                time_step: 1,
-                total_time: 4,
+            !root.join(name).exists(),
+            "old owned file was retained: {name}"
+        );
+    }
+    assert!(new_file.exists());
+    assert!(unknown.exists());
+    assert!(directory.is_dir());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn stale_transport_cleanup_keeps_symlinks() {
+    let root = std::env::temp_dir().join(format!(
+        "aexcompat-stale-transport-link-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let target = root.join("unknown-target");
+    fs::write(&target, b"target").unwrap();
+    let link = root.join("input-999.rgba");
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&target, &link).is_ok();
+    #[cfg(not(any(windows, unix)))]
+    let linked = false;
+
+    cleanup_stale_image_transport_before(
+        &root,
+        SystemTime::now() + Duration::from_secs(120),
+        Duration::from_secs(60),
+    )
+    .unwrap();
+
+    assert_eq!(fs::read(&target).unwrap(), b"target");
+    if linked {
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+fn aux_fixture(root: &Path, name: &str, values: &[f32]) -> crate::render_request::AuxChannel {
+    let path = root.join(name);
+    let bytes = values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect::<Vec<_>>();
+    fs::write(&path, bytes).unwrap();
+    crate::render_request::AuxChannel {
+        param_index: 0,
+        channel: crate::render_request::AuxChannelDescriptor {
+            channel_type: AUX_CHANNEL_DEPTH,
+            name: "depth".into(),
+            data_type: crate::render_request::AuxDataType::F32le,
+            dimension: 1,
+            width: values.len() as u32,
+            height: 1,
+            row_bytes: None,
+            origin_x: 0,
+            origin_y: 0,
+            downsample_x: crate::render_request::RationalScale {
+                numerator: 1,
+                denominator: 1,
+            },
+            downsample_y: crate::render_request::RationalScale {
+                numerator: 1,
+                denominator: 1,
+            },
+            coordinate_space: "source_pixel".into(),
+            units: "unitless".into(),
+            samples: vec![crate::render_request::AuxChannelSample {
+                time: 0,
                 time_scale: 30,
-            }
-            .is_valid()
-        );
-        assert!(
-            !RenderTiming {
-                current_time: 3,
-                time_step: 0,
-                total_time: 2,
-                time_scale: 0,
-            }
-            .is_valid()
-        );
+                path,
+                sampling: crate::render_request::AuxSampling::Exact,
+                interpretation: crate::render_request::AuxInterpretation::Depth,
+            }],
+        },
     }
+}
 
-    #[test]
-    fn pixel_formats_expose_their_full_argb_stride() {
-        assert_eq!(RenderPixelFormat::Argb8.bytes_per_pixel(), 4);
-        assert_eq!(RenderPixelFormat::Argb16.bytes_per_pixel(), 8);
-        assert_eq!(RenderPixelFormat::Argb32f.bytes_per_pixel(), 16);
-    }
-
-    #[test]
-    fn world_dump_dir_is_fail_closed_under_the_target_tree() {
-        let repository = std::env::temp_dir().join(format!(
-            "aexcompat-world-dump-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(repository.join("target")).unwrap();
-
-        let accepted =
-            resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).unwrap();
-        assert!(accepted.path.is_dir());
-        assert_eq!(accepted.display, "target/world-dumps");
-
-        // The length-one session wrapper resolves the environment value once
-        // before passing it to `RenderSession::open`, so the second resolver
-        // receives the canonical Windows path. Keep that production shape in
-        // the contract test (#372).
-        let canonical_request = repository.join("target/canonical-world-dumps");
-        fs::create_dir_all(&canonical_request).unwrap();
-        let canonical_request = canonical_request.canonicalize().unwrap();
-        let canonical_accepted =
-            resolve_managed_dump_dir(&repository, &canonical_request, true).unwrap();
-        assert_eq!(canonical_accepted.display, "target/canonical-world-dumps");
-
-        // A non-empty directory is refused so stale snapshots cannot be
-        // mistaken for the coming run's output.
-        fs::write(
-            accepted.path.join("000-classic-input-2x2.rgba8"),
-            [0_u8; 16],
-        )
-        .unwrap();
-        assert!(resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).is_err());
-
-        assert!(resolve_world_dump_dir(&repository, Path::new("")).is_err());
-        assert!(resolve_world_dump_dir(&repository, Path::new("target/../escape")).is_err());
-        assert!(resolve_world_dump_dir(&repository, Path::new("not-target/dumps")).is_err());
-        let outside = std::env::temp_dir().join(format!(
-            "aexcompat-world-dump-outside-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        assert!(resolve_world_dump_dir(&repository, &outside).is_err());
-        assert!(!outside.exists() || fs::remove_dir_all(&outside).is_ok());
-        fs::remove_dir_all(repository).unwrap();
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn world_dump_dir_accepts_existing_directory_beneath_target_junction() {
-        let nonce = SystemTime::now()
+#[test]
+#[cfg(windows)]
+fn aux_manifest_owns_raw_data_and_cleans_everything() {
+    let repository = std::env::temp_dir().join(format!(
+        "aexcompat-aux-{}",
+        SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos();
-        let repository =
-            std::env::temp_dir().join(format!("aexcompat-world-dump-junction-repository-{nonce}"));
-        let junction_target =
-            std::env::temp_dir().join(format!("aexcompat-world-dump-junction-target-{nonce}"));
-        fs::create_dir_all(&repository).unwrap();
-        fs::create_dir_all(junction_target.join("existing")).unwrap();
-        let output = std::process::Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(repository.join("target"))
-            .arg(&junction_target)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "mklink /J failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let accepted =
-            resolve_managed_dump_dir(&repository, &repository.join("target/existing"), true)
-                .unwrap();
-        assert_eq!(
-            accepted.path,
-            strip_extended_prefix(&junction_target.join("existing").canonicalize().unwrap())
-        );
-
-        fs::remove_dir(repository.join("target")).unwrap();
-        fs::remove_dir_all(repository).unwrap();
-        fs::remove_dir_all(junction_target).unwrap();
-    }
-
-    #[test]
-    fn deep16_png_expands_ae_range_and_counts_overrange_samples() {
-        let rgba16 = [0u16, 16_384, 32_768, 65_535]
-            .into_iter()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>();
-        let (samples, overrange) = rgba16_transport_to_png16(&rgba16).unwrap();
-        assert_eq!(samples, vec![0, 32_768, 65_535, 65_535]);
-        assert_eq!(overrange, 1);
-        assert!(rgba16_transport_to_png16(&rgba16[..6]).is_err());
-    }
-
-    #[test]
-    fn deep16_png_rounds_to_the_same_8_bit_values_as_the_preview() {
-        // The 16-bit PNG must stay interchangeable with the 8-bit preview:
-        // rounding its full-range samples back to 8 bits has to reproduce the
-        // preview quantization for every representable AE-range value.
-        for value in 0..=32_768u32 {
-            let bytes = (value as u16).to_le_bytes();
-            let transport = [bytes[0], bytes[1], 0, 0, 0, 0, 0, 0];
-            let (samples, overrange) = rgba16_transport_to_png16(&transport).unwrap();
-            assert_eq!(overrange, 0);
-            let png16 = u32::from(samples[0]);
-            let rounded8 = (png16 * 255 + 32_767) / 65_535;
-            let preview8 = (value * 255 + 16_384) / 32_768;
-            assert_eq!(rounded8, preview8, "value {value}");
-            // Full-range expansion must be lossless for AE-range data.
-            assert_eq!((png16 * 32_768 + 32_767) / 65_535, value, "value {value}");
-        }
-    }
-
-    #[test]
-    fn native_depth_transport_keeps_raw_precision_and_builds_preview() {
-        assert_eq!(RenderPixelFormat::Argb16.raw_extension(), Some("rgba16le"));
-        assert_eq!(
-            RenderPixelFormat::Argb32f.raw_extension(),
-            Some("rgba32f-le")
-        );
-        let rgba16 = [0u16, 16_384, 32_768, 65_535]
-            .into_iter()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            native_rgba_to_preview(&rgba16, RenderPixelFormat::Argb16).unwrap(),
-            vec![0, 128, 255, 255]
-        );
-        let rgba32 = [-1.0f32, 0.5, 2.0, f32::NAN]
-            .into_iter()
-            .flat_map(f32::to_le_bytes)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            native_rgba_to_preview(&rgba32, RenderPixelFormat::Argb32f).unwrap(),
-            vec![0, 128, 255, 0]
-        );
-    }
-
-    #[test]
-    fn module_audit_summary_exposes_only_bounded_safe_unknown_basenames() {
-        let summary = module_audit_summary(&json!({
-            "status": "failed",
-            "unknown_count": 4,
-            "phase_count": 3,
-            "observed_union": {
-                "policy": ["approved.dll"],
-                "unknown": ["outside.dll", "C:\\private\\leak.dll", "bad:name.dll"]
-            }
-        }))
+            .as_nanos()
+    ));
+    let transport_root = repository.join("transport");
+    fs::create_dir_all(&transport_root).unwrap();
+    let channel = aux_fixture(&repository, "source.f32", &[1.0, 2.5]);
+    let transport = prepare_aux_transport(&repository, &[channel], &transport_root, 7)
+        .unwrap()
         .unwrap();
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(&transport.manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["schema"], "aux-manifest-v1");
+    assert_eq!(manifest["channels"][0]["data_type"], "f32le");
+    assert_eq!(manifest["channels"][0]["samples"][0]["time_scale"], 30);
+    assert_eq!(
+        manifest["channels"][0]["samples"][0]["expected_byte_length"],
+        8
+    );
+    let raw = PathBuf::from(
+        manifest["channels"][0]["samples"][0]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let raw_bytes = fs::read(&raw).unwrap();
+    assert_eq!(raw_bytes.len(), 8);
+    assert_eq!(
+        manifest["channels"][0]["samples"][0]["sha256"],
+        format!("{:x}", Sha256::digest(&raw_bytes))
+    );
+    let manifest_path = transport.manifest_path.clone();
+    drop(transport);
+    assert!(!manifest_path.exists());
+    assert!(!raw.exists());
+    fs::remove_dir_all(repository).unwrap();
+}
 
-        assert_eq!(
-            summary["authorized_policy_modules"],
-            json!(["approved.dll"])
-        );
-        assert_eq!(summary["unknown_modules"], json!(["outside.dll"]));
-        assert!(!summary.to_string().contains("private"));
+#[test]
+#[cfg(windows)]
+fn aux_sample_under_target_junction_is_owned_but_external_sample_is_not() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let repository = std::env::temp_dir().join(format!("aexcompat-aux-junction-repo-{nonce}"));
+    let physical_target =
+        std::env::temp_dir().join(format!("aexcompat-aux-junction-target-{nonce}"));
+    let outside = std::env::temp_dir().join(format!("aexcompat-aux-junction-outside-{nonce}"));
+    fs::create_dir_all(&repository).unwrap();
+    fs::create_dir_all(&physical_target).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let linked = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(repository.join("target"))
+        .arg(&physical_target)
+        .output()
+        .unwrap();
+    assert!(
+        linked.status.success(),
+        "mklink /J failed: {}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+
+    let transport_root = repository.join("target/image-transport");
+    fs::create_dir_all(&transport_root).unwrap();
+    let mut channel = aux_fixture(&physical_target, "depth.f32", &[0.0, 0.5]);
+    channel.channel.samples[0].path = repository.join("target/depth.f32");
+    let transport = prepare_aux_transport(&repository, &[channel.clone()], &transport_root, nonce)
+        .expect("target junction is an owned source root")
+        .expect("manifest produced");
+    assert!(transport.manifest_path.is_file());
+    drop(transport);
+
+    let mut external = aux_fixture(&outside, "outside.f32", &[0.0, 0.5]);
+    external.channel.samples[0].path = outside.join("outside.f32");
+    assert!(prepare_aux_transport(&repository, &[external], &transport_root, nonce + 1).is_err());
+    let mut alias = channel.clone();
+    alias.channel.channel_type = i32::from_be_bytes(*b"GEN1");
+    alias.channel.name = "generic-alias".into();
+    alias.channel.samples[0].interpretation = crate::render_request::AuxInterpretation::Generic;
+    assert!(
+        prepare_aux_transport(&repository, &[channel, alias], &transport_root, nonce + 2).is_err()
+    );
+
+    fs::remove_dir(repository.join("target")).unwrap();
+    fs::remove_dir_all(repository).unwrap();
+    fs::remove_dir_all(physical_target).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn prepare_aux_transport_output_satisfies_the_session_aux_manifest_contract() {
+    // #211: the length-1 session wrapper now carries aux channels through
+    // the same broker-built manifest the one-shot path uses, passing its
+    // path to SessionOpenRequest::aux_manifest. This guards the handoff:
+    // the manifest prepare_aux_transport produces must satisfy the session's
+    // `--aux-manifest-v1` precondition (render_session.rs requires an
+    // absolute, existing file) and the worker's top-level manifest gate
+    // (session_protocol_worker mirrors the real load_aux_manifest contract:
+    // exactly {schema, nonce, channels}, the v1 schema string, a digit
+    // nonce, and a non-empty channel list). A manifest that failed any of
+    // these would make the wrapper's session route dead-on-arrival while the
+    // one-shot route kept working, exactly the silent split #211 removes.
+    let repository = std::env::temp_dir().join(format!(
+        "aexcompat-aux-session-contract-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let transport_root = repository.join("transport");
+    fs::create_dir_all(&transport_root).unwrap();
+    let channel = aux_fixture(&repository, "depth.f32", &[0.0, 0.25, 1.0, 2.0]);
+    let transport = prepare_aux_transport(&repository, &[channel], &transport_root, 42)
+        .unwrap()
+        .expect("aux channels present, so a manifest is produced");
+
+    // The session gate rejects a non-absolute or missing manifest before it
+    // ever launches the worker (render_session.rs `aux_manifest` handling).
+    assert!(
+        transport.manifest_path.is_absolute(),
+        "session aux_manifest must be an absolute path"
+    );
+    assert!(
+        transport.manifest_path.is_file(),
+        "session aux_manifest must point at an existing file"
+    );
+
+    // The worker's top-level manifest gate.
+    let document: Value =
+        serde_json::from_slice(&fs::read(&transport.manifest_path).unwrap()).unwrap();
+    let object = document.as_object().expect("manifest is a JSON object");
+    assert_eq!(
+        object.len(),
+        3,
+        "manifest carries exactly schema/nonce/channels"
+    );
+    assert_eq!(object["schema"], "aux-manifest-v1");
+    let nonce = object["nonce"].as_str().expect("nonce is a string");
+    assert!(
+        !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_digit()),
+        "nonce is a non-empty digit string"
+    );
+    let channels = object["channels"].as_array().expect("channels is an array");
+    assert!(
+        !channels.is_empty() && channels.iter().all(Value::is_object),
+        "channels is a non-empty list of objects"
+    );
+
+    drop(transport);
+    fs::remove_dir_all(repository).unwrap();
+}
+
+// Issue #231: canonicalize() returns verbatim Windows paths, but the worker
+// transport wire format remains plain absolute paths. This guards the
+// de-verbatim contract without needing the real worker.
+#[test]
+#[cfg(windows)]
+fn aux_transport_de_verbatims_manifest_and_sidecar_paths() {
+    let repository = std::env::temp_dir().join(format!(
+        "aexcompat-aux-verbatim-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&repository).unwrap();
+    // canonicalize() yields the `\\?\C:\...` verbatim form that reproduced
+    // the bug; derive the transport root from it exactly as the render path
+    // does (repository.join("target/image-transport")).
+    let canonical_repository = repository.canonicalize().unwrap();
+    assert!(
+        canonical_repository
+            .as_os_str()
+            .to_string_lossy()
+            .starts_with(r"\\?\"),
+        "canonicalize() is expected to produce a verbatim root on Windows"
+    );
+    let transport_root = canonical_repository.join("transport");
+    fs::create_dir_all(&transport_root).unwrap();
+    let channel = aux_fixture(&canonical_repository, "depth.f32", &[0.0, 0.5, 1.0, 2.0]);
+    let transport = prepare_aux_transport(&canonical_repository, &[channel], &transport_root, 231)
+        .unwrap()
+        .expect("aux channels present, so a manifest is produced");
+
+    assert!(
+        !transport
+            .manifest_path
+            .as_os_str()
+            .to_string_lossy()
+            .starts_with(r"\\?\"),
+        "manifest path handed to the worker must not carry the \\?\\ prefix"
+    );
+    let document: Value =
+        serde_json::from_slice(&fs::read(&transport.manifest_path).unwrap()).unwrap();
+    let sample_path = document["channels"][0]["samples"][0]["path"]
+        .as_str()
+        .expect("sample path is a string");
+    assert!(
+        !sample_path.starts_with(r"\\?\"),
+        "sidecar path written into the manifest must not carry the \\?\\ prefix, got {sample_path}"
+    );
+    // The de-verbatimed manifest path still resolves to the written file.
+    assert!(transport.manifest_path.is_file());
+    assert!(Path::new(sample_path).is_file());
+
+    drop(transport);
+    fs::remove_dir_all(repository).unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn aux_transport_rejects_nonfinite_duplicate_time_and_path_aliases() {
+    let repository = std::env::temp_dir().join(format!(
+        "aexcompat-aux-reject-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let transport_root = repository.join("transport");
+    fs::create_dir_all(&transport_root).unwrap();
+    let nonfinite = aux_fixture(&repository, "nan.f32", &[f32::NAN]);
+    assert!(prepare_aux_transport(&repository, &[nonfinite], &transport_root, 1).is_err());
+
+    let mut duplicate = aux_fixture(&repository, "valid.f32", &[1.0]);
+    duplicate
+        .channel
+        .samples
+        .push(duplicate.channel.samples[0].clone());
+    assert!(prepare_aux_transport(&repository, &[duplicate], &transport_root, 2).is_err());
+
+    let mut wrong_dimension = aux_fixture(&repository, "wrong-dimension.f32", &[1.0]);
+    wrong_dimension.channel.dimension = 2;
+    assert!(prepare_aux_transport(&repository, &[wrong_dimension], &transport_root, 4).is_err());
+
+    let first = aux_fixture(&repository, "alias.f32", &[1.0]);
+    let mut second = first.clone();
+    second.channel.name = "other".into();
+    assert!(prepare_aux_transport(&repository, &[first, second], &transport_root, 3).is_err());
+    assert!(fs::read_dir(&transport_root).unwrap().next().is_none());
+    fs::remove_dir_all(repository).unwrap();
+}
+
+#[cfg(windows)]
+fn crashkit_parameters(mode: f64) -> Vec<InteractiveParameter> {
+    [
+        (1, "Fault mode", mode, 1.0, 5.0),
+        (2, "Fault stage", 2.0, 1.0, 2.0),
+    ]
+    .into_iter()
+    .map(
+        |(slot, name, value, minimum, maximum)| InteractiveParameter {
+            slot,
+            name: name.into(),
+            kind: "integer".into(),
+            minimum,
+            maximum,
+            value,
+            choices: vec![],
+            use_declared_default: false,
+            color_float: None,
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 4,
+            control_size: [0, 0],
+        },
+    )
+    .collect()
+}
+
+#[test]
+#[cfg(windows)]
+fn crashkit_event_crash_and_hang_remain_inside_the_worker() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    let plugin = repository
+        .join("target/instruments-sdk-build/pf-crashkit")
+        .join(["pf_crashkit", "aex"].join("."));
+    if !plugin.exists() {
+        return;
     }
+    let hash = format!("{:X}", Sha256::digest(fs::read(&plugin).unwrap()));
 
-    #[test]
-    fn module_audit_failure_summary_bounds_and_revalidates_rejections() {
-        let summary = module_audit_failure_summary(
-            &json!({
-                "module_audit_failure": {
-                    "status": "failed",
-                    "reason": "loaded_module_policy_rejection",
-                    "unknown_count": 3,
-                    "unattributed_count": 1,
-                    "rejections": [
-                        {
-                            "basename": "outside.dll",
-                            "canonical_path_token": "a".repeat(64),
-                            "path_class": "external",
-                            "reason": "outside_allowed_roots_or_unapproved_policy"
-                        },
-                        {
-                            "basename": "C:\\private\\leak.dll",
-                            "canonical_path_token": "b".repeat(64),
-                            "path_class": "external",
-                            "reason": "outside_allowed_roots_or_unapproved_policy"
-                        }
-                    ],
-                    "rejections_truncated": false
+    let crash =
+        probe_experimental_custom_ui_idle(repository, &plugin, &hash, &crashkit_parameters(2.0))
+            .unwrap_err();
+    assert!(crash.to_string().contains("failed safely"));
+
+    let started = Instant::now();
+    let hang =
+        probe_experimental_custom_ui_idle(repository, &plugin, &hash, &crashkit_parameters(3.0))
+            .unwrap_err();
+    assert!(hang.to_string().contains("failed safely"));
+    assert!(started.elapsed() < Duration::from_secs(8));
+}
+
+#[test]
+#[cfg(windows)]
+fn histogrid_draw_and_smartfx_render_share_one_isolated_worker() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    let plugin = repository
+        .join("target/sdk-fixtures/histogrid")
+        .join(["HistoGrid", "aex"].join("."));
+    if !plugin.exists()
+        || !repository
+            .join("target/minihost-build/aex_worker.exe")
+            .exists()
+    {
+        return;
+    }
+    let hash = format!("{:X}", Sha256::digest(fs::read(&plugin).unwrap()));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let input = repository.join(format!("target/histogrid-broker-input-{nonce}.png"));
+    let pixels = image::RgbaImage::from_fn(37, 23, |x, y| {
+        image::Rgba([x as u8 * 7, y as u8 * 11, ((x + y) % 23) as u8 * 11, 255])
+    });
+    pixels.save(&input).unwrap();
+    let formats = [
+        RenderPixelFormat::Argb8,
+        RenderPixelFormat::Argb16,
+        RenderPixelFormat::Argb32f,
+    ];
+    let outputs = formats
+        .iter()
+        .map(|format| {
+            repository.join(format!(
+                "target/histogrid-broker-output-{}-{nonce}.png",
+                format.report_name()
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    let result = (|| {
+        let parameters = inspect_experimental(repository, &plugin, &hash)?;
+        formats
+            .iter()
+            .zip(&outputs)
+            .map(|(format, output)| {
+                if *format == RenderPixelFormat::Argb32f {
+                    render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
+                        repository,
+                        &plugin,
+                        &hash,
+                        &input,
+                        output,
+                        &parameters,
+                        RenderTiming::default(),
+                        true,
+                        *format,
+                        None,
+                        Some(RenderUiAction::Draw),
+                        RenderGpuBackend::Cpu,
+                    )
+                } else {
+                    render_experimental_image_at_time_with_format_context_and_ui_action(
+                        repository,
+                        &plugin,
+                        &hash,
+                        &input,
+                        output,
+                        &parameters,
+                        RenderTiming::default(),
+                        true,
+                        *format,
+                        None,
+                        Some(RenderUiAction::Draw),
+                    )
                 }
-            }),
-            Some("params_setup"),
-        )
-        .unwrap();
-
-        assert_eq!(summary["selector_phase"], "params_setup");
-        assert_eq!(summary["rejections"].as_array().unwrap().len(), 1);
-        assert_eq!(summary["rejections"][0]["basename"], "outside.dll");
-        assert_eq!(
-            summary["rejections"][0]["canonical_path_token"],
-            "a".repeat(64)
-        );
-        assert!(!summary.to_string().contains("private"));
+            })
+            .collect::<io::Result<Vec<_>>>()
+    })();
+    let _ = fs::remove_file(&input);
+    let outputs_exist = outputs.iter().all(|output| output.exists());
+    for output in &outputs {
+        let _ = fs::remove_file(output);
     }
 
-    #[test]
-    fn selector_invocation_diagnostics_distinguish_normal_return_from_seh() {
-        let report = json!({
-            "selector_invocations": {
-                "maximum_records": 64,
-                "records": [
+    let reports = result.unwrap();
+    assert!(outputs_exist);
+    let mut output_hashes = std::collections::HashSet::new();
+    for (report, format) in reports.iter().zip(formats) {
+        assert_eq!(report["pixel_format"], format.report_name());
+        assert_eq!(report["custom_ui_draw_dispatched"], true);
+        assert_eq!(report["custom_ui_draw_error"], 0);
+        assert_eq!(report["custom_ui_draw_out_flags"], 1);
+        assert_eq!(report["custom_ui_lifecycle_errors"], json!([0, 0, 0, 0]));
+        assert_eq!(report["custom_ui_context_closed"], true);
+        assert_eq!(report["passed"], true);
+        output_hashes.insert(report["output_sha256"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(output_hashes.len(), 3);
+}
+
+#[test]
+#[cfg(windows)]
+fn default_interactive_payload_is_slot_bound_and_distinct_from_explicit() {
+    let parameters = vec![InteractiveParameter {
+        slot: 2,
+        name: "Direction".into(),
+        kind: "integer".into(),
+        minimum: 1.0,
+        maximum: 3.0,
+        value: 2.0,
+        choices: vec!["Horizontal".into(), "Vertical".into(), "Both".into()],
+        use_declared_default: false,
+        color_float: None,
+        color: [255, 0, 0, 0],
+        components: [0.0; 3],
+        component_count: 0,
+        layer_path: None,
+        enabled: true,
+        visible: true,
+        supervised: false,
+        debug_summary: None,
+        custom_ui_events: 0,
+        control_size: [0, 0],
+    }];
+    assert_eq!(
+        encode_interactive_payload(&parameters).unwrap(),
+        "v2|param_2@2:i32=2"
+    );
+    let mut invalid = parameters;
+    invalid[0].value = 4.0;
+    assert!(encode_interactive_payload(&invalid).is_err());
+    assert_eq!(
+        encode_default_interactive_payload(&invalid).unwrap(),
+        "v7|param_2@2:i32=default"
+    );
+    let mut malformed = invalid;
+    malformed[0].minimum = 4.0;
+    malformed[0].maximum = 1.0;
+    assert!(encode_interactive_payload(&malformed).is_err());
+}
+
+#[test]
+#[cfg(windows)]
+fn float_color_payload_preserves_words_and_legacy_bytes() {
+    let mut p: InteractiveParameter = serde_json::from_value(json!({
+        "slot":1,"name":"Color","kind":"color","minimum":0,"maximum":0,"value":0,
+        "choices":[],"color":[255,64,128,192],"components":[0,0,0],"component_count":0,
+        "layer_path":null,"enabled":true,"visible":true,"supervised":false
+    }))
+    .unwrap();
+    assert_eq!(
+        encode_interactive_payload(&[p.clone()]).unwrap(),
+        "v3|param_1@1:argb8=255,64,128,192"
+    );
+    p.color_float = Some([1.0, f32::from_bits(0x3e800001), -0.0, 2.0]);
+    assert_eq!(
+        encode_interactive_payload(&[p.clone()]).unwrap(),
+        "v6|param_1@1:argb8f=255,64,128,192/3f800000,3e800001,80000000,40000000"
+    );
+    p.color_float.as_mut().unwrap()[1] = f32::NAN;
+    assert!(encode_interactive_payload(&[p.clone()]).is_err());
+    p.color_float = Some([0.0; 4]);
+    p.slot = 0;
+    assert!(encode_interactive_payload(&[p]).is_err());
+}
+
+#[test]
+#[cfg(windows)]
+fn declared_default_mode_ignores_caller_value_but_keeps_slot_and_kind() {
+    let mut p: InteractiveParameter = serde_json::from_value(json!({
+        "slot":5,"name":"Gain","kind":"float","minimum":1,"maximum":100,"value":0.1,
+        "choices":[],"color":[255,0,0,0],"components":[0,0,0],"component_count":0,
+        "layer_path":null,"enabled":true,"visible":true,"supervised":false
+    }))
+    .unwrap();
+    assert!(!p.use_declared_default);
+    assert!(encode_interactive_payload(&[p.clone()]).is_err());
+    p.use_declared_default = true;
+    let wire = "v7|param_5@5:f64=default";
+    assert_eq!(encode_interactive_payload(&[p.clone()]).unwrap(), wire);
+    p.value = 99.0;
+    assert_eq!(encode_interactive_payload(&[p.clone()]).unwrap(), wire);
+    let roundtrip: InteractiveParameter =
+        serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+    assert!(roundtrip.use_declared_default);
+    p.slot = 0;
+    assert!(encode_interactive_payload(&[p.clone()]).is_err());
+    p.slot = 5;
+    p.kind = "color".into();
+    assert!(encode_interactive_payload(&[p.clone()]).is_err());
+    p.kind = "float".into();
+    p.use_declared_default = false;
+    p.value = 1.0;
+    assert_eq!(
+        encode_interactive_payload(&[p]).unwrap(),
+        "v2|param_5@5:f64=1"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn empty_parameter_set_uses_valid_default_payload() {
+    assert_eq!(encode_interactive_payload(&[]).unwrap(), "v2|");
+}
+
+#[test]
+#[cfg(windows)]
+fn arbitrary_payload_is_hex_encoded_and_bounded() {
+    let parameter = InteractiveParameter {
+        slot: 1,
+        name: "Grid".into(),
+        kind: "arbitrary_data".into(),
+        minimum: 0.0,
+        maximum: 0.0,
+        value: 0.0,
+        choices: vec![],
+        use_declared_default: false,
+        color_float: None,
+        color: [0; 4],
+        components: [0.0; 3],
+        component_count: 0,
+        layer_path: None,
+        enabled: true,
+        visible: true,
+        supervised: false,
+        debug_summary: Some("value=7".into()),
+        custom_ui_events: 0,
+        control_size: [0, 0],
+    };
+    assert_eq!(
+        encode_interactive_payload(std::slice::from_ref(&parameter)).unwrap(),
+        "v5|param_1@1:arbhex=76616c75653d37"
+    );
+    let mut invalid = parameter.clone();
+    invalid.debug_summary = Some("\0".into());
+    assert!(encode_interactive_payload(&[invalid]).is_err());
+    let mut too_long = parameter;
+    too_long.debug_summary = Some("x".repeat(4097));
+    assert!(encode_interactive_payload(&[too_long]).is_err());
+}
+
+#[test]
+#[cfg(windows)]
+fn arbitrary_without_printable_text_keeps_the_plugin_default() {
+    let parameter = InteractiveParameter {
+        slot: 1,
+        name: "Grid".into(),
+        kind: "arbitrary_data".into(),
+        // Scalar bounds do not describe an arbitrary-data value. Real
+        // descriptors may leave these union bytes as unrelated data.
+        minimum: 10.0,
+        maximum: -10.0,
+        value: f64::NAN,
+        choices: vec![],
+        use_declared_default: false,
+        color_float: None,
+        color: [0; 4],
+        components: [0.0; 3],
+        component_count: 0,
+        layer_path: None,
+        enabled: true,
+        visible: true,
+        supervised: false,
+        debug_summary: None,
+        custom_ui_events: 0,
+        control_size: [0, 0],
+    };
+    assert_eq!(
+        encode_default_interactive_payload(&[parameter]).unwrap(),
+        "v2|"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn ui_only_descriptors_are_filtered_but_path_is_render_assignable() {
+    let parameters = [
+        "group_start",
+        "group_end",
+        "button",
+        "custom",
+        "no_data",
+        "path",
+    ]
+    .map(|kind| InteractiveParameter {
+        slot: 1,
+        name: kind.into(),
+        kind: kind.into(),
+        minimum: 0.0,
+        maximum: 0.0,
+        value: 0.0,
+        choices: vec![],
+        use_declared_default: false,
+        color_float: None,
+        color: [0; 4],
+        components: [0.0; 3],
+        component_count: 0,
+        layer_path: None,
+        enabled: true,
+        visible: true,
+        supervised: false,
+        debug_summary: None,
+        custom_ui_events: 0,
+        control_size: [0, 0],
+    });
+    assert_eq!(
+        encode_interactive_payload(&parameters).unwrap(),
+        "v2|param_1@1:i32=0"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn component_payload_is_slot_bound_and_range_checked() {
+    let parameters = vec![InteractiveParameter {
+        slot: 2,
+        name: "Center".into(),
+        kind: "point".into(),
+        minimum: 0.0,
+        maximum: 0.0,
+        value: 0.0,
+        choices: vec![],
+        use_declared_default: false,
+        color_float: None,
+        color: [0; 4],
+        components: [50.0, 25.5, 0.0],
+        component_count: 2,
+        layer_path: None,
+        enabled: true,
+        visible: true,
+        supervised: false,
+        debug_summary: None,
+        custom_ui_events: 0,
+        control_size: [0, 0],
+    }];
+    assert_eq!(
+        encode_interactive_payload(&parameters).unwrap(),
+        "v4|param_2@2:point=50,25.5"
+    );
+    let mut invalid = parameters;
+    invalid[0].components[1] = 40_000.0;
+    assert!(encode_interactive_payload(&invalid).is_err());
+}
+
+#[test]
+#[cfg(windows)]
+fn render_timing_is_bounded_and_monotonic() {
+    assert!(
+        RenderTiming {
+            current_time: 3,
+            time_step: 1,
+            total_time: 4,
+            time_scale: 30,
+        }
+        .is_valid()
+    );
+    assert!(
+        !RenderTiming {
+            current_time: 3,
+            time_step: 0,
+            total_time: 2,
+            time_scale: 0,
+        }
+        .is_valid()
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn pixel_formats_expose_their_full_argb_stride() {
+    assert_eq!(RenderPixelFormat::Argb8.bytes_per_pixel(), 4);
+    assert_eq!(RenderPixelFormat::Argb16.bytes_per_pixel(), 8);
+    assert_eq!(RenderPixelFormat::Argb32f.bytes_per_pixel(), 16);
+}
+
+#[test]
+#[cfg(windows)]
+fn world_dump_dir_is_fail_closed_under_the_target_tree() {
+    let repository = std::env::temp_dir().join(format!(
+        "aexcompat-world-dump-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(repository.join("target")).unwrap();
+
+    let accepted = resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).unwrap();
+    assert!(accepted.path.is_dir());
+    assert_eq!(accepted.display, "target/world-dumps");
+
+    // The length-one session wrapper resolves the environment value once
+    // before passing it to `RenderSession::open`, so the second resolver
+    // receives the canonical Windows path. Keep that production shape in
+    // the contract test (#372).
+    let canonical_request = repository.join("target/canonical-world-dumps");
+    fs::create_dir_all(&canonical_request).unwrap();
+    let canonical_request = canonical_request.canonicalize().unwrap();
+    let canonical_accepted =
+        resolve_managed_dump_dir(&repository, &canonical_request, true).unwrap();
+    assert_eq!(canonical_accepted.display, "target/canonical-world-dumps");
+
+    // A non-empty directory is refused so stale snapshots cannot be
+    // mistaken for the coming run's output.
+    fs::write(
+        accepted.path.join("000-classic-input-2x2.rgba8"),
+        [0_u8; 16],
+    )
+    .unwrap();
+    assert!(resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).is_err());
+
+    assert!(resolve_world_dump_dir(&repository, Path::new("")).is_err());
+    assert!(resolve_world_dump_dir(&repository, Path::new("target/../escape")).is_err());
+    assert!(resolve_world_dump_dir(&repository, Path::new("not-target/dumps")).is_err());
+    let outside = std::env::temp_dir().join(format!(
+        "aexcompat-world-dump-outside-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    assert!(resolve_world_dump_dir(&repository, &outside).is_err());
+    assert!(!outside.exists() || fs::remove_dir_all(&outside).is_ok());
+    fs::remove_dir_all(repository).unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn world_dump_dir_accepts_existing_directory_beneath_target_junction() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let repository =
+        std::env::temp_dir().join(format!("aexcompat-world-dump-junction-repository-{nonce}"));
+    let junction_target =
+        std::env::temp_dir().join(format!("aexcompat-world-dump-junction-target-{nonce}"));
+    fs::create_dir_all(&repository).unwrap();
+    fs::create_dir_all(junction_target.join("existing")).unwrap();
+    let output = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(repository.join("target"))
+        .arg(&junction_target)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "mklink /J failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let accepted =
+        resolve_managed_dump_dir(&repository, &repository.join("target/existing"), true).unwrap();
+    assert_eq!(
+        accepted.path,
+        strip_extended_prefix(&junction_target.join("existing").canonicalize().unwrap())
+    );
+
+    fs::remove_dir(repository.join("target")).unwrap();
+    fs::remove_dir_all(repository).unwrap();
+    fs::remove_dir_all(junction_target).unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn deep16_png_expands_ae_range_and_counts_overrange_samples() {
+    let rgba16 = [0u16, 16_384, 32_768, 65_535]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let (samples, overrange) = rgba16_transport_to_png16(&rgba16).unwrap();
+    assert_eq!(samples, vec![0, 32_768, 65_535, 65_535]);
+    assert_eq!(overrange, 1);
+    assert!(rgba16_transport_to_png16(&rgba16[..6]).is_err());
+}
+
+#[test]
+#[cfg(windows)]
+fn deep16_png_rounds_to_the_same_8_bit_values_as_the_preview() {
+    // The 16-bit PNG must stay interchangeable with the 8-bit preview:
+    // rounding its full-range samples back to 8 bits has to reproduce the
+    // preview quantization for every representable AE-range value.
+    for value in 0..=32_768u32 {
+        let bytes = (value as u16).to_le_bytes();
+        let transport = [bytes[0], bytes[1], 0, 0, 0, 0, 0, 0];
+        let (samples, overrange) = rgba16_transport_to_png16(&transport).unwrap();
+        assert_eq!(overrange, 0);
+        let png16 = u32::from(samples[0]);
+        let rounded8 = (png16 * 255 + 32_767) / 65_535;
+        let preview8 = (value * 255 + 16_384) / 32_768;
+        assert_eq!(rounded8, preview8, "value {value}");
+        // Full-range expansion must be lossless for AE-range data.
+        assert_eq!((png16 * 32_768 + 32_767) / 65_535, value, "value {value}");
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn native_depth_transport_keeps_raw_precision_and_builds_preview() {
+    assert_eq!(RenderPixelFormat::Argb16.raw_extension(), Some("rgba16le"));
+    assert_eq!(
+        RenderPixelFormat::Argb32f.raw_extension(),
+        Some("rgba32f-le")
+    );
+    let rgba16 = [0u16, 16_384, 32_768, 65_535]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        native_rgba_to_preview(&rgba16, RenderPixelFormat::Argb16).unwrap(),
+        vec![0, 128, 255, 255]
+    );
+    let rgba32 = [-1.0f32, 0.5, 2.0, f32::NAN]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        native_rgba_to_preview(&rgba32, RenderPixelFormat::Argb32f).unwrap(),
+        vec![0, 128, 255, 0]
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn module_audit_summary_exposes_only_bounded_safe_unknown_basenames() {
+    let summary = module_audit_summary(&json!({
+        "status": "failed",
+        "unknown_count": 4,
+        "phase_count": 3,
+        "observed_union": {
+            "policy": ["approved.dll"],
+            "unknown": ["outside.dll", "C:\\private\\leak.dll", "bad:name.dll"]
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        summary["authorized_policy_modules"],
+        json!(["approved.dll"])
+    );
+    assert_eq!(summary["unknown_modules"], json!(["outside.dll"]));
+    assert!(!summary.to_string().contains("private"));
+}
+
+#[test]
+#[cfg(windows)]
+fn module_audit_failure_summary_bounds_and_revalidates_rejections() {
+    let summary = module_audit_failure_summary(
+        &json!({
+            "module_audit_failure": {
+                "status": "failed",
+                "reason": "loaded_module_policy_rejection",
+                "unknown_count": 3,
+                "unattributed_count": 1,
+                "rejections": [
                     {
-                        "selector": "PARAMS_SETUP",
-                        "invocation_completed_normally": true,
-                        "raw_return_code": 512,
-                        "host_result_code": 512,
-                        "seh_caught": false,
-                        "seh_code": null,
-                        "fault_module_class": null,
-                        "fault_module": null,
-                        "plugin_rva": null,
-                        "access_type": null,
-                        "fault_address": null,
-                        "registers": null,
-                        "stack_pointer_values": null,
-                        "unwind_stop": null,
-                        "unwind_frames": null,
-                        "global_data_handoff": {
-                            "input_at_entry": {
-                                "state": "null",
-                                "classification": "null",
-                                "process_local_token": null
-                            },
-                            "output_after_return": {
-                                "state": "non_null",
-                                "classification": "heap_or_unknown",
-                                "process_local_token": "ptr-0123456789abcdef"
-                            },
-                            "same_identity_as_previous_output": null
-                        },
-                        "effect_ref_at_entry": {
-                            "state": "null",
-                            "classification": "null",
-                            "process_local_token": null,
-                            "same_identity_as_global_setup_entry": null
-                        },
-                        "appl_id_at_entry": {
-                            "printable_code": "FXTC",
-                            "hex_u32": "0x46585443",
-                            "same_value_as_global_setup_entry": null,
-                            "host_setting_source": "worker_effect_bootstrap"
-                        },
-                        "version_at_entry": {
-                            "raw_packed_u32": "0x001d000d",
-                            "major": 13,
-                            "minor": 29,
-                            "same_value_as_global_setup_entry": null,
-                            "host_setting_source": "worker_effect_bootstrap"
-                        }
+                        "basename": "outside.dll",
+                        "canonical_path_token": "a".repeat(64),
+                        "path_class": "external",
+                        "reason": "outside_allowed_roots_or_unapproved_policy"
                     },
                     {
-                        "selector": "PARAMS_SETUP",
-                        "invocation_completed_normally": false,
-                        "raw_return_code": null,
-                        "host_result_code": 512,
-                        "seh_caught": true,
-                        "seh_code": 0xC0000005u32,
-                        "fault_module_class": "plugin",
-                        "fault_module": "synthetic.aex",
-                        "plugin_rva": "0x0000000000001234",
-                        "access_type": "read",
-                        "fault_address": {
-                            "classification": "low",
-                            "module": null,
-                            "relative_offset": null,
-                            "token": null
-                        },
-                        "registers": {
-                            "rcx": {
-                                "classification": "low",
-                                "module": null,
-                                "relative_offset": null,
-                                "token": null
-                            },
-                            "rdx": {
-                                "classification": "null",
-                                "module": null,
-                                "relative_offset": null,
-                                "token": null
-                            },
-                            "r8": {
-                                "classification": "plugin",
-                                "module": "synthetic.aex",
-                                "relative_offset": "0x0000000000002000",
-                                "token": null
-                            },
-                            "r9": {
-                                "classification": "module",
-                                "module": "kernel32.dll",
-                                "relative_offset": "0x0000000000003000",
-                                "token": null
-                            },
-                            "rsp": {
-                                "classification": "heap_or_unknown",
-                                "module": null,
-                                "relative_offset": null,
-                                "token": "ptr-0123456789abcdef"
-                            }
-                        },
-                        "stack_pointer_values": [
-                            {"offset_bytes": 0, "value": null},
-                            {"offset_bytes": 8, "value": null},
-                            {"offset_bytes": 16, "value": null},
-                            {"offset_bytes": 24, "value": null},
-                            {"offset_bytes": 32, "value": null},
-                            {"offset_bytes": 40, "value": null}
-                        ],
-                        "unwind_stop": "end_of_chain",
-                        "unwind_frames": [
-                            {
-                                "from_return_slot": false,
-                                "site": {
-                                    "classification": "plugin",
-                                    "module": "synthetic.aex",
-                                    "relative_offset": "0x0000000000001234",
-                                    "token": null
-                                }
-                            },
-                            {
-                                "from_return_slot": true,
-                                "site": {
-                                    "classification": "module",
-                                    "module": "kernel32.dll",
-                                    "relative_offset": "0x0000000000005678",
-                                    "token": null
-                                }
-                            }
-                        ],
-                        "global_data_handoff": {
-                            "input_at_entry": {
-                                "state": "non_null",
-                                "classification": "heap_or_unknown",
-                                "process_local_token": "ptr-0123456789abcdef"
-                            },
-                            "output_after_return": {
-                                "state": "non_null",
-                                "classification": "heap_or_unknown",
-                                "process_local_token": "ptr-0123456789abcdef"
-                            },
-                            "same_identity_as_previous_output": true
-                        },
-                        "effect_ref_at_entry": {
-                            "state": "non_null",
-                            "classification": "heap_or_unknown",
-                            "process_local_token": "ptr-fedcba9876543210",
-                            "same_identity_as_global_setup_entry": true
-                        },
-                        "appl_id_at_entry": {
-                            "printable_code": "FXTC",
-                            "hex_u32": "0x46585443",
-                            "same_value_as_global_setup_entry": true,
-                            "host_setting_source": "worker_effect_bootstrap"
-                        },
-                        "version_at_entry": {
-                            "raw_packed_u32": "0x001d000d",
-                            "major": 13,
-                            "minor": 29,
-                            "same_value_as_global_setup_entry": true,
-                            "host_setting_source": "worker_effect_bootstrap"
-                        }
+                        "basename": "C:\\private\\leak.dll",
+                        "canonical_path_token": "b".repeat(64),
+                        "path_class": "external",
+                        "reason": "outside_allowed_roots_or_unapproved_policy"
                     }
                 ],
-                "truncated": false
+                "rejections_truncated": false
             }
-        });
-        let mut diagnostics = json!({});
-        propagate_selector_invocations(&mut diagnostics, &report);
-        let records = diagnostics["selector_invocations"]["records"]
-            .as_array()
-            .unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0]["invocation_completed_normally"], true);
-        assert_eq!(records[0]["raw_return_code"], 512);
-        assert_eq!(records[0]["seh_caught"], false);
-        assert_eq!(records[1]["invocation_completed_normally"], false);
-        assert_eq!(records[1]["raw_return_code"], Value::Null);
-        assert_eq!(records[1]["seh_caught"], true);
-        assert_eq!(records[1]["seh_code"], 0xC0000005u32);
-        assert_eq!(records[1]["fault_module_class"], "plugin");
-        assert_eq!(records[1]["plugin_rva"], "0x0000000000001234");
-        assert_eq!(records[1]["access_type"], "read");
-        assert_eq!(records[1]["fault_address"]["classification"], "low");
-        assert_eq!(records[1]["registers"]["rdx"]["classification"], "null");
-        assert_eq!(
-            records[1]["registers"]["rsp"]["token"],
-            "ptr-0123456789abcdef"
-        );
-        assert_eq!(
-            records[1]["stack_pointer_values"].as_array().unwrap().len(),
-            6
-        );
-        assert_eq!(records[0]["unwind_stop"], Value::Null);
-        assert_eq!(records[0]["unwind_frames"], Value::Null);
-        assert_eq!(records[1]["unwind_stop"], "end_of_chain");
-        assert_eq!(records[1]["unwind_frames"].as_array().unwrap().len(), 2);
-        assert_eq!(records[1]["unwind_frames"][0]["from_return_slot"], false);
-        assert_eq!(
-            records[1]["unwind_frames"][1]["site"]["relative_offset"],
-            "0x0000000000005678"
-        );
-        assert_eq!(
-            records[0]["global_data_handoff"]["output_after_return"]["process_local_token"],
-            "ptr-0123456789abcdef"
-        );
-        assert_eq!(
-            records[1]["global_data_handoff"]["same_identity_as_previous_output"],
-            true
-        );
-        assert_eq!(records[0]["effect_ref_at_entry"]["state"], "null");
-        assert_eq!(
-            records[1]["effect_ref_at_entry"]["process_local_token"],
-            "ptr-fedcba9876543210"
-        );
-        assert_eq!(
-            records[1]["effect_ref_at_entry"]["same_identity_as_global_setup_entry"],
-            true
-        );
-        assert_eq!(records[0]["appl_id_at_entry"]["printable_code"], "FXTC");
-        assert_eq!(records[1]["appl_id_at_entry"]["hex_u32"], "0x46585443");
-        assert_eq!(
-            records[1]["appl_id_at_entry"]["same_value_as_global_setup_entry"],
-            true
-        );
-        assert_eq!(
-            records[0]["version_at_entry"]["raw_packed_u32"],
-            "0x001d000d"
-        );
-        assert_eq!(records[1]["version_at_entry"]["major"], 13);
-        assert_eq!(records[1]["version_at_entry"]["minor"], 29);
-        assert_eq!(
-            records[1]["version_at_entry"]["same_value_as_global_setup_entry"],
-            true
-        );
-        assert!(
-            !records[1]["global_data_handoff"]
-                .to_string()
-                .contains("raw_pointer")
-        );
+        }),
+        Some("params_setup"),
+    )
+    .unwrap();
 
-        let fault_record = report["selector_invocations"]["records"][1].clone();
-        let mut mutations = Vec::new();
-        let mut unknown_stop = fault_record.clone();
-        unknown_stop["unwind_stop"] = json!("worker_supplied_unknown");
-        mutations.push(unknown_stop);
-        let mut too_many_frames = fault_record.clone();
-        too_many_frames["unwind_frames"] =
-            Value::Array(vec![fault_record["unwind_frames"][0].clone(); 13]);
-        mutations.push(too_many_frames);
-        let mut extra_frame_key = fault_record.clone();
-        extra_frame_key["unwind_frames"][0]["worker_private"] = json!(true);
-        mutations.push(extra_frame_key);
-        let mut extra_site_key = fault_record.clone();
-        extra_site_key["unwind_frames"][0]["site"]["worker_private"] = json!("x".repeat(4096));
-        mutations.push(extra_site_key);
-        let mut unwind_without_seh = fault_record;
-        unwind_without_seh["seh_caught"] = json!(false);
-        unwind_without_seh["seh_code"] = Value::Null;
-        unwind_without_seh["fault_module_class"] = Value::Null;
-        unwind_without_seh["fault_module"] = Value::Null;
-        unwind_without_seh["plugin_rva"] = Value::Null;
-        mutations.push(unwind_without_seh);
+    assert_eq!(summary["selector_phase"], "params_setup");
+    assert_eq!(summary["rejections"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["rejections"][0]["basename"], "outside.dll");
+    assert_eq!(
+        summary["rejections"][0]["canonical_path_token"],
+        "a".repeat(64)
+    );
+    assert!(!summary.to_string().contains("private"));
+}
 
-        for mutated in mutations {
-            let mutated_report = json!({
-                "selector_invocations": {
-                    "maximum_records": 64,
-                    "records": [mutated],
-                    "truncated": false
-                }
-            });
-            let mut mutated_diagnostics = json!({});
-            propagate_selector_invocations(&mut mutated_diagnostics, &mutated_report);
-            assert!(
-                mutated_diagnostics["selector_invocations"]["records"]
-                    .as_array()
-                    .unwrap()
-                    .is_empty(),
-                "malformed unwind record must be dropped: {mutated_report}"
-            );
-            assert_eq!(
-                mutated_diagnostics["selector_invocations"]["truncated"],
-                true
-            );
-        }
-    }
-
-    #[test]
-    fn selector_invocation_rejects_unbounded_global_data_handoff_fields() {
-        let report = json!({
-            "selector_invocations": {
-                "maximum_records": 64,
-                "records": [{
-                    "selector": "GLOBAL_SETUP",
+#[test]
+#[cfg(windows)]
+fn selector_invocation_diagnostics_distinguish_normal_return_from_seh() {
+    let report = json!({
+        "selector_invocations": {
+            "maximum_records": 64,
+            "records": [
+                {
+                    "selector": "PARAMS_SETUP",
                     "invocation_completed_normally": true,
-                    "raw_return_code": 0,
-                    "host_result_code": 0,
+                    "raw_return_code": 512,
+                    "host_result_code": 512,
                     "seh_caught": false,
                     "seh_code": null,
                     "fault_module_class": null,
@@ -1858,20 +1641,25 @@ mod tests {
                     "fault_address": null,
                     "registers": null,
                     "stack_pointer_values": null,
+                    "unwind_stop": null,
+                    "unwind_frames": null,
                     "global_data_handoff": {
-                        "input_at_entry": null,
+                        "input_at_entry": {
+                            "state": "null",
+                            "classification": "null",
+                            "process_local_token": null
+                        },
                         "output_after_return": {
                             "state": "non_null",
                             "classification": "heap_or_unknown",
-                            "process_local_token": "ptr-0123456789abcdef",
-                            "raw_pointer": "0x1234"
+                            "process_local_token": "ptr-0123456789abcdef"
                         },
                         "same_identity_as_previous_output": null
                     },
                     "effect_ref_at_entry": {
-                        "state": "non_null",
-                        "classification": "heap_or_unknown",
-                        "process_local_token": "ptr-0123456789abcdef",
+                        "state": "null",
+                        "classification": "null",
+                        "process_local_token": null,
                         "same_identity_as_global_setup_entry": null
                     },
                     "appl_id_at_entry": {
@@ -1887,1987 +1675,2310 @@ mod tests {
                         "same_value_as_global_setup_entry": null,
                         "host_setting_source": "worker_effect_bootstrap"
                     }
-                }],
-                "truncated": false
-            }
-        });
-        let mut diagnostics = json!({});
-        propagate_selector_invocations(&mut diagnostics, &report);
-        assert!(
-            diagnostics["selector_invocations"]["records"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(diagnostics["selector_invocations"]["truncated"], true);
-    }
-
-    #[test]
-    fn selector_invocation_rejects_unbounded_effect_ref_fields() {
-        let report = json!({
-            "selector_invocations": {
-                "maximum_records": 64,
-                "records": [{
-                    "selector": "GLOBAL_SETUP",
-                    "invocation_completed_normally": true,
-                    "raw_return_code": 0,
-                    "host_result_code": 0,
-                    "seh_caught": false,
-                    "seh_code": null,
-                    "fault_module_class": null,
-                    "fault_module": null,
-                    "plugin_rva": null,
-                    "access_type": null,
-                    "fault_address": null,
-                    "registers": null,
-                    "stack_pointer_values": null,
+                },
+                {
+                    "selector": "PARAMS_SETUP",
+                    "invocation_completed_normally": false,
+                    "raw_return_code": null,
+                    "host_result_code": 512,
+                    "seh_caught": true,
+                    "seh_code": 0xC0000005u32,
+                    "fault_module_class": "plugin",
+                    "fault_module": "synthetic.aex",
+                    "plugin_rva": "0x0000000000001234",
+                    "access_type": "read",
+                    "fault_address": {
+                        "classification": "low",
+                        "module": null,
+                        "relative_offset": null,
+                        "token": null
+                    },
+                    "registers": {
+                        "rcx": {
+                            "classification": "low",
+                            "module": null,
+                            "relative_offset": null,
+                            "token": null
+                        },
+                        "rdx": {
+                            "classification": "null",
+                            "module": null,
+                            "relative_offset": null,
+                            "token": null
+                        },
+                        "r8": {
+                            "classification": "plugin",
+                            "module": "synthetic.aex",
+                            "relative_offset": "0x0000000000002000",
+                            "token": null
+                        },
+                        "r9": {
+                            "classification": "module",
+                            "module": "kernel32.dll",
+                            "relative_offset": "0x0000000000003000",
+                            "token": null
+                        },
+                        "rsp": {
+                            "classification": "heap_or_unknown",
+                            "module": null,
+                            "relative_offset": null,
+                            "token": "ptr-0123456789abcdef"
+                        }
+                    },
+                    "stack_pointer_values": [
+                        {"offset_bytes": 0, "value": null},
+                        {"offset_bytes": 8, "value": null},
+                        {"offset_bytes": 16, "value": null},
+                        {"offset_bytes": 24, "value": null},
+                        {"offset_bytes": 32, "value": null},
+                        {"offset_bytes": 40, "value": null}
+                    ],
+                    "unwind_stop": "end_of_chain",
+                    "unwind_frames": [
+                        {
+                            "from_return_slot": false,
+                            "site": {
+                                "classification": "plugin",
+                                "module": "synthetic.aex",
+                                "relative_offset": "0x0000000000001234",
+                                "token": null
+                            }
+                        },
+                        {
+                            "from_return_slot": true,
+                            "site": {
+                                "classification": "module",
+                                "module": "kernel32.dll",
+                                "relative_offset": "0x0000000000005678",
+                                "token": null
+                            }
+                        }
+                    ],
                     "global_data_handoff": {
-                        "input_at_entry": null,
-                        "output_after_return": null,
-                        "same_identity_as_previous_output": null
+                        "input_at_entry": {
+                            "state": "non_null",
+                            "classification": "heap_or_unknown",
+                            "process_local_token": "ptr-0123456789abcdef"
+                        },
+                        "output_after_return": {
+                            "state": "non_null",
+                            "classification": "heap_or_unknown",
+                            "process_local_token": "ptr-0123456789abcdef"
+                        },
+                        "same_identity_as_previous_output": true
                     },
                     "effect_ref_at_entry": {
                         "state": "non_null",
                         "classification": "heap_or_unknown",
-                        "process_local_token": "ptr-0123456789abcdef",
-                        "same_identity_as_global_setup_entry": null,
-                        "raw_pointer": "0x1234"
+                        "process_local_token": "ptr-fedcba9876543210",
+                        "same_identity_as_global_setup_entry": true
                     },
                     "appl_id_at_entry": {
                         "printable_code": "FXTC",
                         "hex_u32": "0x46585443",
-                        "same_value_as_global_setup_entry": null,
+                        "same_value_as_global_setup_entry": true,
                         "host_setting_source": "worker_effect_bootstrap"
                     },
                     "version_at_entry": {
                         "raw_packed_u32": "0x001d000d",
                         "major": 13,
                         "minor": 29,
-                        "same_value_as_global_setup_entry": null,
+                        "same_value_as_global_setup_entry": true,
                         "host_setting_source": "worker_effect_bootstrap"
                     }
-                }],
+                }
+            ],
+            "truncated": false
+        }
+    });
+    let mut diagnostics = json!({});
+    propagate_selector_invocations(&mut diagnostics, &report);
+    let records = diagnostics["selector_invocations"]["records"]
+        .as_array()
+        .unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["invocation_completed_normally"], true);
+    assert_eq!(records[0]["raw_return_code"], 512);
+    assert_eq!(records[0]["seh_caught"], false);
+    assert_eq!(records[1]["invocation_completed_normally"], false);
+    assert_eq!(records[1]["raw_return_code"], Value::Null);
+    assert_eq!(records[1]["seh_caught"], true);
+    assert_eq!(records[1]["seh_code"], 0xC0000005u32);
+    assert_eq!(records[1]["fault_module_class"], "plugin");
+    assert_eq!(records[1]["plugin_rva"], "0x0000000000001234");
+    assert_eq!(records[1]["access_type"], "read");
+    assert_eq!(records[1]["fault_address"]["classification"], "low");
+    assert_eq!(records[1]["registers"]["rdx"]["classification"], "null");
+    assert_eq!(
+        records[1]["registers"]["rsp"]["token"],
+        "ptr-0123456789abcdef"
+    );
+    assert_eq!(
+        records[1]["stack_pointer_values"].as_array().unwrap().len(),
+        6
+    );
+    assert_eq!(records[0]["unwind_stop"], Value::Null);
+    assert_eq!(records[0]["unwind_frames"], Value::Null);
+    assert_eq!(records[1]["unwind_stop"], "end_of_chain");
+    assert_eq!(records[1]["unwind_frames"].as_array().unwrap().len(), 2);
+    assert_eq!(records[1]["unwind_frames"][0]["from_return_slot"], false);
+    assert_eq!(
+        records[1]["unwind_frames"][1]["site"]["relative_offset"],
+        "0x0000000000005678"
+    );
+    assert_eq!(
+        records[0]["global_data_handoff"]["output_after_return"]["process_local_token"],
+        "ptr-0123456789abcdef"
+    );
+    assert_eq!(
+        records[1]["global_data_handoff"]["same_identity_as_previous_output"],
+        true
+    );
+    assert_eq!(records[0]["effect_ref_at_entry"]["state"], "null");
+    assert_eq!(
+        records[1]["effect_ref_at_entry"]["process_local_token"],
+        "ptr-fedcba9876543210"
+    );
+    assert_eq!(
+        records[1]["effect_ref_at_entry"]["same_identity_as_global_setup_entry"],
+        true
+    );
+    assert_eq!(records[0]["appl_id_at_entry"]["printable_code"], "FXTC");
+    assert_eq!(records[1]["appl_id_at_entry"]["hex_u32"], "0x46585443");
+    assert_eq!(
+        records[1]["appl_id_at_entry"]["same_value_as_global_setup_entry"],
+        true
+    );
+    assert_eq!(
+        records[0]["version_at_entry"]["raw_packed_u32"],
+        "0x001d000d"
+    );
+    assert_eq!(records[1]["version_at_entry"]["major"], 13);
+    assert_eq!(records[1]["version_at_entry"]["minor"], 29);
+    assert_eq!(
+        records[1]["version_at_entry"]["same_value_as_global_setup_entry"],
+        true
+    );
+    assert!(
+        !records[1]["global_data_handoff"]
+            .to_string()
+            .contains("raw_pointer")
+    );
+
+    let fault_record = report["selector_invocations"]["records"][1].clone();
+    let mut mutations = Vec::new();
+    let mut unknown_stop = fault_record.clone();
+    unknown_stop["unwind_stop"] = json!("worker_supplied_unknown");
+    mutations.push(unknown_stop);
+    let mut too_many_frames = fault_record.clone();
+    too_many_frames["unwind_frames"] =
+        Value::Array(vec![fault_record["unwind_frames"][0].clone(); 13]);
+    mutations.push(too_many_frames);
+    let mut extra_frame_key = fault_record.clone();
+    extra_frame_key["unwind_frames"][0]["worker_private"] = json!(true);
+    mutations.push(extra_frame_key);
+    let mut extra_site_key = fault_record.clone();
+    extra_site_key["unwind_frames"][0]["site"]["worker_private"] = json!("x".repeat(4096));
+    mutations.push(extra_site_key);
+    let mut unwind_without_seh = fault_record;
+    unwind_without_seh["seh_caught"] = json!(false);
+    unwind_without_seh["seh_code"] = Value::Null;
+    unwind_without_seh["fault_module_class"] = Value::Null;
+    unwind_without_seh["fault_module"] = Value::Null;
+    unwind_without_seh["plugin_rva"] = Value::Null;
+    mutations.push(unwind_without_seh);
+
+    for mutated in mutations {
+        let mutated_report = json!({
+            "selector_invocations": {
+                "maximum_records": 64,
+                "records": [mutated],
                 "truncated": false
             }
         });
-        let mut diagnostics = json!({});
-        propagate_selector_invocations(&mut diagnostics, &report);
+        let mut mutated_diagnostics = json!({});
+        propagate_selector_invocations(&mut mutated_diagnostics, &mutated_report);
         assert!(
-            diagnostics["selector_invocations"]["records"]
+            mutated_diagnostics["selector_invocations"]["records"]
                 .as_array()
                 .unwrap()
-                .is_empty()
+                .is_empty(),
+            "malformed unwind record must be dropped: {mutated_report}"
         );
-        assert_eq!(diagnostics["selector_invocations"]["truncated"], true);
-        assert!(
-            !diagnostics["selector_invocations"]
-                .to_string()
-                .contains("0x1234")
+        assert_eq!(
+            mutated_diagnostics["selector_invocations"]["truncated"],
+            true
         );
     }
+}
 
-    #[test]
-    fn application_id_entry_requires_canonical_code_and_source() {
-        let expected = json!({
-            "printable_code": "FXTC",
+#[test]
+#[cfg(windows)]
+fn selector_invocation_rejects_unbounded_global_data_handoff_fields() {
+    let report = json!({
+        "selector_invocations": {
+            "maximum_records": 64,
+            "records": [{
+                "selector": "GLOBAL_SETUP",
+                "invocation_completed_normally": true,
+                "raw_return_code": 0,
+                "host_result_code": 0,
+                "seh_caught": false,
+                "seh_code": null,
+                "fault_module_class": null,
+                "fault_module": null,
+                "plugin_rva": null,
+                "access_type": null,
+                "fault_address": null,
+                "registers": null,
+                "stack_pointer_values": null,
+                "global_data_handoff": {
+                    "input_at_entry": null,
+                    "output_after_return": {
+                        "state": "non_null",
+                        "classification": "heap_or_unknown",
+                        "process_local_token": "ptr-0123456789abcdef",
+                        "raw_pointer": "0x1234"
+                    },
+                    "same_identity_as_previous_output": null
+                },
+                "effect_ref_at_entry": {
+                    "state": "non_null",
+                    "classification": "heap_or_unknown",
+                    "process_local_token": "ptr-0123456789abcdef",
+                    "same_identity_as_global_setup_entry": null
+                },
+                "appl_id_at_entry": {
+                    "printable_code": "FXTC",
+                    "hex_u32": "0x46585443",
+                    "same_value_as_global_setup_entry": null,
+                    "host_setting_source": "worker_effect_bootstrap"
+                },
+                "version_at_entry": {
+                    "raw_packed_u32": "0x001d000d",
+                    "major": 13,
+                    "minor": 29,
+                    "same_value_as_global_setup_entry": null,
+                    "host_setting_source": "worker_effect_bootstrap"
+                }
+            }],
+            "truncated": false
+        }
+    });
+    let mut diagnostics = json!({});
+    propagate_selector_invocations(&mut diagnostics, &report);
+    assert!(
+        diagnostics["selector_invocations"]["records"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(diagnostics["selector_invocations"]["truncated"], true);
+}
+
+#[test]
+#[cfg(windows)]
+fn selector_invocation_rejects_unbounded_effect_ref_fields() {
+    let report = json!({
+        "selector_invocations": {
+            "maximum_records": 64,
+            "records": [{
+                "selector": "GLOBAL_SETUP",
+                "invocation_completed_normally": true,
+                "raw_return_code": 0,
+                "host_result_code": 0,
+                "seh_caught": false,
+                "seh_code": null,
+                "fault_module_class": null,
+                "fault_module": null,
+                "plugin_rva": null,
+                "access_type": null,
+                "fault_address": null,
+                "registers": null,
+                "stack_pointer_values": null,
+                "global_data_handoff": {
+                    "input_at_entry": null,
+                    "output_after_return": null,
+                    "same_identity_as_previous_output": null
+                },
+                "effect_ref_at_entry": {
+                    "state": "non_null",
+                    "classification": "heap_or_unknown",
+                    "process_local_token": "ptr-0123456789abcdef",
+                    "same_identity_as_global_setup_entry": null,
+                    "raw_pointer": "0x1234"
+                },
+                "appl_id_at_entry": {
+                    "printable_code": "FXTC",
+                    "hex_u32": "0x46585443",
+                    "same_value_as_global_setup_entry": null,
+                    "host_setting_source": "worker_effect_bootstrap"
+                },
+                "version_at_entry": {
+                    "raw_packed_u32": "0x001d000d",
+                    "major": 13,
+                    "minor": 29,
+                    "same_value_as_global_setup_entry": null,
+                    "host_setting_source": "worker_effect_bootstrap"
+                }
+            }],
+            "truncated": false
+        }
+    });
+    let mut diagnostics = json!({});
+    propagate_selector_invocations(&mut diagnostics, &report);
+    assert!(
+        diagnostics["selector_invocations"]["records"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(diagnostics["selector_invocations"]["truncated"], true);
+    assert!(
+        !diagnostics["selector_invocations"]
+            .to_string()
+            .contains("0x1234")
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn application_id_entry_requires_canonical_code_and_source() {
+    let expected = json!({
+        "printable_code": "FXTC",
+        "hex_u32": "0x46585443",
+        "same_value_as_global_setup_entry": true,
+        "host_setting_source": "worker_effect_bootstrap"
+    });
+    let escaped = json!({
+        "printable_code": "\\x00\\x01\\x02\\x03",
+        "hex_u32": "0x00010203",
+        "same_value_as_global_setup_entry": false,
+        "host_setting_source": "worker_effect_bootstrap"
+    });
+    assert_eq!(safe_application_id_entry(&expected), Some(expected));
+    assert_eq!(safe_application_id_entry(&escaped), Some(escaped));
+    assert!(
+        safe_application_id_entry(&json!({
+            "printable_code": "PrMr",
             "hex_u32": "0x46585443",
-            "same_value_as_global_setup_entry": true,
-            "host_setting_source": "worker_effect_bootstrap"
-        });
-        let escaped = json!({
-            "printable_code": "\\x00\\x01\\x02\\x03",
-            "hex_u32": "0x00010203",
             "same_value_as_global_setup_entry": false,
             "host_setting_source": "worker_effect_bootstrap"
-        });
-        assert_eq!(safe_application_id_entry(&expected), Some(expected));
-        assert_eq!(safe_application_id_entry(&escaped), Some(escaped));
-        assert!(
-            safe_application_id_entry(&json!({
-                "printable_code": "PrMr",
-                "hex_u32": "0x46585443",
-                "same_value_as_global_setup_entry": false,
-                "host_setting_source": "worker_effect_bootstrap"
-            }))
-            .is_none()
-        );
-        assert!(
-            safe_application_id_entry(&json!({
-                "printable_code": "FXTC",
-                "hex_u32": "0x46585443",
-                "same_value_as_global_setup_entry": false,
-                "host_setting_source": "unknown"
-            }))
-            .is_none()
-        );
-    }
+        }))
+        .is_none()
+    );
+    assert!(
+        safe_application_id_entry(&json!({
+            "printable_code": "FXTC",
+            "hex_u32": "0x46585443",
+            "same_value_as_global_setup_entry": false,
+            "host_setting_source": "unknown"
+        }))
+        .is_none()
+    );
+}
 
-    #[test]
-    fn spec_version_entry_requires_consistent_packing_and_source() {
-        let expected = json!({
+#[test]
+#[cfg(windows)]
+fn spec_version_entry_requires_consistent_packing_and_source() {
+    let expected = json!({
+        "raw_packed_u32": "0x001d000d",
+        "major": 13,
+        "minor": 29,
+        "same_value_as_global_setup_entry": true,
+        "host_setting_source": "worker_effect_bootstrap"
+    });
+    let changed = json!({
+        "raw_packed_u32": "0x001c000d",
+        "major": 13,
+        "minor": 28,
+        "same_value_as_global_setup_entry": false,
+        "host_setting_source": "worker_effect_bootstrap"
+    });
+    let zero = json!({
+        "raw_packed_u32": "0x00000000",
+        "major": 0,
+        "minor": 0,
+        "same_value_as_global_setup_entry": true,
+        "host_setting_source": "worker_effect_bootstrap"
+    });
+    let invalid = json!({
+        "raw_packed_u32": "0xffffffff",
+        "major": -1,
+        "minor": -1,
+        "same_value_as_global_setup_entry": false,
+        "host_setting_source": "worker_effect_bootstrap"
+    });
+    assert_eq!(safe_spec_version_entry(&expected), Some(expected));
+    assert_eq!(safe_spec_version_entry(&changed), Some(changed));
+    assert_eq!(safe_spec_version_entry(&zero), Some(zero));
+    assert_eq!(safe_spec_version_entry(&invalid), Some(invalid));
+    assert!(
+        safe_spec_version_entry(&json!({
             "raw_packed_u32": "0x001d000d",
-            "major": 13,
-            "minor": 29,
-            "same_value_as_global_setup_entry": true,
-            "host_setting_source": "worker_effect_bootstrap"
-        });
-        let changed = json!({
-            "raw_packed_u32": "0x001c000d",
             "major": 13,
             "minor": 28,
             "same_value_as_global_setup_entry": false,
             "host_setting_source": "worker_effect_bootstrap"
-        });
-        let zero = json!({
-            "raw_packed_u32": "0x00000000",
-            "major": 0,
-            "minor": 0,
+        }))
+        .is_none()
+    );
+    assert!(
+        safe_spec_version_entry(&json!({
+            "raw_packed_u32": "0x001d000d",
+            "major": 13,
+            "minor": 29,
             "same_value_as_global_setup_entry": true,
-            "host_setting_source": "worker_effect_bootstrap"
-        });
-        let invalid = json!({
-            "raw_packed_u32": "0xffffffff",
-            "major": -1,
-            "minor": -1,
-            "same_value_as_global_setup_entry": false,
-            "host_setting_source": "worker_effect_bootstrap"
-        });
-        assert_eq!(safe_spec_version_entry(&expected), Some(expected));
-        assert_eq!(safe_spec_version_entry(&changed), Some(changed));
-        assert_eq!(safe_spec_version_entry(&zero), Some(zero));
-        assert_eq!(safe_spec_version_entry(&invalid), Some(invalid));
-        assert!(
-            safe_spec_version_entry(&json!({
-                "raw_packed_u32": "0x001d000d",
-                "major": 13,
-                "minor": 28,
-                "same_value_as_global_setup_entry": false,
-                "host_setting_source": "worker_effect_bootstrap"
-            }))
-            .is_none()
-        );
-        assert!(
-            safe_spec_version_entry(&json!({
-                "raw_packed_u32": "0x001d000d",
-                "major": 13,
-                "minor": 29,
-                "same_value_as_global_setup_entry": true,
-                "host_setting_source": "unknown"
-            }))
-            .is_none()
-        );
-    }
+            "host_setting_source": "unknown"
+        }))
+        .is_none()
+    );
+}
 
-    #[test]
-    fn host_callback_timeline_normalizes_outcomes_and_rejects_arguments() {
-        let report = json!({
-            "host_callback_timeline": {
-                "maximum_records": 128,
-                "records": [
-                    {
-                        "sequence": 0,
-                        "callback": "inter.extended_alloc",
-                        "selector": "GLOBAL_SETUP",
-                        "call_count": 1,
-                        "status": "success",
-                        "return_code": 0,
-                        "classification": "implemented"
-                    },
-                    {
-                        "sequence": 1,
-                        "callback": "synthetic.unsupported",
-                        "selector": "GLOBAL_SETUP",
-                        "call_count": 2,
-                        "status": "failure",
-                        "return_code": 4,
-                        "classification": "unsupported"
-                    },
-                    {
-                        "sequence": 3,
-                        "callback": "inter.extended_lookup",
-                        "selector": "PARAMS_SETUP",
-                        "call_count": 3,
-                        "status": "failure",
-                        "return_code": 4,
-                        "classification": "fallback"
-                    },
-                    {
-                        "sequence": 6,
-                        "callback": "synthetic.raw",
-                        "selector": "PARAMS_SETUP",
-                        "call_count": 1,
-                        "status": "success",
-                        "return_code": 0,
-                        "classification": "implemented",
-                        "arguments": ["0x1234"]
-                    }
-                ],
-                "truncated": false
-            }
-        });
-        let mut diagnostics = json!({});
-        propagate_host_callback_timeline(&mut diagnostics, &report);
-        let records = diagnostics["host_callback_timeline"]["records"]
-            .as_array()
-            .unwrap();
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0]["callback"], "inter.extended_alloc");
-        assert_eq!(records[0]["status"], "success");
-        assert_eq!(records[1]["classification"], "unsupported");
-        assert_eq!(records[2]["classification"], "fallback");
-        assert_eq!(records[2]["call_count"], 3);
-        assert_eq!(diagnostics["host_callback_timeline"]["truncated"], true);
-        assert!(
-            !diagnostics["host_callback_timeline"]
-                .to_string()
-                .contains("0x1234")
-        );
-    }
+#[test]
+#[cfg(windows)]
+fn host_callback_timeline_normalizes_outcomes_and_rejects_arguments() {
+    let report = json!({
+        "host_callback_timeline": {
+            "maximum_records": 128,
+            "records": [
+                {
+                    "sequence": 0,
+                    "callback": "inter.extended_alloc",
+                    "selector": "GLOBAL_SETUP",
+                    "call_count": 1,
+                    "status": "success",
+                    "return_code": 0,
+                    "classification": "implemented"
+                },
+                {
+                    "sequence": 1,
+                    "callback": "synthetic.unsupported",
+                    "selector": "GLOBAL_SETUP",
+                    "call_count": 2,
+                    "status": "failure",
+                    "return_code": 4,
+                    "classification": "unsupported"
+                },
+                {
+                    "sequence": 3,
+                    "callback": "inter.extended_lookup",
+                    "selector": "PARAMS_SETUP",
+                    "call_count": 3,
+                    "status": "failure",
+                    "return_code": 4,
+                    "classification": "fallback"
+                },
+                {
+                    "sequence": 6,
+                    "callback": "synthetic.raw",
+                    "selector": "PARAMS_SETUP",
+                    "call_count": 1,
+                    "status": "success",
+                    "return_code": 0,
+                    "classification": "implemented",
+                    "arguments": ["0x1234"]
+                }
+            ],
+            "truncated": false
+        }
+    });
+    let mut diagnostics = json!({});
+    propagate_host_callback_timeline(&mut diagnostics, &report);
+    let records = diagnostics["host_callback_timeline"]["records"]
+        .as_array()
+        .unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["callback"], "inter.extended_alloc");
+    assert_eq!(records[0]["status"], "success");
+    assert_eq!(records[1]["classification"], "unsupported");
+    assert_eq!(records[2]["classification"], "fallback");
+    assert_eq!(records[2]["call_count"], 3);
+    assert_eq!(diagnostics["host_callback_timeline"]["truncated"], true);
+    assert!(
+        !diagnostics["host_callback_timeline"]
+            .to_string()
+            .contains("0x1234")
+    );
+}
 
-    #[test]
-    fn compute_cache_timeline_is_exact_key_bounded_and_fail_closed() {
-        let report = json!({
-            "compute_cache_timeline": {
-                "maximum_records": 128,
-                "records": [
-                    {
-                        "sequence": 0,
-                        "selector": "GLOBAL_SETUP",
-                        "slot": 0,
-                        "operation": "class_register",
-                        "outcome": "registered",
-                        "return_code": 0,
-                        "call_count": 1
-                    },
-                    {
-                        "sequence": 1,
-                        "selector": "RENDER",
-                        "slot": 2,
-                        "operation": "compute_if_needed_and_checkout",
-                        "outcome": "compute_pending",
-                        "return_code": 22,
-                        "call_count": 3
-                    },
-                    {
-                        "sequence": 2,
-                        "selector": "GLOBAL_SETDOWN",
-                        "slot": 1,
-                        "operation": "class_unregister",
-                        "outcome": "unregistered",
-                        "return_code": 0,
-                        "call_count": 1
-                    }
-                ],
-                "truncated": false
-            }
-        });
-        let mut diagnostics = json!({});
-        propagate_compute_cache_timeline(&mut diagnostics, &report);
-        assert_eq!(
-            diagnostics["compute_cache_timeline"]["maximum_records"],
-            128
-        );
-        assert_eq!(
-            diagnostics["compute_cache_timeline"]["records"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(
-            diagnostics["compute_cache_timeline"]["records"][1]["return_code"],
-            22
-        );
-        assert_eq!(
-            diagnostics["compute_cache_timeline"]["records"][1]["call_count"],
-            3
-        );
-        assert_eq!(diagnostics["compute_cache_timeline"]["truncated"], false);
-
-        let near_miss = json!({
-            "compute_cache_timeline_extra": {
-                "maximum_records": 128,
-                "records": [],
-                "truncated": false
-            }
-        });
-        let mut near_miss_diagnostics = json!({});
-        propagate_compute_cache_timeline(&mut near_miss_diagnostics, &near_miss);
-        assert!(
-            near_miss_diagnostics
-                .get("compute_cache_timeline")
-                .is_none()
-        );
-
-        let malformed = json!({
-            "compute_cache_timeline": {
-                "maximum_records": 128,
-                "records": [{
+#[test]
+#[cfg(windows)]
+fn compute_cache_timeline_is_exact_key_bounded_and_fail_closed() {
+    let report = json!({
+        "compute_cache_timeline": {
+            "maximum_records": 128,
+            "records": [
+                {
                     "sequence": 0,
                     "selector": "GLOBAL_SETUP",
-                    "slot": 6,
+                    "slot": 0,
                     "operation": "class_register",
                     "outcome": "registered",
                     "return_code": 0,
-                    "call_count": 1,
-                    "address": "0x1234"
-                }],
-                "truncated": false
-            }
-        });
-        let mut malformed_diagnostics = json!({});
-        propagate_compute_cache_timeline(&mut malformed_diagnostics, &malformed);
-        assert_eq!(
-            malformed_diagnostics["compute_cache_timeline"]["records"],
-            json!([])
-        );
-        assert_eq!(
-            malformed_diagnostics["compute_cache_timeline"]["truncated"],
-            true
-        );
-        assert!(
-            !malformed_diagnostics["compute_cache_timeline"]
-                .to_string()
-                .contains("0x1234")
-        );
-
-        let wrong_container = json!({
-            "compute_cache_timeline": {
-                "maximum_records": 128,
-                "records": [],
-                "truncated": false,
-                "absolute_path": "C:\\private\\effect.aex"
-            }
-        });
-        let mut wrong_container_diagnostics = json!({});
-        propagate_compute_cache_timeline(&mut wrong_container_diagnostics, &wrong_container);
-        assert_eq!(
-            wrong_container_diagnostics["compute_cache_timeline"]["records"],
-            json!([])
-        );
-        assert_eq!(
-            wrong_container_diagnostics["compute_cache_timeline"]["truncated"],
-            true
-        );
-        assert!(
-            !wrong_container_diagnostics["compute_cache_timeline"]
-                .to_string()
-                .contains("private")
-        );
-
-        let overflow_records = (0..=MAX_COMPUTE_CACHE_TIMELINE_RECORDS)
-            .map(|sequence| {
-                json!({
-                    "sequence": sequence,
+                    "call_count": 1
+                },
+                {
+                    "sequence": 1,
                     "selector": "RENDER",
-                    "slot": 3,
-                    "operation": "checkout_cached",
-                    "outcome": "cache_hit",
+                    "slot": 2,
+                    "operation": "compute_if_needed_and_checkout",
+                    "outcome": "compute_pending",
+                    "return_code": 22,
+                    "call_count": 3
+                },
+                {
+                    "sequence": 2,
+                    "selector": "GLOBAL_SETDOWN",
+                    "slot": 1,
+                    "operation": "class_unregister",
+                    "outcome": "unregistered",
                     "return_code": 0,
                     "call_count": 1
-                })
-            })
-            .collect::<Vec<_>>();
-        let overflow = json!({
-            "compute_cache_timeline": {
-                "maximum_records": 128,
-                "records": overflow_records,
-                "truncated": false
-            }
-        });
-        let mut overflow_diagnostics = json!({});
-        propagate_compute_cache_timeline(&mut overflow_diagnostics, &overflow);
-        assert_eq!(
-            overflow_diagnostics["compute_cache_timeline"]["records"]
-                .as_array()
-                .unwrap()
-                .len(),
-            MAX_COMPUTE_CACHE_TIMELINE_RECORDS
-        );
-        assert_eq!(
-            overflow_diagnostics["compute_cache_timeline"]["truncated"],
-            true
-        );
-    }
-
-    #[test]
-    fn extended_lookup_timeline_validates_states_ids_and_bounds_fail_closed() {
-        let report = json!({
-            "extended_lookup_timeline": {
-                "maximum_records": 128,
-                "records": [
-                    {
-                        "sequence": 0,
-                        "selector": "GLOBAL_SETUP",
-                        "call_count": 2,
-                        "opaque_table_classification": "null",
-                        "raw_private_table_state": "valid",
-                        "windows_resource_source_state": "valid",
-                        "lookup_id": 7,
-                        "outcome": "found",
-                        "return_code": 0
-                    },
-                    {
-                        "sequence": 2,
-                        "selector": "PARAMS_SETUP",
-                        "call_count": 1,
-                        "opaque_table_classification": "active_effect_module",
-                        "raw_private_table_state": "valid",
-                        "windows_resource_source_state": "none",
-                        "lookup_id": 8,
-                        "outcome": "missing",
-                        "return_code": 4
-                    },
-                    {
-                        "sequence": 3,
-                        "selector": "PARAMS_SETUP",
-                        "call_count": 1,
-                        "opaque_table_classification": "other_loaded_sealed_module",
-                        "raw_private_table_state": "none",
-                        "windows_resource_source_state": "none",
-                        "lookup_id": -1,
-                        "outcome": "missing",
-                        "return_code": 4
-                    },
-                    {
-                        "sequence": 4,
-                        "selector": "PARAMS_SETUP",
-                        "call_count": 1,
-                        "opaque_table_classification": "unrecognized",
-                        "raw_private_table_state": "invalid",
-                        "windows_resource_source_state": "none",
-                        "lookup_id": 2147483647,
-                        "outcome": "invalid",
-                        "return_code": 4
-                    }
-                ],
-                "truncated": false
-            }
-        });
-        let mut diagnostics = json!({});
-        propagate_extended_lookup_timeline(&mut diagnostics, &report);
-        let records = diagnostics["extended_lookup_timeline"]["records"]
+                }
+            ],
+            "truncated": false
+        }
+    });
+    let mut diagnostics = json!({});
+    propagate_compute_cache_timeline(&mut diagnostics, &report);
+    assert_eq!(
+        diagnostics["compute_cache_timeline"]["maximum_records"],
+        128
+    );
+    assert_eq!(
+        diagnostics["compute_cache_timeline"]["records"]
             .as_array()
-            .unwrap();
-        assert_eq!(records.len(), 4);
-        assert_eq!(records[0]["call_count"], 2);
-        assert_eq!(records[2]["lookup_id"], -1);
-        assert_eq!(records[3]["lookup_id"], 2147483647_i64);
-        assert_eq!(diagnostics["extended_lookup_timeline"]["truncated"], false);
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        diagnostics["compute_cache_timeline"]["records"][1]["return_code"],
+        22
+    );
+    assert_eq!(
+        diagnostics["compute_cache_timeline"]["records"][1]["call_count"],
+        3
+    );
+    assert_eq!(diagnostics["compute_cache_timeline"]["truncated"], false);
 
-        let near_miss_key = json!({
-            "extended_lookup_timeline_extra": {
-                "maximum_records": 128,
-                "records": [],
-                "truncated": false
-            }
-        });
-        let mut near_miss_diagnostics = json!({});
-        propagate_extended_lookup_timeline(&mut near_miss_diagnostics, &near_miss_key);
-        assert!(
-            near_miss_diagnostics
-                .get("extended_lookup_timeline")
-                .is_none()
-        );
+    let near_miss = json!({
+        "compute_cache_timeline_extra": {
+            "maximum_records": 128,
+            "records": [],
+            "truncated": false
+        }
+    });
+    let mut near_miss_diagnostics = json!({});
+    propagate_compute_cache_timeline(&mut near_miss_diagnostics, &near_miss);
+    assert!(
+        near_miss_diagnostics
+            .get("compute_cache_timeline")
+            .is_none()
+    );
 
-        let invalid_record = json!({
-            "extended_lookup_timeline": {
-                "maximum_records": 128,
-                "records": [{
+    let malformed = json!({
+        "compute_cache_timeline": {
+            "maximum_records": 128,
+            "records": [{
+                "sequence": 0,
+                "selector": "GLOBAL_SETUP",
+                "slot": 6,
+                "operation": "class_register",
+                "outcome": "registered",
+                "return_code": 0,
+                "call_count": 1,
+                "address": "0x1234"
+            }],
+            "truncated": false
+        }
+    });
+    let mut malformed_diagnostics = json!({});
+    propagate_compute_cache_timeline(&mut malformed_diagnostics, &malformed);
+    assert_eq!(
+        malformed_diagnostics["compute_cache_timeline"]["records"],
+        json!([])
+    );
+    assert_eq!(
+        malformed_diagnostics["compute_cache_timeline"]["truncated"],
+        true
+    );
+    assert!(
+        !malformed_diagnostics["compute_cache_timeline"]
+            .to_string()
+            .contains("0x1234")
+    );
+
+    let wrong_container = json!({
+        "compute_cache_timeline": {
+            "maximum_records": 128,
+            "records": [],
+            "truncated": false,
+            "absolute_path": "C:\\private\\effect.aex"
+        }
+    });
+    let mut wrong_container_diagnostics = json!({});
+    propagate_compute_cache_timeline(&mut wrong_container_diagnostics, &wrong_container);
+    assert_eq!(
+        wrong_container_diagnostics["compute_cache_timeline"]["records"],
+        json!([])
+    );
+    assert_eq!(
+        wrong_container_diagnostics["compute_cache_timeline"]["truncated"],
+        true
+    );
+    assert!(
+        !wrong_container_diagnostics["compute_cache_timeline"]
+            .to_string()
+            .contains("private")
+    );
+
+    let overflow_records = (0..=MAX_COMPUTE_CACHE_TIMELINE_RECORDS)
+        .map(|sequence| {
+            json!({
+                "sequence": sequence,
+                "selector": "RENDER",
+                "slot": 3,
+                "operation": "checkout_cached",
+                "outcome": "cache_hit",
+                "return_code": 0,
+                "call_count": 1
+            })
+        })
+        .collect::<Vec<_>>();
+    let overflow = json!({
+        "compute_cache_timeline": {
+            "maximum_records": 128,
+            "records": overflow_records,
+            "truncated": false
+        }
+    });
+    let mut overflow_diagnostics = json!({});
+    propagate_compute_cache_timeline(&mut overflow_diagnostics, &overflow);
+    assert_eq!(
+        overflow_diagnostics["compute_cache_timeline"]["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        MAX_COMPUTE_CACHE_TIMELINE_RECORDS
+    );
+    assert_eq!(
+        overflow_diagnostics["compute_cache_timeline"]["truncated"],
+        true
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn extended_lookup_timeline_validates_states_ids_and_bounds_fail_closed() {
+    let report = json!({
+        "extended_lookup_timeline": {
+            "maximum_records": 128,
+            "records": [
+                {
                     "sequence": 0,
-                    "selector": "PARAMS_SETUP",
-                    "call_count": 1,
-                    "opaque_table_classification": "active_resource_module",
+                    "selector": "GLOBAL_SETUP",
+                    "call_count": 2,
+                    "opaque_table_classification": "null",
                     "raw_private_table_state": "valid",
-                    "windows_resource_source_state": "none",
-                    "lookup_id": 2147483648_i64,
+                    "windows_resource_source_state": "valid",
+                    "lookup_id": 7,
                     "outcome": "found",
-                    "return_code": 4,
-                    "value": "must-not-propagate"
-                }],
-                "truncated": false
-            }
-        });
-        let mut invalid_record_diagnostics = json!({});
-        propagate_extended_lookup_timeline(&mut invalid_record_diagnostics, &invalid_record);
-        assert_eq!(
-            invalid_record_diagnostics["extended_lookup_timeline"]["records"],
-            json!([])
-        );
-        assert_eq!(
-            invalid_record_diagnostics["extended_lookup_timeline"]["truncated"],
-            true
-        );
-        assert!(
-            !invalid_record_diagnostics["extended_lookup_timeline"]
-                .to_string()
-                .contains("must-not-propagate")
-        );
-
-        let malformed = json!({
-            "extended_lookup_timeline": {
-                "maximum_records": 128,
-                "records": [],
-                "truncated": false,
-                "absolute_path": "C:\\private\\plugin.aex"
-            }
-        });
-        let mut malformed_diagnostics = json!({});
-        propagate_extended_lookup_timeline(&mut malformed_diagnostics, &malformed);
-        assert_eq!(
-            malformed_diagnostics["extended_lookup_timeline"]["records"],
-            json!([])
-        );
-        assert_eq!(
-            malformed_diagnostics["extended_lookup_timeline"]["truncated"],
-            true
-        );
-        assert!(
-            !malformed_diagnostics["extended_lookup_timeline"]
-                .to_string()
-                .contains("private")
-        );
-
-        let overflow_records = (0..=MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS)
-            .map(|sequence| {
-                json!({
-                    "sequence": sequence,
+                    "return_code": 0
+                },
+                {
+                    "sequence": 2,
                     "selector": "PARAMS_SETUP",
                     "call_count": 1,
-                    "opaque_table_classification": "other_loaded_system_module",
+                    "opaque_table_classification": "active_effect_module",
                     "raw_private_table_state": "valid",
                     "windows_resource_source_state": "none",
-                    "lookup_id": sequence,
+                    "lookup_id": 8,
                     "outcome": "missing",
                     "return_code": 4
-                })
+                },
+                {
+                    "sequence": 3,
+                    "selector": "PARAMS_SETUP",
+                    "call_count": 1,
+                    "opaque_table_classification": "other_loaded_sealed_module",
+                    "raw_private_table_state": "none",
+                    "windows_resource_source_state": "none",
+                    "lookup_id": -1,
+                    "outcome": "missing",
+                    "return_code": 4
+                },
+                {
+                    "sequence": 4,
+                    "selector": "PARAMS_SETUP",
+                    "call_count": 1,
+                    "opaque_table_classification": "unrecognized",
+                    "raw_private_table_state": "invalid",
+                    "windows_resource_source_state": "none",
+                    "lookup_id": 2147483647,
+                    "outcome": "invalid",
+                    "return_code": 4
+                }
+            ],
+            "truncated": false
+        }
+    });
+    let mut diagnostics = json!({});
+    propagate_extended_lookup_timeline(&mut diagnostics, &report);
+    let records = diagnostics["extended_lookup_timeline"]["records"]
+        .as_array()
+        .unwrap();
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[0]["call_count"], 2);
+    assert_eq!(records[2]["lookup_id"], -1);
+    assert_eq!(records[3]["lookup_id"], 2147483647_i64);
+    assert_eq!(diagnostics["extended_lookup_timeline"]["truncated"], false);
+
+    let near_miss_key = json!({
+        "extended_lookup_timeline_extra": {
+            "maximum_records": 128,
+            "records": [],
+            "truncated": false
+        }
+    });
+    let mut near_miss_diagnostics = json!({});
+    propagate_extended_lookup_timeline(&mut near_miss_diagnostics, &near_miss_key);
+    assert!(
+        near_miss_diagnostics
+            .get("extended_lookup_timeline")
+            .is_none()
+    );
+
+    let invalid_record = json!({
+        "extended_lookup_timeline": {
+            "maximum_records": 128,
+            "records": [{
+                "sequence": 0,
+                "selector": "PARAMS_SETUP",
+                "call_count": 1,
+                "opaque_table_classification": "active_resource_module",
+                "raw_private_table_state": "valid",
+                "windows_resource_source_state": "none",
+                "lookup_id": 2147483648_i64,
+                "outcome": "found",
+                "return_code": 4,
+                "value": "must-not-propagate"
+            }],
+            "truncated": false
+        }
+    });
+    let mut invalid_record_diagnostics = json!({});
+    propagate_extended_lookup_timeline(&mut invalid_record_diagnostics, &invalid_record);
+    assert_eq!(
+        invalid_record_diagnostics["extended_lookup_timeline"]["records"],
+        json!([])
+    );
+    assert_eq!(
+        invalid_record_diagnostics["extended_lookup_timeline"]["truncated"],
+        true
+    );
+    assert!(
+        !invalid_record_diagnostics["extended_lookup_timeline"]
+            .to_string()
+            .contains("must-not-propagate")
+    );
+
+    let malformed = json!({
+        "extended_lookup_timeline": {
+            "maximum_records": 128,
+            "records": [],
+            "truncated": false,
+            "absolute_path": "C:\\private\\plugin.aex"
+        }
+    });
+    let mut malformed_diagnostics = json!({});
+    propagate_extended_lookup_timeline(&mut malformed_diagnostics, &malformed);
+    assert_eq!(
+        malformed_diagnostics["extended_lookup_timeline"]["records"],
+        json!([])
+    );
+    assert_eq!(
+        malformed_diagnostics["extended_lookup_timeline"]["truncated"],
+        true
+    );
+    assert!(
+        !malformed_diagnostics["extended_lookup_timeline"]
+            .to_string()
+            .contains("private")
+    );
+
+    let overflow_records = (0..=MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS)
+        .map(|sequence| {
+            json!({
+                "sequence": sequence,
+                "selector": "PARAMS_SETUP",
+                "call_count": 1,
+                "opaque_table_classification": "other_loaded_system_module",
+                "raw_private_table_state": "valid",
+                "windows_resource_source_state": "none",
+                "lookup_id": sequence,
+                "outcome": "missing",
+                "return_code": 4
             })
-            .collect::<Vec<_>>();
-        let overflow = json!({
-            "extended_lookup_timeline": {
-                "maximum_records": 128,
-                "records": overflow_records,
-                "truncated": false
-            }
-        });
-        let mut overflow_diagnostics = json!({});
-        propagate_extended_lookup_timeline(&mut overflow_diagnostics, &overflow);
-        assert_eq!(
-            overflow_diagnostics["extended_lookup_timeline"]["records"]
-                .as_array()
-                .unwrap()
-                .len(),
-            MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS
-        );
-        assert_eq!(
-            overflow_diagnostics["extended_lookup_timeline"]["truncated"],
-            true
-        );
-    }
-
-    #[test]
-    fn extended_allocation_timeline_normalizes_lifetime_without_pointer_details() {
-        let allocation = json!({
-            "allocation_token": "ptr-0123456789abcdef",
-            "state": "live",
-            "owner_selector": "GLOBAL_SETUP"
-        });
-        let report = json!({
-            "extended_allocation_timeline": {
-                "maximum_records": 128,
-                "records": [
-                    {
-                        "sequence": 0,
-                        "selector": "GLOBAL_SETUP",
-                        "boundary": "entry",
-                        "live_allocation_count": 0,
-                        "new_allocations": 0,
-                        "frees": 0,
-                        "invalid_frees": 0,
-                        "double_frees": 0,
-                        "global_setup_live_allocation_count": 0,
-                        "allocations": []
-                    },
-                    {
-                        "sequence": 1,
-                        "selector": "GLOBAL_SETUP",
-                        "boundary": "exit",
-                        "live_allocation_count": 1,
-                        "new_allocations": 1,
-                        "frees": 0,
-                        "invalid_frees": 0,
-                        "double_frees": 0,
-                        "global_setup_live_allocation_count": 1,
-                        "allocations": [allocation.clone()]
-                    },
-                    {
-                        "sequence": 2,
-                        "selector": "PARAMS_SETUP",
-                        "boundary": "entry",
-                        "live_allocation_count": 1,
-                        "new_allocations": 0,
-                        "frees": 0,
-                        "invalid_frees": 0,
-                        "double_frees": 0,
-                        "global_setup_live_allocation_count": 1,
-                        "allocations": [allocation]
-                    },
-                    {
-                        "sequence": 3,
-                        "selector": "PARAMS_SETUP",
-                        "boundary": "exit",
-                        "live_allocation_count": 1,
-                        "new_allocations": 0,
-                        "frees": 0,
-                        "invalid_frees": 0,
-                        "double_frees": 0,
-                        "global_setup_live_allocation_count": 1,
-                        "allocations": [{
-                            "allocation_token": "ptr-0123456789abcdef",
-                            "state": "live",
-                            "owner_selector": "GLOBAL_SETUP",
-                            "size": 4000
-                        }]
-                    }
-                ],
-                "truncated": false
-            }
-        });
-        let mut diagnostics = json!({});
-        propagate_extended_allocation_timeline(&mut diagnostics, &report);
-        let records = diagnostics["extended_allocation_timeline"]["records"]
+        })
+        .collect::<Vec<_>>();
+    let overflow = json!({
+        "extended_lookup_timeline": {
+            "maximum_records": 128,
+            "records": overflow_records,
+            "truncated": false
+        }
+    });
+    let mut overflow_diagnostics = json!({});
+    propagate_extended_lookup_timeline(&mut overflow_diagnostics, &overflow);
+    assert_eq!(
+        overflow_diagnostics["extended_lookup_timeline"]["records"]
             .as_array()
-            .unwrap();
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[1]["new_allocations"], 1);
-        assert_eq!(records[2]["selector"], "PARAMS_SETUP");
-        assert_eq!(records[2]["global_setup_live_allocation_count"], 1);
-        assert_eq!(records[2]["allocations"][0]["state"], "live");
-        assert_eq!(
-            diagnostics["extended_allocation_timeline"]["truncated"],
-            true
-        );
-        assert!(
-            !diagnostics["extended_allocation_timeline"]
-                .to_string()
-                .contains("size")
-        );
-    }
+            .unwrap()
+            .len(),
+        MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS
+    );
+    assert_eq!(
+        overflow_diagnostics["extended_lookup_timeline"]["truncated"],
+        true
+    );
+}
 
-    #[test]
-    fn the_premiere_gpu_route_outcome_survives_the_allowlist_and_the_reason_filter() {
-        // The other half of the contract `render_sweep`'s
-        // `the_premiere_gpu_route_outcome_reaches_the_record_without_extended_diag`
-        // reads: the route's faults are contained, so a plug-in whose GPU route
-        // dies on entry renders through the PF path, and this event is the only
-        // thing that says the route was tried (issue #1271). A rename here, or a
-        // tighter reason filter, would empty that record silently.
-        let declined = worker_diagnostics(
-            "stage:pr_gpu_route_begin\nstage:pr_gpu_route_end reason=startup_fault\n",
-            false,
-            "ok",
-            0,
-            5,
-        );
-        let events = declined["stage_events"].as_array().unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1]["stage"], "pr_gpu_route");
-        assert_eq!(events[1]["state"], "end");
-        assert_eq!(events[1]["errors"]["reason"], "startup_fault");
-        // A decline is not a failed stage: the render carries on down the PF
-        // path, and calling it one would misattribute that render's verdict.
-        assert_eq!(declined["failure_stage"], Value::Null);
-        assert_eq!(declined["last_completed_stage"], "pr_gpu_route");
-
-        // A worker that died inside the route leaves the begin unmatched, which
-        // is what names the route as the active stage.
-        let died_inside =
-            worker_diagnostics("stage:pr_gpu_route_begin\n", false, "crash", 0xC0000005, 5);
-        assert_eq!(died_inside["active_stage"], "pr_gpu_route");
-
-        // The reason is dropped rather than truncated when it is not the fixed
-        // lower-case identifier shape, so plug-in authored text - it shares this
-        // stderr - cannot ride into a shareable report through this field.
-        let forged = worker_diagnostics(
-            "stage:pr_gpu_route_end reason=C:\\private\\plugin.aex\n",
-            false,
-            "ok",
-            0,
-            5,
-        );
-        let forged_events = forged["stage_events"].as_array().unwrap();
-        assert_eq!(forged_events.len(), 1);
-        assert!(forged_events[0]["errors"].get("reason").is_none());
-    }
-
-    #[test]
-    fn launch_validation_diagnostics_are_bounded_typed_and_path_free() {
-        let prefix = "stage:session_launch_validation_end ";
-        for reason in ["params_setup", "parameter_count", "external_aux"] {
-            let diag = worker_diagnostics(
-                &format!("{prefix}error=3 reason={reason}\n"),
-                false,
-                "nonzero_exit",
-                3,
-                1,
-            );
-            assert_eq!(diag["launch_validation_failure"], json!({"reason": reason}));
-            assert_eq!(diag["failure_stage"], "session_launch_validation");
+#[test]
+#[cfg(windows)]
+fn extended_allocation_timeline_normalizes_lifetime_without_pointer_details() {
+    let allocation = json!({
+        "allocation_token": "ptr-0123456789abcdef",
+        "state": "live",
+        "owner_selector": "GLOBAL_SETUP"
+    });
+    let report = json!({
+        "extended_allocation_timeline": {
+            "maximum_records": 128,
+            "records": [
+                {
+                    "sequence": 0,
+                    "selector": "GLOBAL_SETUP",
+                    "boundary": "entry",
+                    "live_allocation_count": 0,
+                    "new_allocations": 0,
+                    "frees": 0,
+                    "invalid_frees": 0,
+                    "double_frees": 0,
+                    "global_setup_live_allocation_count": 0,
+                    "allocations": []
+                },
+                {
+                    "sequence": 1,
+                    "selector": "GLOBAL_SETUP",
+                    "boundary": "exit",
+                    "live_allocation_count": 1,
+                    "new_allocations": 1,
+                    "frees": 0,
+                    "invalid_frees": 0,
+                    "double_frees": 0,
+                    "global_setup_live_allocation_count": 1,
+                    "allocations": [allocation.clone()]
+                },
+                {
+                    "sequence": 2,
+                    "selector": "PARAMS_SETUP",
+                    "boundary": "entry",
+                    "live_allocation_count": 1,
+                    "new_allocations": 0,
+                    "frees": 0,
+                    "invalid_frees": 0,
+                    "double_frees": 0,
+                    "global_setup_live_allocation_count": 1,
+                    "allocations": [allocation]
+                },
+                {
+                    "sequence": 3,
+                    "selector": "PARAMS_SETUP",
+                    "boundary": "exit",
+                    "live_allocation_count": 1,
+                    "new_allocations": 0,
+                    "frees": 0,
+                    "invalid_frees": 0,
+                    "double_frees": 0,
+                    "global_setup_live_allocation_count": 1,
+                    "allocations": [{
+                        "allocation_token": "ptr-0123456789abcdef",
+                        "state": "live",
+                        "owner_selector": "GLOBAL_SETUP",
+                        "size": 4000
+                    }]
+                }
+            ],
+            "truncated": false
         }
-        for kind in [
-            "integer",
-            "float",
-            "color",
-            "angle",
-            "point",
-            "point3d",
-            "arbitrary_text",
-        ] {
-            for reason in [
-                "slot_out_of_range",
-                "kind_mismatch",
-                "mask_range",
-                "numeric_range",
-            ] {
-                let diag = worker_diagnostics(
-                    &format!(
-                        "{prefix}error=3 reason=requested_assignment slot=1 kind={kind} param_type=15 assignment_reason={reason}\n"
-                    ),
-                    false,
-                    "nonzero_exit",
-                    3,
-                    1,
-                );
-                assert_eq!(
-                    diag["launch_validation_failure"],
-                    json!({
-                        "reason": "requested_assignment", "slot": 1, "kind": kind,
-                        "param_type": 15, "assignment_reason": reason
-                    })
-                );
-            }
-        }
-        for fields in [
-            "error=3 reason=C:\\private\\file",
-            "error=3 reason=private_secret",
-            "error=3 reason=params_setup path=C:\\private\\file",
-            "error=3 reason=params_setup reason=external_aux",
-            "error=0 reason=params_setup",
-            "error=3 reason=requested_assignment slot=1 kind=integer param_type=15",
-            "error=3 reason=requested_assignment slot=0 kind=integer param_type=15 assignment_reason=kind_mismatch",
-            "error=3 reason=requested_assignment slot=4097 kind=integer param_type=15 assignment_reason=kind_mismatch",
-            "error=3 reason=requested_assignment slot=1 kind=C:\\private\\file param_type=15 assignment_reason=kind_mismatch",
-            "error=3 reason=requested_assignment slot=1 kind=integer param_type=C:\\private\\file assignment_reason=kind_mismatch",
-            "error=3 reason=requested_assignment slot=1 kind=integer param_type=2147483648 assignment_reason=kind_mismatch",
-            "error=3 reason=requested_assignment slot=1 kind=integer param_type=15 assignment_reason=C:\\private\\file",
-            "error=3 reason=requested_assignment slot=1 kind=integer param_type=15 assignment_reason=kind_mismatch value=1234567",
-        ] {
-            let diag =
-                worker_diagnostics(&format!("{prefix}{fields}\n"), false, "nonzero_exit", 3, 1);
-            assert!(
-                diag["launch_validation_failure"].is_null(),
-                "{fields}: {diag}"
-            );
-            for secret in ["private", "1234567"] {
-                assert!(!diag.to_string().contains(secret), "{diag}");
-            }
-        }
-        let oversized = format!("{prefix}error=3 reason=params_setup {}\n", "x".repeat(300));
-        assert!(worker_diagnostics(&oversized, false, "nonzero_exit", 3, 1)["launch_validation_failure"].is_null());
-        let recovered = worker_diagnostics(
-            &format!(
-                "{prefix}error=3 reason=params_setup path=secret\n{prefix}error=3 reason=external_aux\n"
-            ),
+    });
+    let mut diagnostics = json!({});
+    propagate_extended_allocation_timeline(&mut diagnostics, &report);
+    let records = diagnostics["extended_allocation_timeline"]["records"]
+        .as_array()
+        .unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[1]["new_allocations"], 1);
+    assert_eq!(records[2]["selector"], "PARAMS_SETUP");
+    assert_eq!(records[2]["global_setup_live_allocation_count"], 1);
+    assert_eq!(records[2]["allocations"][0]["state"], "live");
+    assert_eq!(
+        diagnostics["extended_allocation_timeline"]["truncated"],
+        true
+    );
+    assert!(
+        !diagnostics["extended_allocation_timeline"]
+            .to_string()
+            .contains("size")
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn the_premiere_gpu_route_outcome_survives_the_allowlist_and_the_reason_filter() {
+    // The other half of the contract `render_sweep`'s
+    // `the_premiere_gpu_route_outcome_reaches_the_record_without_extended_diag`
+    // reads: the route's faults are contained, so a plug-in whose GPU route
+    // dies on entry renders through the PF path, and this event is the only
+    // thing that says the route was tried (issue #1271). A rename here, or a
+    // tighter reason filter, would empty that record silently.
+    let declined = worker_diagnostics(
+        "stage:pr_gpu_route_begin\nstage:pr_gpu_route_end reason=startup_fault\n",
+        false,
+        "ok",
+        0,
+        5,
+    );
+    let events = declined["stage_events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["stage"], "pr_gpu_route");
+    assert_eq!(events[1]["state"], "end");
+    assert_eq!(events[1]["errors"]["reason"], "startup_fault");
+    // A decline is not a failed stage: the render carries on down the PF
+    // path, and calling it one would misattribute that render's verdict.
+    assert_eq!(declined["failure_stage"], Value::Null);
+    assert_eq!(declined["last_completed_stage"], "pr_gpu_route");
+
+    // A worker that died inside the route leaves the begin unmatched, which
+    // is what names the route as the active stage.
+    let died_inside =
+        worker_diagnostics("stage:pr_gpu_route_begin\n", false, "crash", 0xC0000005, 5);
+    assert_eq!(died_inside["active_stage"], "pr_gpu_route");
+
+    // The reason is dropped rather than truncated when it is not the fixed
+    // lower-case identifier shape, so plug-in authored text - it shares this
+    // stderr - cannot ride into a shareable report through this field.
+    let forged = worker_diagnostics(
+        "stage:pr_gpu_route_end reason=C:\\private\\plugin.aex\n",
+        false,
+        "ok",
+        0,
+        5,
+    );
+    let forged_events = forged["stage_events"].as_array().unwrap();
+    assert_eq!(forged_events.len(), 1);
+    assert!(forged_events[0]["errors"].get("reason").is_none());
+}
+
+#[test]
+#[cfg(windows)]
+fn launch_validation_diagnostics_are_bounded_typed_and_path_free() {
+    let prefix = "stage:session_launch_validation_end ";
+    for reason in ["params_setup", "parameter_count", "external_aux"] {
+        let diag = worker_diagnostics(
+            &format!("{prefix}error=3 reason={reason}\n"),
             false,
             "nonzero_exit",
             3,
             1,
         );
-        assert_eq!(
-            recovered["launch_validation_failure"]["reason"],
-            "external_aux"
-        );
+        assert_eq!(diag["launch_validation_failure"], json!({"reason": reason}));
+        assert_eq!(diag["failure_stage"], "session_launch_validation");
     }
+    for kind in [
+        "integer",
+        "float",
+        "color",
+        "angle",
+        "point",
+        "point3d",
+        "arbitrary_text",
+    ] {
+        for reason in [
+            "slot_out_of_range",
+            "kind_mismatch",
+            "mask_range",
+            "numeric_range",
+        ] {
+            let diag = worker_diagnostics(
+                &format!(
+                    "{prefix}error=3 reason=requested_assignment slot=1 kind={kind} param_type=15 assignment_reason={reason}\n"
+                ),
+                false,
+                "nonzero_exit",
+                3,
+                1,
+            );
+            assert_eq!(
+                diag["launch_validation_failure"],
+                json!({
+                    "reason": "requested_assignment", "slot": 1, "kind": kind,
+                    "param_type": 15, "assignment_reason": reason
+                })
+            );
+        }
+    }
+    for fields in [
+        "error=3 reason=C:\\private\\file",
+        "error=3 reason=private_secret",
+        "error=3 reason=params_setup path=C:\\private\\file",
+        "error=3 reason=params_setup reason=external_aux",
+        "error=0 reason=params_setup",
+        "error=3 reason=requested_assignment slot=1 kind=integer param_type=15",
+        "error=3 reason=requested_assignment slot=0 kind=integer param_type=15 assignment_reason=kind_mismatch",
+        "error=3 reason=requested_assignment slot=4097 kind=integer param_type=15 assignment_reason=kind_mismatch",
+        "error=3 reason=requested_assignment slot=1 kind=C:\\private\\file param_type=15 assignment_reason=kind_mismatch",
+        "error=3 reason=requested_assignment slot=1 kind=integer param_type=C:\\private\\file assignment_reason=kind_mismatch",
+        "error=3 reason=requested_assignment slot=1 kind=integer param_type=2147483648 assignment_reason=kind_mismatch",
+        "error=3 reason=requested_assignment slot=1 kind=integer param_type=15 assignment_reason=C:\\private\\file",
+        "error=3 reason=requested_assignment slot=1 kind=integer param_type=15 assignment_reason=kind_mismatch value=1234567",
+    ] {
+        let diag = worker_diagnostics(&format!("{prefix}{fields}\n"), false, "nonzero_exit", 3, 1);
+        assert!(
+            diag["launch_validation_failure"].is_null(),
+            "{fields}: {diag}"
+        );
+        for secret in ["private", "1234567"] {
+            assert!(!diag.to_string().contains(secret), "{diag}");
+        }
+    }
+    let oversized = format!("{prefix}error=3 reason=params_setup {}\n", "x".repeat(300));
+    assert!(
+        worker_diagnostics(&oversized, false, "nonzero_exit", 3, 1)["launch_validation_failure"]
+            .is_null()
+    );
+    let recovered = worker_diagnostics(
+        &format!(
+            "{prefix}error=3 reason=params_setup path=secret\n{prefix}error=3 reason=external_aux\n"
+        ),
+        false,
+        "nonzero_exit",
+        3,
+        1,
+    );
+    assert_eq!(
+        recovered["launch_validation_failure"]["reason"],
+        "external_aux"
+    );
+}
 
-    #[test]
-    fn worker_stage_diagnostics_identify_active_and_failed_selectors() {
-        let diagnostics = worker_diagnostics(
-            "untrusted C:\\private\\plugin\nstage:global_setup_begin\nstage:global_setup_end error=0\nstage:render_begin\n",
+#[test]
+#[cfg(windows)]
+fn worker_stage_diagnostics_identify_active_and_failed_selectors() {
+    let diagnostics = worker_diagnostics(
+        "untrusted C:\\private\\plugin\nstage:global_setup_begin\nstage:global_setup_end error=0\nstage:render_begin\n",
+        false,
+        "crash",
+        0xC0000005,
+        42,
+    );
+    assert_eq!(diagnostics["active_stage"], "render");
+    assert_eq!(diagnostics["last_completed_stage"], "global_setup");
+    assert_eq!(diagnostics["stage_events"].as_array().unwrap().len(), 3);
+
+    let failed = worker_diagnostics(
+        "stage:smart_render_begin\nstage:smart_render_end pre_error=0 render_error=25\n",
+        false,
+        "ok",
+        0,
+        8,
+    );
+    assert_eq!(failed["failure_stage"], "smart_render");
+    assert_eq!(failed["first_failure_stage"], "smart_render");
+    assert!(failed.to_string().find("private").is_none());
+
+    let nested_crash = worker_diagnostics(
+        "stage:render_begin\nstage:sequence_setup_begin\nstage:sequence_setup_end error=0\nstage:frame_setup_begin\nstage:frame_setup_end error=0\n",
+        false,
+        "crashed",
+        0xC0000005,
+        29,
+    );
+    assert_eq!(nested_crash["active_stage"], "render");
+    assert_eq!(nested_crash["failure_stage"], "render");
+    assert_eq!(nested_crash["first_failure_stage"], "render");
+    assert_eq!(nested_crash["last_completed_stage"], "frame_setup");
+
+    let cleanup_failure = worker_diagnostics(
+        "stage:global_setup_begin\nstage:global_setup_end error=512\nstage:global_setdown_begin\nstage:global_setdown_end error=-1\n",
+        false,
+        "nonzero_exit",
+        14,
+        12,
+    );
+    assert_eq!(cleanup_failure["first_failure_stage"], "global_setup");
+    assert_eq!(cleanup_failure["failure_stage"], "global_setdown");
+}
+
+/// A classic session's frame errors used to carry no stage at all: the
+/// `render` pair brackets the whole session, so a frame that failed came
+/// back with `first_failure_stage: null` and nothing said which selector
+/// did it. 29 of the 56 failing AE 2026 effects looked like that
+/// (issue #722).
+#[test]
+#[cfg(windows)]
+fn a_classic_frame_names_the_selector_that_failed() {
+    // The plug-in's own RENDER refused this frame.
+    let selector = worker_diagnostics(
+        "stage:frame_setup_begin\nstage:frame_setup_end error=0\n\
+         stage:classic_render_begin\nstage:classic_render_end error=512\n",
+        false,
+        "ok",
+        0,
+        9,
+    );
+    assert_eq!(selector["first_failure_stage"], "classic_render");
+    assert_eq!(selector["failure_stage"], "classic_render");
+
+    // The selector returned cleanly and the host's finalize added the
+    // error, which has to read as a different stage - otherwise a host-side
+    // refusal is filed against the plug-in.
+    let finalize = worker_diagnostics(
+        "stage:classic_render_begin\nstage:classic_render_end error=0\n\
+         stage:classic_finalize_end error=4\n",
+        false,
+        "ok",
+        0,
+        9,
+    );
+    assert_eq!(finalize["first_failure_stage"], "classic_finalize");
+
+    // The host refused the plug-in's requested output resize, so RENDER was
+    // never dispatched. `prepare_output` runs inside the same
+    // classic_execution::dispatch_render call as the selector but never
+    // calls the plug-in, so it gets its own name instead of being filed
+    // under RENDER. It is not the `output_validation` that session.rs
+    // assigns from `output_pixels_valid` - that one is smart-only and means
+    // the returned pixels were empty, untouched, or non-finite.
+    let host_refused_resize = worker_diagnostics(
+        "stage:frame_setup_begin\nstage:frame_setup_end error=0\n\
+         stage:classic_output_resize_end error=4\n",
+        false,
+        "ok",
+        0,
+        9,
+    );
+    assert_eq!(
+        host_refused_resize["first_failure_stage"],
+        "classic_output_resize"
+    );
+    assert_eq!(
+        host_refused_resize["failure_stage"],
+        "classic_output_resize"
+    );
+
+    // The custom-UI draw is a plug-in dispatch before RENDER. Its own
+    // failure short-circuits the selector, so it has to be the frame's
+    // failure rather than falling back to the session-wide `render` stage.
+    let ui_draw = worker_diagnostics(
+        "stage:classic_ui_draw_begin\nstage:classic_ui_draw_end error=-5\n\
+         stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=0\n",
+        false,
+        "ok",
+        0,
+        9,
+    );
+    assert_eq!(ui_draw["first_failure_stage"], "classic_ui_draw");
+    assert_eq!(ui_draw["failure_stage"], "classic_ui_draw");
+
+    // A close failure becomes -5 only on an otherwise clean frame. This
+    // is distinct from a teardown that returned false after an existing
+    // selector error: the latter emits error=0 and must not steal the
+    // failure attribution from RENDER.
+    let ui_teardown = worker_diagnostics(
+        "stage:classic_render_begin\nstage:classic_render_end error=0\n\
+         stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=-5\n",
+        false,
+        "ok",
+        0,
+        9,
+    );
+    assert_eq!(ui_teardown["first_failure_stage"], "classic_ui_teardown");
+    assert_eq!(ui_teardown["failure_stage"], "classic_ui_teardown");
+
+    let selector_then_suppressed_close = worker_diagnostics(
+        "stage:classic_render_begin\nstage:classic_render_end error=512\n\
+         stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=0\n",
+        false,
+        "ok",
+        0,
+        9,
+    );
+    assert_eq!(
+        selector_then_suppressed_close["first_failure_stage"],
+        "classic_render"
+    );
+    assert_eq!(
+        selector_then_suppressed_close["failure_stage"],
+        "classic_render"
+    );
+
+    // A crash or hang inside either UI dispatch leaves its begin unmatched.
+    // That incomplete pair must name the operation the worker was executing.
+    for stage in ["classic_ui_draw", "classic_ui_teardown"] {
+        let crashed = worker_diagnostics(
+            &format!("stage:{stage}_begin\n"),
             false,
             "crash",
             0xC0000005,
-            42,
-        );
-        assert_eq!(diagnostics["active_stage"], "render");
-        assert_eq!(diagnostics["last_completed_stage"], "global_setup");
-        assert_eq!(diagnostics["stage_events"].as_array().unwrap().len(), 3);
-
-        let failed = worker_diagnostics(
-            "stage:smart_render_begin\nstage:smart_render_end pre_error=0 render_error=25\n",
-            false,
-            "ok",
-            0,
-            8,
-        );
-        assert_eq!(failed["failure_stage"], "smart_render");
-        assert_eq!(failed["first_failure_stage"], "smart_render");
-        assert!(failed.to_string().find("private").is_none());
-
-        let nested_crash = worker_diagnostics(
-            "stage:render_begin\nstage:sequence_setup_begin\nstage:sequence_setup_end error=0\nstage:frame_setup_begin\nstage:frame_setup_end error=0\n",
-            false,
-            "crashed",
-            0xC0000005,
-            29,
-        );
-        assert_eq!(nested_crash["active_stage"], "render");
-        assert_eq!(nested_crash["failure_stage"], "render");
-        assert_eq!(nested_crash["first_failure_stage"], "render");
-        assert_eq!(nested_crash["last_completed_stage"], "frame_setup");
-
-        let cleanup_failure = worker_diagnostics(
-            "stage:global_setup_begin\nstage:global_setup_end error=512\nstage:global_setdown_begin\nstage:global_setdown_end error=-1\n",
-            false,
-            "nonzero_exit",
-            14,
-            12,
-        );
-        assert_eq!(cleanup_failure["first_failure_stage"], "global_setup");
-        assert_eq!(cleanup_failure["failure_stage"], "global_setdown");
-    }
-
-    /// A classic session's frame errors used to carry no stage at all: the
-    /// `render` pair brackets the whole session, so a frame that failed came
-    /// back with `first_failure_stage: null` and nothing said which selector
-    /// did it. 29 of the 56 failing AE 2026 effects looked like that
-    /// (issue #722).
-    #[test]
-    fn a_classic_frame_names_the_selector_that_failed() {
-        // The plug-in's own RENDER refused this frame.
-        let selector = worker_diagnostics(
-            "stage:frame_setup_begin\nstage:frame_setup_end error=0\n\
-             stage:classic_render_begin\nstage:classic_render_end error=512\n",
-            false,
-            "ok",
-            0,
             9,
         );
-        assert_eq!(selector["first_failure_stage"], "classic_render");
-        assert_eq!(selector["failure_stage"], "classic_render");
-
-        // The selector returned cleanly and the host's finalize added the
-        // error, which has to read as a different stage - otherwise a host-side
-        // refusal is filed against the plug-in.
-        let finalize = worker_diagnostics(
-            "stage:classic_render_begin\nstage:classic_render_end error=0\n\
-             stage:classic_finalize_end error=4\n",
-            false,
-            "ok",
-            0,
-            9,
-        );
-        assert_eq!(finalize["first_failure_stage"], "classic_finalize");
-
-        // The host refused the plug-in's requested output resize, so RENDER was
-        // never dispatched. `prepare_output` runs inside the same
-        // classic_execution::dispatch_render call as the selector but never
-        // calls the plug-in, so it gets its own name instead of being filed
-        // under RENDER. It is not the `output_validation` that session.rs
-        // assigns from `output_pixels_valid` - that one is smart-only and means
-        // the returned pixels were empty, untouched, or non-finite.
-        let host_refused_resize = worker_diagnostics(
-            "stage:frame_setup_begin\nstage:frame_setup_end error=0\n\
-             stage:classic_output_resize_end error=4\n",
-            false,
-            "ok",
-            0,
-            9,
-        );
-        assert_eq!(
-            host_refused_resize["first_failure_stage"],
-            "classic_output_resize"
-        );
-        assert_eq!(
-            host_refused_resize["failure_stage"],
-            "classic_output_resize"
-        );
-
-        // The custom-UI draw is a plug-in dispatch before RENDER. Its own
-        // failure short-circuits the selector, so it has to be the frame's
-        // failure rather than falling back to the session-wide `render` stage.
-        let ui_draw = worker_diagnostics(
-            "stage:classic_ui_draw_begin\nstage:classic_ui_draw_end error=-5\n\
-             stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=0\n",
-            false,
-            "ok",
-            0,
-            9,
-        );
-        assert_eq!(ui_draw["first_failure_stage"], "classic_ui_draw");
-        assert_eq!(ui_draw["failure_stage"], "classic_ui_draw");
-
-        // A close failure becomes -5 only on an otherwise clean frame. This
-        // is distinct from a teardown that returned false after an existing
-        // selector error: the latter emits error=0 and must not steal the
-        // failure attribution from RENDER.
-        let ui_teardown = worker_diagnostics(
-            "stage:classic_render_begin\nstage:classic_render_end error=0\n\
-             stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=-5\n",
-            false,
-            "ok",
-            0,
-            9,
-        );
-        assert_eq!(ui_teardown["first_failure_stage"], "classic_ui_teardown");
-        assert_eq!(ui_teardown["failure_stage"], "classic_ui_teardown");
-
-        let selector_then_suppressed_close = worker_diagnostics(
-            "stage:classic_render_begin\nstage:classic_render_end error=512\n\
-             stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=0\n",
-            false,
-            "ok",
-            0,
-            9,
-        );
-        assert_eq!(
-            selector_then_suppressed_close["first_failure_stage"],
-            "classic_render"
-        );
-        assert_eq!(
-            selector_then_suppressed_close["failure_stage"],
-            "classic_render"
-        );
-
-        // A crash or hang inside either UI dispatch leaves its begin unmatched.
-        // That incomplete pair must name the operation the worker was executing.
-        for stage in ["classic_ui_draw", "classic_ui_teardown"] {
-            let crashed = worker_diagnostics(
-                &format!("stage:{stage}_begin\n"),
-                false,
-                "crash",
-                0xC0000005,
-                9,
-            );
-            assert_eq!(crashed["active_stage"], stage);
-            assert_eq!(crashed["first_failure_stage"], stage);
-            assert_eq!(crashed["failure_stage"], stage);
-        }
-
-        // A frame that never reached the selector carries no `classic_render`
-        // pair, because the markers live inside the selector hook rather than
-        // around the dispatch call. On a non-zero incoming error
-        // `dispatch_render` skips the draw, prepare_output, and selector steps,
-        // so bracketing the call would re-emit that error under the selector's
-        // name; `failure_stage` takes the last failing stage and would blame a
-        // RENDER the plug-in never saw. It does not skip close_ui, whose stage
-        // is clean when an earlier error already owns the frame (issue #735).
-        //
-        // FRAME_SETUP is not yet one of the steps that gets skipped: the
-        // `render_once` path drops its error instead of propagating it and
-        // dispatches RENDER anyway (issue #725), so a real setup refusal still
-        // shows both stages today - correctly, because RENDER really does run.
-        // This trace is the one a lifecycle refusal produces once it
-        // propagates, and the one `smart_render_runtime` already produces at
-        // its `lifecycle.setup_error != 0` check, since that call site honors
-        // the field the classic path drops.
-        let lifecycle_refused = worker_diagnostics(
-            "stage:frame_setup_begin\nstage:frame_setup_end error=512\n",
-            false,
-            "ok",
-            0,
-            9,
-        );
-        assert_eq!(lifecycle_refused["first_failure_stage"], "frame_setup");
-        assert_eq!(lifecycle_refused["failure_stage"], "frame_setup");
+        assert_eq!(crashed["active_stage"], stage);
+        assert_eq!(crashed["first_failure_stage"], stage);
+        assert_eq!(crashed["failure_stage"], stage);
     }
 
-    /// The event cap bounds what is reported, not what is noticed. A frame that
-    /// fails on every frame of a long session overruns the list, and that is
-    /// exactly when the failure must still be attributed (issue #722).
-    #[test]
-    fn the_event_cap_does_not_hide_a_failure_past_it() {
-        let mut trace = "stage:classic_render_begin\nstage:classic_render_end error=0\n"
-            .repeat(MAX_STAGE_EVENTS);
-        trace.push_str("stage:classic_render_begin\nstage:classic_render_end error=512\n");
-        let diagnostics = worker_diagnostics(&trace, false, "ok", 0, 9);
-        assert_eq!(
-            diagnostics["stage_events"].as_array().unwrap().len(),
-            MAX_STAGE_EVENTS
-        );
-        assert_eq!(diagnostics["failure_stage"], "classic_render");
-        assert_eq!(diagnostics["last_completed_stage"], "classic_render");
-    }
-
-    #[test]
-    fn worker_stage_diagnostics_are_bounded() {
-        let trace = "stage:render_begin\n".repeat(MAX_STAGE_EVENTS + 20);
-        let diagnostics = worker_diagnostics(&trace, true, "timeout", 1, 5_000);
-        assert_eq!(
-            diagnostics["stage_events"].as_array().unwrap().len(),
-            MAX_STAGE_EVENTS
-        );
-        assert_eq!(diagnostics["stderr_truncated"], true);
-    }
-
-    #[test]
-    fn active_stage_tracking_is_bounded_but_keeps_the_latest_stage() {
-        let mut trace = "stage:classic_render_begin\nstage:classic_render_end error=0\n"
-            .repeat(MAX_ACTIVE_STAGES + 20);
-        trace.push_str(&"stage:classic_render_begin\n".repeat(MAX_ACTIVE_STAGES + 20));
-        trace.push_str("stage:smart_render_begin\n");
-        let diagnostics = worker_diagnostics(&trace, true, "timeout", 1, 5_000);
-        assert_eq!(diagnostics["active_stage"], "smart_render");
-        assert_eq!(diagnostics["failure_stage"], "smart_render");
-    }
-
-    #[test]
-    fn load_failure_marker_accepts_only_path_free_worker_owned_stage_and_error() {
-        let diagnostics = worker_diagnostics(
-            "untrusted C:\\private\\plugin.aex\n\
-             stage:load_failure stage=load_library win32_error=126\n",
-            false,
-            "nonzero_exit",
-            11,
-            4,
-        );
-        assert_eq!(
-            diagnostics["load_failure"],
-            json!({"stage": "load_library", "win32_error_code": 126})
-        );
-        assert!(!diagnostics["load_failure"].to_string().contains("private"));
-
-        for marker in [
-            "stage:load_failure stage=unknown win32_error=126",
-            "stage:load_failure stage=load_library win32_error=0",
-            "stage:load_failure stage=load_library win32_error=-1",
-            "stage:load_failure stage=load_library win32_error=126 path=C:\\private",
-            "stage:load_failure win32_error=126 stage=load_library",
-        ] {
-            assert_eq!(load_failure_marker(marker, 11), None);
-        }
-        assert_eq!(
-            load_failure_marker(
-                "stage:load_failure stage=add_dll_directory win32_error=87",
-                11,
-            ),
-            Some(json!({"stage": "add_dll_directory", "win32_error_code": 87}))
-        );
-        assert_eq!(
-            load_failure_marker(
-                "stage:load_failure stage=set_default_dll_directories win32_error=5",
-                11,
-            ),
-            Some(json!({
-                "stage": "set_default_dll_directories",
-                "win32_error_code": 5,
-            }))
-        );
-        assert_eq!(
-            load_failure_marker("stage:load_failure stage=load_library win32_error=126", 12,),
-            None
-        );
-    }
-
-    #[test]
-    fn structured_worker_report_supplies_bounded_unique_missing_suites() {
-        let mut trace = String::from(
-            "stage:suite_acquire_failed name=PF World Suite version=2\n\
-             stage:suite_acquire_failed name=PF World Suite version=2\n\
-             stage:suite_acquire_failed name=C:\\private\\suite version=1\n\
-             stage:suite_acquire_failed name=Bad Suite version=-1\n",
-        );
-        for index in 0..(MAX_MISSING_SUITES + 3) {
-            trace.push_str(&format!(
-                "stage:suite_acquire_failed name=Safe Suite {index} version=1\n"
-            ));
-        }
-        trace.push_str(&format!(
-            "stage:suite_acquire_failed name={} version=1\n",
-            "A".repeat(MAX_SUITE_NAME_LEN + 1)
-        ));
-
-        let mut diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
-        assert!(diagnostics["missing_suites"].as_array().unwrap().is_empty());
-        let mut reported = vec![
-            json!({"name": "PF World Suite", "version": 2}),
-            json!({"name": "PF World Suite", "version": 2}),
-            json!({"name": "C:\\private\\suite", "version": 1}),
-            json!({"name": "Bad Suite", "version": -1}),
-        ];
-        for index in 0..(MAX_MISSING_SUITES + 3) {
-            reported.push(json!({"name": format!("Safe Suite {index}"), "version": 1}));
-        }
-        propagate_missing_suites(&mut diagnostics, &json!({"missing_suites": reported}));
-        let suites = diagnostics["missing_suites"].as_array().unwrap();
-        assert_eq!(suites.len(), MAX_MISSING_SUITES);
-        assert_eq!(diagnostics["missing_suites_truncated"], true);
-        assert_eq!(suites[0], json!({"name": "PF World Suite", "version": 2}));
-        assert_eq!(
-            suites
-                .iter()
-                .filter(|suite| suite["name"] == "PF World Suite")
-                .count(),
-            1
-        );
-        assert!(!diagnostics.to_string().contains("private"));
-    }
-
-    #[test]
-    fn callback_addr_denials_are_unique_and_shape_checked() {
-        let trace = "stage:callback_addr_denied id=-5 quality=1 mode=0\n\
-             stage:callback_addr_denied id=-5 quality=1 mode=0\n\
-             stage:callback_addr_denied id=-5 quality=0 mode=0\n\
-             stage:callback_addr_denied id=oops quality=1 mode=0\n\
-             stage:callback_addr_denied id=5 quality=1 mode=0 path=C:\\private\n\
-             stage:callback_addr_denied quality=1 id=5 mode=0\n\
-             stage:callback_addr_denied id=99999999999 quality=1 mode=0\n\
-             stage:callback_addr_denied id=1 quality=1 mode=-1\n";
-        let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
-        let denials = diagnostics["callback_addr_denials"].as_array().unwrap();
-        assert_eq!(
-            denials,
-            &[
-                json!({"id": -5, "quality": 1, "mode": 0}),
-                json!({"id": -5, "quality": 0, "mode": 0}),
-            ]
-        );
-        assert_eq!(diagnostics["callback_addr_denials_truncated"], true);
-        assert!(!diagnostics.to_string().contains("private"));
-        // The denial marker must not feed the stage state machine: it carries
-        // no _begin/_end suffix, so it can neither create events nor be
-        // blamed as a failure stage.
-        assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
-        assert_eq!(diagnostics["failure_stage"], Value::Null);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn worker_callback_addr_denial_round_trips_through_broker_diagnostics() {
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(3)
-            .unwrap();
-        let worker = repository.join("target/minihost-build/aex_worker.exe");
-        if !worker.exists() {
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "CI must build aex_worker.exe before broker tests"
-            );
-            return;
-        }
-
-        let output = std::process::Command::new(&worker)
-            .args(["--kind", "discovery", "--self-test-pf-private-callbacks"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        let diagnostics = worker_diagnostics(&stderr, false, "ok", 0, 1);
-        assert_eq!(
-            diagnostics["callback_addr_denials"],
-            json!([{"id": -3, "quality": 1, "mode": 0}])
-        );
-        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "requires built aex_worker.exe; run explicitly with --ignored"]
-    fn unhandled_worker_thread_fault_round_trips_into_shipping_diagnostics() {
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(3)
-            .unwrap();
-        let worker = repository.join("target/minihost-build/aex_worker.exe");
-        if !worker.exists() {
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "CI must build aex_worker.exe before broker tests"
-            );
-            return;
-        }
-        let output = std::process::Command::new(&worker)
-            .args(["--kind", "discovery", "--self-test-unhandled-thread-crash"])
-            .env_remove("AEXCOMPAT_MINIDUMP_HANDLE")
-            .env_remove("AEXCOMPAT_MINIDUMP_ACK_HANDLE")
-            .output()
-            .unwrap();
-        assert_eq!(
-            output.status.code().map(|code| code as u32),
-            Some(0xC000_0005)
-        );
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        let diagnostics = worker_diagnostics(&stderr, false, "crashed", 0xC000_0005, 1);
-        assert_eq!(diagnostics["unhandled_exception"]["code"], 0xC000_0005u32);
-        assert_eq!(diagnostics["unhandled_exception"]["site"], "worker");
-        assert_eq!(
-            diagnostics["unhandled_exception"]["module"],
-            "aex_worker.exe"
-        );
-        assert!(diagnostics["unhandled_exception"]["rva"].as_u64().unwrap() > 0);
-        assert!(diagnostics.get("stderr_tail").is_none());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "requires built aex_worker.exe and fault-module fixture; run explicitly with --ignored"]
-    fn unhandled_loaded_module_thread_fault_names_the_foreign_module() {
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(3)
-            .unwrap();
-        let worker = repository.join("target/minihost-build/aex_worker.exe");
-        let fixture =
-            repository.join("target/minihost-build/worker_unhandled_thread_fault_fixture.dll");
-        if !worker.exists() || !fixture.exists() {
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "CI must build aex_worker.exe and its fault-module fixture before broker tests"
-            );
-            return;
-        }
-        let output = std::process::Command::new(&worker)
-            .args([
-                "--kind",
-                "discovery",
-                "--self-test-unhandled-module-thread-crash",
-            ])
-            .env_remove("AEXCOMPAT_MINIDUMP_HANDLE")
-            .env_remove("AEXCOMPAT_MINIDUMP_ACK_HANDLE")
-            .output()
-            .unwrap();
-        assert_eq!(
-            output.status.code().map(|code| code as u32),
-            Some(0xC000_0005)
-        );
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        let diagnostics = worker_diagnostics(&stderr, false, "crashed", 0xC000_0005, 1);
-        assert_eq!(diagnostics["unhandled_exception"]["code"], 0xC000_0005u32);
-        assert_eq!(diagnostics["unhandled_exception"]["site"], "module");
-        assert_eq!(
-            diagnostics["unhandled_exception"]["module"],
-            "worker_unhandled_thread_fault_fixture.dll"
-        );
-        assert!(diagnostics["unhandled_exception"]["rva"].as_u64().unwrap() > 0);
-    }
-
-    #[test]
-    fn unhandled_exception_marker_is_crash_bound_and_path_free() {
-        let valid = "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x42";
-        assert_eq!(
-            unhandled_exception_marker(valid, "crashed", 0xC000_0005),
-            Some(
-                json!({"code": 0xC000_0005u32, "site": "module", "module": "plugin.aex", "rva": 66u64})
-            )
-        );
-        assert_eq!(unhandled_exception_marker(valid, "ok", 0xC000_0005), None);
-        assert_eq!(
-            unhandled_exception_marker(valid, "crashed", 0xC000_0094),
-            None
-        );
-        for forged in [
-            "stage:unhandled_seh code=0xc0000005 site=module module=C:\\private\\plugin.aex rva=0x42",
-            "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x42 path=private",
-            "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0xgg",
-            "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x123456789abcdef01",
-            "stage:unhandled_seh code=0xc0000005 site=plugin module=plugin.aex rva=0x42",
-        ] {
-            assert_eq!(
-                unhandled_exception_marker(forged, "crashed", 0xC000_0005),
-                None
-            );
-        }
-        assert_eq!(
-            unhandled_exception_marker(
-                "stage:unhandled_seh code=0xc0000005 site=unknown",
-                "crashed",
-                0xC000_0005
-            ),
-            Some(json!({"code": 0xC000_0005u32, "site": "unknown"}))
-        );
-    }
-
-    #[test]
-    fn callback_denials_are_unique_and_identifier_shape_checked() {
-        let trace = "stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\
-             stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\
-             stage:callback_denied callback=transform_world reason=transfer_mode value=-3\n\
-             stage:callback_denied callback=transform_world reason=transfer_mode\n\
-             stage:callback_denied callback=transform_world reason=extent_over_4096\n\
-             stage:callback_denied callback=transform_world reason=C:\\private\\x\n\
-             stage:callback_denied callback=Transform reason=transfer_mode\n\
-             stage:callback_denied reason=transfer_mode callback=transform_world\n\
-             stage:callback_denied callback=transform_world reason=ok value=oops\n\
-             stage:callback_denied callback=transform_world reason=ok value=99999999999\n\
-             stage:callback_denied callback=transform_world reason=ok value=1 extra=1\n\
-             stage:callback_denied callback=private_effect_utf16_to_multibyte reason=null_argument\n\
-             stage:callback_denied callback=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb reason=boundary\n\
-             stage:callback_denied callback=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa reason=too_long\n\
-             stage:callback_denied callback=transform_world\n";
-        let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
-        let denials = diagnostics["callback_denials"].as_array().unwrap();
-        assert_eq!(
-            denials,
-            &[
-                json!({"callback": "transform_world", "reason": "transfer_mode", "value": 2}),
-                json!({"callback": "transform_world", "reason": "transfer_mode", "value": -3}),
-                json!({"callback": "transform_world", "reason": "transfer_mode"}),
-                json!({"callback": "transform_world", "reason": "extent_over_4096"}),
-                json!({"callback": "private_effect_utf16_to_multibyte", "reason": "null_argument"}),
-                json!({"callback": "b".repeat(64), "reason": "boundary"}),
-            ]
-        );
-        assert_eq!(diagnostics["callback_denials_truncated"], true);
-        assert!(!diagnostics.to_string().contains(&"a".repeat(65)));
-        assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
-        assert_eq!(diagnostics["failure_stage"], Value::Null);
-    }
-
-    #[test]
-    fn callback_denials_cap_reports_truncation_without_malformed_lines() {
-        let mut trace = String::new();
-        for index in 0..(MAX_CALLBACK_DENIALS + 3) {
-            trace.push_str(&format!(
-                "stage:callback_denied callback=transform_world reason=reason_{index}\n"
-            ));
-        }
-        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
-        assert_eq!(
-            diagnostics["callback_denials"].as_array().unwrap().len(),
-            MAX_CALLBACK_DENIALS
-        );
-        assert_eq!(diagnostics["callback_denials_truncated"], true);
-        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
-    }
-
-    #[test]
-    fn callback_addr_denials_cap_reports_truncation_without_malformed_lines() {
-        let mut trace = String::new();
-        for index in 0..(MAX_CALLBACK_ADDR_DENIALS + 3) {
-            trace.push_str(&format!(
-                "stage:callback_addr_denied id={index} quality=1 mode=0\n"
-            ));
-        }
-        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
-        assert_eq!(
-            diagnostics["callback_addr_denials"]
-                .as_array()
-                .unwrap()
-                .len(),
-            MAX_CALLBACK_ADDR_DENIALS
-        );
-        assert_eq!(diagnostics["callback_addr_denials_truncated"], true);
-    }
-
-    #[test]
-    fn callback_addr_denials_absent_lines_report_empty_untruncated() {
-        let diagnostics = worker_diagnostics(
-            "stage:classic_render_begin\nstage:classic_render_end error=516\n",
-            false,
-            "ok",
-            0,
-            2,
-        );
-        assert!(
-            diagnostics["callback_addr_denials"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
-    }
-
-    #[test]
-    fn structured_worker_report_supplies_bounded_unique_unsupported_suite_calls() {
-        let mut diagnostics = json!({});
-        let mut reported = vec![
-            json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 2}),
-            json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 9}),
-            json!({"name": "C:\\private\\suite", "version": 1, "slot": 1, "call_count": 1}),
-            json!({"name": "Bad Suite", "version": 1, "slot": 2048, "call_count": 1}),
-        ];
-        for index in 0..(MAX_UNSUPPORTED_SUITE_CALLS + 3) {
-            reported.push(json!({
-                "name": format!("Safe Suite {index}"),
-                "version": 1,
-                "slot": index,
-                "call_count": 1,
-            }));
-        }
-
-        propagate_unsupported_suite_calls(
-            &mut diagnostics,
-            &json!({
-                "unsupported_suite_calls": reported,
-                "callback_history": [
-                    {"sequence": 4, "callback": "iterate", "result": 0, "reason": "none"},
-                    {"sequence": 5, "callback": "checkout_output", "result": 4, "reason": "invalid_arguments"}
-                ]
-            }),
-        );
-        let calls = diagnostics["unsupported_suite_calls"].as_array().unwrap();
-        assert_eq!(calls.len(), MAX_UNSUPPORTED_SUITE_CALLS);
-        assert_eq!(diagnostics["unsupported_suite_calls_truncated"], true);
-        assert_eq!(
-            calls[0],
-            json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 2})
-        );
-        assert_eq!(
-            calls
-                .iter()
-                .filter(|call| call["name"] == "AEGP Comp Suite" && call["slot"] == 7)
-                .count(),
-            1
-        );
-        assert!(!diagnostics.to_string().contains("private"));
-        assert_eq!(diagnostics["callback_history"].as_array().unwrap().len(), 2);
-        assert_eq!(diagnostics["callback_history"][1]["sequence"], 5);
-    }
-
-    #[test]
-    fn bee_facade_block_is_rebuilt_from_validated_integers_and_bounded() {
-        // The facade counters are the positive half of the facade diagnostic:
-        // `unsupported_suite_calls` names slots nobody implemented, and an
-        // empty list there reads the same whether a slot held or nothing
-        // reached it (issue #1264). This is the boundary against worker
-        // stdout, so what lands in the record has to be integers this side
-        // built, not whatever the report happened to contain.
-        let mut diagnostics = json!({});
-        propagate_bee_facade(
-            &mut diagnostics,
-            &json!({"bee_facade": {
-                "effect_layer_hand_outs": 2,
-                "trap_count": 0,
-                "layer_vtable_calls": [
-                    {"slot": 56, "call_count": 1},
-                    {"slot": 183, "call_count": 2},
-                    // Dropped: no legible slot/count pair.
-                    {"slot": "56", "call_count": 1},
-                    "not an entry",
-                ],
-                // Not copied through: only the named fields survive.
-                "sealed_path": "a private path the worker had no business emitting",
-            }}),
-        );
-        let block = &diagnostics["bee_facade"];
-        assert_eq!(block["effect_layer_hand_outs"], 2);
-        assert_eq!(block["trap_count"], 0);
-        assert_eq!(
-            block["layer_vtable_calls"],
-            json!([{"slot": 56, "call_count": 1}, {"slot": 183, "call_count": 2}])
-        );
-        // The dropped entries are why the flag exists: a shortened list read
-        // as a complete one turns "not legible" into "did not happen".
-        assert_eq!(block["layer_vtable_calls_truncated"], true);
-        assert!(!diagnostics.to_string().contains("private"));
-
-        // A report without the block leaves the diagnostics untouched, so the
-        // null default keeps meaning "no facade block was reported".
-        let mut absent = json!({"bee_facade": Value::Null});
-        propagate_bee_facade(&mut absent, &json!({}));
-        assert_eq!(absent["bee_facade"], Value::Null);
-
-        // A non-object where the block belongs is refused rather than copied.
-        let mut malformed = json!({"bee_facade": Value::Null});
-        propagate_bee_facade(&mut malformed, &json!({"bee_facade": 7}));
-        assert_eq!(malformed["bee_facade"], Value::Null);
-
-        // A list longer than any real facade could produce is capped.
-        let long: Vec<Value> = (0..64)
-            .map(|slot| json!({"slot": slot, "call_count": 1}))
-            .collect();
-        let mut capped = json!({});
-        propagate_bee_facade(
-            &mut capped,
-            &json!({"bee_facade": {"layer_vtable_calls": long}}),
-        );
-        assert_eq!(
-            capped["bee_facade"]["layer_vtable_calls"]
-                .as_array()
-                .unwrap()
-                .len(),
-            32
-        );
-        assert_eq!(capped["bee_facade"]["layer_vtable_calls_truncated"], true);
-        // Counters the report omitted stay null rather than reading as zero.
-        assert_eq!(capped["bee_facade"]["effect_layer_hand_outs"], Value::Null);
-
-        // The worker always writes the list, so a block without it is not
-        // legible either: an empty list with the flag down would read as "no
-        // slot was dispatched".
-        let mut missing = json!({});
-        propagate_bee_facade(
-            &mut missing,
-            &json!({"bee_facade": {"effect_layer_hand_outs": 1, "trap_count": 0}}),
-        );
-        assert_eq!(missing["bee_facade"]["layer_vtable_calls"], json!([]));
-        assert_eq!(missing["bee_facade"]["layer_vtable_calls_truncated"], true);
-
-        // A slot index no BEE_AVLayer vtable has is a malformed entry, not data.
-        let mut out_of_range = json!({});
-        propagate_bee_facade(
-            &mut out_of_range,
-            &json!({"bee_facade": {"layer_vtable_calls": [
-                {"slot": 1024, "call_count": 1},
-                {"slot": 5, "call_count": 3},
-            ]}}),
-        );
-        assert_eq!(
-            out_of_range["bee_facade"]["layer_vtable_calls"],
-            json!([{"slot": 5, "call_count": 3}])
-        );
-        assert_eq!(
-            out_of_range["bee_facade"]["layer_vtable_calls_truncated"],
-            true
-        );
-    }
-
-    #[test]
-    fn structured_worker_report_supplies_bounded_suite_timeline_without_rounding_failure() {
-        let boundary_name = format!("A{}Z", "n".repeat(MAX_SUITE_NAME_LEN - 2));
-        let boundary_selector = "S".repeat(MAX_SUITE_NAME_LEN);
-        let mut reported = vec![
-            json!({
-                "sequence": 0,
-                "action": "acquire",
-                "name": boundary_name,
-                "version": MAX_SUITE_VERSION,
-                "selector": boundary_selector,
-                "result": i32::MIN,
-            }),
-            json!({
-                "sequence": 1,
-                "action": "acquire",
-                "name": "A".repeat(MAX_SUITE_NAME_LEN + 1),
-                "version": 1,
-                "selector": "HOST",
-                "result": 0,
-            }),
-            json!({
-                "sequence": 2,
-                "action": "acquire",
-                "name": "PF World Suite",
-                "version": MAX_SUITE_VERSION + 1,
-                "selector": "HOST",
-                "result": 0,
-            }),
-        ];
-        for sequence in 3..(MAX_SUITE_TIMELINE_EVENTS + 10) {
-            reported.push(json!({
-                "sequence": sequence,
-                "action": if sequence % 2 == 0 { "acquire" } else { "release" },
-                "name": "PF World Suite",
-                "version": 2,
-                "selector": "PF Cmd RENDER",
-                "result": 0,
-            }));
-        }
-        let mut diagnostics = worker_diagnostics("", false, "nonzero_exit", 13, 1);
-        propagate_suite_timeline(
-            &mut diagnostics,
-            &json!({
-                "suite_timeline": reported,
-                "suite_timeline_truncated": false,
-            }),
-        );
-
-        assert_eq!(
-            diagnostics["suite_timeline"].as_array().unwrap().len(),
-            MAX_SUITE_TIMELINE_EVENTS
-        );
-        assert_eq!(diagnostics["suite_timeline_truncated"], true);
-        assert_eq!(diagnostics["classification"], "nonzero_exit");
-        assert_eq!(diagnostics["exit_code"], 13);
-        assert_eq!(
-            diagnostics["suite_timeline"][0]["version"],
-            MAX_SUITE_VERSION
-        );
-        assert_eq!(diagnostics["suite_timeline"][0]["result"], i32::MIN);
-    }
-
-    #[test]
-    fn minidump_marker_accepts_only_worker_owned_shapes() {
-        // Legitimate worker lines normalize to a path-free marker.
-        assert_eq!(
-            minidump_marker("stage:minidump_written bytes=51790"),
-            Some("written bytes=51790".to_owned())
-        );
-        assert_eq!(
-            minidump_marker("stage:minidump_failed reason=dbghelp_unavailable"),
-            Some("failed reason=dbghelp_unavailable".to_owned())
-        );
-        assert_eq!(
-            minidump_marker("stage:minidump_failed reason=create_failed code=5"),
-            Some("failed reason=create_failed".to_owned())
-        );
-        assert_eq!(
-            minidump_marker("stage:minidump_failed reason=writer_timeout"),
-            Some("failed reason=writer_timeout".to_owned())
-        );
-
-        // A plug-in cannot smuggle a path or fake reason through the marker.
-        assert_eq!(
-            minidump_marker("stage:minidump_written name=C:\\Users\\secret\\a.dmp bytes=1"),
-            None
-        );
-        assert_eq!(minidump_marker("stage:minidump_written bytes=../etc"), None);
-        assert_eq!(
-            minidump_marker("stage:minidump_failed reason=totally_made_up"),
-            None
-        );
-        assert_eq!(minidump_marker("stage:minidump_written whatever"), None);
-        assert_eq!(minidump_marker("stage:other"), None);
-    }
-
-    #[test]
-    fn isolated_worker_diagnostics_expose_kill_reason_and_memory_peaks() {
-        let isolated = crate::secure_launch::SecureLaunchResult {
-            classification: crate::ExitClassification::NonzeroExit,
-            exit_code: 42,
-            stdout: String::new(),
-            stderr: String::new(),
-            stdout_truncated: false,
-            stderr_truncated: false,
-            kill_reason: Some("memory_limit"),
-            worker_peak_commit_bytes: Some(529_000_000),
-            peak_process_memory_bytes: Some(530_000_000),
-            peak_job_memory_bytes: Some(531_000_000),
-            process_memory_limit_bytes: 536_870_912,
-            memory_limit_reached: true,
-            dismissed_windows: Vec::new(),
-            worker_freshness_warning: Some("source_newer_than_worker"),
-            module_audit_warning: Some("secure worker module audit did not pass".to_owned()),
-        };
-        let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
-        assert_eq!(diagnostics["kill_reason"], "memory_limit");
-        assert_eq!(
-            diagnostics["worker_freshness_warning"],
-            "source_newer_than_worker"
-        );
-        assert_eq!(
-            diagnostics["module_audit_warning"],
-            "secure worker module audit did not pass"
-        );
-        assert_eq!(diagnostics["memory_limit_reached"], true);
-        assert_eq!(diagnostics["worker_peak_commit_bytes"], 529_000_000u64);
-        assert_eq!(diagnostics["peak_process_memory_bytes"], 530_000_000u64);
-        assert_eq!(diagnostics["peak_job_memory_bytes"], 531_000_000u64);
-        assert_eq!(diagnostics["process_memory_limit_bytes"], 536_870_912u64);
-        assert_eq!(diagnostics["classification"], "nonzero_exit");
-        assert_eq!(diagnostics["elapsed_ms"], 1_234);
-
-        let alive = crate::secure_launch::SecureLaunchResult {
-            classification: crate::ExitClassification::Ok,
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-            stdout_truncated: false,
-            stderr_truncated: false,
-            kill_reason: None,
-            worker_peak_commit_bytes: Some(900_000),
-            peak_process_memory_bytes: Some(1_000_000),
-            peak_job_memory_bytes: Some(1_000_000),
-            process_memory_limit_bytes: 536_870_912,
-            memory_limit_reached: false,
-            dismissed_windows: Vec::new(),
-            worker_freshness_warning: None,
-            module_audit_warning: None,
-        };
-        let diagnostics = isolated_worker_diagnostics(&alive, 5);
-        assert_eq!(diagnostics["kill_reason"], Value::Null);
-        assert_eq!(diagnostics["memory_limit_reached"], false);
-        assert!(
-            diagnostics.get("worker_freshness_warning").is_none(),
-            "a fresh worker adds no freshness key"
-        );
-        assert!(
-            diagnostics.get("module_audit_warning").is_none(),
-            "a passing audit adds no audit key"
-        );
-    }
-
-    #[test]
-    fn smart_route_diagnostic_requires_a_matching_completed_failure_report() {
-        let report = json!({
-            "stage": "smartfx_render", "status": "render_failed", "global_setup_error": 0,
-            "smart_render_supported": false, "advertised_out_flags2": 8,
-            "route_mismatch": {"reason": "smart_render_not_advertised", "advertised_out_flags2": 8},
-        });
-        let mut isolated = crate::secure_launch::SecureLaunchResult {
-            classification: crate::ExitClassification::NonzeroExit,
-            exit_code: 22,
-            stdout: report.to_string(),
-            stderr: String::new(),
-            stdout_truncated: false,
-            stderr_truncated: false,
-            kill_reason: None,
-            worker_peak_commit_bytes: None,
-            peak_process_memory_bytes: None,
-            peak_job_memory_bytes: None,
-            process_memory_limit_bytes: 536_870_912,
-            memory_limit_reached: false,
-            dismissed_windows: Vec::new(),
-            worker_freshness_warning: None,
-            module_audit_warning: None,
-        };
-        let diagnostic = isolated_worker_diagnostics(&isolated, 1);
-        assert_eq!(diagnostic["classification"], "route_mismatch");
-        assert_eq!(diagnostic["route_mismatch"], report["route_mismatch"]);
-        for (key, value) in [
-            ("stage", json!("classic_render")),
-            ("status", json!("render_completed")),
-            ("global_setup_error", json!(4)),
-            ("smart_render_supported", json!(true)),
-            ("advertised_out_flags2", json!(1032)),
-            ("advertised_out_flags2", json!(9)),
-            (
-                "route_mismatch",
-                json!({"reason": "unknown", "advertised_out_flags2": 8}),
-            ),
-        ] {
-            let mut invalid = report.clone();
-            invalid[key] = value;
-            isolated.stdout = invalid.to_string();
-            assert_eq!(
-                isolated_worker_diagnostics(&isolated, 1)["classification"],
-                "nonzero_exit"
-            );
-        }
-        isolated.stdout = report.to_string();
-        isolated.stdout_truncated = true;
-        assert_eq!(
-            isolated_worker_diagnostics(&isolated, 1)["classification"],
-            "nonzero_exit"
-        );
-        isolated.stdout_truncated = false;
-        isolated.exit_code = 24;
-        assert_eq!(
-            isolated_worker_diagnostics(&isolated, 1)["classification"],
-            "nonzero_exit"
-        );
-    }
-
-    #[test]
-    fn runtime_module_backend_matches_the_worker_gpu_command() {
-        assert_eq!(
-            runtime_backend(RenderGpuBackend::Auto),
-            Some(RuntimeBackend::Cuda)
-        );
-        assert_eq!(
-            runtime_backend(RenderGpuBackend::Cuda),
-            Some(RuntimeBackend::Cuda)
-        );
-        assert_eq!(
-            runtime_backend(RenderGpuBackend::OpenCl),
-            Some(RuntimeBackend::Opencl)
-        );
-        assert_eq!(
-            runtime_backend(RenderGpuBackend::DirectX),
-            Some(RuntimeBackend::Directx)
-        );
-        assert_eq!(runtime_backend(RenderGpuBackend::Cpu), None);
-    }
-
-    #[test]
-    fn in_place_inspection_requires_search_dirs_before_touching_the_plugin() {
-        // The empty-dirs rejection fires before any file access, so the fake
-        // path is never read (issue #751).
-        let error = inspect_experimental_in_place(
-            std::path::Path::new("missing-repository"),
-            std::path::Path::new("missing-plugin.aex"),
-            &"0".repeat(64),
-            Vec::new(),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("requires at least one dependency search directory")
-        );
-    }
-
-    #[test]
-    fn discovery_inspection_requires_search_dirs_before_worker_launch() {
-        let error = inspect_experimental_via_discovery_in_place(
-            std::path::Path::new("missing-repository"),
-            ApprovedImageArtifact {
-                path: std::path::PathBuf::from("missing-plugin.aex"),
-                expected_sha256: [0; 32],
-                expected_size: 1,
-            },
-            Vec::new(),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("requires dependency search directories")
-        );
-    }
-
-    #[test]
-    fn discovery_report_is_converted_to_interactive_parameters() {
-        let report = json!({
-            "status": "parameters_inspected",
-            "global_setup_error": 0,
-            "params_setup_error": 0,
-            "global_setdown_error": 0,
-            "out_flags": 0,
-            "out_flags2": 1 << 10,
-            "parameters": [{
-                "index": 4,
-                "name": "Amount",
-                "type": 10,
-                "default": 25.0,
-                "valid_min": 0.0,
-                "valid_max": 100.0,
-                "slider_min": 5.0,
-                "slider_max": 75.0,
-                "ui_flags": 0,
-                "flags": 0
-            }]
-        });
-        let (parameters, diagnostics) = inspection_result_from_report(
-            report,
-            json!({"inspection_transport": "discovery_session"}),
-            false,
-        )
-        .expect("authenticated discovery report converts");
-        assert_eq!(parameters.len(), 1);
-        assert_eq!(parameters[0].slot, 4);
-        assert_eq!(parameters[0].kind, "float");
-        assert_eq!(parameters[0].value, 25.0);
-        assert_eq!(diagnostics["advertised_out_flags2"], 1 << 10);
-        assert_eq!(diagnostics["smart_render_advertised"], true);
-        assert_eq!(diagnostics["parameter_metadata"][0]["type"], "float_slider");
-        assert_eq!(
-            diagnostics["parameter_metadata"][0]["user_range"],
-            json!({"minimum": 5.0, "maximum": 75.0})
-        );
-    }
-
-    #[test]
-    fn discovery_orchestration_retries_only_an_authenticated_cleanup_checkpoint() {
-        let report = json!({
-            "status": "parameters_inspected",
-            "global_setup_error": 0,
-            "params_setup_error": 0,
-            "global_setdown_error": 0,
-            "out_flags": 0,
-            "out_flags2": 0,
-            "parameters": []
-        });
-        let clean_close = json!({"session_clean": true});
-        let retries = std::cell::Cell::new(0);
-        let inspected = finish_discovery_inspection(
-            crate::render_session::InspectOutcome::Inspected {
-                report: report.clone(),
-            },
-            Path::new("repository"),
-            clean_close.clone(),
-            |_, _| {
-                retries.set(retries.get() + 1);
-                unreachable!("a clean terminal report must not retry")
-            },
-        )
-        .expect("clean terminal report succeeds");
-        assert!(inspected.0.is_empty());
-        assert_eq!(retries.get(), 0);
-
-        let error = finish_discovery_inspection(
-            crate::render_session::InspectOutcome::InspectError {
-                error_kind: "selector_error".to_owned(),
-                report: Some(report),
-            },
-            Path::new("repository"),
-            clean_close,
-            |_, _| {
-                retries.set(retries.get() + 1);
-                unreachable!("an inspect error must not retry")
-            },
-        )
-        .expect_err("inspect error stays failed");
-        assert!(error.to_string().contains("selector_error"));
-        assert_eq!(retries.get(), 0);
-
-        let recovered = finish_discovery_inspection(
-            crate::render_session::InspectOutcome::CleanupCrashCheckpoint {
-                authorization: crate::render_session::CleanupCrashAuthorization::fixture(),
-            },
-            Path::new("repository"),
-            json!({"invalidated": true}),
-            |_, _| {
-                retries.set(retries.get() + 1);
-                Ok((
-                    Vec::new(),
-                    json!({"inspection_status": "parameters_inspected_cleanup_contained"}),
-                ))
-            },
-        )
-        .expect("authenticated checkpoint performs one contained retry");
-        assert!(recovered.0.is_empty());
-        assert_eq!(retries.get(), 1);
-        assert_eq!(
-            recovered.1["inspection_transport"],
-            "discovery_cleanup_contained"
-        );
-    }
-
-    #[test]
-    fn in_place_aegp_initialization_requires_search_dirs_before_file_access() {
-        let error = initialize_experimental_aegp_in_place(
-            std::path::Path::new("missing-repository"),
-            std::path::Path::new("missing-plugin.aex"),
-            &"0".repeat(64),
-            Vec::new(),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("requires at least one dependency search directory")
-        );
-    }
-
-    #[test]
-    fn aegp_dynamic_suite_report_is_bounded_unique_and_exact() {
-        let valid = json!({
-            "dynamic_suites": [{
-                "name": "Fixture Companion Suite",
-                "api_version": 1,
-                "internal_version": 2
-            }]
-        });
-        assert!(valid_dynamic_suite_report(&valid));
-
-        let mut duplicate = valid.clone();
-        duplicate["dynamic_suites"] = json!([
-            {"name":"Fixture Companion Suite","api_version":1,"internal_version":2},
-            {"name":"Fixture Companion Suite","api_version":1,"internal_version":2}
-        ]);
-        assert!(!valid_dynamic_suite_report(&duplicate));
-
-        for mutation in [
-            json!({"dynamic_suites":[{"name":"","api_version":1,"internal_version":0}]}),
-            json!({"dynamic_suites":[{"name":"Suite","api_version":0,"internal_version":0}]}),
-            json!({"dynamic_suites":[{"name":"Suite","api_version":1,"internal_version":-1}]}),
-            json!({"dynamic_suites":[{"name":"Suite","api_version":1,"internal_version":0,"extra":true}]}),
-        ] {
-            assert!(!valid_dynamic_suite_report(&mutation));
-        }
-        assert!(!valid_dynamic_suite_report(&json!({
-            "dynamic_suites": (0..33).map(|index| json!({
-                "name": format!("Suite {index}"),
-                "api_version": 1,
-                "internal_version": 0
-            })).collect::<Vec<_>>()
-        })));
-    }
+    // A frame that never reached the selector carries no `classic_render`
+    // pair, because the markers live inside the selector hook rather than
+    // around the dispatch call. On a non-zero incoming error
+    // `dispatch_render` skips the draw, prepare_output, and selector steps,
+    // so bracketing the call would re-emit that error under the selector's
+    // name; `failure_stage` takes the last failing stage and would blame a
+    // RENDER the plug-in never saw. It does not skip close_ui, whose stage
+    // is clean when an earlier error already owns the frame (issue #735).
+    //
+    // FRAME_SETUP is not yet one of the steps that gets skipped: the
+    // `render_once` path drops its error instead of propagating it and
+    // dispatches RENDER anyway (issue #725), so a real setup refusal still
+    // shows both stages today - correctly, because RENDER really does run.
+    // This trace is the one a lifecycle refusal produces once it
+    // propagates, and the one `smart_render_runtime` already produces at
+    // its `lifecycle.setup_error != 0` check, since that call site honors
+    // the field the classic path drops.
+    let lifecycle_refused = worker_diagnostics(
+        "stage:frame_setup_begin\nstage:frame_setup_end error=512\n",
+        false,
+        "ok",
+        0,
+        9,
+    );
+    assert_eq!(lifecycle_refused["first_failure_stage"], "frame_setup");
+    assert_eq!(lifecycle_refused["failure_stage"], "frame_setup");
 }
+
+/// The event cap bounds what is reported, not what is noticed. A frame that
+/// fails on every frame of a long session overruns the list, and that is
+/// exactly when the failure must still be attributed (issue #722).
+#[test]
+#[cfg(windows)]
+fn the_event_cap_does_not_hide_a_failure_past_it() {
+    let mut trace =
+        "stage:classic_render_begin\nstage:classic_render_end error=0\n".repeat(MAX_STAGE_EVENTS);
+    trace.push_str("stage:classic_render_begin\nstage:classic_render_end error=512\n");
+    let diagnostics = worker_diagnostics(&trace, false, "ok", 0, 9);
+    assert_eq!(
+        diagnostics["stage_events"].as_array().unwrap().len(),
+        MAX_STAGE_EVENTS
+    );
+    assert_eq!(diagnostics["failure_stage"], "classic_render");
+    assert_eq!(diagnostics["last_completed_stage"], "classic_render");
+}
+
+#[test]
+#[cfg(windows)]
+fn worker_stage_diagnostics_are_bounded() {
+    let trace = "stage:render_begin\n".repeat(MAX_STAGE_EVENTS + 20);
+    let diagnostics = worker_diagnostics(&trace, true, "timeout", 1, 5_000);
+    assert_eq!(
+        diagnostics["stage_events"].as_array().unwrap().len(),
+        MAX_STAGE_EVENTS
+    );
+    assert_eq!(diagnostics["stderr_truncated"], true);
+}
+
+#[test]
+#[cfg(windows)]
+fn active_stage_tracking_is_bounded_but_keeps_the_latest_stage() {
+    let mut trace = "stage:classic_render_begin\nstage:classic_render_end error=0\n"
+        .repeat(MAX_ACTIVE_STAGES + 20);
+    trace.push_str(&"stage:classic_render_begin\n".repeat(MAX_ACTIVE_STAGES + 20));
+    trace.push_str("stage:smart_render_begin\n");
+    let diagnostics = worker_diagnostics(&trace, true, "timeout", 1, 5_000);
+    assert_eq!(diagnostics["active_stage"], "smart_render");
+    assert_eq!(diagnostics["failure_stage"], "smart_render");
+}
+
+#[test]
+#[cfg(windows)]
+fn load_failure_marker_accepts_only_path_free_worker_owned_stage_and_error() {
+    let diagnostics = worker_diagnostics(
+        "untrusted C:\\private\\plugin.aex\n\
+         stage:load_failure stage=load_library win32_error=126\n",
+        false,
+        "nonzero_exit",
+        11,
+        4,
+    );
+    assert_eq!(
+        diagnostics["load_failure"],
+        json!({"stage": "load_library", "win32_error_code": 126})
+    );
+    assert!(!diagnostics["load_failure"].to_string().contains("private"));
+
+    for marker in [
+        "stage:load_failure stage=unknown win32_error=126",
+        "stage:load_failure stage=load_library win32_error=0",
+        "stage:load_failure stage=load_library win32_error=-1",
+        "stage:load_failure stage=load_library win32_error=126 path=C:\\private",
+        "stage:load_failure win32_error=126 stage=load_library",
+    ] {
+        assert_eq!(load_failure_marker(marker, 11), None);
+    }
+    assert_eq!(
+        load_failure_marker(
+            "stage:load_failure stage=add_dll_directory win32_error=87",
+            11,
+        ),
+        Some(json!({"stage": "add_dll_directory", "win32_error_code": 87}))
+    );
+    assert_eq!(
+        load_failure_marker(
+            "stage:load_failure stage=set_default_dll_directories win32_error=5",
+            11,
+        ),
+        Some(json!({
+            "stage": "set_default_dll_directories",
+            "win32_error_code": 5,
+        }))
+    );
+    assert_eq!(
+        load_failure_marker("stage:load_failure stage=load_library win32_error=126", 12,),
+        None
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn structured_worker_report_supplies_bounded_unique_missing_suites() {
+    let mut trace = String::from(
+        "stage:suite_acquire_failed name=PF World Suite version=2\n\
+         stage:suite_acquire_failed name=PF World Suite version=2\n\
+         stage:suite_acquire_failed name=C:\\private\\suite version=1\n\
+         stage:suite_acquire_failed name=Bad Suite version=-1\n",
+    );
+    for index in 0..(MAX_MISSING_SUITES + 3) {
+        trace.push_str(&format!(
+            "stage:suite_acquire_failed name=Safe Suite {index} version=1\n"
+        ));
+    }
+    trace.push_str(&format!(
+        "stage:suite_acquire_failed name={} version=1\n",
+        "A".repeat(MAX_SUITE_NAME_LEN + 1)
+    ));
+
+    let mut diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+    assert!(diagnostics["missing_suites"].as_array().unwrap().is_empty());
+    let mut reported = vec![
+        json!({"name": "PF World Suite", "version": 2}),
+        json!({"name": "PF World Suite", "version": 2}),
+        json!({"name": "C:\\private\\suite", "version": 1}),
+        json!({"name": "Bad Suite", "version": -1}),
+    ];
+    for index in 0..(MAX_MISSING_SUITES + 3) {
+        reported.push(json!({"name": format!("Safe Suite {index}"), "version": 1}));
+    }
+    propagate_missing_suites(&mut diagnostics, &json!({"missing_suites": reported}));
+    let suites = diagnostics["missing_suites"].as_array().unwrap();
+    assert_eq!(suites.len(), MAX_MISSING_SUITES);
+    assert_eq!(diagnostics["missing_suites_truncated"], true);
+    assert_eq!(suites[0], json!({"name": "PF World Suite", "version": 2}));
+    assert_eq!(
+        suites
+            .iter()
+            .filter(|suite| suite["name"] == "PF World Suite")
+            .count(),
+        1
+    );
+    assert!(!diagnostics.to_string().contains("private"));
+}
+
+#[test]
+#[cfg(windows)]
+fn callback_addr_denials_are_unique_and_shape_checked() {
+    let trace = "stage:callback_addr_denied id=-5 quality=1 mode=0\n\
+         stage:callback_addr_denied id=-5 quality=1 mode=0\n\
+         stage:callback_addr_denied id=-5 quality=0 mode=0\n\
+         stage:callback_addr_denied id=oops quality=1 mode=0\n\
+         stage:callback_addr_denied id=5 quality=1 mode=0 path=C:\\private\n\
+         stage:callback_addr_denied quality=1 id=5 mode=0\n\
+         stage:callback_addr_denied id=99999999999 quality=1 mode=0\n\
+         stage:callback_addr_denied id=1 quality=1 mode=-1\n";
+    let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
+    let denials = diagnostics["callback_addr_denials"].as_array().unwrap();
+    assert_eq!(
+        denials,
+        &[
+            json!({"id": -5, "quality": 1, "mode": 0}),
+            json!({"id": -5, "quality": 0, "mode": 0}),
+        ]
+    );
+    assert_eq!(diagnostics["callback_addr_denials_truncated"], true);
+    assert!(!diagnostics.to_string().contains("private"));
+    // The denial marker must not feed the stage state machine: it carries
+    // no _begin/_end suffix, so it can neither create events nor be
+    // blamed as a failure stage.
+    assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
+    assert_eq!(diagnostics["failure_stage"], Value::Null);
+}
+
+#[test]
+#[cfg(windows)]
+fn worker_callback_addr_denial_round_trips_through_broker_diagnostics() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    let worker = repository.join("target/minihost-build/aex_worker.exe");
+    if !worker.exists() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must build aex_worker.exe before broker tests"
+        );
+        return;
+    }
+
+    let output = std::process::Command::new(&worker)
+        .args(["--kind", "discovery", "--self-test-pf-private-callbacks"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let diagnostics = worker_diagnostics(&stderr, false, "ok", 0, 1);
+    assert_eq!(
+        diagnostics["callback_addr_denials"],
+        json!([{"id": -3, "quality": 1, "mode": 0}])
+    );
+    assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
+}
+
+#[test]
+#[ignore = "requires built aex_worker.exe; run explicitly with --ignored"]
+#[cfg(windows)]
+fn unhandled_worker_thread_fault_round_trips_into_shipping_diagnostics() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    let worker = repository.join("target/minihost-build/aex_worker.exe");
+    if !worker.exists() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must build aex_worker.exe before broker tests"
+        );
+        return;
+    }
+    let output = std::process::Command::new(&worker)
+        .args(["--kind", "discovery", "--self-test-unhandled-thread-crash"])
+        .env_remove("AEXCOMPAT_MINIDUMP_HANDLE")
+        .env_remove("AEXCOMPAT_MINIDUMP_ACK_HANDLE")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code().map(|code| code as u32),
+        Some(0xC000_0005)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let diagnostics = worker_diagnostics(&stderr, false, "crashed", 0xC000_0005, 1);
+    assert_eq!(diagnostics["unhandled_exception"]["code"], 0xC000_0005u32);
+    assert_eq!(diagnostics["unhandled_exception"]["site"], "worker");
+    assert_eq!(
+        diagnostics["unhandled_exception"]["module"],
+        "aex_worker.exe"
+    );
+    assert!(diagnostics["unhandled_exception"]["rva"].as_u64().unwrap() > 0);
+    assert!(diagnostics.get("stderr_tail").is_none());
+}
+
+#[test]
+#[ignore = "requires built aex_worker.exe and fault-module fixture; run explicitly with --ignored"]
+#[cfg(windows)]
+fn unhandled_loaded_module_thread_fault_names_the_foreign_module() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    let worker = repository.join("target/minihost-build/aex_worker.exe");
+    let fixture =
+        repository.join("target/minihost-build/worker_unhandled_thread_fault_fixture.dll");
+    if !worker.exists() || !fixture.exists() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must build aex_worker.exe and its fault-module fixture before broker tests"
+        );
+        return;
+    }
+    let output = std::process::Command::new(&worker)
+        .args([
+            "--kind",
+            "discovery",
+            "--self-test-unhandled-module-thread-crash",
+        ])
+        .env_remove("AEXCOMPAT_MINIDUMP_HANDLE")
+        .env_remove("AEXCOMPAT_MINIDUMP_ACK_HANDLE")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code().map(|code| code as u32),
+        Some(0xC000_0005)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let diagnostics = worker_diagnostics(&stderr, false, "crashed", 0xC000_0005, 1);
+    assert_eq!(diagnostics["unhandled_exception"]["code"], 0xC000_0005u32);
+    assert_eq!(diagnostics["unhandled_exception"]["site"], "module");
+    assert_eq!(
+        diagnostics["unhandled_exception"]["module"],
+        "worker_unhandled_thread_fault_fixture.dll"
+    );
+    assert!(diagnostics["unhandled_exception"]["rva"].as_u64().unwrap() > 0);
+}
+
+#[test]
+#[cfg(windows)]
+fn unhandled_exception_marker_is_crash_bound_and_path_free() {
+    let valid = "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x42";
+    assert_eq!(
+        unhandled_exception_marker(valid, "crashed", 0xC000_0005),
+        Some(
+            json!({"code": 0xC000_0005u32, "site": "module", "module": "plugin.aex", "rva": 66u64})
+        )
+    );
+    assert_eq!(unhandled_exception_marker(valid, "ok", 0xC000_0005), None);
+    assert_eq!(
+        unhandled_exception_marker(valid, "crashed", 0xC000_0094),
+        None
+    );
+    for forged in [
+        "stage:unhandled_seh code=0xc0000005 site=module module=C:\\private\\plugin.aex rva=0x42",
+        "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x42 path=private",
+        "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0xgg",
+        "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x123456789abcdef01",
+        "stage:unhandled_seh code=0xc0000005 site=plugin module=plugin.aex rva=0x42",
+    ] {
+        assert_eq!(
+            unhandled_exception_marker(forged, "crashed", 0xC000_0005),
+            None
+        );
+    }
+    assert_eq!(
+        unhandled_exception_marker(
+            "stage:unhandled_seh code=0xc0000005 site=unknown",
+            "crashed",
+            0xC000_0005
+        ),
+        Some(json!({"code": 0xC000_0005u32, "site": "unknown"}))
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn callback_denials_are_unique_and_identifier_shape_checked() {
+    let trace = "stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\
+         stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\
+         stage:callback_denied callback=transform_world reason=transfer_mode value=-3\n\
+         stage:callback_denied callback=transform_world reason=transfer_mode\n\
+         stage:callback_denied callback=transform_world reason=extent_over_4096\n\
+         stage:callback_denied callback=transform_world reason=C:\\private\\x\n\
+         stage:callback_denied callback=Transform reason=transfer_mode\n\
+         stage:callback_denied reason=transfer_mode callback=transform_world\n\
+         stage:callback_denied callback=transform_world reason=ok value=oops\n\
+         stage:callback_denied callback=transform_world reason=ok value=99999999999\n\
+         stage:callback_denied callback=transform_world reason=ok value=1 extra=1\n\
+         stage:callback_denied callback=private_effect_utf16_to_multibyte reason=null_argument\n\
+         stage:callback_denied callback=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb reason=boundary\n\
+         stage:callback_denied callback=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa reason=too_long\n\
+         stage:callback_denied callback=transform_world\n";
+    let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
+    let denials = diagnostics["callback_denials"].as_array().unwrap();
+    assert_eq!(
+        denials,
+        &[
+            json!({"callback": "transform_world", "reason": "transfer_mode", "value": 2}),
+            json!({"callback": "transform_world", "reason": "transfer_mode", "value": -3}),
+            json!({"callback": "transform_world", "reason": "transfer_mode"}),
+            json!({"callback": "transform_world", "reason": "extent_over_4096"}),
+            json!({"callback": "private_effect_utf16_to_multibyte", "reason": "null_argument"}),
+            json!({"callback": "b".repeat(64), "reason": "boundary"}),
+        ]
+    );
+    assert_eq!(diagnostics["callback_denials_truncated"], true);
+    assert!(!diagnostics.to_string().contains(&"a".repeat(65)));
+    assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
+    assert_eq!(diagnostics["failure_stage"], Value::Null);
+}
+
+#[test]
+#[cfg(windows)]
+fn callback_denials_cap_reports_truncation_without_malformed_lines() {
+    let mut trace = String::new();
+    for index in 0..(MAX_CALLBACK_DENIALS + 3) {
+        trace.push_str(&format!(
+            "stage:callback_denied callback=transform_world reason=reason_{index}\n"
+        ));
+    }
+    let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+    assert_eq!(
+        diagnostics["callback_denials"].as_array().unwrap().len(),
+        MAX_CALLBACK_DENIALS
+    );
+    assert_eq!(diagnostics["callback_denials_truncated"], true);
+    assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
+}
+
+#[test]
+#[cfg(windows)]
+fn callback_addr_denials_cap_reports_truncation_without_malformed_lines() {
+    let mut trace = String::new();
+    for index in 0..(MAX_CALLBACK_ADDR_DENIALS + 3) {
+        trace.push_str(&format!(
+            "stage:callback_addr_denied id={index} quality=1 mode=0\n"
+        ));
+    }
+    let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+    assert_eq!(
+        diagnostics["callback_addr_denials"]
+            .as_array()
+            .unwrap()
+            .len(),
+        MAX_CALLBACK_ADDR_DENIALS
+    );
+    assert_eq!(diagnostics["callback_addr_denials_truncated"], true);
+}
+
+#[test]
+#[cfg(windows)]
+fn callback_addr_denials_absent_lines_report_empty_untruncated() {
+    let diagnostics = worker_diagnostics(
+        "stage:classic_render_begin\nstage:classic_render_end error=516\n",
+        false,
+        "ok",
+        0,
+        2,
+    );
+    assert!(
+        diagnostics["callback_addr_denials"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
+}
+
+#[test]
+#[cfg(windows)]
+fn structured_worker_report_supplies_bounded_unique_unsupported_suite_calls() {
+    let mut diagnostics = json!({});
+    let mut reported = vec![
+        json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 2}),
+        json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 9}),
+        json!({"name": "C:\\private\\suite", "version": 1, "slot": 1, "call_count": 1}),
+        json!({"name": "Bad Suite", "version": 1, "slot": 2048, "call_count": 1}),
+    ];
+    for index in 0..(MAX_UNSUPPORTED_SUITE_CALLS + 3) {
+        reported.push(json!({
+            "name": format!("Safe Suite {index}"),
+            "version": 1,
+            "slot": index,
+            "call_count": 1,
+        }));
+    }
+
+    propagate_unsupported_suite_calls(
+        &mut diagnostics,
+        &json!({
+            "unsupported_suite_calls": reported,
+            "callback_history": [
+                {"sequence": 4, "callback": "iterate", "result": 0, "reason": "none"},
+                {"sequence": 5, "callback": "checkout_output", "result": 4, "reason": "invalid_arguments"}
+            ]
+        }),
+    );
+    let calls = diagnostics["unsupported_suite_calls"].as_array().unwrap();
+    assert_eq!(calls.len(), MAX_UNSUPPORTED_SUITE_CALLS);
+    assert_eq!(diagnostics["unsupported_suite_calls_truncated"], true);
+    assert_eq!(
+        calls[0],
+        json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 2})
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["name"] == "AEGP Comp Suite" && call["slot"] == 7)
+            .count(),
+        1
+    );
+    assert!(!diagnostics.to_string().contains("private"));
+    assert_eq!(diagnostics["callback_history"].as_array().unwrap().len(), 2);
+    assert_eq!(diagnostics["callback_history"][1]["sequence"], 5);
+}
+
+#[test]
+#[cfg(windows)]
+fn bee_facade_block_is_rebuilt_from_validated_integers_and_bounded() {
+    // The facade counters are the positive half of the facade diagnostic:
+    // `unsupported_suite_calls` names slots nobody implemented, and an
+    // empty list there reads the same whether a slot held or nothing
+    // reached it (issue #1264). This is the boundary against worker
+    // stdout, so what lands in the record has to be integers this side
+    // built, not whatever the report happened to contain.
+    let mut diagnostics = json!({});
+    propagate_bee_facade(
+        &mut diagnostics,
+        &json!({"bee_facade": {
+            "effect_layer_hand_outs": 2,
+            "trap_count": 0,
+            "layer_vtable_calls": [
+                {"slot": 56, "call_count": 1},
+                {"slot": 183, "call_count": 2},
+                // Dropped: no legible slot/count pair.
+                {"slot": "56", "call_count": 1},
+                "not an entry",
+            ],
+            // Not copied through: only the named fields survive.
+            "sealed_path": "a private path the worker had no business emitting",
+        }}),
+    );
+    let block = &diagnostics["bee_facade"];
+    assert_eq!(block["effect_layer_hand_outs"], 2);
+    assert_eq!(block["trap_count"], 0);
+    assert_eq!(
+        block["layer_vtable_calls"],
+        json!([{"slot": 56, "call_count": 1}, {"slot": 183, "call_count": 2}])
+    );
+    // The dropped entries are why the flag exists: a shortened list read
+    // as a complete one turns "not legible" into "did not happen".
+    assert_eq!(block["layer_vtable_calls_truncated"], true);
+    assert!(!diagnostics.to_string().contains("private"));
+
+    // A report without the block leaves the diagnostics untouched, so the
+    // null default keeps meaning "no facade block was reported".
+    let mut absent = json!({"bee_facade": Value::Null});
+    propagate_bee_facade(&mut absent, &json!({}));
+    assert_eq!(absent["bee_facade"], Value::Null);
+
+    // A non-object where the block belongs is refused rather than copied.
+    let mut malformed = json!({"bee_facade": Value::Null});
+    propagate_bee_facade(&mut malformed, &json!({"bee_facade": 7}));
+    assert_eq!(malformed["bee_facade"], Value::Null);
+
+    // A list longer than any real facade could produce is capped.
+    let long: Vec<Value> = (0..64)
+        .map(|slot| json!({"slot": slot, "call_count": 1}))
+        .collect();
+    let mut capped = json!({});
+    propagate_bee_facade(
+        &mut capped,
+        &json!({"bee_facade": {"layer_vtable_calls": long}}),
+    );
+    assert_eq!(
+        capped["bee_facade"]["layer_vtable_calls"]
+            .as_array()
+            .unwrap()
+            .len(),
+        32
+    );
+    assert_eq!(capped["bee_facade"]["layer_vtable_calls_truncated"], true);
+    // Counters the report omitted stay null rather than reading as zero.
+    assert_eq!(capped["bee_facade"]["effect_layer_hand_outs"], Value::Null);
+
+    // The worker always writes the list, so a block without it is not
+    // legible either: an empty list with the flag down would read as "no
+    // slot was dispatched".
+    let mut missing = json!({});
+    propagate_bee_facade(
+        &mut missing,
+        &json!({"bee_facade": {"effect_layer_hand_outs": 1, "trap_count": 0}}),
+    );
+    assert_eq!(missing["bee_facade"]["layer_vtable_calls"], json!([]));
+    assert_eq!(missing["bee_facade"]["layer_vtable_calls_truncated"], true);
+
+    // A slot index no BEE_AVLayer vtable has is a malformed entry, not data.
+    let mut out_of_range = json!({});
+    propagate_bee_facade(
+        &mut out_of_range,
+        &json!({"bee_facade": {"layer_vtable_calls": [
+            {"slot": 1024, "call_count": 1},
+            {"slot": 5, "call_count": 3},
+        ]}}),
+    );
+    assert_eq!(
+        out_of_range["bee_facade"]["layer_vtable_calls"],
+        json!([{"slot": 5, "call_count": 3}])
+    );
+    assert_eq!(
+        out_of_range["bee_facade"]["layer_vtable_calls_truncated"],
+        true
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn structured_worker_report_supplies_bounded_suite_timeline_without_rounding_failure() {
+    let boundary_name = format!("A{}Z", "n".repeat(MAX_SUITE_NAME_LEN - 2));
+    let boundary_selector = "S".repeat(MAX_SUITE_NAME_LEN);
+    let mut reported = vec![
+        json!({
+            "sequence": 0,
+            "action": "acquire",
+            "name": boundary_name,
+            "version": MAX_SUITE_VERSION,
+            "selector": boundary_selector,
+            "result": i32::MIN,
+        }),
+        json!({
+            "sequence": 1,
+            "action": "acquire",
+            "name": "A".repeat(MAX_SUITE_NAME_LEN + 1),
+            "version": 1,
+            "selector": "HOST",
+            "result": 0,
+        }),
+        json!({
+            "sequence": 2,
+            "action": "acquire",
+            "name": "PF World Suite",
+            "version": MAX_SUITE_VERSION + 1,
+            "selector": "HOST",
+            "result": 0,
+        }),
+    ];
+    for sequence in 3..(MAX_SUITE_TIMELINE_EVENTS + 10) {
+        reported.push(json!({
+            "sequence": sequence,
+            "action": if sequence % 2 == 0 { "acquire" } else { "release" },
+            "name": "PF World Suite",
+            "version": 2,
+            "selector": "PF Cmd RENDER",
+            "result": 0,
+        }));
+    }
+    let mut diagnostics = worker_diagnostics("", false, "nonzero_exit", 13, 1);
+    propagate_suite_timeline(
+        &mut diagnostics,
+        &json!({
+            "suite_timeline": reported,
+            "suite_timeline_truncated": false,
+        }),
+    );
+
+    assert_eq!(
+        diagnostics["suite_timeline"].as_array().unwrap().len(),
+        MAX_SUITE_TIMELINE_EVENTS
+    );
+    assert_eq!(diagnostics["suite_timeline_truncated"], true);
+    assert_eq!(diagnostics["classification"], "nonzero_exit");
+    assert_eq!(diagnostics["exit_code"], 13);
+    assert_eq!(
+        diagnostics["suite_timeline"][0]["version"],
+        MAX_SUITE_VERSION
+    );
+    assert_eq!(diagnostics["suite_timeline"][0]["result"], i32::MIN);
+}
+
+#[test]
+#[cfg(windows)]
+fn minidump_marker_accepts_only_worker_owned_shapes() {
+    // Legitimate worker lines normalize to a path-free marker.
+    assert_eq!(
+        minidump_marker("stage:minidump_written bytes=51790"),
+        Some("written bytes=51790".to_owned())
+    );
+    assert_eq!(
+        minidump_marker("stage:minidump_failed reason=dbghelp_unavailable"),
+        Some("failed reason=dbghelp_unavailable".to_owned())
+    );
+    assert_eq!(
+        minidump_marker("stage:minidump_failed reason=create_failed code=5"),
+        Some("failed reason=create_failed".to_owned())
+    );
+    assert_eq!(
+        minidump_marker("stage:minidump_failed reason=writer_timeout"),
+        Some("failed reason=writer_timeout".to_owned())
+    );
+
+    // A plug-in cannot smuggle a path or fake reason through the marker.
+    assert_eq!(
+        minidump_marker("stage:minidump_written name=C:\\Users\\secret\\a.dmp bytes=1"),
+        None
+    );
+    assert_eq!(minidump_marker("stage:minidump_written bytes=../etc"), None);
+    assert_eq!(
+        minidump_marker("stage:minidump_failed reason=totally_made_up"),
+        None
+    );
+    assert_eq!(minidump_marker("stage:minidump_written whatever"), None);
+    assert_eq!(minidump_marker("stage:other"), None);
+}
+
+#[test]
+#[cfg(windows)]
+fn isolated_worker_diagnostics_expose_kill_reason_and_memory_peaks() {
+    let isolated = crate::secure_launch::SecureLaunchResult {
+        classification: crate::ExitClassification::NonzeroExit,
+        exit_code: 42,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        kill_reason: Some("memory_limit"),
+        worker_peak_commit_bytes: Some(529_000_000),
+        peak_process_memory_bytes: Some(530_000_000),
+        peak_job_memory_bytes: Some(531_000_000),
+        process_memory_limit_bytes: 536_870_912,
+        memory_limit_reached: true,
+        dismissed_windows: Vec::new(),
+        worker_freshness_warning: Some("source_newer_than_worker"),
+        module_audit_warning: Some("secure worker module audit did not pass".to_owned()),
+    };
+    let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
+    assert_eq!(diagnostics["kill_reason"], "memory_limit");
+    assert_eq!(
+        diagnostics["worker_freshness_warning"],
+        "source_newer_than_worker"
+    );
+    assert_eq!(
+        diagnostics["module_audit_warning"],
+        "secure worker module audit did not pass"
+    );
+    assert_eq!(diagnostics["memory_limit_reached"], true);
+    assert_eq!(diagnostics["worker_peak_commit_bytes"], 529_000_000u64);
+    assert_eq!(diagnostics["peak_process_memory_bytes"], 530_000_000u64);
+    assert_eq!(diagnostics["peak_job_memory_bytes"], 531_000_000u64);
+    assert_eq!(diagnostics["process_memory_limit_bytes"], 536_870_912u64);
+    assert_eq!(diagnostics["classification"], "nonzero_exit");
+    assert_eq!(diagnostics["elapsed_ms"], 1_234);
+
+    let alive = crate::secure_launch::SecureLaunchResult {
+        classification: crate::ExitClassification::Ok,
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        kill_reason: None,
+        worker_peak_commit_bytes: Some(900_000),
+        peak_process_memory_bytes: Some(1_000_000),
+        peak_job_memory_bytes: Some(1_000_000),
+        process_memory_limit_bytes: 536_870_912,
+        memory_limit_reached: false,
+        dismissed_windows: Vec::new(),
+        worker_freshness_warning: None,
+        module_audit_warning: None,
+    };
+    let diagnostics = isolated_worker_diagnostics(&alive, 5);
+    assert_eq!(diagnostics["kill_reason"], Value::Null);
+    assert_eq!(diagnostics["memory_limit_reached"], false);
+    assert!(
+        diagnostics.get("worker_freshness_warning").is_none(),
+        "a fresh worker adds no freshness key"
+    );
+    assert!(
+        diagnostics.get("module_audit_warning").is_none(),
+        "a passing audit adds no audit key"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn smart_route_diagnostic_requires_a_matching_completed_failure_report() {
+    let report = json!({
+        "stage": "smartfx_render", "status": "render_failed", "global_setup_error": 0,
+        "smart_render_supported": false, "advertised_out_flags2": 8,
+        "route_mismatch": {"reason": "smart_render_not_advertised", "advertised_out_flags2": 8},
+    });
+    let mut isolated = crate::secure_launch::SecureLaunchResult {
+        classification: crate::ExitClassification::NonzeroExit,
+        exit_code: 22,
+        stdout: report.to_string(),
+        stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        kill_reason: None,
+        worker_peak_commit_bytes: None,
+        peak_process_memory_bytes: None,
+        peak_job_memory_bytes: None,
+        process_memory_limit_bytes: 536_870_912,
+        memory_limit_reached: false,
+        dismissed_windows: Vec::new(),
+        worker_freshness_warning: None,
+        module_audit_warning: None,
+    };
+    let diagnostic = isolated_worker_diagnostics(&isolated, 1);
+    assert_eq!(diagnostic["classification"], "route_mismatch");
+    assert_eq!(diagnostic["route_mismatch"], report["route_mismatch"]);
+    for (key, value) in [
+        ("stage", json!("classic_render")),
+        ("status", json!("render_completed")),
+        ("global_setup_error", json!(4)),
+        ("smart_render_supported", json!(true)),
+        ("advertised_out_flags2", json!(1032)),
+        ("advertised_out_flags2", json!(9)),
+        (
+            "route_mismatch",
+            json!({"reason": "unknown", "advertised_out_flags2": 8}),
+        ),
+    ] {
+        let mut invalid = report.clone();
+        invalid[key] = value;
+        isolated.stdout = invalid.to_string();
+        assert_eq!(
+            isolated_worker_diagnostics(&isolated, 1)["classification"],
+            "nonzero_exit"
+        );
+    }
+    isolated.stdout = report.to_string();
+    isolated.stdout_truncated = true;
+    assert_eq!(
+        isolated_worker_diagnostics(&isolated, 1)["classification"],
+        "nonzero_exit"
+    );
+    isolated.stdout_truncated = false;
+    isolated.exit_code = 24;
+    assert_eq!(
+        isolated_worker_diagnostics(&isolated, 1)["classification"],
+        "nonzero_exit"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn runtime_module_backend_matches_the_worker_gpu_command() {
+    assert_eq!(
+        runtime_backend(RenderGpuBackend::Auto),
+        Some(RuntimeBackend::Cuda)
+    );
+    assert_eq!(
+        runtime_backend(RenderGpuBackend::Cuda),
+        Some(RuntimeBackend::Cuda)
+    );
+    assert_eq!(
+        runtime_backend(RenderGpuBackend::OpenCl),
+        Some(RuntimeBackend::Opencl)
+    );
+    assert_eq!(
+        runtime_backend(RenderGpuBackend::DirectX),
+        Some(RuntimeBackend::Directx)
+    );
+    assert_eq!(runtime_backend(RenderGpuBackend::Cpu), None);
+}
+
+#[test]
+#[cfg(windows)]
+fn in_place_inspection_requires_search_dirs_before_touching_the_plugin() {
+    // The empty-dirs rejection fires before any file access, so the fake
+    // path is never read (issue #751).
+    let error = inspect_experimental_in_place(
+        std::path::Path::new("missing-repository"),
+        std::path::Path::new("missing-plugin.aex"),
+        &"0".repeat(64),
+        Vec::new(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires at least one dependency search directory")
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn discovery_inspection_requires_search_dirs_before_worker_launch() {
+    let error = inspect_experimental_via_discovery_in_place(
+        std::path::Path::new("missing-repository"),
+        ApprovedImageArtifact {
+            path: std::path::PathBuf::from("missing-plugin.aex"),
+            expected_sha256: [0; 32],
+            expected_size: 1,
+        },
+        Vec::new(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires dependency search directories")
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn discovery_report_is_converted_to_interactive_parameters() {
+    let report = json!({
+        "status": "parameters_inspected",
+        "global_setup_error": 0,
+        "params_setup_error": 0,
+        "global_setdown_error": 0,
+        "out_flags": 0,
+        "out_flags2": 1 << 10,
+        "parameters": [{
+            "index": 4,
+            "name": "Amount",
+            "type": 10,
+            "default": 25.0,
+            "valid_min": 0.0,
+            "valid_max": 100.0,
+            "slider_min": 5.0,
+            "slider_max": 75.0,
+            "ui_flags": 0,
+            "flags": 0
+        }]
+    });
+    let (parameters, diagnostics) = inspection_result_from_report(
+        report,
+        json!({"inspection_transport": "discovery_session"}),
+        false,
+    )
+    .expect("authenticated discovery report converts");
+    assert_eq!(parameters.len(), 1);
+    assert_eq!(parameters[0].slot, 4);
+    assert_eq!(parameters[0].kind, "float");
+    assert_eq!(parameters[0].value, 25.0);
+    assert_eq!(diagnostics["advertised_out_flags2"], 1 << 10);
+    assert_eq!(diagnostics["smart_render_advertised"], true);
+    assert_eq!(diagnostics["parameter_metadata"][0]["type"], "float_slider");
+    assert_eq!(
+        diagnostics["parameter_metadata"][0]["user_range"],
+        json!({"minimum": 5.0, "maximum": 75.0})
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn discovery_orchestration_retries_only_an_authenticated_cleanup_checkpoint() {
+    let report = json!({
+        "status": "parameters_inspected",
+        "global_setup_error": 0,
+        "params_setup_error": 0,
+        "global_setdown_error": 0,
+        "out_flags": 0,
+        "out_flags2": 0,
+        "parameters": []
+    });
+    let clean_close = json!({"session_clean": true});
+    let retries = std::cell::Cell::new(0);
+    let inspected = finish_discovery_inspection(
+        crate::render_session::InspectOutcome::Inspected {
+            report: report.clone(),
+        },
+        Path::new("repository"),
+        clean_close.clone(),
+        |_, _| {
+            retries.set(retries.get() + 1);
+            unreachable!("a clean terminal report must not retry")
+        },
+    )
+    .expect("clean terminal report succeeds");
+    assert!(inspected.0.is_empty());
+    assert_eq!(retries.get(), 0);
+
+    let error = finish_discovery_inspection(
+        crate::render_session::InspectOutcome::InspectError {
+            error_kind: "selector_error".to_owned(),
+            report: Some(report),
+        },
+        Path::new("repository"),
+        clean_close,
+        |_, _| {
+            retries.set(retries.get() + 1);
+            unreachable!("an inspect error must not retry")
+        },
+    )
+    .expect_err("inspect error stays failed");
+    assert!(error.to_string().contains("selector_error"));
+    assert_eq!(retries.get(), 0);
+
+    let recovered = finish_discovery_inspection(
+        crate::render_session::InspectOutcome::CleanupCrashCheckpoint {
+            authorization: crate::render_session::CleanupCrashAuthorization::fixture(),
+        },
+        Path::new("repository"),
+        json!({"invalidated": true}),
+        |_, _| {
+            retries.set(retries.get() + 1);
+            Ok((
+                Vec::new(),
+                json!({"inspection_status": "parameters_inspected_cleanup_contained"}),
+            ))
+        },
+    )
+    .expect("authenticated checkpoint performs one contained retry");
+    assert!(recovered.0.is_empty());
+    assert_eq!(retries.get(), 1);
+    assert_eq!(
+        recovered.1["inspection_transport"],
+        "discovery_cleanup_contained"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn in_place_aegp_initialization_requires_search_dirs_before_file_access() {
+    let error = initialize_experimental_aegp_in_place(
+        std::path::Path::new("missing-repository"),
+        std::path::Path::new("missing-plugin.aex"),
+        &"0".repeat(64),
+        Vec::new(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires at least one dependency search directory")
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn aegp_dynamic_suite_report_is_bounded_unique_and_exact() {
+    let valid = json!({
+        "dynamic_suites": [{
+            "name": "Fixture Companion Suite",
+            "api_version": 1,
+            "internal_version": 2
+        }]
+    });
+    assert!(valid_dynamic_suite_report(&valid));
+
+    let mut duplicate = valid.clone();
+    duplicate["dynamic_suites"] = json!([
+        {"name":"Fixture Companion Suite","api_version":1,"internal_version":2},
+        {"name":"Fixture Companion Suite","api_version":1,"internal_version":2}
+    ]);
+    assert!(!valid_dynamic_suite_report(&duplicate));
+
+    for mutation in [
+        json!({"dynamic_suites":[{"name":"","api_version":1,"internal_version":0}]}),
+        json!({"dynamic_suites":[{"name":"Suite","api_version":0,"internal_version":0}]}),
+        json!({"dynamic_suites":[{"name":"Suite","api_version":1,"internal_version":-1}]}),
+        json!({"dynamic_suites":[{"name":"Suite","api_version":1,"internal_version":0,"extra":true}]}),
+    ] {
+        assert!(!valid_dynamic_suite_report(&mutation));
+    }
+    assert!(!valid_dynamic_suite_report(&json!({
+        "dynamic_suites": (0..33).map(|index| json!({
+            "name": format!("Suite {index}"),
+            "api_version": 1,
+            "internal_version": 0
+        })).collect::<Vec<_>>()
+    })));
+}
+
 #[test]
 fn cleanup_contained_report_contract_rejects_mutations() {
     let valid = json!({

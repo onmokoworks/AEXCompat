@@ -1,5 +1,47 @@
 #[cfg(windows)]
-fn render_with_artifact(
+use super::declarative_fixture::{
+    fixture_capture_override, fixture_case_identity_override, fixture_secondary_layouts_override,
+    fixture_world_layout_override,
+};
+#[cfg(windows)]
+use super::diagnostics::conformance_render_settings_transport;
+use super::diagnostics::{
+    MAX_DIMENSION, MAX_PIXELS, apply_conformance_premultiplication, cleanup_stale_image_transport,
+    decode_bounded_image, decode_bounded_image_for_format, propagate_bee_facade,
+    propagate_compute_cache_timeline, propagate_extended_allocation_timeline,
+    propagate_extended_lookup_timeline, propagate_host_callback_timeline, propagate_missing_suites,
+    propagate_selector_invocations, propagate_suite_call_slot_probe, propagate_suite_timeline,
+    propagate_unsupported_suite_calls,
+};
+#[cfg(windows)]
+use super::independent_cases::IndependentCaseBatch;
+use super::native_input::NativeImageInput;
+use super::render_operations::AudioWrapperOutcome;
+#[cfg(windows)]
+use super::types_and_transport::requested_world_dump_dir;
+use super::types_and_transport::{
+    Cleanup, GpuRuntimePolicyInput, RenderGpuBackend, RenderTiming, RenderUiAction,
+    TimedLayerImage, invalid, output_checksum_detail_requested, prepare_aux_transport,
+    requested_minidump_directory, validate_timed_layer_identities,
+};
+use super::{
+    InteractiveParameter, ParameterAnimation, RenderArtifactConditions, RenderArtifactKind,
+    RenderPixelFormat, visual_diagnostics, write_float32_exr_artifact, write_raw_world_artifact,
+};
+use crate::decoded_image::{native_rgba_to_preview, rgba16_transport_to_png16};
+use crate::parameter_limits::MAX_PARAMETERS;
+use crate::secure_image_dispatch::ApprovedImageArtifact;
+use image::ImageFormat;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(windows)]
+pub(super) fn render_with_artifact(
     repository: &Path,
     plugin_id: &str,
     plugin_path: &Path,
@@ -55,7 +97,7 @@ fn render_with_artifact(
 }
 
 #[cfg(windows)]
-fn render_with_artifact_using(
+pub(super) fn render_with_artifact_using(
     repository: &Path,
     plugin_id: &str,
     plugin_path: &Path,
@@ -633,7 +675,7 @@ fn forced_session_fallback() -> Option<SessionWrapperOutcome> {
 /// debug-only `FORCE_SESSION_FALLBACK_ENV` knob so a test can exercise the audio
 /// fail-closed caller arm. Absent from release builds.
 #[cfg(debug_assertions)]
-fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
+pub(super) fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
     std::env::var_os(FORCE_SESSION_FALLBACK_ENV)
         .is_some()
         .then(|| {
@@ -643,7 +685,7 @@ fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
         })
 }
 #[cfg(not(debug_assertions))]
-fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
+pub(super) fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
     None
 }
 
@@ -665,75 +707,75 @@ struct SessionAudioSource {
 }
 
 #[cfg(windows)]
-struct SessionWrapperRequest<'a> {
-    repository: &'a Path,
-    plugin_id: &'a str,
-    plugin_path: &'a Path,
-    plugin_sha256: &'a str,
-    timeout_ms: u64,
-    output_path: &'a Path,
-    preserved_output: Option<&'a Path>,
-    interactive_parameters: Option<&'a [InteractiveParameter]>,
+pub(super) struct SessionWrapperRequest<'a> {
+    pub(super) repository: &'a Path,
+    pub(super) plugin_id: &'a str,
+    pub(super) plugin_path: &'a Path,
+    pub(super) plugin_sha256: &'a str,
+    pub(super) timeout_ms: u64,
+    pub(super) output_path: &'a Path,
+    pub(super) preserved_output: Option<&'a Path>,
+    pub(super) interactive_parameters: Option<&'a [InteractiveParameter]>,
     /// Pre-encoded worker payload for the fixture-manifest route, whose
     /// descriptor-profile encoding `interactive_parameters` cannot express
     /// (see `SessionOpenRequest::payload_override`). `None` on every
     /// interactive route.
-    payload_override: Option<&'a str>,
-    parameter_animation: Option<&'a [ParameterAnimation]>,
-    layers: Vec<crate::render_session::SessionLayer>,
-    mask_trailer: Option<String>,
-    spatial_trailer: Option<String>,
-    camera_trailer: Option<String>,
-    render_environment_trailer: Option<String>,
+    pub(super) payload_override: Option<&'a str>,
+    pub(super) parameter_animation: Option<&'a [ParameterAnimation]>,
+    pub(super) layers: Vec<crate::render_session::SessionLayer>,
+    pub(super) mask_trailer: Option<String>,
+    pub(super) spatial_trailer: Option<String>,
+    pub(super) camera_trailer: Option<String>,
+    pub(super) render_environment_trailer: Option<String>,
     /// The session's audio source, or `None` when the render carries no audio.
     /// The trailer and the sidecar digest travel together so the gate, the
     /// launch argv, and the public report cannot disagree about whether this
     /// render had audio (issue #339).
     audio: Option<SessionAudioSource>,
-    alpha_as_coverage_params: &'a [u32],
+    pub(super) alpha_as_coverage_params: &'a [u32],
     /// Conformance render-settings trailer (`--conformance-render-settings-v1`),
     /// forwarded so the session worker reports the same render_settings block the
     /// one-shot path does (#275). The input pre-transform is applied on both
     /// routes before this point, so this only aligns the report. `None` leaves
     /// the option unset.
-    conformance_render_settings: Option<&'a str>,
+    pub(super) conformance_render_settings: Option<&'a str>,
     /// Absolute path to the broker-prepared aux-channel manifest sidecar
     /// (`--aux-manifest-v1`), shared with the one-shot transport. `None` when
     /// the host context carries no aux channels (#211).
-    aux_manifest: Option<&'a Path>,
-    timing: RenderTiming,
-    pixel_format: RenderPixelFormat,
-    deep_png_output: bool,
-    dependencies: &'a [ApprovedImageArtifact],
+    pub(super) aux_manifest: Option<&'a Path>,
+    pub(super) timing: RenderTiming,
+    pub(super) pixel_format: RenderPixelFormat,
+    pub(super) deep_png_output: bool,
+    pub(super) dependencies: &'a [ApprovedImageArtifact],
     /// Operator-approved in-place runtime roots. These are validated again by
     /// the secure dispatch boundary and are kept distinct from artifact
     /// identities: selecting a directory never manufactures a DLL approval.
-    explicit_dependency_search_dirs: &'a [PathBuf],
-    rgba: &'a [u8],
-    native_input: bool,
-    native_world_layout: Option<crate::render_session::DiagnosticWorldLayout>,
-    width: u32,
-    height: u32,
-    spatial: crate::render_request::SpatialContext,
-    expected_quality: i32,
-    expected_field: i32,
-    expected_shutter_angle: i32,
-    expected_shutter_phase: i32,
+    pub(super) explicit_dependency_search_dirs: &'a [PathBuf],
+    pub(super) rgba: &'a [u8],
+    pub(super) native_input: bool,
+    pub(super) native_world_layout: Option<crate::render_session::DiagnosticWorldLayout>,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) spatial: crate::render_request::SpatialContext,
+    pub(super) expected_quality: i32,
+    pub(super) expected_field: i32,
+    pub(super) expected_shutter_angle: i32,
+    pub(super) expected_shutter_phase: i32,
     /// Per-frame custom-UI action (#238) driven on the wrapper's single frame
     /// through the v:2 `ui_action` attribute. `None` for a plain render.
-    custom_ui_action: Option<&'a RenderUiAction>,
-    smart: bool,
-    gpu_backend: RenderGpuBackend,
+    pub(super) custom_ui_action: Option<&'a RenderUiAction>,
+    pub(super) smart: bool,
+    pub(super) gpu_backend: RenderGpuBackend,
     /// Authenticated GPU runtime-module policy for this render (#290), threaded
     /// into the length-one session so a GPU single-image render routes through
     /// the session like the CPU shapes do instead of staying on the one-shot
     /// transport. `None` for CPU or policy-less renders; the session-eligibility
     /// gate only sets `Some` for Argb32f with a GPU backend.
-    gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
-    artifact_kind: Option<RenderArtifactKind>,
+    pub(super) gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
+    pub(super) artifact_kind: Option<RenderArtifactKind>,
 }
 
-enum SessionWrapperOutcome {
+pub(super) enum SessionWrapperOutcome {
     /// The session rendered and validated the frame; this is the public
     /// report, identical in shape to the one-shot flattening.
     Report(Value),
@@ -749,7 +791,7 @@ enum SessionWrapperOutcome {
     Fallback(String),
 }
 
-fn in_place_session_search_dirs(
+pub(super) fn in_place_session_search_dirs(
     plugin_path: &Path,
     dependencies: &[ApprovedImageArtifact],
     explicit_roots: &[PathBuf],
@@ -1284,7 +1326,7 @@ fn render_classic_via_length_one_session(
 /// typed invariant comes from `render_session`; the only worker values exposed
 /// are the four small lease counters.  Do not add report strings, paths, or
 /// launch details here: this path is also used after crashes and timeouts.
-fn close_failure_diagnostic(
+pub(super) fn close_failure_diagnostic(
     close: &Value,
     invariant: crate::render_session::CloseReportInvariant,
 ) -> String {
@@ -1322,7 +1364,7 @@ fn close_failure_diagnostic(
 /// Keeping this boundary explicit makes a rejected close unable to carry its
 /// image, lease diagnostics, or report into the next independently opened
 /// session.
-fn validated_wrapper_final_report(
+pub(super) fn validated_wrapper_final_report(
     close: &Value,
     smart: bool,
 ) -> Result<Value, crate::render_session::CloseReportInvariant> {

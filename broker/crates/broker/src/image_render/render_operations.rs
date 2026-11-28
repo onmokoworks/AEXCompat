@@ -1,4 +1,36 @@
 #[cfg(windows)]
+use super::diagnostics::isolated_worker_diagnostics;
+use super::diagnostics::{
+    dispatch_approved_image, interactive_frame_deadline_ms, prepare_gpu_runtime_policy,
+};
+use super::inspection_and_probes::{encode_interactive_payload, inspection_result_from_report};
+#[cfg(windows)]
+use super::inspection_and_probes::{
+    inspect_experimental_impl, inspect_experimental_with_diagnostics_and_runtime_policy,
+};
+use super::session::forced_audio_session_fallback;
+#[cfg(windows)]
+use super::session::render_with_artifact;
+use super::types_and_transport::{
+    GpuRuntimePolicyInput, RenderGpuBackend, RenderTiming, RenderUiAction, TimedLayerImage,
+    invalid, observe_selected_plugin, observe_selected_plugin_bytes, validate_animation_bindings,
+};
+use super::{
+    InteractiveParameter, ParameterAnimation, RenderArtifactKind, RenderPixelFormat,
+    parameter_animation_sidecar_json,
+};
+use crate::host_core::descriptor_manifest::load as load_manifest;
+use crate::host_core::parameter::{ValidatedAssignments, apply_defaults, encode_worker_payload};
+use crate::runtime_module_policy::{RuntimeBackend, RuntimeModulePolicy};
+use crate::secure_image_dispatch::{ApprovedImageArtifact, WorkerKind};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
 /// Render the approved ScatterMap fixture through the session-only transport.
 ///
 /// The explicit name is intentional: this is not a generic AEX path and must
@@ -98,7 +130,7 @@ pub fn render_experimental_image(
     )
 }
 
-enum AudioWrapperOutcome {
+pub(super) enum AudioWrapperOutcome {
     /// The length-1 audio session rendered and closed clean; this is the public
     /// report, in the shape the deleted one-shot path asserted.
     Report(Value),
@@ -952,7 +984,7 @@ pub fn render_experimental_artifact_at_time(
 }
 
 #[cfg(windows)]
-fn render_experimental_artifact_at_time_with_context(
+pub(super) fn render_experimental_artifact_at_time_with_context(
     repository: &Path,
     plugin_path: &Path,
     approved_sha256: &str,
@@ -1706,7 +1738,7 @@ pub fn inspect_experimental_via_discovery_in_place(
 }
 
 #[cfg(windows)]
-fn finish_discovery_inspection<F>(
+pub(super) fn finish_discovery_inspection<F>(
     outcome: crate::render_session::InspectOutcome,
     repository: &Path,
     close: Value,
@@ -1873,7 +1905,7 @@ pub fn inspect_experimental_cleanup_contained_in_place(
     Ok(inspected)
 }
 
-fn cleanup_contained_report_is_valid(diagnostics: &Value) -> bool {
+pub(super) fn cleanup_contained_report_is_valid(diagnostics: &Value) -> bool {
     diagnostics.get("inspection_status").and_then(Value::as_str)
         == Some("parameters_inspected_cleanup_contained")
         && diagnostics
