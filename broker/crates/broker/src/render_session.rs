@@ -12,6 +12,8 @@
 //! a dead worker, a stale generation, a mutated header, a checksum mismatch,
 //! or an out-of-bounds geometry invalidates the whole session fail-closed.
 
+pub mod actor;
+
 use crate::image_render::{
     GpuRuntimePolicyInput, INTERACTIVE_RENDER_TIMEOUT_MS, InteractiveParameter, MAX_DIMENSION,
     MAX_PIXELS, ParameterAnimation, RenderGpuBackend, RenderPixelFormat, RenderUiAction,

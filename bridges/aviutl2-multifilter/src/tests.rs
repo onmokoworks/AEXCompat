@@ -4641,14 +4641,25 @@ mod tests {
                 matches!(reply, FrameReply::Rendered(_)),
                 "the frame renders"
             );
-            // The session thread's recv loop ends only when every sender is
-            // gone, so the reply clone goes first; dropping the handle then
-            // drives RenderSession::close on the session thread. Since issue
+            // Swapping both ways must preserve the transport serial across
+            // actor requests, including a repeated host timeline position.
+            for member in [1, 0] {
+                assert!(matches!(
+                    render_on(&tx, member, 0, vec![7u8; 8 * 4 * 4], None, None),
+                    FrameReply::Rendered(_)
+                ));
+            }
+            // Dropping the owner closes and joins even with an endpoint clone
+            // still alive. It cannot accept frames after shutdown. Since issue
             // #730 the audit outcome is a recorded warning on the close
             // report, not an invalidation: the close stays clean and no
             // close failure is recorded for the delivered frame.
-            drop(tx);
             drop(session);
+            assert!(matches!(
+                render_on(&tx, 0, 0, vec![7u8; 8 * 4 * 4], None, None),
+                FrameReply::SessionLost(_)
+            ));
+            drop(tx);
             let failures: Vec<SessionCloseFailure> = SESSION_CLOSE_FAILURES
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -4661,6 +4672,55 @@ mod tests {
                 "an audit-only close records no failure (issue #730): {failures:?}"
             );
             std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn single_session_actor_keeps_frame_serial_and_reports_session_loss() {
+            let _guard = BEHAVIOR_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+            }
+            let (root, one, _) = cluster_repository();
+            let session = open_mf_session(MfSessionConfig {
+                repository: root.to_path_buf(),
+                plugin: one.clone(),
+                dependency: dependency(),
+                sha: hex_lower(&Sha256::digest(std::fs::read(&one).unwrap())),
+                smart: false,
+                plugin_data_selector: None,
+                identity: GeomIdentity {
+                    width: 8,
+                    height: 4,
+                    time_step: 1,
+                    total_time: 300,
+                    time_scale: 30,
+                },
+                layers: Vec::new(),
+                companions: Vec::new(),
+                cluster: None,
+            })
+            .expect("open single render session");
+            let tx = session.sender().unwrap();
+            for _ in 0..2 {
+                assert!(matches!(
+                    render_on(&tx, 0, 0, vec![7u8; 128], None, None),
+                    FrameReply::Rendered(_)
+                ));
+            }
+            // Preserve MfSession's existing policy: a broker render error
+            // ends this instance and lets the map reopen on the next callback.
+            assert!(matches!(
+                render_on(&tx, 0, 0, vec![], None, None),
+                FrameReply::SessionLost(_)
+            ));
+            assert!(matches!(
+                render_on(&tx, 0, 0, vec![7u8; 128], None, None),
+                FrameReply::SessionLost(_)
+            ));
+            drop(session);
+            drop(tx);
         }
     }
 
@@ -6305,7 +6365,6 @@ mod tests {
 
     #[test]
     fn classic_fallback_retains_request_bytes_and_requires_clean_close() {
-        let (reply, _rx) = channel();
         let request = RenderReq {
             current_time: 37,
             rgba: vec![1, 2, 3, 4],
@@ -6332,7 +6391,6 @@ mod tests {
             }]),
             layer: Some((2, vec![9, 8, 7, 6])),
             plugin_index: 1,
-            reply,
         };
         let retained = retain_frame_request(&request);
         assert_eq!(retained.current_time, request.current_time);

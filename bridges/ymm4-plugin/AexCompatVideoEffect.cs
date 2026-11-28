@@ -179,7 +179,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
                     (nuint)parameters.Length);
                 if (result != 0)
                 {
-                    throw new InvalidOperationException(ReadNativeError());
+                    throw new NativeRenderException((Ymm4ErrorCode)result, ReadNativeError());
                 }
                 if (outputWidth != size.Width || outputHeight != size.Height)
                 {
@@ -195,7 +195,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         {
             lock (gate)
             {
-                if (IsSessionFatal(ex.Message))
+                if (ex is NativeRenderException { Code: Ymm4ErrorCode.SessionLost })
                 {
                     CloseSession();
                 }
@@ -205,14 +205,6 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         }
 
         return effectDescription.DrawDescription;
-    }
-
-    private static bool IsSessionFatal(string message)
-    {
-        return message.StartsWith("YMM4 render reply exceeded", StringComparison.Ordinal)
-            || message.StartsWith("YMM4 render reply lost", StringComparison.Ordinal)
-            || message.StartsWith("YMM4 session thread stopped", StringComparison.Ordinal)
-            || message.StartsWith("YMM4 session is closed", StringComparison.Ordinal);
     }
 
     public void Dispose()
@@ -416,6 +408,23 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
 
     private static byte Unpremultiply(byte value, byte alpha)
         => alpha == 0 ? (byte)0 : (byte)Math.Min(255, (value * 255 + alpha / 2) / alpha);
+}
+
+// Stable values from ymm4-native's repr(i32) Ymm4ErrorCode. The diagnostic
+// string is for display only and never determines session lifetime.
+internal enum Ymm4ErrorCode : int
+{
+    Success = 0,
+    InvalidArgument = -1,
+    FrameError = -2,
+    OutputTooLarge = -3,
+    SessionLost = -4,
+}
+
+internal sealed class NativeRenderException(Ymm4ErrorCode code, string message)
+    : InvalidOperationException(message)
+{
+    public Ymm4ErrorCode Code { get; } = code;
 }
 
 internal static partial class NativeMethods
