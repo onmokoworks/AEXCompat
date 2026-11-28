@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_ui_event_execution.hpp"
 
 #include <algorithm>
@@ -7,6 +8,9 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
 
 namespace aexcompat::worker_runtime::ui_event_execution {
 
@@ -98,39 +102,52 @@ bool dispatch(const Request& r, const Hooks& hooks, Result& result) {
   std::array<std::byte, 208> extra{};
   UiScope ui_scope(hooks, r.window_type);
   if (!ui_scope.state) return false;
-  write<void*>(extra, 0, r.context_slot);
-  write<int32_t>(extra, 8, (r.lifecycle || r.idle || r.keydown || r.mouse_exited)
+  write<void*>(extra, abi_contract::EVENT_CONTEXT_OFFSET, r.context_slot);
+  write<int32_t>(extra, abi_contract::EVENT_TYPE_OFFSET,
+      (r.lifecycle || r.idle || r.keydown || r.mouse_exited)
       ? 0 : (r.draw ? 4 : ((r.click || r.drag) ? 2 : 9)));
   if (r.draw) {
     write_rect(extra.data() + 16, 203);
-    write<int32_t>(extra, 32, 32);
+    write<int32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_offsets::kDrawDepth, 32);
   } else if (r.click || r.drag) {
     // PF_Point stores horizontal/x first, then vertical/y (also for drag/key).
-    write<uint32_t>(extra, 16, 1);
-    write<int32_t>(extra, 20, r.click_x);
-    write<int32_t>(extra, 24, r.click_y);
-    write<int32_t>(extra, 28, 1);
-    write<int32_t>(extra, 32, 0);
+    write<uint32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_WHEN_OFFSET, 1);
+    write<int32_t>(extra,
+        abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_SCREEN_POINT_OFFSET + abi_offsets::kPointHorizontal, r.click_x);
+    write<int32_t>(extra,
+        abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_SCREEN_POINT_OFFSET + abi_offsets::kPointVertical, r.click_y);
+    write<int32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_NUM_CLICKS_OFFSET, 1);
+    write<int32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_MODIFIERS_OFFSET, 0);
   } else {
-    write<int32_t>(extra, 16, 101);
-    write<int32_t>(extra, 20, 101);
-    write<int32_t>(extra, 24, 0);
-    write<int32_t>(extra, 28, 0);
+    write<int32_t>(extra,
+        abi_contract::EVENT_UNION_OFFSET + abi_contract::ADJUST_CURSOR_SCREEN_POINT_OFFSET + abi_offsets::kPointHorizontal, 101);
+    write<int32_t>(extra,
+        abi_contract::EVENT_UNION_OFFSET + abi_contract::ADJUST_CURSOR_SCREEN_POINT_OFFSET + abi_offsets::kPointVertical, 101);
+    write<int32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::ADJUST_CURSOR_MODIFIERS_OFFSET, 0);
+    write<int32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::ADJUST_CURSOR_SET_CURSOR_OFFSET,
+        0);
   }
   if (r.window_type == 2) {
-    write<int32_t>(extra, 80, 1);
-    write<int32_t>(extra, 84, 2);
+    write<int32_t>(extra, abi_contract::EVENT_EFFECT_WINDOW_OFFSET + abi_contract::EFFECT_WINDOW_INDEX_OFFSET,
+        1);
+    write<int32_t>(extra, abi_contract::EVENT_EFFECT_WINDOW_OFFSET + abi_contract::EFFECT_WINDOW_AREA_OFFSET,
+        2);
   } else {
     write_rect(extra.data() + 80, 200);
   }
   if (r.window_type != 2) {
-    write<int32_t>(*r.input, 252, 200);
-    write<int32_t>(*r.input, 256, 200);
-    write<void*>(extra, 128, r.ui_context);
-    write<void*>(extra, 136, r.transform_point);
-    write<void*>(extra, 144, r.transform_point);
-    write<void*>(extra, 168, r.transform_point_simple);
-    write<void*>(extra, 176, r.transform_point_simple);
+    write<int32_t>(*r.input, abi_contract::IN_WIDTH_OFFSET, 200);
+    write<int32_t>(*r.input, abi_contract::IN_HEIGHT_OFFSET, 200);
+    write<void*>(extra, abi_contract::EVENT_CALLBACKS_OFFSET + abi_offsets::kEventCallbacksRefcon,
+        r.ui_context);
+    write<void*>(extra, abi_contract::EVENT_CALLBACKS_OFFSET + abi_offsets::kEventCallbacksLayerToComp,
+        r.transform_point);
+    write<void*>(extra, abi_contract::EVENT_CALLBACKS_OFFSET + abi_offsets::kEventCallbacksCompToLayer,
+        r.transform_point);
+    write<void*>(extra, abi_contract::EVENT_CALLBACKS_OFFSET + abi_offsets::kEventCallbacksSourceToFrame,
+        r.transform_point_simple);
+    write<void*>(extra, abi_contract::EVENT_CALLBACKS_OFFSET + abi_offsets::kEventCallbacksFrameToSource,
+        r.transform_point_simple);
   }
   write_rect(extra.data() + 88, 203);
   uint32_t exception_code{};
@@ -152,19 +169,23 @@ bool dispatch(const Request& r, const Hooks& hooks, Result& result) {
     for (int index = 1; index < count; ++index) {
       result.lifecycle_context_stable =
           result.lifecycle_context_stable &&
-          read<void*>(extra, 0) == r.context_slot && hooks.context_stable();
+          read<void*>(extra, abi_contract::EVENT_CONTEXT_OFFSET) == r.context_slot && hooks.context_stable();
       if (index == count - 1) {
         for (std::size_t slot = 0; slot < result.plugin_state_before_close.size(); ++slot)
           result.plugin_state_before_close[slot] =
               static_cast<uintptr_t>(r.plugin_state[slot]);
       }
-      write<int32_t>(extra, 8, events[index]);
+      write<int32_t>(extra, abi_contract::EVENT_TYPE_OFFSET, events[index]);
       if (r.keydown && index == 2) {
-        write<uint32_t>(extra, 16, 1);
-        write<int32_t>(extra, 20, r.click_x);
-        write<int32_t>(extra, 24, r.click_y);
-        write<uint32_t>(extra, 28, r.keydown_code);
-        write<uint32_t>(extra, 32, r.keydown_modifiers);
+        write<uint32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::KEY_DOWN_WHEN_OFFSET, 1);
+        write<int32_t>(extra,
+            abi_contract::EVENT_UNION_OFFSET + abi_contract::KEY_DOWN_SCREEN_POINT_OFFSET + abi_offsets::kPointHorizontal, r.click_x);
+        write<int32_t>(extra,
+            abi_contract::EVENT_UNION_OFFSET + abi_contract::KEY_DOWN_SCREEN_POINT_OFFSET + abi_offsets::kPointVertical, r.click_y);
+        write<uint32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::KEY_DOWN_KEYCODE_OFFSET,
+            r.keydown_code);
+        write<uint32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::KEY_DOWN_MODIFIERS_OFFSET,
+            r.keydown_modifiers);
       }
       exception_code = 0;
       result.lifecycle_errors[index] = hooks.invoke_entry(
@@ -183,15 +204,18 @@ bool dispatch(const Request& r, const Hooks& hooks, Result& result) {
                     [](intptr_t state) { return state == 0; });
   }
   if (r.drag && result.event_error == 0) {
-    result.drag_requested = read<uint8_t>(extra, 72) != 0;
+    result.drag_requested = read<uint8_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_SEND_DRAG_OFFSET) != 0;
     for (int32_t step = 1; result.drag_requested && step <= r.drag_steps; ++step) {
-      write<int32_t>(extra, 8, 3);
-      write<int32_t>(extra, 20,
+      write<int32_t>(extra, abi_contract::EVENT_TYPE_OFFSET, 3);
+      write<int32_t>(extra,
+          abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_SCREEN_POINT_OFFSET + abi_offsets::kPointHorizontal,
           r.click_x + (r.drag_end_x - r.click_x) * step / r.drag_steps);
-      write<int32_t>(extra, 24,
+      write<int32_t>(extra,
+          abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_SCREEN_POINT_OFFSET + abi_offsets::kPointVertical,
           r.click_y + (r.drag_end_y - r.click_y) * step / r.drag_steps);
-      write<uint8_t>(extra, 73, step == r.drag_steps ? 1 : 0);
-      write<int32_t>(extra, 204, 0);
+      write<uint8_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_LAST_TIME_OFFSET,
+          step == r.drag_steps ? 1 : 0);
+      write<int32_t>(extra, abi_contract::EVENT_OUT_FLAGS_OFFSET, 0);
       exception_code = 0;
       result.event_error = hooks.invoke_entry(
           r.entry, kEvent, r.input->data(), r.output->data(), params.data(),
@@ -200,12 +224,12 @@ bool dispatch(const Request& r, const Hooks& hooks, Result& result) {
       if (exception_code != 0) { result.event_error = 512; break; }
     }
     result.drag_terminated = result.drag_calls == static_cast<uint32_t>(r.drag_steps) &&
-        read<uint8_t>(extra, 72) == 0 && read<uint8_t>(extra, 73) != 0;
+        read<uint8_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_SEND_DRAG_OFFSET) == 0 && read<uint8_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_LAST_TIME_OFFSET) != 0;
   }
-  result.cursor = r.adjust_cursor ? read<int32_t>(extra, 28) : 0;
-  result.event_out_flags = read<int32_t>(extra, 204);
+  result.cursor = r.adjust_cursor ? read<int32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::ADJUST_CURSOR_SET_CURSOR_OFFSET) : 0;
+  result.event_out_flags = read<int32_t>(extra, abi_contract::EVENT_OUT_FLAGS_OFFSET);
   result.changed_value = definitions.size() > 1 &&
-      (read<uint32_t>(definitions[1], 0) & 1u) != 0;
+      (read<uint32_t>(definitions[1], abi_contract::PARAM_UU_OFFSET) & 1u) != 0;
   return true;
 }
 

@@ -163,9 +163,11 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
   std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
   std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
   aexcompat::world_safety::EffectWorldStorage lifecycle_world{};
-  write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
-  write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
-  write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
+  write<void*>(lifecycle_world, abi_contract::LAYER_DATA_OFFSET, lifecycle_pixel.data());
+  write<int32_t>(lifecycle_world, abi_contract::LAYER_ROWBYTES_OFFSET,
+      4); write<int32_t>(lifecycle_world, abi_contract::LAYER_WIDTH_OFFSET, 1);
+  write<int32_t>(lifecycle_world, abi_contract::LAYER_HEIGHT_OFFSET,
+      1); write_rect(lifecycle_world.data() + 44, 1, 1);
   // The one world the host builds without render::prepare_world_layout, so it
   // needs the PF_World shape put on it here: the discovery path hands it to
   // FRAME_SETUP / FRAME_SETDOWN, and an effect that reads `world + 0x50` and
@@ -219,7 +221,7 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
       g_user_changed_param_error = 4;
     } else {
       std::array<std::byte, 4> changed_extra{};
-      write<int32_t>(changed_extra, 0, g_user_changed_param_slot);
+      write<int32_t>(changed_extra, abi_contract::USER_CHANGED_PARAM_INDEX_OFFSET, g_user_changed_param_slot);
       g_user_changed_param_active = true;
       g_active_ui_params = lifecycle_params.data();
       g_active_ui_param_count = lifecycle_params.size();
@@ -2225,7 +2227,7 @@ bool verify_pf_world_facade() {
     }
     const int32_t expected_flags = entry.depth == 8 ? 0 :
         (entry.depth == 16 ? 0x01000001 : 0x02000000);
-    check(read<int32_t>(world, 16) == expected_flags, "prepared world flags differ from AE");
+    check(read<int32_t>(world, abi_contract::LAYER_WORLD_FLAGS_OFFSET) == expected_flags, "prepared world flags differ from AE");
     check(worlds.register_world(world.data(), entry.pixel_format), "world registration failed");
     void* reserved_long4 = nullptr;
     std::memcpy(&reserved_long4, world.data() + 0x50, sizeof(reserved_long4));
@@ -3541,7 +3543,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // owned by worker_effect_bootstrap.cpp. They document the exact legacy
   // offsets/ordering that the owner preserves and keep static contract tests
   // useful during the staged extraction.
-  // write<int32_t>(input, 284, g_downsample_x.numerator)
+  // write<int32_t>(input, abi_contract::IN_DOWNSAMPLE_X_OFFSET, g_downsample_x.numerator)
   // write(utils, kUtilsNewWorld, &legacy_new_world)
   // write(utils, kUtilsCopy, &copy_world8)
   // write(utils, kUtilsGetPlatformData, &get_platform_data)
@@ -3570,8 +3572,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // invocation.external_pixel_bytes == 16 &&
   // params_error == 0 && image_render_supported && depth_supported
   // (1u << 26)
-  // write<int32_t>(input, 248, g_shutter_angle)
-  // write<int32_t>(input, 400, g_shutter_phase)
+  // write<int32_t>(input, abi_contract::IN_SHUTTER_ANGLE_OFFSET, g_shutter_angle)
+  // write<int32_t>(input, abi_contract::IN_SHUTTER_PHASE_OFFSET, g_shutter_phase)
   // about_error = g_skip_about ? 0
   // invoke_entry_seh(entry, kGlobalSetup)
   // invoke_entry_seh(entry, kAbout)
@@ -4048,10 +4050,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       g_full_resolution_width > 0 ? g_full_resolution_width : invocation.external_width,
       g_full_resolution_height > 0 ? g_full_resolution_height : invocation.external_height};
   classic_inputs.context_head = {read<int32_t>(input, kInQuality), read<int32_t>(input, kInNumParams),
-      read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, 244),
-      read<int32_t>(input, 248), read<int32_t>(input, 400)};
-  classic_inputs.context_zoom = {read<int32_t>(input, 252), read<int32_t>(input, 256)};
-  classic_inputs.context_origin = {read<int32_t>(input, 392), read<int32_t>(input, 396)};
+      read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, abi_contract::IN_FIELD_OFFSET),
+      read<int32_t>(input, abi_contract::IN_SHUTTER_ANGLE_OFFSET), read<int32_t>(input, abi_contract::IN_SHUTTER_PHASE_OFFSET)};
+  classic_inputs.context_zoom = {read<int32_t>(input, abi_contract::IN_WIDTH_OFFSET), read<int32_t>(input, abi_contract::IN_HEIGHT_OFFSET)};
+  classic_inputs.context_origin = {read<int32_t>(input, abi_contract::IN_PRE_EFFECT_SOURCE_ORIGIN_X_OFFSET), read<int32_t>(input, abi_contract::IN_PRE_EFFECT_SOURCE_ORIGIN_Y_OFFSET)};
   // Through the generated contract, like the two sites that write the field
   // (worker_classic_render_runtime.cpp, worker_smart_dispatch.cpp): a
   // regeneration that moved it would otherwise leave the reader describing
@@ -4115,10 +4117,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       g_full_resolution_width > 0 ? g_full_resolution_width : invocation.external_width,
       g_full_resolution_height > 0 ? g_full_resolution_height : invocation.external_height};
   smart_inputs.context_head = {read<int32_t>(input, kInQuality), read<int32_t>(input, kInNumParams),
-      read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, 244),
-      read<int32_t>(input, 248), read<int32_t>(input, 400)};
-  smart_inputs.context_zoom = {read<int32_t>(input, 252), read<int32_t>(input, 256)};
-  smart_inputs.context_origin = {read<int32_t>(input, 392), read<int32_t>(input, 396)};
+      read<int32_t>(input, kInLocalTimeStep), read<int32_t>(input, abi_contract::IN_FIELD_OFFSET),
+      read<int32_t>(input, abi_contract::IN_SHUTTER_ANGLE_OFFSET), read<int32_t>(input, abi_contract::IN_SHUTTER_PHASE_OFFSET)};
+  smart_inputs.context_zoom = {read<int32_t>(input, abi_contract::IN_WIDTH_OFFSET), read<int32_t>(input, abi_contract::IN_HEIGHT_OFFSET)};
+  smart_inputs.context_origin = {read<int32_t>(input, abi_contract::IN_PRE_EFFECT_SOURCE_ORIGIN_X_OFFSET), read<int32_t>(input, abi_contract::IN_PRE_EFFECT_SOURCE_ORIGIN_Y_OFFSET)};
   smart_inputs.context_extent = {
       read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET),
       read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET)};

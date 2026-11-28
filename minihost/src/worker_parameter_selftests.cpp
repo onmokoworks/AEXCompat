@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_parameter_selftests.hpp"
 #include "worker_parameter_limits.hpp"
 #include "worker_invocation_orchestration.hpp"
@@ -9,6 +10,10 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
+
 namespace aexcompat::l2_detail {
 int32_t __cdecl add_param(void*, int32_t, void*);
 bool parse_parameter_payload(const wchar_t*, worker_runtime::parameters::RequestedAssignments&);
@@ -49,17 +54,17 @@ bool verify_pf_param_utils_suite3() {
   param.index = 1;
   param.disk_id = 7001;
   param.type = 1;
-  write<int32_t>(param.raw, 0, param.disk_id);
+  write<int32_t>(param.raw, abi_contract::PARAM_UU_OFFSET, param.disk_id);
   write<int32_t>(param.raw, kParamType, param.type);
-  write<int32_t>(param.raw, 56, 42);
+  write<int32_t>(param.raw, abi_contract::PARAM_U_OFFSET, 42);
   parameter_state().records.push_back(param);
   reset_effect_lifetime(true);
 
   auto active = param.raw;
   auto local = active;
   write<uint32_t>(local, kParamUiFlags, (1u << 5));
-  write<int16_t>(local, 8, 123);
-  write<int16_t>(local, 10, 45);
+  write<int16_t>(local, abi_contract::PARAM_UI_WIDTH_OFFSET, 123);
+  write<int16_t>(local, abi_contract::PARAM_UI_HEIGHT_OFFSET, 45);
   write<uint32_t>(local, kParamFlags, (1u << 5));
   std::memcpy(local.data() + kParamName, "Updated", 8);
   void* active_params[2]{nullptr, active.data()};
@@ -80,7 +85,7 @@ bool verify_pf_param_utils_suite3() {
                   [](const void* slot) { return slot != nullptr; }) &&
       update_param_ui(g_hooks.effect, 1, local.data()) == 0 &&
       read<uint32_t>(active, kParamUiFlags) == (1u << 5) &&
-      read<int16_t>(active, 8) == 123 && read<int16_t>(active, 10) == 45 &&
+      read<int16_t>(active, abi_contract::PARAM_UI_WIDTH_OFFSET) == 123 && read<int16_t>(active, abi_contract::PARAM_UI_HEIGHT_OFFSET) == 45 &&
       read<uint32_t>(active, kParamFlags) == (1u << 5) &&
       std::strcmp(reinterpret_cast<const char*>(active.data() + kParamName), "Updated") == 0 &&
       get_current_param_state(g_hooks.effect, 1, &start, &duration, &first) == 0 &&
@@ -111,7 +116,7 @@ bool verify_pf_param_utils_suite3() {
           nullptr, &obsolete_state, nullptr, nullptr, &obsolete_changed) ==
           kPfBadCallbackParam && obsolete_changed == 0x5a &&
       release_suite("PF Param Utils Suite", 2) == 0;
-  write<int32_t>(parameter_state().records[0].raw, 56, 43);
+  write<int32_t>(parameter_state().records[0].raw, abi_contract::PARAM_U_OFFSET, 43);
   ok = ok && get_current_param_state(g_hooks.effect, 1, &start, &duration, &changed) == 0 &&
       are_param_states_identical(g_hooks.effect, &first, &changed, &same) == 0 && same == 0 &&
       is_identical_param_checkout(g_hooks.effect, 1, 0, 1, 24, 10, 1, 24, &identical) == 0 &&
@@ -178,7 +183,7 @@ bool verify_parameter_animation_transport() {
   param.index = 1;
   param.disk_id = 9001;
   param.type = 10;
-  write<int32_t>(param.raw, 0, param.disk_id);
+  write<int32_t>(param.raw, abi_contract::PARAM_UU_OFFSET, param.disk_id);
   write<int32_t>(param.raw, kParamType, param.type);
   parameter_state().records.push_back(param);
   ParameterTimeline timeline;
@@ -201,7 +206,7 @@ bool verify_parameter_animation_transport() {
   point.index = 2;
   point.disk_id = 9002;
   point.type = 6;
-  write<int32_t>(point.raw, 0, point.disk_id);
+  write<int32_t>(point.raw, abi_contract::PARAM_UU_OFFSET, point.disk_id);
   write<int32_t>(point.raw, kParamType, point.type);
   parameter_state().records.push_back(point);
   ParameterTimeline point_timeline;
@@ -219,7 +224,7 @@ bool verify_parameter_animation_transport() {
   point3d.index = 3;
   point3d.disk_id = 9003;
   point3d.type = 18;
-  write<int32_t>(point3d.raw, 0, point3d.disk_id);
+  write<int32_t>(point3d.raw, abi_contract::PARAM_UU_OFFSET, point3d.disk_id);
   write<int32_t>(point3d.raw, kParamType, point3d.type);
   parameter_state().records.push_back(point3d);
   ParameterTimeline point3d_timeline;
@@ -241,14 +246,14 @@ bool verify_parameter_animation_transport() {
   int32_t count = 0, index = -1, time = 0;
   uint32_t scale = 0;
   bool ok = apply_parameter_animation(definitions, 12, 24) &&
-            std::abs(read<double>(definitions[1], 56) - 15.0) < 1e-12 &&
-            read<int32_t>(definitions[2], 56) == 128 * 65536 &&
-            read<int32_t>(definitions[2], 60) == 36 * 65536 &&
-            std::abs(read<double>(definitions[3], 56) - 64.0) < 1e-12 &&
-            std::abs(read<double>(definitions[3], 64) - 72.0) < 1e-12 &&
-            std::abs(read<double>(definitions[3], 72) - 108.0) < 1e-12 &&
+            std::abs(read<double>(definitions[1], abi_contract::PARAM_U_OFFSET) - 15.0) < 1e-12 &&
+            read<int32_t>(definitions[2], abi_contract::PARAM_U_OFFSET) == 128 * 65536 &&
+            read<int32_t>(definitions[2], abi_contract::PARAM_U_OFFSET + abi_offsets::kPointValueY) == 36 * 65536 &&
+            std::abs(read<double>(definitions[3], abi_contract::PARAM_U_OFFSET) - 64.0) < 1e-12 &&
+            std::abs(read<double>(definitions[3], abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueY) - 72.0) < 1e-12 &&
+            std::abs(read<double>(definitions[3], abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueZ) - 108.0) < 1e-12 &&
             apply_parameter_animation(definitions, 36, 24) &&
-            std::abs(read<double>(definitions[1], 56) - 20.0) < 1e-12 &&
+            std::abs(read<double>(definitions[1], abi_contract::PARAM_U_OFFSET) - 20.0) < 1e-12 &&
             get_param_keyframe_count(g_hooks.effect, 1, &count) == 0 && count == 3 &&
             find_param_keyframe_time(g_hooks.effect, 1, 12, 24, 0, &found, &index,
                                      &time, &scale) == 0 &&
@@ -270,33 +275,33 @@ bool verify_parameter_animation_transport() {
   Definition point_checkout{}, point3d_checkout{};
   ok = ok && checkout_param_keyframe(g_hooks.effect, 2, 0, nullptr, nullptr,
                                      &point_checkout) == 0 &&
-       read<int32_t>(point_checkout, 56) == 128 * 65536 &&
-       read<int32_t>(point_checkout, 60) == 36 * 65536 &&
+       read<int32_t>(point_checkout, abi_contract::PARAM_U_OFFSET) == 128 * 65536 &&
+       read<int32_t>(point_checkout, abi_contract::PARAM_U_OFFSET + abi_offsets::kPointValueY) == 36 * 65536 &&
        checkin_param_keyframe(g_hooks.effect, &point_checkout) == 0 &&
        checkout_param_keyframe(g_hooks.effect, 3, 0, nullptr, nullptr,
                                &point3d_checkout) == 0 &&
-       std::abs(read<double>(point3d_checkout, 56) - 64.0) < 1e-12 &&
-       std::abs(read<double>(point3d_checkout, 64) - 72.0) < 1e-12 &&
-       std::abs(read<double>(point3d_checkout, 72) - 108.0) < 1e-12 &&
+       std::abs(read<double>(point3d_checkout, abi_contract::PARAM_U_OFFSET) - 64.0) < 1e-12 &&
+       std::abs(read<double>(point3d_checkout, abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueY) - 72.0) < 1e-12 &&
+       std::abs(read<double>(point3d_checkout, abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueZ) - 108.0) < 1e-12 &&
        checkin_param_keyframe(g_hooks.effect, &point3d_checkout) == 0;
   Definition temporal_point{}, temporal_point3d{};
   ok = ok && aexcompat::worker_runtime::parameters::copy_definition_at_time(
                  2, 0, 24, point.raw, temporal_point) &&
-       read<int32_t>(temporal_point, 56) == 128 * 65536 &&
-       read<int32_t>(temporal_point, 60) == 36 * 65536 &&
+       read<int32_t>(temporal_point, abi_contract::PARAM_U_OFFSET) == 128 * 65536 &&
+       read<int32_t>(temporal_point, abi_contract::PARAM_U_OFFSET + abi_offsets::kPointValueY) == 36 * 65536 &&
        aexcompat::worker_runtime::parameters::copy_definition_at_time(
            3, 0, 24, point3d.raw, temporal_point3d) &&
-       std::abs(read<double>(temporal_point3d, 56) - 64.0) < 1e-12 &&
-       std::abs(read<double>(temporal_point3d, 64) - 72.0) < 1e-12 &&
-       std::abs(read<double>(temporal_point3d, 72) - 108.0) < 1e-12;
+       std::abs(read<double>(temporal_point3d, abi_contract::PARAM_U_OFFSET) - 64.0) < 1e-12 &&
+       std::abs(read<double>(temporal_point3d, abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueY) - 72.0) < 1e-12 &&
+       std::abs(read<double>(temporal_point3d, abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueZ) - 108.0) < 1e-12;
   parameter_state().animation_layer_width = 0;
   parameter_state().animation_layer_height = 0;
   ok = ok && apply_parameter_animation(definitions, 0, 24) &&
-       read<int32_t>(definitions[2], 56) == 50 * 65536 &&
-       read<int32_t>(definitions[2], 60) == 25 * 65536 &&
-       std::abs(read<double>(definitions[3], 56) - 25.0) < 1e-12 &&
-       std::abs(read<double>(definitions[3], 64) - 50.0) < 1e-12 &&
-       std::abs(read<double>(definitions[3], 72) - 75.0) < 1e-12;
+       read<int32_t>(definitions[2], abi_contract::PARAM_U_OFFSET) == 50 * 65536 &&
+       read<int32_t>(definitions[2], abi_contract::PARAM_U_OFFSET + abi_offsets::kPointValueY) == 25 * 65536 &&
+       std::abs(read<double>(definitions[3], abi_contract::PARAM_U_OFFSET) - 25.0) < 1e-12 &&
+       std::abs(read<double>(definitions[3], abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueY) - 50.0) < 1e-12 &&
+       std::abs(read<double>(definitions[3], abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueZ) - 75.0) < 1e-12;
   parameter_state().records = saved_params;
   parameter_state().timelines = saved_timelines;
   parameter_state().animation_layer_width = saved_layer_width;
@@ -314,7 +319,7 @@ bool verify_parameter_registry_capacity() {
   bool ok = true;
   for (std::size_t index = 1;
        index <= worker_runtime::parameters::kMaxParameterCount; ++index) {
-    write<int32_t>(definition, 0, static_cast<int32_t>(index));
+    write<int32_t>(definition, abi_contract::PARAM_UU_OFFSET, static_cast<int32_t>(index));
     ok = ok && aexcompat::l2_detail::add_param(
                    nullptr, static_cast<int32_t>(index), definition.data()) == 0;
   }
@@ -377,10 +382,10 @@ bool verify_parameter_registry_capacity() {
   Definition popup{};
   std::memcpy(popup.data() + kParamName, "popup", 6);
   write<int32_t>(popup, kParamType, 7);
-  write<int16_t>(popup, 56 + 4, 3);
-  write<int16_t>(popup, 56 + 6, 0);
+  write<int16_t>(popup, abi_contract::PARAM_U_OFFSET + abi_contract::POPUP_NUM_CHOICES_OFFSET, 3);
+  write<int16_t>(popup, abi_contract::PARAM_U_OFFSET + abi_contract::POPUP_DEFAULT_OFFSET, 0);
   ok = ok && aexcompat::l2_detail::add_param(nullptr, -1, popup.data()) == 0;
-  write<int16_t>(popup, 56 + 6, 2);
+  write<int16_t>(popup, abi_contract::PARAM_U_OFFSET + abi_contract::POPUP_DEFAULT_OFFSET, 2);
   ok = ok && aexcompat::l2_detail::add_param(nullptr, -1, popup.data()) == 0;
   ok = ok && records.size() == 2 && records[0].type == 7 &&
        records[0].default_value == 1.0 && records[0].valid_max == 3.0 &&

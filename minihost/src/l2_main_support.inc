@@ -192,10 +192,10 @@ constexpr std::size_t kInUtils = 176;
 constexpr std::size_t kInEffectRef = 184;
 constexpr std::size_t kInQuality = 192;
 constexpr std::size_t kInVersion = 196;
-constexpr std::size_t kInCurrentTime = 224;
+constexpr std::size_t kInCurrentTime = abi_contract::IN_CURRENT_TIME_OFFSET;
 constexpr std::size_t kInTimeStep = 228;
 constexpr std::size_t kInLocalTimeStep = 236;
-constexpr std::size_t kInTimeScale = 240;
+constexpr std::size_t kInTimeScale = abi_contract::IN_TIME_SCALE_OFFSET;
 constexpr std::size_t kInApplicationId = 204;
 constexpr int16_t kHostSpecMajor = 13;
 constexpr int16_t kHostSpecMinor = 28;
@@ -229,11 +229,11 @@ constexpr uint32_t kOutFlagAudioEffectOnly = 1u << 31;
 constexpr uint32_t kOutFlag2SupportsSmartRender = 1u << 10;
 constexpr uint32_t kOutFlag2AutomaticWideTimeInput = 1u << 17;
 constexpr uint32_t kOutFlag2FloatColorAware = 1u << 12;
-constexpr std::size_t kParamType = 12;
+constexpr std::size_t kParamType = abi_contract::PARAM_PARAM_TYPE_OFFSET;
 constexpr std::size_t kParamUiFlags = 4;
-constexpr std::size_t kParamName = 16;
+constexpr std::size_t kParamName = abi_contract::PARAM_NAME_OFFSET;
 constexpr std::size_t kParamNameSize = 32;
-constexpr std::size_t kParamFlags = 48;
+constexpr std::size_t kParamFlags = abi_contract::PARAM_FLAGS_OFFSET;
 constexpr int32_t kGlobalSetup = 1;
 constexpr int32_t kGlobalSetdown = 3;
 constexpr int32_t kParamsSetup = 4;
@@ -3560,7 +3560,7 @@ std::string build_l2_report_json(
   c.parameters.reserve(g_params.size());
   for (const auto& p : g_params) {
     const auto* name = reinterpret_cast<const char*>(p.raw.data() + kParamName);
-    c.parameters.push_back({p.index, p.disk_id, p.type, read<uint32_t>(p.raw, kParamUiFlags), read<int16_t>(p.raw, 8), read<int16_t>(p.raw, 10), read<uint32_t>(p.raw, kParamFlags), std::string(name, strnlen_s(name, kParamNameSize)), p.has_numeric, p.valid_min, p.valid_max, p.slider_min, p.slider_max, p.default_value, p.has_current, p.current_value, p.has_color, p.default_color, p.current_color, p.component_count, p.default_components, p.current_components, p.precision, p.choices, p.label, p.arbitrary_summary, p.layer_default});
+    c.parameters.push_back({p.index, p.disk_id, p.type, read<uint32_t>(p.raw, kParamUiFlags), read<int16_t>(p.raw, abi_contract::PARAM_UI_WIDTH_OFFSET), read<int16_t>(p.raw, abi_contract::PARAM_UI_HEIGHT_OFFSET), read<uint32_t>(p.raw, kParamFlags), std::string(name, strnlen_s(name, kParamNameSize)), p.has_numeric, p.valid_min, p.valid_max, p.slider_min, p.slider_max, p.default_value, p.has_current, p.current_value, p.has_color, p.default_color, p.current_color, p.component_count, p.default_components, p.current_components, p.precision, p.choices, p.label, p.arbitrary_summary, p.layer_default});
   }
   return aexcompat::worker_report::serialize_l2_report(c);
 }

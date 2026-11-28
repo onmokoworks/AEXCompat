@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_audio_execution.hpp"
 
 #include <windows.h>
@@ -16,6 +17,9 @@
 #include <iostream>
 #include <string>
 #include <vector>
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
 
 namespace aexcompat::l2_detail {
 
@@ -40,7 +44,7 @@ namespace {
 constexpr int32_t kAudioRender = 19;
 constexpr int32_t kAudioSetup = 20;
 constexpr int32_t kAudioSetdown = 21;
-constexpr std::size_t kInTimeScale = 240;
+constexpr std::size_t kInTimeScale = abi_contract::IN_TIME_SCALE_OFFSET;
 
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
@@ -78,16 +82,18 @@ AudioSpanOutcome run_audio_span(
   for (std::size_t index = 0; index < audio_values.size(); ++index)
     audio_params[index] = audio_values[index].data();
 
-  write<int32_t>(input, 336, 0);
-  write<int32_t>(input, 340, external_audio_samples);
-  write<int32_t>(input, 344, external_audio_samples);
+  write<int32_t>(input, abi_contract::IN_START_SAMP_OFFSET, 0);
+  write<int32_t>(input, abi_contract::IN_DURATION_SAMPLES_OFFSET, external_audio_samples);
+  write<int32_t>(input, abi_contract::IN_TOTAL_SAMPLES_OFFSET, external_audio_samples);
   write<uint32_t>(input, kInTimeScale, rate);
-  write<double>(input, 352, static_cast<double>(rate));
-  write<int16_t>(input, 360, 1);
-  write<int16_t>(input, 362, 2);
-  write<int16_t>(input, 364, 4);
-  write<int32_t>(input, 368, external_audio_samples);
-  write<void*>(input, 376, external_audio->data());
+  write<double>(input, abi_contract::IN_SOURCE_SOUND_OFFSET + abi_offsets::kSoundRate,
+      static_cast<double>(rate));
+  write<int16_t>(input, abi_contract::IN_SOURCE_SOUND_OFFSET + abi_offsets::kSoundChannels, 1);
+  write<int16_t>(input, abi_contract::IN_SOURCE_SOUND_OFFSET + abi_offsets::kSoundFormat, 2);
+  write<int16_t>(input, abi_contract::IN_SOURCE_SOUND_OFFSET + abi_offsets::kSoundSampleSize, 4);
+  write<int32_t>(input, abi_contract::IN_SOURCE_SOUND_OFFSET + abi_offsets::kSoundNumSamples,
+      external_audio_samples);
+  write<void*>(input, abi_contract::IN_SOURCE_SOUND_OFFSET + abi_offsets::kSoundData, external_audio->data());
   aexcompat::host_audio::runtime().set_source(external_audio, external_audio_samples);
 
   // The audio selectors are invoked as raw entry() calls rather than through
@@ -104,8 +110,8 @@ AudioSpanOutcome run_audio_span(
       : -1;
   aexcompat::worker_runtime::capture_module_audit_phase();
   std::cerr << "stage:audio_setup_end error=" << audio_setup_error << "\n" << std::flush;
-  const int32_t output_start = read<int32_t>(output, 356);
-  const int32_t output_samples = read<int32_t>(output, 360);
+  const int32_t output_start = read<int32_t>(output, abi_contract::OUT_START_SAMP_OFFSET);
+  const int32_t output_samples = read<int32_t>(output, abi_contract::OUT_DURATION_SAMPLES_OFFSET);
   const bool setup_range_valid = output_start >= 0 && output_samples >= 0 &&
       output_start <= external_audio_samples &&
       output_samples <= external_audio_samples - output_start;
@@ -116,12 +122,15 @@ AudioSpanOutcome run_audio_span(
   auto* audio_destination = guarded_output.data() + kAudioGuardSamples;
   if (setup_range_valid) {
     std::fill_n(audio_destination, external_audio_samples, 0.0f);
-    write<double>(output, 368, static_cast<double>(rate));
-    write<int16_t>(output, 376, 1);
-    write<int16_t>(output, 378, 2);
-    write<int16_t>(output, 380, 4);
-    write<int32_t>(output, 384, output_samples);
-    write<void*>(output, 392, audio_destination);
+    write<double>(output, abi_contract::OUT_DESTINATION_SOUND_OFFSET + abi_offsets::kSoundRate,
+        static_cast<double>(rate));
+    write<int16_t>(output, abi_contract::OUT_DESTINATION_SOUND_OFFSET + abi_offsets::kSoundChannels, 1);
+    write<int16_t>(output, abi_contract::OUT_DESTINATION_SOUND_OFFSET + abi_offsets::kSoundFormat, 2);
+    write<int16_t>(output, abi_contract::OUT_DESTINATION_SOUND_OFFSET + abi_offsets::kSoundSampleSize, 4);
+    write<int32_t>(output, abi_contract::OUT_DESTINATION_SOUND_OFFSET + abi_offsets::kSoundNumSamples,
+        output_samples);
+    write<void*>(output, abi_contract::OUT_DESTINATION_SOUND_OFFSET + abi_offsets::kSoundData,
+        audio_destination);
   }
   std::cerr << "stage:audio_render_begin\n" << std::flush;
   const int32_t audio_render_error = audio_setup_error == 0 && setup_range_valid

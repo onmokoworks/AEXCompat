@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_memory_fill.hpp"
 #include <windows.h>
 
@@ -44,6 +45,10 @@
 // Worker-entry owned callbacks, snapshot wrappers, and probes stay in their
 // owners and are reached cross-TU; every direct EffectMain selector call
 // keeps the audited guarded_effect_call boundary through the macro below.
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
+
 namespace aexcompat::l2_detail {
 
 using namespace aexcompat::worker_runtime::parameter_execution;
@@ -104,8 +109,8 @@ constexpr std::size_t kInEffectRef = 184;
 constexpr std::size_t kOutSize = 408;
 constexpr std::size_t kParamSize = 176;
 constexpr std::size_t kInQuality = 192;
-constexpr std::size_t kInCurrentTime = 224;
-constexpr std::size_t kInTimeScale = 240;
+constexpr std::size_t kInCurrentTime = abi_contract::IN_CURRENT_TIME_OFFSET;
+constexpr std::size_t kInTimeScale = abi_contract::IN_TIME_SCALE_OFFSET;
 constexpr std::size_t kInSequenceData = 320;
 constexpr std::size_t kInFrameData = 328;
 constexpr std::size_t kOutSequenceData = 56;
@@ -699,8 +704,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (!aexcompat::render::prepare_world_layout(input_world, input_layout, source.data()) ||
       !aexcompat::render::prepare_world_layout(output_world, output_layout, destination)) return -3;
   if (diagnostic.enabled) {
-    write<int32_t>(input_world, 104, diagnostic.input_origin_x);
-    write<int32_t>(input_world, 108, diagnostic.input_origin_y);
+    write<int32_t>(input_world, abi_offsets::kLayerOriginX, diagnostic.input_origin_x);
+    write<int32_t>(input_world, abi_offsets::kLayerOriginY, diagnostic.input_origin_y);
     if (diagnostic.has_extent_hint)
       std::memcpy(input_world.data() + 44, diagnostic.extent_hint.data(),
                   sizeof(diagnostic.extent_hint));
@@ -721,7 +726,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     if (!aexcompat::render::prepare_connected_map_world(case_id, width, height, map_world) ||
         !dispatch_worlds.register_world(map_world.world.data(), kPixelFormatArgb32)) return -3;
     aexcompat::worker_runtime::classic::ParameterDefinition checkout_definition{};
-    write<int32_t>(checkout_definition, 12, 0);
+    write<int32_t>(checkout_definition, abi_contract::PARAM_PARAM_TYPE_OFFSET, 0);
     copy_world_into_param_def(checkout_definition, map_world.world);
     classic_context->set_fallback_definition(g_secondary_layer_slot,
                                              checkout_definition);
@@ -791,8 +796,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
             layer_pixel_bytes == 4 ? kPixelFormatArgb32 :
             (layer_pixel_bytes == 8 ? kPixelFormatArgb64 : kPixelFormatArgb128))) return -3;
     if (layer.has_world_layout) {
-      write<int32_t>(world, 104, layer.origin_x);
-      write<int32_t>(world, 108, layer.origin_y);
+      write<int32_t>(world, abi_offsets::kLayerOriginX, layer.origin_x);
+      write<int32_t>(world, abi_offsets::kLayerOriginY, layer.origin_y);
       std::memcpy(world.data() + 44, layer.extent.data(), sizeof(layer.extent));
     }
     if (!aexcompat::render::capture_requested_world(
@@ -802,7 +807,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
             external_current_time, external_time_scale))
       copy_world_into_param_def(definitions[layer.slot], world);
     std::array<std::byte, kParamSize> checkout{};
-    write<int32_t>(checkout, 12, 0);
+    write<int32_t>(checkout, abi_contract::PARAM_PARAM_TYPE_OFFSET, 0);
     copy_world_into_param_def(checkout, world);
     if (layer.timed) {
       if (!classic_context->add_timed_layer(
@@ -816,12 +821,12 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
             read<int32_t>(input_world, aexcompat::abi::x86_64_windows::LAYER_HEIGHT_OFFSET)))
       return -3;
   } else if (definitions.size() > 7) {
-    write<int32_t>(definitions[1], 56, parameter_profile.amount);
-    write<int32_t>(definitions[2], 56, parameter_profile.direction);
-    write<int32_t>(definitions[3], 56, parameter_profile.seed);
-    write<int32_t>(definitions[4], 56, parameter_profile.repeat);
-    write<double>(definitions[5], 56, parameter_profile.mix);
-    if (parameter_profile.inverted_map) write<int32_t>(definitions[7], 56, 1);
+    write<int32_t>(definitions[1], abi_contract::PARAM_U_OFFSET, parameter_profile.amount);
+    write<int32_t>(definitions[2], abi_contract::PARAM_U_OFFSET, parameter_profile.direction);
+    write<int32_t>(definitions[3], abi_contract::PARAM_U_OFFSET, parameter_profile.seed);
+    write<int32_t>(definitions[4], abi_contract::PARAM_U_OFFSET, parameter_profile.repeat);
+    write<double>(definitions[5], abi_contract::PARAM_U_OFFSET, parameter_profile.mix);
+    if (parameter_profile.inverted_map) write<int32_t>(definitions[7], abi_contract::PARAM_U_OFFSET, 1);
   }
   aexcompat::worker_runtime::parameters::set_animation_layer_extent(width, height);
   if (!apply_parameter_animation(definitions, external_current_time, external_time_scale)) return -3;
@@ -831,13 +836,15 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     classic_context->set_definition(static_cast<int32_t>(slot), definitions[slot]);
   std::vector<void*> params(definitions.size());
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
-  write<int32_t>(input, 224, external_current_time);
-  write<int32_t>(input, 228, external_time_step);
-  write<int32_t>(input, 232, external_total_time);
-  write<int32_t>(input, 236, external_time_step);
-  write<uint32_t>(input, 240, external_time_scale);
-  write<int32_t>(input, 252, g_full_resolution_width > 0 ? g_full_resolution_width : width);
-  write<int32_t>(input, 256, g_full_resolution_height > 0 ? g_full_resolution_height : height);
+  write<int32_t>(input, abi_contract::IN_CURRENT_TIME_OFFSET, external_current_time);
+  write<int32_t>(input, abi_contract::IN_TIME_STEP_OFFSET, external_time_step);
+  write<int32_t>(input, abi_contract::IN_TOTAL_TIME_OFFSET, external_total_time);
+  write<int32_t>(input, abi_contract::IN_LOCAL_TIME_STEP_OFFSET, external_time_step);
+  write<uint32_t>(input, abi_contract::IN_TIME_SCALE_OFFSET, external_time_scale);
+  write<int32_t>(input, abi_contract::IN_WIDTH_OFFSET,
+      g_full_resolution_width > 0 ? g_full_resolution_width : width);
+  write<int32_t>(input, abi_contract::IN_HEIGHT_OFFSET,
+      g_full_resolution_height > 0 ? g_full_resolution_height : height);
   const int32_t full_extent[4] = {0, 0, width, height};
   std::memcpy(input.data() + kInExtentHint, full_extent, sizeof(full_extent));
   if (partial_extent_hint) {
@@ -1120,11 +1127,11 @@ bool verify_classic_animation_extent_wiring_for_test() {
   return width == 256 && height == 144 && guards_intact &&
          classic_context.copy_definition(2, point.data(), point.size()) &&
          classic_context.copy_definition(3, point3d.data(), point3d.size()) &&
-         read<int32_t>(point, 56) == 128 * 65536 &&
-         read<int32_t>(point, 60) == 36 * 65536 &&
-         std::abs(read<double>(point3d, 56) - 64.0) < 1e-12 &&
-         std::abs(read<double>(point3d, 64) - 72.0) < 1e-12 &&
-         std::abs(read<double>(point3d, 72) - 108.0) < 1e-12;
+         read<int32_t>(point, abi_contract::PARAM_U_OFFSET) == 128 * 65536 &&
+         read<int32_t>(point, abi_contract::PARAM_U_OFFSET + abi_offsets::kPointValueY) == 36 * 65536 &&
+         std::abs(read<double>(point3d, abi_contract::PARAM_U_OFFSET) - 64.0) < 1e-12 &&
+         std::abs(read<double>(point3d, abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueY) - 72.0) < 1e-12 &&
+         std::abs(read<double>(point3d, abi_contract::PARAM_U_OFFSET + abi_offsets::kPoint3DValueZ) - 108.0) < 1e-12;
 }
 
 using SmartResult = aexcompat::worker_runtime::smart_execution::Result;

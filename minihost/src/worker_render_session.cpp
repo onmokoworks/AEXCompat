@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_render_session.hpp"
 
 #include "worker_bee_scene_facade.hpp"
@@ -39,6 +40,9 @@
 #include <utility>
 #include <variant>
 #include <vector>
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
 
 namespace aexcompat::worker_render_session {
 namespace {
@@ -539,17 +543,17 @@ void independent_report_context(Report& report,
   report.requested_parameters = parameters;
   report.case_id = "request";
   report.downsample_x = {read<int32_t>(input, abi::IN_DOWNSAMPLE_X_OFFSET),
-                         read<int32_t>(input, abi::IN_DOWNSAMPLE_X_OFFSET + 4)};
+                         read<int32_t>(input, abi::IN_DOWNSAMPLE_X_OFFSET + abi_offsets::kRationalDenominator)};
   report.downsample_y = {read<int32_t>(input, abi::IN_DOWNSAMPLE_Y_OFFSET),
-                         read<int32_t>(input, abi::IN_DOWNSAMPLE_Y_OFFSET + 4)};
+                         read<int32_t>(input, abi::IN_DOWNSAMPLE_Y_OFFSET + abi_offsets::kRationalDenominator)};
   report.pixel_aspect_ratio = {read<int32_t>(input, abi::IN_PIXEL_ASPECT_RATIO_OFFSET),
-                               read<int32_t>(input, abi::IN_PIXEL_ASPECT_RATIO_OFFSET + 4)};
-  report.resolution = {read<int32_t>(input, 252), read<int32_t>(input, 256)};
+                               read<int32_t>(input, abi::IN_PIXEL_ASPECT_RATIO_OFFSET + abi_offsets::kRationalDenominator)};
+  report.resolution = {read<int32_t>(input, abi_contract::IN_WIDTH_OFFSET), read<int32_t>(input, abi_contract::IN_HEIGHT_OFFSET)};
   report.context_head = {read<int32_t>(input, abi::IN_QUALITY_OFFSET),
-      read<int32_t>(input, abi::IN_NUM_PARAMS_OFFSET), read<int32_t>(input, 236),
-      read<int32_t>(input, 244), read<int32_t>(input, 248), read<int32_t>(input, 400)};
+      read<int32_t>(input, abi::IN_NUM_PARAMS_OFFSET), read<int32_t>(input, abi_contract::IN_LOCAL_TIME_STEP_OFFSET),
+      read<int32_t>(input, abi_contract::IN_FIELD_OFFSET), read<int32_t>(input, abi_contract::IN_SHUTTER_ANGLE_OFFSET), read<int32_t>(input, abi_contract::IN_SHUTTER_PHASE_OFFSET)};
   report.context_zoom = report.resolution;
-  report.context_origin = {read<int32_t>(input, 392), read<int32_t>(input, 396)};
+  report.context_origin = {read<int32_t>(input, abi_contract::IN_PRE_EFFECT_SOURCE_ORIGIN_X_OFFSET), read<int32_t>(input, abi_contract::IN_PRE_EFFECT_SOURCE_ORIGIN_Y_OFFSET)};
   report.context_extent = {read<int32_t>(input, abi::IN_OUTPUT_ORIGIN_X_OFFSET),
                            read<int32_t>(input, abi::IN_OUTPUT_ORIGIN_Y_OFFSET)};
 }
@@ -724,16 +728,16 @@ void run_session_frame_loop(
   // cluster-session swap re-bootstraps the buffers: the static fields must be
   // re-applied before the swapped plug-in's first frame.
   const auto write_session_static_fields = [&] {
-    write<int32_t>(input, 228, time_step);
-    write<int32_t>(input, 232, total_time);
-    write<int32_t>(input, 236, time_step);
-    write<uint32_t>(input, 240, time_scale);
+    write<int32_t>(input, abi_contract::IN_TIME_STEP_OFFSET, time_step);
+    write<int32_t>(input, abi_contract::IN_TOTAL_TIME_OFFSET, total_time);
+    write<int32_t>(input, abi_contract::IN_LOCAL_TIME_STEP_OFFSET, time_step);
+    write<uint32_t>(input, abi_contract::IN_TIME_SCALE_OFFSET, time_scale);
     // Same full-resolution override the per-frame render applies: a spatial
     // context can declare the true composition size, and the deferred
     // SEQUENCE_SETUP must observe it exactly like the one-shot lifecycle.
-    write<int32_t>(input, 252,
+    write<int32_t>(input, abi_contract::IN_WIDTH_OFFSET,
                    g_full_resolution_width > 0 ? g_full_resolution_width : max_width);
-    write<int32_t>(input, 256,
+    write<int32_t>(input, abi_contract::IN_HEIGHT_OFFSET,
                    g_full_resolution_height > 0 ? g_full_resolution_height : max_height);
     const int32_t session_extent[4] = {0, 0, max_width, max_height};
     std::memcpy(input.data() + 260, session_extent, sizeof(session_extent));
@@ -1301,7 +1305,7 @@ void run_session_frame_loop(
     if (fresh_case) {
       case_active = true;
       worker_runtime::suite_registry().begin_case_diagnostics();
-      write<int32_t>(input, 224, current_time);
+      write<int32_t>(input, abi_contract::IN_CURRENT_TIME_OFFSET, current_time);
       if (!instance.begin()) {
         outcome.invariant_failure = true;
         respond_error(kSessionSequenceSetupFailed);
@@ -1315,7 +1319,7 @@ void run_session_frame_loop(
       break;
     }
     if (!sequence_started) {
-      write<int32_t>(input, 224, current_time);
+      write<int32_t>(input, abi_contract::IN_CURRENT_TIME_OFFSET, current_time);
       sequence_attempted = true;
       outcome.setup_error = invoke_sequence_selector(entry, kSequenceSetup,
                                                      input.data(), output.data());

@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_smart_dispatch.hpp"
 #include "worker_memory_fill.hpp"
 
@@ -21,6 +22,9 @@
 #include <memory>
 #include <vector>
 #include <windows.h>
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
 
 namespace aexcompat::worker_runtime::smart_dispatch {
 namespace {
@@ -1884,7 +1888,7 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   void* input_pixels{};
   std::memcpy(&input_pixels, request.input_world->data() + 24,
               sizeof(input_pixels));
-  const int32_t input_rowbytes = read<int32_t>(*request.input_world, 32);
+  const int32_t input_rowbytes = read<int32_t>(*request.input_world, abi_contract::LAYER_ROWBYTES_OFFSET);
   const int32_t float_rowbytes = width * 16;
   // Fail closed on a stride that cannot hold the row (mirrors
   // gpu_memcpy_frame's own check on the float32 side) rather than over-read.
@@ -2467,10 +2471,11 @@ bool dispatch(const Request& request, const Hooks& hooks,
           gpu_framework, plan.gpu_device_index,
           gpu_framework == 3 ? video_frame_worlds.cuda_context() : nullptr);
   if (plan.gpu_negotiation) {
-    write<int32_t>(gpu_setup_input, 0, gpu_framework);
-    write<uint32_t>(gpu_setup_input, 4, plan.gpu_device_index);
-    write<void*>(gpu_setup_extra, 0, gpu_setup_input.data());
-    write<void*>(gpu_setup_extra, 8, gpu_setup_output.data());
+    write<int32_t>(gpu_setup_input, abi_contract::GPU_SETUP_INPUT_WHAT_GPU_OFFSET, gpu_framework);
+    write<uint32_t>(gpu_setup_input, abi_contract::GPU_SETUP_INPUT_DEVICE_INDEX_OFFSET,
+        plan.gpu_device_index);
+    write<void*>(gpu_setup_extra, abi_contract::GPU_SETUP_EXTRA_INPUT_OFFSET, gpu_setup_input.data());
+    write<void*>(gpu_setup_extra, abi_contract::GPU_SETUP_EXTRA_OUTPUT_OFFSET, gpu_setup_output.data());
     std::cerr << "stage:gpu_device_setup_begin\n" << std::flush;
     {
       ModuleDirectoryScope gpu_module_directory(
@@ -2505,15 +2510,17 @@ bool dispatch(const Request& request, const Hooks& hooks,
       build_selector_inputs(expected_request, render_bitdepth, nullptr);
   std::array<std::byte, 64>& pre_input = selector_inputs.pre_render;
   if (plan.gpu_negotiation) {
-    write<void*>(pre_input, 48, read<void*>(gpu_setup_output, 0));
-    write<int32_t>(pre_input, 56, gpu_framework);
-    write<uint32_t>(pre_input, 60, plan.gpu_device_index);
+    write<void*>(pre_input, abi_contract::PRE_INPUT_GPU_DATA_OFFSET,
+        read<void*>(gpu_setup_output, abi_contract::GPU_SETUP_OUTPUT_GPU_DATA_OFFSET));
+    write<int32_t>(pre_input, abi_contract::PRE_INPUT_WHAT_GPU_OFFSET, gpu_framework);
+    write<uint32_t>(pre_input, abi_contract::PRE_INPUT_DEVICE_INDEX_OFFSET, plan.gpu_device_index);
   }
-  write<void*>(pre_callbacks, 0, reinterpret_cast<void*>(&smart::pre_checkout_layer));
-  write<void*>(pre_callbacks, 8, hooks.guid_mix_in_callback);
-  write<void*>(pre_extra, 0, pre_input.data());
-  write<void*>(pre_extra, 8, dispatch_state.pre_output.data());
-  write<void*>(pre_extra, 16, pre_callbacks.data());
+  write<void*>(pre_callbacks, abi_contract::PRE_CALLBACKS_CHECKOUT_LAYER_OFFSET,
+      reinterpret_cast<void*>(&smart::pre_checkout_layer));
+  write<void*>(pre_callbacks, abi_offsets::kPreCallbacksGuidMixIn, hooks.guid_mix_in_callback);
+  write<void*>(pre_extra, abi_contract::PRE_EXTRA_INPUT_OFFSET, pre_input.data());
+  write<void*>(pre_extra, abi_contract::PRE_EXTRA_OUTPUT_OFFSET, dispatch_state.pre_output.data());
+  write<void*>(pre_extra, abi_contract::PRE_EXTRA_CALLBACKS_OFFSET, pre_callbacks.data());
   runtime.input_checkout_request.fill(-1);
   runtime.map_checkout_request.fill(-1);
   runtime.secondary_checkout_id = -1;
@@ -2662,7 +2669,7 @@ bool dispatch(const Request& request, const Hooks& hooks,
     smart_bounds.origin_y = passthrough_rect[1];
   }
   result.returns_extra_pixels =
-      (read<uint16_t>(dispatch_state.pre_output, 34) & 0x1u) != 0;
+      (read<uint16_t>(dispatch_state.pre_output, abi_contract::PRE_OUTPUT_FLAGS_OFFSET) & 0x1u) != 0;
   // Without RETURNS_EXTRA_PIXELS the SDK does not admit result > request. The
   // overrun is surfaced as an explicit diagnostic rather than a render
   // failure: AE silently clips, and blocking here would turn an observable
@@ -2698,8 +2705,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
       // result_rect top-left as PF_LayerDef::origin_x/origin_y (offset 104/108),
       // and in_data.output_origin (276/280) is the position of the layer origin
       // inside that buffer, i.e. the negated result_rect top-left.
-      write<int32_t>(*request.output_world, 104, smart_bounds.origin_x);
-      write<int32_t>(*request.output_world, 108, smart_bounds.origin_y);
+      write<int32_t>(*request.output_world, abi_offsets::kLayerOriginX, smart_bounds.origin_x);
+      write<int32_t>(*request.output_world, abi_offsets::kLayerOriginY, smart_bounds.origin_y);
       write<int32_t>(*request.input,
                      aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET,
                      -smart_bounds.result_rect[0]);
@@ -2730,8 +2737,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
                         world_registry::kPixelFormatArgb128))) {
           result.rects_valid = false;
         } else {
-          write<int32_t>(video_frame_worlds.output(), 104, smart_bounds.origin_x);
-          write<int32_t>(video_frame_worlds.output(), 108, smart_bounds.origin_y);
+          write<int32_t>(video_frame_worlds.output(), abi_offsets::kLayerOriginX, smart_bounds.origin_x);
+          write<int32_t>(video_frame_worlds.output(), abi_offsets::kLayerOriginY, smart_bounds.origin_y);
         }
       }
     }
@@ -2742,7 +2749,7 @@ bool dispatch(const Request& request, const Hooks& hooks,
        result.result_rect == expected_request &&
        result.max_result_rect == expected_request);
   result.gpu_render_possible =
-      (read<uint16_t>(dispatch_state.pre_output, 34) & 0x2u) != 0;
+      (read<uint16_t>(dispatch_state.pre_output, abi_contract::PRE_OUTPUT_FLAGS_OFFSET) & 0x2u) != 0;
   result.checkout_time = runtime.checkout_time;
   result.checkout_time_step = runtime.checkout_time_step;
   result.checkout_time_scale = runtime.checkout_time_scale;
@@ -2751,17 +2758,21 @@ bool dispatch(const Request& request, const Hooks& hooks,
   std::array<std::byte, 16> smart_extra{};
   std::array<std::byte, 72>& smart_input = selector_inputs.smart_render;
   write<void*>(smart_input, kSmartInputPreRenderData,
-               read<void*>(dispatch_state.pre_output, 40));
+               read<void*>(dispatch_state.pre_output, abi_contract::PRE_OUTPUT_PRE_RENDER_DATA_OFFSET));
   if (plan.gpu_negotiation) {
-    write<void*>(smart_input, 56, read<void*>(gpu_setup_output, 0));
-    write<int32_t>(smart_input, 64, gpu_framework);
-    write<uint32_t>(smart_input, 68, plan.gpu_device_index);
+    write<void*>(smart_input, abi_contract::SMART_INPUT_GPU_DATA_OFFSET,
+        read<void*>(gpu_setup_output, abi_contract::GPU_SETUP_OUTPUT_GPU_DATA_OFFSET));
+    write<int32_t>(smart_input, abi_contract::SMART_INPUT_WHAT_GPU_OFFSET, gpu_framework);
+    write<uint32_t>(smart_input, abi_contract::SMART_INPUT_DEVICE_INDEX_OFFSET, plan.gpu_device_index);
   }
-  write<void*>(callbacks, 0, reinterpret_cast<void*>(&smart::checkout_pixels));
-  write<void*>(callbacks, 8, reinterpret_cast<void*>(&smart::checkin_pixels));
-  write<void*>(callbacks, 16, reinterpret_cast<void*>(&smart::checkout_output));
-  write<void*>(smart_extra, 0, smart_input.data());
-  write<void*>(smart_extra, 8, callbacks.data());
+  write<void*>(callbacks, abi_contract::SMART_CALLBACKS_CHECKOUT_LAYER_PIXELS_OFFSET,
+      reinterpret_cast<void*>(&smart::checkout_pixels));
+  write<void*>(callbacks, abi_contract::SMART_CALLBACKS_CHECKIN_LAYER_PIXELS_OFFSET,
+      reinterpret_cast<void*>(&smart::checkin_pixels));
+  write<void*>(callbacks, abi_contract::SMART_CALLBACKS_CHECKOUT_OUTPUT_OFFSET,
+      reinterpret_cast<void*>(&smart::checkout_output));
+  write<void*>(smart_extra, abi_contract::SMART_EXTRA_INPUT_OFFSET, smart_input.data());
+  write<void*>(smart_extra, abi_contract::SMART_EXTRA_CALLBACKS_OFFSET, callbacks.data());
   runtime.output_world = video_frame_adapter_ready && !plan.gpu_negotiation
       ? video_frame_worlds.output().data() : request.output_world->data();
   if (plan.gpu_negotiation && !video_frame_adapter_ready &&
@@ -2802,9 +2813,9 @@ bool dispatch(const Request& request, const Hooks& hooks,
           checkout.view_world = nullptr;
         }
       }
-      write<int32_t>(video_frame_worlds.output(), 104,
+      write<int32_t>(video_frame_worlds.output(), abi_offsets::kLayerOriginX,
                      smart_bounds.origin_x);
-      write<int32_t>(video_frame_worlds.output(), 108,
+      write<int32_t>(video_frame_worlds.output(), abi_offsets::kLayerOriginY,
                      smart_bounds.origin_y);
       if (!request.parameters->definitions.empty() &&
           request.parameters->definitions[0].size() >=
@@ -2972,10 +2983,12 @@ bool dispatch(const Request& request, const Hooks& hooks,
   if (plan.gpu_negotiation && result.gpu_setup_error == 0) {
     std::array<std::byte, 16> setdown_input{};
     std::array<std::byte, 8> setdown_extra{};
-    write<void*>(setdown_input, 0, read<void*>(gpu_setup_output, 0));
-    write<int32_t>(setdown_input, 8, gpu_framework);
-    write<uint32_t>(setdown_input, 12, plan.gpu_device_index);
-    write<void*>(setdown_extra, 0, setdown_input.data());
+    write<void*>(setdown_input, abi_contract::GPU_SETDOWN_INPUT_GPU_DATA_OFFSET,
+        read<void*>(gpu_setup_output, abi_contract::GPU_SETUP_OUTPUT_GPU_DATA_OFFSET));
+    write<int32_t>(setdown_input, abi_contract::GPU_SETDOWN_INPUT_WHAT_GPU_OFFSET, gpu_framework);
+    write<uint32_t>(setdown_input, abi_contract::GPU_SETDOWN_INPUT_DEVICE_INDEX_OFFSET,
+        plan.gpu_device_index);
+    write<void*>(setdown_extra, abi_contract::GPU_SETDOWN_EXTRA_INPUT_OFFSET, setdown_input.data());
     hooks.capture_module_audit();
     std::cerr << "stage:gpu_device_setdown_begin\n" << std::flush;
     {
@@ -2997,12 +3010,13 @@ bool dispatch(const Request& request, const Hooks& hooks,
       !transport::end_backend_context(gpu_framework) && result.gpu_setdown_error == 0)
     result.gpu_setdown_error = -6;
   if (video_frame_gpu_ready) {
-    void* pre_render_data = read<void*>(dispatch_state.pre_output, 40);
+    void* pre_render_data = read<void*>(dispatch_state.pre_output, abi_contract::PRE_OUTPUT_PRE_RENDER_DATA_OFFSET);
     if (auto cleanup =
-            read<void(__cdecl*)(void*)>(dispatch_state.pre_output, 48)) {
+            read<void(__cdecl*)(void*)>(dispatch_state.pre_output, abi_offsets::kPreOutputDeletePreRenderData)) {
       invoke_smart_pre_render_cleanup_seh(cleanup, pre_render_data);
-      write<void*>(dispatch_state.pre_output, 40, nullptr);
-      write<void(__cdecl*)(void*)>(dispatch_state.pre_output, 48, nullptr);
+      write<void*>(dispatch_state.pre_output, abi_contract::PRE_OUTPUT_PRE_RENDER_DATA_OFFSET, nullptr);
+      write<void(__cdecl*)(void*)>(dispatch_state.pre_output, abi_offsets::kPreOutputDeletePreRenderData,
+          nullptr);
     }
   }
   result.input_checkout_result_rect = runtime.input_checkout_result_rect;

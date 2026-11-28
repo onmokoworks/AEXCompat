@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_memory_fill.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_parameter_limits.hpp"
@@ -12,12 +13,15 @@
 #include <sstream>
 #include <vector>
 
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
+
 namespace aexcompat::worker_runtime::parameter_execution {
 using parameters::RequestedAssignments;
 using parameters::RequestedKind;
 namespace {
 constexpr int32_t kArbitraryCallback = 22;
-constexpr std::size_t kInCurrentTime = 224;
+constexpr std::size_t kInCurrentTime = abi_contract::IN_CURRENT_TIME_OFFSET;
 Hooks g_hooks{};
 Hooks& hooks() { return g_hooks; }
 parameters::State& runtime() { return parameters::state(); }
@@ -43,10 +47,10 @@ bool dispose_arbitrary_handle(EffectEntry entry, BufferIn& input, BufferOut& out
                               int16_t id, void* refcon, void* value) {
   if (!value) return true;
   std::array<std::byte, 48> extra{};
-  write<int32_t>(extra, 0, 1);
-  write<int16_t>(extra, 4, id);
-  write<void*>(extra, 8, refcon);
-  write<void*>(extra, 16, value);
+  write<int32_t>(extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 1);
+  write<int16_t>(extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+  write<void*>(extra, abi_contract::ARB_DISPOSE_REFCON_OFFSET, refcon);
+  write<void*>(extra, abi_contract::ARB_DISPOSE_VALUE_OFFSET, value);
   uint32_t exception_code = 0;
   return hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(),
       nullptr, nullptr, extra.data(), &exception_code) == 0 && exception_code == 0;
@@ -62,31 +66,31 @@ bool initialize_arbitrary_values(EffectEntry entry,
     std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions) {
   for (std::size_t i = 0; i < runtime().records.size(); ++i) {
     if (runtime().records[i].type != 11) continue;
-    const std::size_t u = 56;
+    const std::size_t u = abi_contract::PARAM_U_OFFSET;
     const int16_t id = read<int16_t>(definitions[i + 1], u);
-    void* source = read<void*>(definitions[i + 1], u + 8);
-    void* refcon = read<void*>(definitions[i + 1], u + 24);
+    void* source = read<void*>(definitions[i + 1], u + abi_contract::ARBITRARY_DEFAULT_OFFSET);
+    void* refcon = read<void*>(definitions[i + 1], u + abi_contract::ARBITRARY_REFCON_OFFSET);
     // PF_ADD_ARBITRARY2 initializes the current value to null independently
     // from its optional default handle.  A null default therefore represents
     // an uninitialized value; there is no source object for COPY to duplicate.
     if (!source) {
-      write<void*>(definitions[i + 1], u + 16, nullptr);
+      write<void*>(definitions[i + 1], u + abi_contract::ARBITRARY_VALUE_OFFSET, nullptr);
       continue;
     }
     void* destination = nullptr;
     std::array<std::byte, 48> extra{};
-    write<int32_t>(extra, 0, 2);
-    write<int16_t>(extra, 4, id);
-    write<void*>(extra, 8, refcon);
-    write<void*>(extra, 16, source);
-    write<void*>(extra, 24, &destination);
+    write<int32_t>(extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 2);
+    write<int16_t>(extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(extra, abi_contract::ARB_COPY_REFCON_OFFSET, refcon);
+    write<void*>(extra, abi_contract::ARB_COPY_SOURCE_OFFSET, source);
+    write<void*>(extra, abi_contract::ARB_COPY_DESTINATION_OFFSET, &destination);
     const int32_t error = entry(kArbitraryCallback, input.data(), output.data(),
                                 nullptr, nullptr, extra.data());
     if (error != 0 || !destination || destination == source) {
       ++runtime().arbitrary.print_failures;
       return false;
     }
-    write<void*>(definitions[i + 1], u + 16, destination);
+    write<void*>(definitions[i + 1], u + abi_contract::ARBITRARY_VALUE_OFFSET, destination);
     ++runtime().arbitrary.copy_calls;
   }
   return true;
@@ -99,19 +103,19 @@ bool apply_arbitrary_text_assignments(EffectEntry entry,
     const RequestedAssignments& requested) {
   for (const auto& assignment : requested) {
     if (assignment.kind != RequestedKind::ArbitraryText) continue;
-    constexpr std::size_t u = 56;
+    constexpr std::size_t u = abi_contract::PARAM_U_OFFSET;
     auto& definition = definitions[static_cast<std::size_t>(assignment.index)];
     const int16_t id = read<int16_t>(definition, u);
-    void* refcon = read<void*>(definition, u + 24);
-    void* previous = read<void*>(definition, u + 16);
+    void* refcon = read<void*>(definition, u + abi_contract::ARBITRARY_REFCON_OFFSET);
+    void* previous = read<void*>(definition, u + abi_contract::ARBITRARY_VALUE_OFFSET);
     void* scanned = nullptr;
     std::array<std::byte, 48> extra{};
-    write<int32_t>(extra, 0, 10);
-    write<int16_t>(extra, 4, id);
-    write<void*>(extra, 8, refcon);
-    write<const char*>(extra, 16, assignment.text.data());
-    write<uint32_t>(extra, 24, static_cast<uint32_t>(assignment.text.size()));
-    write<void*>(extra, 32, &scanned);
+    write<int32_t>(extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 10);
+    write<int16_t>(extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(extra, abi_offsets::kArbScanRefcon, refcon);
+    write<const char*>(extra, abi_offsets::kArbScanBuffer, assignment.text.data());
+    write<uint32_t>(extra, abi_offsets::kArbScanSize, static_cast<uint32_t>(assignment.text.size()));
+    write<void*>(extra, abi_offsets::kArbScanOutput, &scanned);
     uint32_t exception_code = 0;
     const bool scan_error = hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(),
         nullptr, nullptr, extra.data(), &exception_code) != 0 || exception_code != 0 ||
@@ -119,10 +123,10 @@ bool apply_arbitrary_text_assignments(EffectEntry entry,
     auto dispose_scanned = [&]() {
       if (!hooks().handle_is_live(scanned) || scanned == previous) return true;
       std::array<std::byte, 48> scanned_dispose_extra{};
-      write<int32_t>(scanned_dispose_extra, 0, 1);
-      write<int16_t>(scanned_dispose_extra, 4, id);
-      write<void*>(scanned_dispose_extra, 8, refcon);
-      write<void*>(scanned_dispose_extra, 16, scanned);
+      write<int32_t>(scanned_dispose_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 1);
+      write<int16_t>(scanned_dispose_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+      write<void*>(scanned_dispose_extra, abi_contract::ARB_DISPOSE_REFCON_OFFSET, refcon);
+      write<void*>(scanned_dispose_extra, abi_contract::ARB_DISPOSE_VALUE_OFFSET, scanned);
       if (entry(kArbitraryCallback, input.data(), output.data(), nullptr, nullptr,
                 scanned_dispose_extra.data()) != 0) {
         ++runtime().arbitrary.invalid_operations;
@@ -137,10 +141,10 @@ bool apply_arbitrary_text_assignments(EffectEntry entry,
       return false;
     }
     std::array<std::byte, 48> dispose_extra{};
-    write<int32_t>(dispose_extra, 0, 1);
-    write<int16_t>(dispose_extra, 4, id);
-    write<void*>(dispose_extra, 8, refcon);
-    write<void*>(dispose_extra, 16, previous);
+    write<int32_t>(dispose_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 1);
+    write<int16_t>(dispose_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_REFCON_OFFSET, refcon);
+    write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_VALUE_OFFSET, previous);
     if (entry(kArbitraryCallback, input.data(), output.data(), nullptr, nullptr,
               dispose_extra.data()) != 0) {
       dispose_scanned();
@@ -149,7 +153,7 @@ bool apply_arbitrary_text_assignments(EffectEntry entry,
     }
     ++runtime().arbitrary.dispose_calls;
     ++runtime().arbitrary.scan_calls;
-    write<void*>(definition, u + 16, scanned);
+    write<void*>(definition, u + abi_contract::ARBITRARY_VALUE_OFFSET, scanned);
   }
   return true;
 }
@@ -161,13 +165,13 @@ bool dispose_arbitrary_values(EffectEntry entry,
   bool valid = true;
   for (std::size_t i = 0; i < runtime().records.size(); ++i) {
     if (runtime().records[i].type != 11) continue;
-    const std::size_t u = 56;
-    void* value = read<void*>(definitions[i + 1], u + 16);
+    const std::size_t u = abi_contract::PARAM_U_OFFSET;
+    void* value = read<void*>(definitions[i + 1], u + abi_contract::ARBITRARY_VALUE_OFFSET);
     if (!value) continue;
     const bool disposed = dispose_arbitrary_handle(entry, input, output,
         read<int16_t>(definitions[i + 1], u),
-        read<void*>(definitions[i + 1], u + 24), value);
-    write<void*>(definitions[i + 1], u + 16, nullptr);
+        read<void*>(definitions[i + 1], u + abi_contract::ARBITRARY_REFCON_OFFSET), value);
+    write<void*>(definitions[i + 1], u + abi_contract::ARBITRARY_VALUE_OFFSET, nullptr);
     if (disposed) ++runtime().arbitrary.dispose_calls;
     else { ++runtime().arbitrary.invalid_operations; valid = false; }
   }
@@ -180,12 +184,12 @@ bool dispose_arbitrary_defaults(EffectEntry entry,
   bool valid = true;
   for (auto& param : runtime().records) {
     if (param.type != 11) continue;
-    const std::size_t u = 56;
-    void* value = read<void*>(param.raw, u + 8);
+    const std::size_t u = abi_contract::PARAM_U_OFFSET;
+    void* value = read<void*>(param.raw, u + abi_contract::ARBITRARY_DEFAULT_OFFSET);
     if (!value) continue;
     const bool disposed = dispose_arbitrary_handle(entry, input, output,
-        read<int16_t>(param.raw, u), read<void*>(param.raw, u + 24), value);
-    write<void*>(param.raw, u + 8, nullptr);
+        read<int16_t>(param.raw, u), read<void*>(param.raw, u + abi_contract::ARBITRARY_REFCON_OFFSET), value);
+    write<void*>(param.raw, u + abi_contract::ARBITRARY_DEFAULT_OFFSET, nullptr);
     if (disposed) ++runtime().arbitrary.dispose_calls;
     else { ++runtime().arbitrary.invalid_operations; valid = false; }
   }
@@ -207,9 +211,9 @@ bool apply_arbitrary_parameter_animation(EffectEntry entry,
                  key.arbitrary.size() > 64 * 1024;
         })) return false;
     auto &definition = definitions[timeline.slot];
-    constexpr std::size_t u = 56;
+    constexpr std::size_t u = abi_contract::PARAM_U_OFFSET;
     const int16_t id = read<int16_t>(definition, u);
-    void* refcon = read<void*>(definition, u + 24);
+    void* refcon = read<void*>(definition, u + abi_contract::ARBITRARY_REFCON_OFFSET);
     const auto dispose = [&](void* value) {
       if (!hooks().handle_is_live(value)) return false;
       const bool ok = dispose_arbitrary_handle(entry, input, output, id, refcon, value);
@@ -226,11 +230,13 @@ bool apply_arbitrary_parameter_animation(EffectEntry entry,
     for (const auto &key : timeline.keys) {
       void* value = nullptr;
       std::array<std::byte, 48> extra{};
-      write<int32_t>(extra, 0, 5); write<int16_t>(extra, 4, id);
-      write<void*>(extra, 8, refcon);
-      write<uint32_t>(extra, 16, static_cast<uint32_t>(key.arbitrary.size()));
-      write<const unsigned char*>(extra, 24, key.arbitrary.data());
-      write<void*>(extra, 32, &value);
+      write<int32_t>(extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET,
+          5); write<int16_t>(extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+      write<void*>(extra, abi_contract::ARB_UNFLATTEN_REFCON_OFFSET, refcon);
+      write<uint32_t>(extra, abi_contract::ARB_UNFLATTEN_SIZE_OFFSET,
+          static_cast<uint32_t>(key.arbitrary.size()));
+      write<const unsigned char*>(extra, abi_contract::ARB_UNFLATTEN_BUFFER_OFFSET, key.arbitrary.data());
+      write<void*>(extra, abi_contract::ARB_UNFLATTEN_OUTPUT_OFFSET, &value);
       uint32_t exception_code = 0;
       if (hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(), nullptr,
           nullptr, extra.data(), &exception_code) != 0 || exception_code != 0 ||
@@ -267,8 +273,10 @@ bool apply_arbitrary_parameter_animation(EffectEntry entry,
         // also permits replacing the output handle.
         void* preallocated = nullptr;
         std::array<std::byte, 48> new_extra{};
-        write<int32_t>(new_extra, 0, 0); write<int16_t>(new_extra, 4, id);
-        write<void*>(new_extra, 8, refcon); write<void*>(new_extra, 16, &preallocated);
+        write<int32_t>(new_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET,
+            0); write<int16_t>(new_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+        write<void*>(new_extra, abi_contract::ARB_NEW_REFCON_OFFSET,
+            refcon); write<void*>(new_extra, abi_contract::ARB_NEW_OUTPUT_OFFSET, &preallocated);
         uint32_t exception_code = 0;
         if (hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(), nullptr,
             nullptr, new_extra.data(), &exception_code) != 0 || exception_code != 0 ||
@@ -283,10 +291,13 @@ bool apply_arbitrary_parameter_animation(EffectEntry entry,
         ++runtime().arbitrary.new_calls;
         replacement = preallocated;
         std::array<std::byte, 48> extra{};
-        write<int32_t>(extra, 0, 6); write<int16_t>(extra, 4, id);
-        write<void*>(extra, 8, refcon); write<void*>(extra, 16, owned[selected]);
-        write<void*>(extra, 24, owned[right]); write<double>(extra, 32, amount);
-        write<void*>(extra, 40, &replacement);
+        write<int32_t>(extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET,
+            6); write<int16_t>(extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+        write<void*>(extra, abi_contract::ARB_INTERP_REFCON_OFFSET,
+            refcon); write<void*>(extra, abi_contract::ARB_INTERP_LEFT_OFFSET, owned[selected]);
+        write<void*>(extra, abi_contract::ARB_INTERP_RIGHT_OFFSET,
+            owned[right]); write<double>(extra, abi_contract::ARB_INTERP_AMOUNT_OFFSET, amount);
+        write<void*>(extra, abi_contract::ARB_INTERP_OUTPUT_OFFSET, &replacement);
         exception_code = 0;
         if (hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(), nullptr,
             nullptr, extra.data(), &exception_code) != 0 || exception_code != 0 ||
@@ -307,13 +318,13 @@ bool apply_arbitrary_parameter_animation(EffectEntry entry,
         ++runtime().arbitrary.interpolation_calls;
       }
     }
-    void* previous = read<void*>(definition, u + 16);
+    void* previous = read<void*>(definition, u + abi_contract::ARBITRARY_VALUE_OFFSET);
     if (!dispose(previous)) {
       if (std::find(owned.begin(), owned.end(), replacement) == owned.end()) dispose(replacement);
       cleanup();
       return false;
     }
-    write<void*>(definition, u + 16, replacement);
+    write<void*>(definition, u + abi_contract::ARBITRARY_VALUE_OFFSET, replacement);
     const auto transferred = std::find(owned.begin(), owned.end(), replacement);
     if (transferred != owned.end()) *transferred = nullptr;
     if (!cleanup()) return false;
@@ -328,16 +339,16 @@ void observe_arbitrary_defaults(EffectEntry entry,
   constexpr std::size_t kMaxSummaryBytes = 4096;
   for (auto& param : runtime().records) {
     if (param.type != 11) continue;
-    const std::size_t u = 56;
-    void* value = read<void*>(param.raw, u + 8);
-    void* refcon = read<void*>(param.raw, u + 24);
+    const std::size_t u = abi_contract::PARAM_U_OFFSET;
+    void* value = read<void*>(param.raw, u + abi_contract::ARBITRARY_DEFAULT_OFFSET);
+    void* refcon = read<void*>(param.raw, u + abi_contract::ARBITRARY_REFCON_OFFSET);
     uint32_t print_size = 0;
     std::array<std::byte, 48> size_extra{};
-    write<int32_t>(size_extra, 0, 8);
-    write<int16_t>(size_extra, 4, read<int16_t>(param.raw, u));
-    write<void*>(size_extra, 8, refcon);
-    write<void*>(size_extra, 16, value);
-    write<void*>(size_extra, 24, &print_size);
+    write<int32_t>(size_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 8);
+    write<int16_t>(size_extra, abi_contract::ARB_EXTRA_ID_OFFSET, read<int16_t>(param.raw, u));
+    write<void*>(size_extra, abi_contract::ARB_PRINT_SIZE_REFCON_OFFSET, refcon);
+    write<void*>(size_extra, abi_contract::ARB_PRINT_SIZE_VALUE_OFFSET, value);
+    write<void*>(size_extra, abi_contract::ARB_PRINT_SIZE_OUTPUT_OFFSET, &print_size);
     uint32_t exception_code = 0;
     if (!value || hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(),
                         nullptr, nullptr, size_extra.data(), &exception_code) != 0 ||
@@ -348,13 +359,13 @@ void observe_arbitrary_defaults(EffectEntry entry,
     }
     std::vector<char> buffer(static_cast<std::size_t>(print_size) + 1, '\0');
     std::array<std::byte, 48> print_extra{};
-    write<int32_t>(print_extra, 0, 9);
-    write<int16_t>(print_extra, 4, read<int16_t>(param.raw, u));
-    write<void*>(print_extra, 8, refcon);
-    write<int32_t>(print_extra, 16, 0);
-    write<void*>(print_extra, 24, value);
-    write<uint32_t>(print_extra, 32, print_size);
-    write<void*>(print_extra, 40, buffer.data());
+    write<int32_t>(print_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 9);
+    write<int16_t>(print_extra, abi_contract::ARB_EXTRA_ID_OFFSET, read<int16_t>(param.raw, u));
+    write<void*>(print_extra, abi_contract::ARB_PRINT_REFCON_OFFSET, refcon);
+    write<int32_t>(print_extra, abi_contract::ARB_PRINT_FLAGS_OFFSET, 0);
+    write<void*>(print_extra, abi_contract::ARB_PRINT_VALUE_OFFSET, value);
+    write<uint32_t>(print_extra, abi_contract::ARB_PRINT_SIZE_OFFSET, print_size);
+    write<void*>(print_extra, abi_contract::ARB_PRINT_BUFFER_OFFSET, buffer.data());
     if (hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(), nullptr,
               nullptr, print_extra.data(), &exception_code) != 0 || exception_code != 0) {
       ++runtime().arbitrary.print_failures;
@@ -383,20 +394,21 @@ void probe_arbitrary_scan(EffectEntry entry,
     std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions) {
   for (std::size_t i = 0; i < runtime().records.size(); ++i) {
     if (runtime().records[i].type != 11 || runtime().records[i].arbitrary_summary.empty()) continue;
-    constexpr std::size_t u = 56;
+    constexpr std::size_t u = abi_contract::PARAM_U_OFFSET;
     auto& definition = definitions[i + 1];
     const int16_t id = read<int16_t>(definition, u);
-    void* source = read<void*>(definition, u + 16);
-    void* refcon = read<void*>(definition, u + 24);
+    void* source = read<void*>(definition, u + abi_contract::ARBITRARY_VALUE_OFFSET);
+    void* refcon = read<void*>(definition, u + abi_contract::ARBITRARY_REFCON_OFFSET);
     void* scanned = nullptr;
     std::array<std::byte, 48> scan_extra{};
-    write<int32_t>(scan_extra, 0, 10);
-    write<int16_t>(scan_extra, 4, id);
-    write<void*>(scan_extra, 8, refcon);
-    write<const char*>(scan_extra, 16, runtime().records[i].arbitrary_summary.c_str());
-    write<uint32_t>(scan_extra, 24,
+    write<int32_t>(scan_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 10);
+    write<int16_t>(scan_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(scan_extra, abi_offsets::kArbScanRefcon, refcon);
+    write<const char*>(scan_extra, abi_offsets::kArbScanBuffer,
+        runtime().records[i].arbitrary_summary.c_str());
+    write<uint32_t>(scan_extra, abi_offsets::kArbScanSize,
         static_cast<uint32_t>(runtime().records[i].arbitrary_summary.size()));
-    write<void*>(scan_extra, 32, &scanned);
+    write<void*>(scan_extra, abi_offsets::kArbScanOutput, &scanned);
     uint32_t exception_code = 0;
     const bool created = hooks().invoke_entry(entry, kArbitraryCallback, input.data(),
         output.data(), nullptr, nullptr, scan_extra.data(), &exception_code) == 0 &&
@@ -404,10 +416,10 @@ void probe_arbitrary_scan(EffectEntry entry,
     if (!created) {
       if (hooks().handle_is_live(scanned)) {
         std::array<std::byte, 48> dispose_extra{};
-        write<int32_t>(dispose_extra, 0, 1);
-        write<int16_t>(dispose_extra, 4, id);
-        write<void*>(dispose_extra, 8, refcon);
-        write<void*>(dispose_extra, 16, scanned);
+        write<int32_t>(dispose_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 1);
+        write<int16_t>(dispose_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+        write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_REFCON_OFFSET, refcon);
+        write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_VALUE_OFFSET, scanned);
         entry(kArbitraryCallback, input.data(), output.data(), nullptr, nullptr,
               dispose_extra.data());
         ++runtime().arbitrary.dispose_calls;
@@ -417,21 +429,21 @@ void probe_arbitrary_scan(EffectEntry entry,
     }
     int32_t comparison = 3;
     std::array<std::byte, 48> compare_extra{};
-    write<int32_t>(compare_extra, 0, 7);
-    write<int16_t>(compare_extra, 4, id);
-    write<void*>(compare_extra, 8, refcon);
-    write<void*>(compare_extra, 16, source);
-    write<void*>(compare_extra, 24, scanned);
-    write<void*>(compare_extra, 32, &comparison);
+    write<int32_t>(compare_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 7);
+    write<int16_t>(compare_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(compare_extra, abi_contract::ARB_COMPARE_REFCON_OFFSET, refcon);
+    write<void*>(compare_extra, abi_contract::ARB_COMPARE_LEFT_OFFSET, source);
+    write<void*>(compare_extra, abi_contract::ARB_COMPARE_RIGHT_OFFSET, scanned);
+    write<void*>(compare_extra, abi_contract::ARB_COMPARE_OUTPUT_OFFSET, &comparison);
     exception_code = 0;
     const bool equal = hooks().invoke_entry(entry, kArbitraryCallback, input.data(),
         output.data(), nullptr, nullptr, compare_extra.data(), &exception_code) == 0 &&
         exception_code == 0 && comparison == 0;
     std::array<std::byte, 48> dispose_extra{};
-    write<int32_t>(dispose_extra, 0, 1);
-    write<int16_t>(dispose_extra, 4, id);
-    write<void*>(dispose_extra, 8, refcon);
-    write<void*>(dispose_extra, 16, scanned);
+    write<int32_t>(dispose_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 1);
+    write<int16_t>(dispose_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_REFCON_OFFSET, refcon);
+    write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_VALUE_OFFSET, scanned);
     const bool disposed = entry(kArbitraryCallback, input.data(), output.data(),
                                 nullptr, nullptr, dispose_extra.data()) == 0;
     if (disposed) ++runtime().arbitrary.dispose_calls;
@@ -445,7 +457,7 @@ bool interpolate_arbitrary_values(EffectEntry entry,
     std::array<std::byte, kOutputSize>& output,
     std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions) {
   const int32_t current_time = read<int32_t>(input, kInCurrentTime);
-  const int32_t total_time = read<int32_t>(input, 232);
+  const int32_t total_time = read<int32_t>(input, abi_contract::IN_TOTAL_TIME_OFFSET);
   const double amount = total_time > 0
       ? std::clamp(static_cast<double>(current_time) / total_time, 0.0, 1.0)
       : 0.0;
@@ -460,11 +472,11 @@ bool interpolate_arbitrary_values(EffectEntry entry,
               timeline.keys.front().kind == parameter_animation::AnimationValueKind::Arbitrary;
         });
     if (timeline_controls_slot) continue;
-    const std::size_t u = 56;
+    const std::size_t u = abi_contract::PARAM_U_OFFSET;
     auto& definition = definitions[i + 1];
     const int16_t id = read<int16_t>(definition, u);
-    void* refcon = read<void*>(definition, u + 24);
-    void* source = read<void*>(definition, u + 16);
+    void* refcon = read<void*>(definition, u + abi_contract::ARBITRARY_REFCON_OFFSET);
+    void* source = read<void*>(definition, u + abi_contract::ARBITRARY_VALUE_OFFSET);
     if (!source) continue;
     if (!hooks().handle_is_live(source)) {
       ++runtime().arbitrary.interpolation_failures;
@@ -478,10 +490,10 @@ bool interpolate_arbitrary_values(EffectEntry entry,
     };
     void* created = nullptr;
     std::array<std::byte, 48> new_extra{};
-    write<int32_t>(new_extra, 0, 0);
-    write<int16_t>(new_extra, 4, id);
-    write<void*>(new_extra, 8, refcon);
-    write<void*>(new_extra, 16, &created);
+    write<int32_t>(new_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 0);
+    write<int16_t>(new_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(new_extra, abi_contract::ARB_NEW_REFCON_OFFSET, refcon);
+    write<void*>(new_extra, abi_contract::ARB_NEW_OUTPUT_OFFSET, &created);
     uint32_t exception_code = 0;
     if (hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(), nullptr,
         nullptr, new_extra.data(), &exception_code) == 0 && exception_code == 0 &&
@@ -497,13 +509,13 @@ bool interpolate_arbitrary_values(EffectEntry entry,
     }
     void* interpolated = created;
     std::array<std::byte, 48> interp_extra{};
-    write<int32_t>(interp_extra, 0, 6);
-    write<int16_t>(interp_extra, 4, id);
-    write<void*>(interp_extra, 8, refcon);
-    write<void*>(interp_extra, 16, source);
-    write<void*>(interp_extra, 24, source);
-    write<double>(interp_extra, 32, amount);
-    write<void*>(interp_extra, 40, &interpolated);
+    write<int32_t>(interp_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 6);
+    write<int16_t>(interp_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(interp_extra, abi_contract::ARB_INTERP_REFCON_OFFSET, refcon);
+    write<void*>(interp_extra, abi_contract::ARB_INTERP_LEFT_OFFSET, source);
+    write<void*>(interp_extra, abi_contract::ARB_INTERP_RIGHT_OFFSET, source);
+    write<double>(interp_extra, abi_contract::ARB_INTERP_AMOUNT_OFFSET, amount);
+    write<void*>(interp_extra, abi_contract::ARB_INTERP_OUTPUT_OFFSET, &interpolated);
     exception_code = 0;
     if (hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(), nullptr,
         nullptr, interp_extra.data(), &exception_code) != 0 || exception_code != 0 ||
@@ -523,7 +535,7 @@ bool interpolate_arbitrary_values(EffectEntry entry,
       ++runtime().arbitrary.invalid_operations;
       return false;
     }
-    write<void*>(definition, u + 16, interpolated);
+    write<void*>(definition, u + abi_contract::ARBITRARY_VALUE_OFFSET, interpolated);
     ++runtime().arbitrary.interpolation_calls;
   }
   return true;
@@ -537,20 +549,20 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
   constexpr std::size_t kGuardBytes = 32;
   for (std::size_t i = 0; i < runtime().records.size(); ++i) {
     if (runtime().records[i].type != 11) continue;
-    const std::size_t u = 56;
+    const std::size_t u = abi_contract::PARAM_U_OFFSET;
     auto& definition = definitions[i + 1];
     const int16_t id = read<int16_t>(definition, u);
-    void* refcon = read<void*>(definition, u + 24);
-    void* source = read<void*>(definition, u + 16);
+    void* refcon = read<void*>(definition, u + abi_contract::ARBITRARY_REFCON_OFFSET);
+    void* source = read<void*>(definition, u + abi_contract::ARBITRARY_VALUE_OFFSET);
     if (!source) continue;
     uint32_t exception_code = 0;
     uint32_t flat_size = 0;
     std::array<std::byte, 48> size_extra{};
-    write<int32_t>(size_extra, 0, 3);
-    write<int16_t>(size_extra, 4, id);
-    write<void*>(size_extra, 8, refcon);
-    write<void*>(size_extra, 16, source);
-    write<void*>(size_extra, 24, &flat_size);
+    write<int32_t>(size_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 3);
+    write<int16_t>(size_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(size_extra, abi_contract::ARB_FLAT_SIZE_REFCON_OFFSET, refcon);
+    write<void*>(size_extra, abi_contract::ARB_FLAT_SIZE_VALUE_OFFSET, source);
+    write<void*>(size_extra, abi_contract::ARB_FLAT_SIZE_OUTPUT_OFFSET, &flat_size);
     if (!hooks().handle_is_live(source) || hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(),
         nullptr, nullptr, size_extra.data(), &exception_code) != 0 || exception_code != 0 ||
         flat_size == 0 || flat_size > kMaxFlatBytes) {
@@ -562,12 +574,12 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
       auto* buffer = guarded.data() + kGuardBytes;
       std::fill(buffer, buffer + flat_size, std::byte{});
       std::array<std::byte, 48> extra{};
-      write<int32_t>(extra, 0, 4);
-      write<int16_t>(extra, 4, id);
-      write<void*>(extra, 8, refcon);
-      write<void*>(extra, 16, value);
-      write<uint32_t>(extra, 24, flat_size);
-      write<void*>(extra, 32, buffer);
+      write<int32_t>(extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 4);
+      write<int16_t>(extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+      write<void*>(extra, abi_contract::ARB_FLATTEN_REFCON_OFFSET, refcon);
+      write<void*>(extra, abi_contract::ARB_FLATTEN_VALUE_OFFSET, value);
+      write<uint32_t>(extra, abi_contract::ARB_FLATTEN_SIZE_OFFSET, flat_size);
+      write<void*>(extra, abi_contract::ARB_FLATTEN_BUFFER_OFFSET, buffer);
       exception_code = 0;
       const int32_t error = hooks().invoke_entry(entry, kArbitraryCallback, input.data(),
           output.data(), nullptr, nullptr, extra.data(), &exception_code);
@@ -584,12 +596,13 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
     }
     void* restored = nullptr;
     std::array<std::byte, 48> unflatten_extra{};
-    write<int32_t>(unflatten_extra, 0, 5);
-    write<int16_t>(unflatten_extra, 4, id);
-    write<void*>(unflatten_extra, 8, refcon);
-    write<uint32_t>(unflatten_extra, 16, flat_size);
-    write<void*>(unflatten_extra, 24, original_flat.data() + kGuardBytes);
-    write<void*>(unflatten_extra, 32, &restored);
+    write<int32_t>(unflatten_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 5);
+    write<int16_t>(unflatten_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+    write<void*>(unflatten_extra, abi_contract::ARB_UNFLATTEN_REFCON_OFFSET, refcon);
+    write<uint32_t>(unflatten_extra, abi_contract::ARB_UNFLATTEN_SIZE_OFFSET, flat_size);
+    write<void*>(unflatten_extra, abi_contract::ARB_UNFLATTEN_BUFFER_OFFSET,
+        original_flat.data() + kGuardBytes);
+    write<void*>(unflatten_extra, abi_contract::ARB_UNFLATTEN_OUTPUT_OFFSET, &restored);
     exception_code = 0;
     const int32_t unflatten_error = hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(), nullptr,
         nullptr, unflatten_extra.data(), &exception_code) != 0 || exception_code != 0 ||
@@ -597,10 +610,10 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
     if (unflatten_error) {
       if (hooks().handle_is_live(restored)) {
         std::array<std::byte, 48> dispose_extra{};
-        write<int32_t>(dispose_extra, 0, 1);
-        write<int16_t>(dispose_extra, 4, id);
-        write<void*>(dispose_extra, 8, refcon);
-        write<void*>(dispose_extra, 16, restored);
+        write<int32_t>(dispose_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 1);
+        write<int16_t>(dispose_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+        write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_REFCON_OFFSET, refcon);
+        write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_VALUE_OFFSET, restored);
         entry(kArbitraryCallback, input.data(), output.data(), nullptr, nullptr,
               dispose_extra.data());
         ++runtime().arbitrary.dispose_calls;
@@ -615,10 +628,10 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
         restored_flat.begin() + kGuardBytes);
     if (!bytes_equal) {
       std::array<std::byte, 48> dispose_extra{};
-      write<int32_t>(dispose_extra, 0, 1);
-      write<int16_t>(dispose_extra, 4, id);
-      write<void*>(dispose_extra, 8, refcon);
-      write<void*>(dispose_extra, 16, restored);
+      write<int32_t>(dispose_extra, abi_contract::ARB_EXTRA_WHICH_FUNCTION_OFFSET, 1);
+      write<int16_t>(dispose_extra, abi_contract::ARB_EXTRA_ID_OFFSET, id);
+      write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_REFCON_OFFSET, refcon);
+      write<void*>(dispose_extra, abi_contract::ARB_DISPOSE_VALUE_OFFSET, restored);
       entry(kArbitraryCallback, input.data(), output.data(), nullptr, nullptr, dispose_extra.data());
       ++runtime().arbitrary.dispose_calls;
       ++runtime().arbitrary.roundtrip_failures;
@@ -629,7 +642,7 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
       return false;
     }
     ++runtime().arbitrary.dispose_calls;
-    write<void*>(definition, u + 16, restored);
+    write<void*>(definition, u + abi_contract::ARBITRARY_VALUE_OFFSET, restored);
     ++runtime().arbitrary.roundtrip_calls;
   }
   return true;
@@ -742,12 +755,12 @@ void initialize_parameter_definitions(
       std::memset(definitions[i + 1].data() + 56, 0, 40);
     else if (record.type == 1 || record.type == 7) {
       const auto encoded = static_cast<int32_t>(default_value);
-      write<int32_t>(definitions[i + 1], 56, encoded);
+      write<int32_t>(definitions[i + 1], abi_contract::PARAM_U_OFFSET, encoded);
       record.has_current = true;
       record.current_value = encoded;
     }
     else if (record.type == 4) {
-      write<int32_t>(definitions[i + 1], 56, record.default_value != 0 ? 1 : 0);
+      write<int32_t>(definitions[i + 1], abi_contract::PARAM_U_OFFSET, record.default_value != 0 ? 1 : 0);
       record.has_current = true;
       record.current_value = record.default_value != 0 ? 1.0 : 0.0;
     }
@@ -757,12 +770,12 @@ void initialize_parameter_definitions(
       const auto encoded = static_cast<int32_t>(std::round(std::clamp(
           default_value * 65536.0, static_cast<double>(INT32_MIN),
           static_cast<double>(INT32_MAX))));
-      write<int32_t>(definitions[i + 1], 56, encoded);
+      write<int32_t>(definitions[i + 1], abi_contract::PARAM_U_OFFSET, encoded);
       record.has_current = true;
       record.current_value = encoded / 65536.0;
     }
     else if (record.type == 10) {
-      write<double>(definitions[i + 1], 56, default_value);
+      write<double>(definitions[i + 1], abi_contract::PARAM_U_OFFSET, default_value);
       record.has_current = true;
       record.current_value = default_value;
     }
@@ -778,7 +791,7 @@ void initialize_parameter_definitions(
     }
     else if (record.type == 3) {
       const auto encoded = to_fixed(record.default_components[0]);
-      write<int32_t>(definitions[i + 1], 56, encoded);
+      write<int32_t>(definitions[i + 1], abi_contract::PARAM_U_OFFSET, encoded);
       record.current_components[0] = encoded / 65536.0;
     }
     else if (record.type == 6) {
@@ -789,8 +802,8 @@ void initialize_parameter_definitions(
           point_pixels(record.default_components[0], layer_width));
       const auto encoded_y = to_fixed(
           point_pixels(record.default_components[1], layer_height));
-      write<int32_t>(definitions[i + 1], 56, encoded_x);
-      write<int32_t>(definitions[i + 1], 60, encoded_y);
+      write<int32_t>(definitions[i + 1], abi_contract::PARAM_U_OFFSET, encoded_x);
+      write<int32_t>(definitions[i + 1], abi_contract::PARAM_U_OFFSET + abi_offsets::kPointValueY, encoded_y);
       record.current_components[0] = encoded_x / 65536.0;
       record.current_components[1] = encoded_y / 65536.0;
     } else if (record.type == 18) {
@@ -798,14 +811,15 @@ void initialize_parameter_definitions(
       const std::array<int32_t, 3> extents{layer_width, layer_height, layer_height};
       for (int component = 0; component < 3; ++component) {
         record.current_components[component] = point_pixels(record.default_components[component], extents[component]);
-        write<double>(definitions[i + 1], 56 + component * 8, record.current_components[component]);
+        write<double>(definitions[i + 1], abi_contract::PARAM_U_OFFSET + component * sizeof(double),
+            record.current_components[component]);
       }
     }
     else if (record.type == 12) {
       const int32_t index = static_cast<int32_t>(record.default_value);
       int32_t mask_id = 0;
       if (index > 0) hooks().active_mask_id(static_cast<std::size_t>(index - 1), &mask_id);
-      write<int32_t>(definitions[i + 1], 56, mask_id);
+      write<int32_t>(definitions[i + 1], abi_contract::PARAM_U_OFFSET, mask_id);
     }
   }
   runtime().records = std::move(staged_records);
@@ -837,7 +851,7 @@ bool apply_requested_assignments(
     if (type == 11 && assignment.kind == parameters::RequestedKind::ArbitraryText) continue;
     if (type == 1 || type == 4 || type == 7) {
       const auto encoded = static_cast<int32_t>(value);
-      write<int32_t>(staged_definitions[slot], 56, encoded);
+      write<int32_t>(staged_definitions[slot], abi_contract::PARAM_U_OFFSET, encoded);
       record.has_current = true;
       record.current_value = encoded;
     }
@@ -845,17 +859,17 @@ bool apply_requested_assignments(
       const int32_t index = static_cast<int32_t>(value);
       int32_t mask_id = 0;
       if (index > 0 && !hooks().active_mask_id(static_cast<std::size_t>(index - 1), &mask_id)) return false;
-      write<int32_t>(staged_definitions[slot], 56, mask_id);
+      write<int32_t>(staged_definitions[slot], abi_contract::PARAM_U_OFFSET, mask_id);
     }
     else if (type == 2) {
       const double fixed = value * 65536.0;
       if (!std::isfinite(fixed) || fixed < INT32_MIN || fixed > INT32_MAX) return false;
       const auto encoded = static_cast<int32_t>(std::round(fixed));
-      write<int32_t>(staged_definitions[slot], 56, encoded);
+      write<int32_t>(staged_definitions[slot], abi_contract::PARAM_U_OFFSET, encoded);
       record.has_current = true;
       record.current_value = encoded / 65536.0;
     } else if (type == 10) {
-      write<double>(staged_definitions[slot], 56, value);
+      write<double>(staged_definitions[slot], abi_contract::PARAM_U_OFFSET, value);
       record.has_current = true;
       record.current_value = value;
     }
@@ -868,7 +882,7 @@ bool apply_requested_assignments(
     }
     else if (type == 3) {
       const auto encoded = to_fixed(assignment.components[0]);
-      write<int32_t>(staged_definitions[slot], 56, encoded);
+      write<int32_t>(staged_definitions[slot], abi_contract::PARAM_U_OFFSET, encoded);
       record.current_components[0] = encoded / 65536.0;
     }
     else if (type == 6) {
@@ -876,15 +890,17 @@ bool apply_requested_assignments(
           point_pixels(assignment.components[0], layer_width));
       const auto encoded_y = to_fixed(
           point_pixels(assignment.components[1], layer_height));
-      write<int32_t>(staged_definitions[slot], 56, encoded_x);
-      write<int32_t>(staged_definitions[slot], 60, encoded_y);
+      write<int32_t>(staged_definitions[slot], abi_contract::PARAM_U_OFFSET, encoded_x);
+      write<int32_t>(staged_definitions[slot], abi_contract::PARAM_U_OFFSET + abi_offsets::kPointValueY,
+          encoded_y);
       record.current_components[0] = encoded_x / 65536.0;
       record.current_components[1] = encoded_y / 65536.0;
     } else if (type == 18) {
       const std::array<int32_t, 3> extents{layer_width, layer_height, layer_height};
       for (int component = 0; component < 3; ++component) {
         record.current_components[component] = point_pixels(assignment.components[component], extents[component]);
-        write<double>(staged_definitions[slot], 56 + component * 8, record.current_components[component]);
+        write<double>(staged_definitions[slot], abi_contract::PARAM_U_OFFSET + component * sizeof(double),
+            record.current_components[component]);
       }
     }
     else
@@ -973,10 +989,10 @@ constexpr std::size_t kMaxParams =
     aexcompat::worker_runtime::parameters::kMaxParameterCount;
 constexpr std::size_t kParamSize =
     aexcompat::worker_runtime::parameters::kDefinitionSize;
-constexpr std::size_t kParamType = 12;
-constexpr std::size_t kParamName = 16;
+constexpr std::size_t kParamType = abi_contract::PARAM_PARAM_TYPE_OFFSET;
+constexpr std::size_t kParamName = abi_contract::PARAM_NAME_OFFSET;
 constexpr std::size_t kParamNameSize = 32;
-constexpr std::size_t kParamFlags = 48;
+constexpr std::size_t kParamFlags = abi_contract::PARAM_FLAGS_OFFSET;
 using aexcompat::worker_runtime::parameters::ParamRecord;
 auto& g_param_state = aexcompat::worker_runtime::parameters::state();
 auto& g_params = g_param_state.records;
@@ -1006,37 +1022,37 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
     // whether an unconnected slot is transparent or is the effect's own input,
     // and the trace had no way to show it (issue #1285).
     if (read<int32_t>(bytes, kParamType) == 0)
-      std::cerr << " layer_dephault=" << read<int32_t>(bytes, 56 + 116);
+      std::cerr << " layer_dephault=" << read<int32_t>(bytes, abi_contract::PARAM_U_OFFSET + abi_offsets::kLayerDefault);
     std::cerr << "\n" << std::flush;
   }
   const int32_t host_index = index < 0 ? static_cast<int32_t>(g_params.size() + 1) : index;
   if (host_index <= 0 || host_index > static_cast<int32_t>(kMaxParams) ||
       std::any_of(g_params.begin(), g_params.end(),
                   [host_index](const auto& param) { return param.index == host_index; })) return 4;
-  ParamRecord record{host_index, read<int32_t>(bytes, 0), read<int32_t>(bytes, kParamType),
+  ParamRecord record{host_index, read<int32_t>(bytes, abi_contract::PARAM_UU_OFFSET), read<int32_t>(bytes, kParamType),
                      read<uint32_t>(bytes, kParamFlags), std::string(name, length)};
-  constexpr std::size_t u = 56;
+  constexpr std::size_t u = abi_contract::PARAM_U_OFFSET;
   if (record.type == 1) {
     record.has_numeric = true;
-    record.valid_min = read<int32_t>(bytes, u + 68);
-    record.valid_max = read<int32_t>(bytes, u + 72);
-    record.slider_min = read<int32_t>(bytes, u + 76);
-    record.slider_max = read<int32_t>(bytes, u + 80);
-    record.default_value = read<int32_t>(bytes, u + 84);
+    record.valid_min = read<int32_t>(bytes, u + abi_contract::SLIDER_VALID_MIN_OFFSET);
+    record.valid_max = read<int32_t>(bytes, u + abi_contract::SLIDER_VALID_MAX_OFFSET);
+    record.slider_min = read<int32_t>(bytes, u + abi_contract::SLIDER_SLIDER_MIN_OFFSET);
+    record.slider_max = read<int32_t>(bytes, u + abi_contract::SLIDER_SLIDER_MAX_OFFSET);
+    record.default_value = read<int32_t>(bytes, u + abi_contract::SLIDER_DEFAULT_OFFSET);
   } else if (record.type == 2) {
     record.has_numeric = true;
     record.has_current = true;
     record.current_value = read<int32_t>(bytes, u) / 65536.0;
-    record.valid_min = read<int32_t>(bytes, u + 68) / 65536.0;
-    record.valid_max = read<int32_t>(bytes, u + 72) / 65536.0;
-    record.slider_min = read<int32_t>(bytes, u + 76) / 65536.0;
-    record.slider_max = read<int32_t>(bytes, u + 80) / 65536.0;
-    record.default_value = read<int32_t>(bytes, u + 84) / 65536.0;
-    record.precision = read<int16_t>(bytes, u + 88);
+    record.valid_min = read<int32_t>(bytes, u + abi_contract::SLIDER_VALID_MIN_OFFSET) / 65536.0;
+    record.valid_max = read<int32_t>(bytes, u + abi_contract::SLIDER_VALID_MAX_OFFSET) / 65536.0;
+    record.slider_min = read<int32_t>(bytes, u + abi_contract::SLIDER_SLIDER_MIN_OFFSET) / 65536.0;
+    record.slider_max = read<int32_t>(bytes, u + abi_contract::SLIDER_SLIDER_MAX_OFFSET) / 65536.0;
+    record.default_value = read<int32_t>(bytes, u + abi_contract::SLIDER_DEFAULT_OFFSET) / 65536.0;
+    record.precision = read<int16_t>(bytes, u + abi_offsets::kFixedSliderPrecision);
   } else if (record.type == 7) {
     record.has_numeric = true;
     record.valid_min = 1;
-    record.valid_max = read<int16_t>(bytes, u + 4);
+    record.valid_max = read<int16_t>(bytes, u + abi_contract::POPUP_NUM_CHOICES_OFFSET);
     record.slider_min = record.valid_min;
     record.slider_max = record.valid_max;
     // A PF popup value is 1-based (SDK PF_PopupDef). Reshape declares its
@@ -1050,9 +1066,9 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
     // PF_Err_OUT_OF_MEMORY. Lift a non-positive declared default to the first
     // choice; a default above num_choices is not an observed case and is left
     // as declared.
-    const int16_t declared_default = read<int16_t>(bytes, u + 6);
+    const int16_t declared_default = read<int16_t>(bytes, u + abi_contract::POPUP_DEFAULT_OFFSET);
     record.default_value = declared_default < 1 ? 1 : declared_default;
-    const char* choices = read<const char*>(bytes, u + 8);
+    const char* choices = read<const char*>(bytes, u + abi_contract::POPUP_NAMES_OFFSET);
     if (choices) record.choices.assign(choices, strnlen_s(choices, 4096));
   } else if (record.type == 4) {
     record.has_numeric = true;
@@ -1061,27 +1077,27 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
     record.valid_max = 1;
     record.slider_min = 0;
     record.slider_max = 1;
-    record.default_value = read<uint8_t>(bytes, u + 4) ? 1 : 0;
+    record.default_value = read<uint8_t>(bytes, u + abi_contract::CHECKBOX_DEFAULT_OFFSET) ? 1 : 0;
     record.current_value = read<int32_t>(bytes, u) != 0 ? 1 : 0;
-    const char* label = read<const char*>(bytes, u + 8);
+    const char* label = read<const char*>(bytes, u + abi_contract::CHECKBOX_LABEL_OFFSET);
     if (label) record.label.assign(label, strnlen_s(label, 4096));
   } else if (record.type == 0) {
-    record.layer_default = read<int32_t>(bytes, u + 116);
+    record.layer_default = read<int32_t>(bytes, u + abi_offsets::kLayerDefault);
   } else if (record.type == 12) {
     record.has_numeric = true;
     record.valid_min = 0;
     record.valid_max = 1024;
     record.slider_min = 0;
     record.slider_max = 1024;
-    record.default_value = read<int32_t>(bytes, u + 8);
+    record.default_value = read<int32_t>(bytes, u + abi_offsets::kPathDefault);
   } else if (record.type == 10) {
     record.has_numeric = true;
-    record.valid_min = read<float>(bytes, u + 48);
-    record.valid_max = read<float>(bytes, u + 52);
-    record.slider_min = read<float>(bytes, u + 56);
-    record.slider_max = read<float>(bytes, u + 60);
-    record.default_value = read<float>(bytes, u + 64);
-    record.precision = read<int16_t>(bytes, u + 68);
+    record.valid_min = read<float>(bytes, u + abi_contract::FLOAT_SLIDER_VALID_MIN_OFFSET);
+    record.valid_max = read<float>(bytes, u + abi_contract::FLOAT_SLIDER_VALID_MAX_OFFSET);
+    record.slider_min = read<float>(bytes, u + abi_contract::FLOAT_SLIDER_SLIDER_MIN_OFFSET);
+    record.slider_max = read<float>(bytes, u + abi_contract::FLOAT_SLIDER_SLIDER_MAX_OFFSET);
+    record.default_value = read<float>(bytes, u + abi_contract::FLOAT_SLIDER_DEFAULT_OFFSET);
+    record.precision = read<int16_t>(bytes, u + abi_contract::FLOAT_SLIDER_PRECISION_OFFSET);
   } else if (record.type == 5) {
     record.has_color = true;
     std::memcpy(record.current_color.data(), bytes.data() + u, record.current_color.size());
@@ -1093,21 +1109,21 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
   } else if (record.type == 3) {
     record.component_count = 1;
     record.current_components[0] = read<int32_t>(bytes, u) / 65536.0;
-    record.default_components[0] = read<int32_t>(bytes, u + 4) / 65536.0;
+    record.default_components[0] = read<int32_t>(bytes, u + abi_offsets::kAngleDefault) / 65536.0;
   } else if (record.type == 6) {
     record.component_count = 2;
     record.current_components[0] = read<int32_t>(bytes, u) / 65536.0;
-    record.current_components[1] = read<int32_t>(bytes, u + 4) / 65536.0;
-    record.default_components[0] = read<int32_t>(bytes, u + 12) / 65536.0;
-    record.default_components[1] = read<int32_t>(bytes, u + 16) / 65536.0;
+    record.current_components[1] = read<int32_t>(bytes, u + abi_offsets::kPointValueY) / 65536.0;
+    record.default_components[0] = read<int32_t>(bytes, u + abi_offsets::kPointDefaultX) / 65536.0;
+    record.default_components[1] = read<int32_t>(bytes, u + abi_offsets::kPointDefaultY) / 65536.0;
   } else if (record.type == 18) {
     record.component_count = 3;
     for (int component = 0; component < 3; ++component) {
-      record.current_components[component] = read<double>(bytes, u + component * 8);
-      record.default_components[component] = read<double>(bytes, u + 24 + component * 8);
+      record.current_components[component] = read<double>(bytes, u + abi_offsets::kPoint3DValueX + component * sizeof(double));
+      record.default_components[component] = read<double>(bytes, u + abi_offsets::kPoint3DDefaultX + component * sizeof(double));
     }
   } else if (record.type == 15) {
-    const char* label = read<const char*>(bytes, u + 8);
+    const char* label = read<const char*>(bytes, u + abi_offsets::kButtonLabel);
     if (label) record.label.assign(label, strnlen_s(label, 4096));
   }
   record.raw = bytes;
