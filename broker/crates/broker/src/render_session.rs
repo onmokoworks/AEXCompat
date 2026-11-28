@@ -1,9 +1,9 @@
 //! Resident render session (issue #98 stage 1 PR-C,
 //! docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
 //!
-//! The broker opens one sealed worker process per session, keeps the trust
-//! artifacts (sealed tree, staged worker) alive for the
-//! session's lifetime, and drives a frame loop over the inherited transport:
+//! The broker opens one isolated worker process per session, loads plug-ins
+//! in place, keeps the staged worker alive for the session's lifetime, and
+//! drives a frame loop over the inherited transport:
 //! two anonymous pipes carrying length-prefixed JSON control messages and one
 //! anonymous file mapping carrying copy-through pixel slots. The worker never
 //! opens a path for session transport (issue #18 lesson).

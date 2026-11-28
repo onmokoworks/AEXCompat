@@ -67,16 +67,12 @@ struct AllowlistV2 {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+// Ignore legacy approval metadata such as `approved_stage` and `expires`.
+// Existing selection files may still include it, but it is not enforced.
 struct ApprovedArtifactV2 {
     id: String,
-    // Parsed so existing selection files keep loading, and echoed into
-    // reports as provenance; no longer compared against a constant (#732).
-    #[allow(dead_code)]
-    approved_stage: String,
+    // Echoed into reports as provenance, not an approval gate (#732).
     receipt_id: String,
-    #[allow(dead_code)]
-    expires: String,
     timeout_ms: u64,
     trusted_worker: TrustedWorkerReceipt,
     load_tree: LoadTreeReceipt,
@@ -102,9 +98,9 @@ pub struct ApprovedLoadTree {
     pub worker_byte_size: u64,
 }
 
-/// An authenticated image at its real location. The historical name remains
-/// in schema-v2 receipts, but #816 no longer copies this entry into a sealed
-/// tree before execution.
+/// An image at its real location with its observed digest and size. The
+/// `expected_*` field names are historical; selection-file identities are
+/// compared for diagnostics, not enforced as launch preconditions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadEntry {
     pub source: PathBuf,
@@ -114,9 +110,9 @@ pub struct LoadEntry {
 }
 
 impl ApprovedLoadTree {
-    /// Stable approval identity over the real-path image set. This replaces
-    /// the former staged manifest digest without making transport details part
-    /// of the trust claim.
+    /// Stable provenance digest over the observed real-path image set. This
+    /// replaces the former staged manifest digest without including transport
+    /// details or imposing an approval gate.
     pub fn image_set_digest(&self) -> [u8; 32] {
         let mut entries: Vec<&LoadEntry> = std::iter::once(&self.main)
             .chain(self.dependencies.iter())
@@ -169,10 +165,10 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-/// Parses an approved schema-v2 receipt into an authenticated in-place load set.
+/// Parses a schema-v2 selection file into an observed in-place load set.
 ///
-/// This authenticates receipt structure and policy fields and observes the
-/// source files that will be loaded in place.
+/// Validates the selection structure, timeout bounds, and paths, then observes
+/// the source files. Recorded identity drift warns without refusing the run.
 pub fn load_v2_load_tree(
     repository: &Path,
     id: &str,
@@ -433,8 +429,35 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn v2_ignores_legacy_approval_metadata_and_keeps_receipt_provenance() {
+        let root = scratch("v2-legacy-metadata");
+        let worker = worker_in(&root);
+        let mut selection = v2_allowlist(entry(&root, "main.plugin"), vec![], &worker);
+        selection["entries"][0]["approved_stage"] = json!("obsolete-stage");
+        selection["entries"][0]["expires"] = json!("2000-01-01T00:00:00Z");
+        selection["entries"][0]["receipt_id"] = json!("legacy-selection-record");
+
+        let legacy = parse_v2_in(&root, selection.clone()).unwrap();
+        let metadata = selection["entries"][0].as_object_mut().unwrap();
+        metadata.remove("approved_stage");
+        metadata.remove("expires");
+        let without_metadata = parse_v2_in(&root, selection).unwrap();
+
+        assert_eq!(legacy.receipt_id, "legacy-selection-record");
+        assert_eq!(without_metadata.receipt_id, legacy.receipt_id);
+        assert_eq!(
+            legacy.main.expected_sha256,
+            Sha256::digest(MAIN_BYTES).as_slice()
+        );
+        assert_eq!(without_metadata.main, legacy.main);
+        assert_eq!(without_metadata.worker_sha256, legacy.worker_sha256);
+        assert_eq!(without_metadata.timeout_ms, legacy.timeout_ms);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// The identity comes from the file, so a record that disagrees with it
-    /// loads anyway and the staged tree is bound to what was read.
+    /// loads anyway and the load set records what was read.
     #[test]
     fn v2_takes_the_identity_from_the_file_not_the_record() {
         let root = scratch("v2-drift");
@@ -491,7 +514,7 @@ mod tests {
             assert!(parse_v2_in(&root, v2_allowlist(invalid_main, vec![], &worker)).is_err());
         }
 
-        // An empty file has no identity worth staging.
+        // Empty load entries remain invalid.
         let empty = root.join("empty.plugin");
         fs::write(&empty, b"").unwrap();
         assert!(
