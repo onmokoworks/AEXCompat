@@ -1,6 +1,16 @@
+use super::callbacks::{free_crt_region, read_crt_stdio_c_string};
+use super::files::guest_file_name;
+use super::imports::{LegacyWin64Import, guest_range_has_permission, read_win64_import_argument};
+use super::types::GuestState;
+use super::{BTreeSet, PAGE_SIZE, Prot, RegisterX86, Unicorn};
+
 const WINDOWS_ACL_BASE: u64 = 0x0000_0008_0000_0000;
 
-fn acl_read(unicorn: &Unicorn<'_, GuestState>, address: u64, size: u64) -> Result<Vec<u8>, String> {
+pub(super) fn acl_read(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    size: u64,
+) -> Result<Vec<u8>, String> {
     if address == 0 || !guest_range_has_permission(unicorn, address, size, Prot::READ)? {
         return Err("ACL input is not readable".into());
     }
@@ -65,7 +75,10 @@ fn build_new_guest_acl(
     Ok(result)
 }
 
-fn emulate_windows_acl(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_windows_acl(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
     let result = (|| -> Result<u64, String> {
         if operation == LegacyWin64Import::AddAccessAllowedAceEx {
             return append_guest_allowed_ace(unicorn);
@@ -295,15 +308,15 @@ fn append_guest_allowed_ace(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64
 // Copy caller-owned security data before attaching it to a virtual object.
 // SID/access evaluation remains the responsibility of the object backend.
 #[derive(Clone, Debug)]
-struct GuestObjectSecurity {
-    inherit_handle: bool,
-    control: u16,
-    owner: Option<Vec<u8>>,
-    group: Option<Vec<u8>>,
-    dacl: Option<Vec<u8>>,
+pub(super) struct GuestObjectSecurity {
+    pub(super) inherit_handle: bool,
+    pub(super) control: u16,
+    pub(super) owner: Option<Vec<u8>>,
+    pub(super) group: Option<Vec<u8>>,
+    pub(super) dacl: Option<Vec<u8>>,
 }
 
-fn read_guest_object_security(
+pub(super) fn read_guest_object_security(
     unicorn: &Unicorn<'_, GuestState>,
     attributes: u64,
 ) -> Result<Option<GuestObjectSecurity>, String> {
@@ -403,7 +416,9 @@ fn read_guest_object_security(
 }
 
 impl GuestObjectSecurity {
-    fn registry_security(&self) -> Result<Option<crate::guest_registry::RegistrySecurity>, String> {
+    pub(super) fn registry_security(
+        &self,
+    ) -> Result<Option<crate::guest_registry::RegistrySecurity>, String> {
         use crate::guest_registry::{RegistryAce, RegistrySecurity};
         if self.owner.is_some() || self.group.is_some() {
             return Err("registry security owner/group token mapping is not implemented".into());

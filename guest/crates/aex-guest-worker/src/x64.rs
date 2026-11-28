@@ -521,51 +521,82 @@ fn uc<T>(
     })
 }
 
-include!("x64/trace.rs");
-include!("x64/gpu_runtime.rs");
-include!("x64/gpu_suite.rs");
-include!("x64/types.rs");
-include!("x64/imports.rs");
-include!("x64/f30_import_probe.rs");
-include!("x64/opencl_imports.rs");
-include!("x64/engine.rs");
-include!("x64/libraries.rs");
-include!("x64/callbacks.rs");
-include!("x64/iterate_and_suites.rs");
-include!("x64/tail.rs");
-
+mod acl;
+mod callbacks;
+mod engine;
+mod environment;
+mod f30_import_probe;
+mod files;
+mod gpu_runtime;
+mod gpu_suite;
+mod import_data;
+mod imports;
+mod iterate_and_suites;
+mod libraries;
+mod lockit;
+mod mutex;
+mod network;
+mod opencl_imports;
+mod printf;
+mod sid;
+mod tail;
 #[cfg(test)]
-mod tests {
-    include!("x64/tests_support.rs");
-    include!("x64/tests_area_sample.rs");
-    include!("x64/tests_ansi_callbacks.rs");
-    include!("x64/tests_host_suite_versions.rs");
-    include!("x64/tests_transfer_rect.rs");
-    include!("x64/tests_register_ui.rs");
-    include!("x64/tests_cases.rs");
-    include!("x64/tests_issue1077.rs");
-    include!("x64/tests_gpu.rs");
-    include!("x64/tests_numeric.rs");
-}
+mod tests_ansi_callbacks;
+#[cfg(test)]
+mod tests_area_sample;
+#[cfg(test)]
+mod tests_cases;
+#[cfg(test)]
+mod tests_gpu;
+#[cfg(test)]
+mod tests_host_suite_versions;
+#[cfg(test)]
+mod tests_issue1077;
+#[cfg(test)]
+mod tests_numeric;
+#[cfg(test)]
+mod tests_register_ui;
+#[cfg(test)]
+mod tests_support;
+#[cfg(test)]
+mod tests_transfer_rect;
+mod trace;
+mod types;
+mod ui_draw;
+mod ui_session;
+mod windows_files;
 
-include!("x64/lockit.rs");
-
-include!("x64/import_data.rs");
-
-include!("x64/environment.rs");
-
-include!("x64/files.rs");
-
-include!("x64/mutex.rs");
-
-include!("x64/sid.rs");
-
-include!("x64/acl.rs");
-include!("x64/network.rs");
-
-include!("x64/printf.rs");
-include!("x64/windows_files.rs");
-
-include!("x64/ui_session.rs");
-
-include!("x64/ui_draw.rs");
+// Retain the existing x64 API paths, including crate-internal entry points.
+#[allow(unused_imports)]
+pub(super) use callbacks::msvc_udt_by_value_return_import;
+pub use f30_import_probe::f30_import_probe;
+#[cfg(feature = "wgpu-metal-experimental")]
+#[allow(unused_imports)]
+pub(crate) use gpu_runtime::{
+    CL_BUILD_PROGRAM_FAILURE, CL_INVALID_ARG_INDEX, CL_INVALID_KERNEL_ARGS, CL_OUT_OF_RESOURCES,
+};
+#[allow(unused_imports)]
+pub(crate) use gpu_runtime::{
+    CL_INVALID_ARG_SIZE, CL_INVALID_ARG_VALUE, CL_INVALID_COMMAND_QUEUE, CL_INVALID_CONTEXT,
+    CL_INVALID_DEVICE, CL_INVALID_EVENT_WAIT_LIST, CL_INVALID_GLOBAL_OFFSET,
+    CL_INVALID_GLOBAL_WORK_SIZE, CL_INVALID_KERNEL, CL_INVALID_MEM_OBJECT, CL_INVALID_PROGRAM,
+    CL_INVALID_PROGRAM_EXECUTABLE, CL_INVALID_VALUE, CL_INVALID_WORK_DIMENSION,
+    CL_INVALID_WORK_GROUP_SIZE, CL_OUT_OF_HOST_MEMORY, CL_SUCCESS, GpuDeviceTokens, GpuRuntime,
+    GpuTokenKind, OpenClRuntimeError,
+};
+use imports::MAX_WIN64_IMPORT_ARGUMENTS;
+pub use types::{
+    CensusBlock, CensusExtent, CustomUiRegistration, ExecutionTrace, GuestCensus, GuestEngine,
+    GuestParam, SmartCheckoutDiskIdFallback, TraceArgument, TraceBasicBlock, TraceBranchEdge,
+    TraceChangedRange, TraceConfiguration, TraceCrashFrame, TraceCrashSnapshot, TraceEvent,
+    TraceExemplars, TraceFunction, TraceMemorySnapshot, TraceMemoryWitness, TraceModule,
+    TraceNumericRange, TraceObservation, TracePointerHop, TraceReturnValue, TraceRuntimeTarget,
+    TraceStackArgument, TraceStateValue, TraceTargetClassification, TraceTargetMemory,
+    TraceTargetRegister, TraceTruncation, TraceValue, TraceWatchSpec, TraceXmmValue,
+    UnhookableWatch, UnsupportedSuiteCall,
+};
+#[allow(unused_imports)]
+pub(crate) use types::{
+    LayerParameterResolution, record_smart_checkout_disk_id_fallback, record_suite_request,
+    record_unsupported_suite_call, resolve_layer_parameter_offset,
+};

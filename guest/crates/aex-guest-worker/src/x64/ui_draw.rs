@@ -1,9 +1,14 @@
+use super::iterate_and_suites::aegp_stack_arg;
+use super::types::GuestState;
+use super::ui_session::{ui_new_handle, ui_write};
+use super::{BTreeMap, RegisterX86, Unicorn};
+
 #[derive(Default)]
-struct UiDrawState {
-    objects: BTreeMap<u64, (&'static str, u32)>,
-    theme: BTreeMap<u16, [u16; 3]>,
-    context: u64,
-    picker: Option<[u32; 4]>,
+pub(super) struct UiDrawState {
+    pub(super) objects: BTreeMap<u64, (&'static str, u32)>,
+    pub(super) theme: BTreeMap<u16, [u16; 3]>,
+    pub(super) context: u64,
+    pub(super) picker: Option<[u32; 4]>,
 }
 fn ui_words(
     unicorn: &Unicorn<'_, GuestState>,
@@ -43,7 +48,7 @@ fn ui_new_object(
         .insert(id, (kind, 1));
     Ok(id)
 }
-fn emulate_ui_draw_call(
+pub(super) fn emulate_ui_draw_call(
     unicorn: &mut Unicorn<'_, GuestState>,
     suite: u64,
     slot: u64,

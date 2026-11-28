@@ -1,3 +1,22 @@
+use super::gpu_runtime::{GpuRuntime, GpuRuntimeBackendKind, ObjectCounts};
+use super::gpu_suite::{
+    GPU_MAX_WORLD_DIMENSION, GpuCallbackFailure, PF_ERR_BAD_CALLBACK_PARAM, PF_ERR_OUT_OF_MEMORY,
+    PF_GPU_DEVICE_INFO_SIZE, PF_GPU_FRAMEWORK_OPENCL, PF_PIXEL_FORMAT_GPU_BGRA128,
+    finish_gpu_callback, finish_gpu_runtime_shutdown,
+};
+use super::imports::{
+    GpuImportLibrary, Win64ImportDispatch, dispatch_win64_import, install_win64_import,
+};
+use super::iterate_and_suites::read_guest_u64;
+use super::tests_support::{TEST_CODE, test_engine};
+use super::{
+    GuestError, HOST_ACQUIRE_SUITE, HOST_GET_WORLD_PIXEL_FORMAT, HOST_GPU_ALLOCATE_DEVICE,
+    HOST_GPU_ALLOCATE_HOST, HOST_GPU_CREATE_WORLD, HOST_GPU_DEVICE_SUITE_V1,
+    HOST_GPU_DISPOSE_WORLD, HOST_GPU_FREE_DEVICE, HOST_GPU_FREE_HOST, HOST_GPU_GET_WORLD_DATA,
+    HOST_GPU_GET_WORLD_DEVICE_INDEX, HOST_GPU_GET_WORLD_SIZE, HOST_GPU_SUITE_CALLBACKS,
+    RegisterX86, STUB_BASE, TIMEOUT_MICROSECONDS, abi,
+};
+
 #[test]
 fn gpu_suite_exposes_backend_neutral_opencl_device_info() {
     assert_eq!(PF_ERR_OUT_OF_MEMORY, 4);

@@ -1,7 +1,16 @@
-use crate::gpu_lifecycle::{
+#[cfg(feature = "wgpu-metal-experimental")]
+use super::BTreeSet;
+use super::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "wgpu-metal-experimental")]
+use super::{
+    WgpuArgumentExpectation, WgpuCompilerConfig, WgpuExecutor, WgpuKernel, add_artifact_evidence,
+    add_dispatch_evidence, add_resource_counts, replace_resource_counts,
+};
+
+pub(super) use crate::gpu_lifecycle::{
     GpuRuntimeBackendKind, OpenClBridgeEvidence, OpenClErrorEvidence, WgpuRuntimeEvidence,
 };
-use aex_apple_opencl::{
+pub(super) use aex_apple_opencl::{
     Buffer, BufferAccess, Error as AppleOpenClError, Kernel, MAX_BUFFER_BYTES, ObjectCounts,
     ObjectTracker, Program, Session,
 };
@@ -19,7 +28,7 @@ const GPU_TOKEN_GENERATION_MASK: u32 = 0x000f_ffff;
 const GPU_TOKEN_GLOBAL_END: u64 =
     GPU_TOKEN_BASE + ((GPU_TOKEN_GENERATION_MASK as u64 + 1) * GPU_TOKEN_GENERATION_BYTES);
 const GPU_TOKEN_KIND_STRIDE: u64 = 0x10;
-const GPU_TOKEN_OBJECT_STRIDE: u64 = 0x100;
+pub(super) const GPU_TOKEN_OBJECT_STRIDE: u64 = 0x100;
 const MAX_GPU_DEVICE_ALLOCATIONS: usize = 256;
 const MAX_GPU_DEVICE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_OPENCL_PROGRAMS: usize = 256;
@@ -154,7 +163,7 @@ pub(crate) struct OpenClRuntimeError {
 }
 
 impl OpenClRuntimeError {
-    fn new(status: i32, detail: impl Into<String>) -> Self {
+    pub(super) fn new(status: i32, detail: impl Into<String>) -> Self {
         Self {
             status,
             detail: detail.into(),

@@ -1,21 +1,27 @@
+use super::imports::guest_range_has_permission;
+use super::iterate_and_suites::aegp_stack_arg;
+use super::types::{GuestEngine, GuestState};
+use super::ui_draw::{UiDrawState, emulate_ui_draw_call};
+use super::{BTreeMap, BTreeSet, GuestError, Prot, RegisterX86, STUB_STRIDE, Unicorn, abi, uc};
+
 // Explicit UI-session support. These suites are unavailable to render sessions.
 const UI_PARAM_SUITE: u64 = 0x0000_0030_0000_0000;
-const UI_SLOTS: u64 = 128;
-const UI_CALLBACK_BASE: u64 = UI_PARAM_SUITE + 0x4000;
+pub(super) const UI_SLOTS: u64 = 128;
+pub(super) const UI_CALLBACK_BASE: u64 = UI_PARAM_SUITE + 0x4000;
 
 #[derive(Default)]
-struct UiSessionState {
-    enabled: bool,
-    draw: UiDrawState,
-    return_code: u64,
+pub(super) struct UiSessionState {
+    pub(super) enabled: bool,
+    pub(super) draw: UiDrawState,
+    pub(super) return_code: u64,
     stream_values: BTreeSet<u64>,
-    time: [u8; 8],
-    next_handle: u64,
-    effects: BTreeSet<u64>,
-    streams: BTreeMap<u64, usize>,
-    hidden: BTreeMap<usize, bool>,
-    dispatching: bool,
-    calls: Vec<serde_json::Value>,
+    pub(super) time: [u8; 8],
+    pub(super) next_handle: u64,
+    pub(super) effects: BTreeSet<u64>,
+    pub(super) streams: BTreeMap<u64, usize>,
+    pub(super) hidden: BTreeMap<usize, bool>,
+    pub(super) dispatching: bool,
+    pub(super) calls: Vec<serde_json::Value>,
 }
 
 impl GuestEngine<'static> {
@@ -233,7 +239,7 @@ fn emulate_ui_callback(unicorn: &mut Unicorn<'_, GuestState>, address: u64, _: u
     }
 }
 
-fn ui_suite_address(name: &str, version: u64) -> Option<u64> {
+pub(super) fn ui_suite_address(name: &str, version: u64) -> Option<u64> {
     let index = match (name, version) {
         ("PF Param Utils Suite", 3) => 0,
         ("AEGP PF Interface Suite", 1) => 1,
@@ -252,14 +258,14 @@ fn ui_suite_address(name: &str, version: u64) -> Option<u64> {
     };
     Some(UI_PARAM_SUITE + index * UI_SLOTS * 8)
 }
-fn ui_write(
+pub(super) fn ui_write(
     unicorn: &mut Unicorn<'_, GuestState>,
     address: u64,
     bytes: &[u8],
 ) -> Result<(), String> {
     unicorn.mem_write(address, bytes).map_err(|e| e.to_string())
 }
-fn ui_new_handle(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn ui_new_handle(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     let state = &mut unicorn.get_data_mut().ui_session;
     if state.next_handle >= 100000 {
         return Err("UI handle budget exhausted".into());

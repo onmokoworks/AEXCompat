@@ -1,3 +1,7 @@
+use super::tests_support::test_engine;
+use super::types::GuestEngine;
+use super::{HOST_ITERATE16, TIMEOUT_MICROSECONDS, abi};
+
 #[test]
 fn iterate16_progress_matches_forward_reverse_and_degenerate_contract() {
     const CODE: u64 = 0x1000_0000;

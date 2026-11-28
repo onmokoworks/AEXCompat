@@ -1,6 +1,13 @@
+use super::imports::{LegacyWin64Import, guest_range_has_permission, read_win64_import_argument};
+use super::types::GuestState;
+use super::{PAGE_SIZE, Prot, RegisterX86, Unicorn};
+
 const WINDOWS_SID_BASE: u64 = 0x0000_0007_0000_0000;
 
-fn emulate_windows_sid(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_windows_sid(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
     let result = (|| -> Result<u64, String> {
         if operation == LegacyWin64Import::CreateWellKnownSid {
             return create_well_known_sid(unicorn);

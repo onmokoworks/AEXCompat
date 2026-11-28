@@ -1,29 +1,38 @@
+#[cfg(target_os = "macos")]
+use super::BTreeSet;
+use super::callbacks::free_crt_region;
+#[cfg(target_os = "macos")]
+use super::callbacks::{allocate_crt_region, read_crt_stdio_c_string};
+use super::imports::{guest_range_has_permission, read_win64_import_argument};
+use super::types::GuestState;
+use super::{Prot, Unicorn};
+
 // IP_ADAPTER_ADDRESSES_XP (SP1): Length explicitly advertises this 184-byte
 // version. Address lists/prefixes and Vista extensions remain separate gaps.
 #[derive(Clone, Debug)]
-struct WindowsAdapter {
-    name: String,
-    description: String,
-    dns_suffix: String,
-    index: u32,
-    physical_address: Vec<u8>,
-    flags: u32,
-    mtu: u32,
-    kind: u32,
-    status: u32,
-    ipv4: bool,
-    ipv6: bool,
+pub(super) struct WindowsAdapter {
+    pub(super) name: String,
+    pub(super) description: String,
+    pub(super) dns_suffix: String,
+    pub(super) index: u32,
+    pub(super) physical_address: Vec<u8>,
+    pub(super) flags: u32,
+    pub(super) mtu: u32,
+    pub(super) kind: u32,
+    pub(super) status: u32,
+    pub(super) ipv4: bool,
+    pub(super) ipv6: bool,
 }
 
 #[cfg(target_os = "macos")]
-fn native_windows_adapters() -> Result<Vec<WindowsAdapter>, String> {
+pub(super) fn native_windows_adapters() -> Result<Vec<WindowsAdapter>, String> {
     let interfaces = aex_host_identity::adapters::interfaces()?;
     let config = aex_host_identity::network_configuration::snapshot()?;
     windows_adapters_from_native(interfaces, &config)
 }
 
 #[cfg(target_os = "macos")]
-fn windows_adapters_from_native(
+pub(super) fn windows_adapters_from_native(
     interfaces: Vec<aex_host_identity::adapters::Interface>,
     config: &aex_host_identity::network_configuration::Configuration,
 ) -> Result<Vec<WindowsAdapter>, String> {
@@ -161,11 +170,11 @@ fn windows_adapters_from_native(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn native_windows_adapters() -> Result<Vec<WindowsAdapter>, String> {
+pub(super) fn native_windows_adapters() -> Result<Vec<WindowsAdapter>, String> {
     Err("native Windows adapter translation is not implemented on this host".into())
 }
 
-fn serialize_windows_adapters(
+pub(super) fn serialize_windows_adapters(
     adapters: &[WindowsAdapter],
     base: u64,
     skip_friendly: bool,
@@ -260,7 +269,9 @@ fn serialize_windows_adapters(
     Ok(bytes)
 }
 
-fn guest_get_adapters_addresses(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_get_adapters_addresses(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<u64, String> {
     let family = read_win64_import_argument(unicorn, 0)? as u32;
     let flags = read_win64_import_argument(unicorn, 1)? as u32;
     let reserved = read_win64_import_argument(unicorn, 2)?;
@@ -324,7 +335,9 @@ fn guest_get_adapters_addresses(unicorn: &mut Unicorn<'_, GuestState>) -> Result
 }
 
 #[cfg(target_os = "macos")]
-fn guest_getaddrinfo_local(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_getaddrinfo_local(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<u64, String> {
     let node = read_win64_import_argument(unicorn, 0)?;
     let service = read_win64_import_argument(unicorn, 1)?;
     let hints = read_win64_import_argument(unicorn, 2)?;
@@ -392,7 +405,7 @@ fn guest_getaddrinfo_local(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64,
 }
 
 #[cfg(target_os = "macos")]
-fn local_ipv4_addresses(
+pub(super) fn local_ipv4_addresses(
     interfaces: &[aex_host_identity::adapters::Interface],
 ) -> BTreeSet<Vec<u8>> {
     let mut non_loopback = BTreeSet::new();
@@ -420,11 +433,13 @@ fn local_ipv4_addresses(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn guest_getaddrinfo_local(_: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_getaddrinfo_local(_: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     Err("native getaddrinfo translation is not implemented on this host".into())
 }
 
-fn guest_freeaddrinfo_local(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_freeaddrinfo_local(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<u64, String> {
     let base = read_win64_import_argument(unicorn, 0)?;
     if base == 0 {
         return Ok(0);
@@ -436,7 +451,7 @@ fn guest_freeaddrinfo_local(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64
     Ok(0)
 }
 
-fn guest_inet_ntop(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_inet_ntop(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     let family = read_win64_import_argument(unicorn, 0)? as u32;
     let source = read_win64_import_argument(unicorn, 1)?;
     let destination = read_win64_import_argument(unicorn, 2)?;
@@ -471,7 +486,9 @@ fn guest_inet_ntop(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String>
 // Win64 IP_ADAPTER_INFO is 664 bytes; its embedded IP_ADDR_STRING fields are
 // 40 bytes each. Report only IPv4 interfaces observed on the real host.
 #[cfg(target_os = "macos")]
-fn guest_get_adapters_info(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_get_adapters_info(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<u64, String> {
     const RECORD_SIZE: usize = 664;
     let output = read_win64_import_argument(unicorn, 0)?;
     let size_pointer = read_win64_import_argument(unicorn, 1)?;
@@ -591,6 +608,6 @@ fn guest_get_adapters_info(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64,
 }
 
 #[cfg(not(target_os = "macos"))]
-fn guest_get_adapters_info(_: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_get_adapters_info(_: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     Err("native GetAdaptersInfo translation is not implemented on this host".into())
 }

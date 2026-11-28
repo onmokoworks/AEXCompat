@@ -1,3 +1,41 @@
+use super::callbacks::scan_crt_stdio_c_string;
+use super::iterate_and_suites::{
+    ansi_asin, ansi_exp, ansi_fmod, ansi_hypot, ansi_log, ansi_pow, ansi_sqrt,
+};
+use super::tail::coalesce_census_extents;
+use super::tests_support::{
+    TEST_CODE, aegp_memory_state_snapshot, call_aegp_new_mem_handle, read_u64, test_engine,
+};
+use super::trace::{
+    AvxStateSync, bytes_to_hex, classify_runtime_target, discover_avx_state_sync_points,
+    emulate_avx_invalid_instruction, install_avx_state_sync_points, install_runtime_avx_state_sync,
+    install_translated_avx_state_sync, push_trace_event, selected_watch_occurrence,
+    trace_changed_ranges, trace_memory_snapshot, trace_return_value, trace_stack_arguments,
+    trace_xmm_arguments, unicorn_ymm_register, update_exemplars, update_numeric_ranges,
+};
+use super::types::{
+    CensusBlock, GuestEngine, GuestState, TraceArgument, TraceCapture, TraceEvent, TraceExemplars,
+    TraceLabel, TraceLabelKind, TraceObservation, TraceReturnValue, TraceValue, TraceWatchSpec,
+    TraceXmmValue, UnsupportedSuiteCall,
+};
+use super::{
+    Arch, DATA_BASE, DATA_SIZE, GuestError, HANDLE_DATA_BASE, HOST_ACQUIRE_SUITE,
+    HOST_AEGP_COMPUTE_CACHE_CALLBACKS, HOST_AEGP_COMPUTE_CACHE_SUITE_V1, HOST_AEGP_UTILITY_TABLES,
+    HOST_COPY, HOST_DISPOSE_WORLD, HOST_EFFECT_UI_SUITE_V1, HOST_FILL8, HOST_GET_CALLBACK_ADDR,
+    HOST_ITERATE8_ORIGIN, HOST_ITERATE8_SUITE, HOST_ITERATE16, HOST_NEW_WORLD8, HOST_NOOP,
+    HOST_PERSISTENT_BLOB_TOKEN, HOST_PERSISTENT_DATA_CALLBACKS_V3, HOST_PERSISTENT_DATA_SUITE_V3,
+    HOST_PF_ANSI_ACOS, HOST_PF_ANSI_ASIN, HOST_PF_ANSI_ATAN, HOST_PF_ANSI_ATAN2, HOST_PF_ANSI_CEIL,
+    HOST_PF_ANSI_COS, HOST_PF_ANSI_EXP, HOST_PF_ANSI_FABS, HOST_PF_ANSI_FLOOR, HOST_PF_ANSI_FMOD,
+    HOST_PF_ANSI_HYPOT, HOST_PF_ANSI_LOG, HOST_PF_ANSI_LOG10, HOST_PF_ANSI_POW, HOST_PF_ANSI_SIN,
+    HOST_PF_ANSI_SPRINTF, HOST_PF_ANSI_SQRT, HOST_PF_ANSI_STRCPY, HOST_PF_ANSI_STRCPY_BOUNDED,
+    HOST_PF_ANSI_SUITE_V2, HOST_PF_ANSI_TAN, HOST_PF_APP_CALLBACKS_V6, HOST_PF_APP_SUITE_V6,
+    HOST_SET_OPTIONS_BUTTON_NAME, HOST_ZERO_PIXEL, HashMap, HashSet, MAX_AEGP_MEMORY_BYTES,
+    MAX_AEGP_MEMORY_HANDLES, MAX_AVX_FALLBACK_INSTRUCTIONS, MAX_AVX_STATE_SYNC_POINTS,
+    MAX_SPARSE_AVX_STATE_SYNC_HOOKS, MAX_TRACE_EVENTS, MAX_TRACE_WATCH_BYTES, Mode, PAGE_SIZE,
+    Prot, RegisterX86, STACK_BASE, STACK_SIZE, STUB_BASE, TIMEOUT_MICROSECONDS,
+    TRACE_DISTINCT_FINGERPRINTS, Unicorn, abi, utility_suite_layout,
+};
+
 #[test]
 fn bounded_crt_string_search_matches_each_terminator_position_and_alignment() {
     const PAGE: u64 = 0x30_0000_0000;

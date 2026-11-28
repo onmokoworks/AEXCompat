@@ -1,4 +1,26 @@
-fn push_trace_event(capture: &mut TraceCapture, mut event: TraceEvent) {
+use super::Digest;
+use super::imports::{guest_range_has_permission, read_win64_import_argument};
+use super::types::{
+    ExecutionTrace, GuestState, PendingTraceWatch, TraceArgument, TraceCapture, TraceChangedRange,
+    TraceEvent, TraceEventKey, TraceExemplars, TraceFunction, TraceLabelKind, TraceMemorySnapshot,
+    TraceMemoryWitness, TraceNumericRange, TraceObservation, TracePointerHop, TraceReturnValue,
+    TraceRuntimeTarget, TraceStackArgument, TraceStateValue, TraceTargetClassification,
+    TraceTargetMemory, TraceTargetRegister, TraceValue, TraceWatchSpec, TraceXmmValue,
+};
+use super::{
+    BTreeMap, BTreeSet, CRT_HEAP_BASE, CRT_HEAP_END, DATA_BASE, DATA_SIZE, Decoder, DecoderOptions,
+    EncodingKind, GuestError, HOST_AEGP_MEMORY_SUITE, HOST_AEGP_UNSUPPORTED_STUBS,
+    HOST_AEGP_UTILITY_TABLES, HOST_COLOR_PARAM_SUITE, HOST_GPU_DEVICE_SUITE_V1, HOST_HANDLE_SUITE,
+    HOST_ITERATE8_SUITE, HOST_ITERATE8_UNSUPPORTED_STUBS, HOST_PF_ANSI_SUITE_V2,
+    HOST_POINT_PARAM_SUITE, HOST_WORLD_SUITE, HashMap, HashSet, InstructionInfoFactory,
+    MAX_AVX_FALLBACK_INSTRUCTIONS, MAX_AVX_STATE_SYNC_POINTS, MAX_RUNTIME_AVX_STATE_SYNC_POINTS,
+    MAX_SPARSE_AVX_STATE_SYNC_HOOKS, MAX_TRACE_EVENTS, MAX_TRACE_WATCH_BYTES, MAX_TRACE_WITNESSES,
+    Mnemonic, OpAccess, OpKind, PeImage, Prot, Register, RegisterX86, STACK_BASE, STACK_SIZE,
+    STUB_BASE, STUB_SIZE, Sha256, TRACE_DISTINCT_FINGERPRINTS, TRACE_DISTINCT_SAMPLES,
+    TRACE_FIRST_SAMPLES, TRACE_LAST_SAMPLES, TRACE_STACK_ARGUMENTS, Unicorn, uc,
+};
+
+pub(super) fn push_trace_event(capture: &mut TraceCapture, mut event: TraceEvent) {
     let key = if matches!(event.kind, "selector_enter" | "selector_exit") {
         None
     } else {
@@ -82,7 +104,7 @@ fn trace_observation(event: &TraceEvent, observation: u64) -> Option<TraceObserv
     })
 }
 
-fn update_exemplars(
+pub(super) fn update_exemplars(
     exemplars: &mut TraceExemplars,
     fingerprints: &mut HashSet<u64>,
     observation: TraceObservation,
@@ -113,7 +135,10 @@ fn update_exemplars(
     update_numeric_ranges(exemplars, &observation);
 }
 
-fn update_numeric_ranges(exemplars: &mut TraceExemplars, observation: &TraceObservation) {
+pub(super) fn update_numeric_ranges(
+    exemplars: &mut TraceExemplars,
+    observation: &TraceObservation,
+) {
     let mut values = Vec::new();
     values.extend(
         observation
@@ -170,7 +195,7 @@ fn update_numeric_ranges(exemplars: &mut TraceExemplars, observation: &TraceObse
     }
 }
 
-fn selected_watch_occurrence(capture: &mut TraceCapture, spec: &TraceWatchSpec) -> bool {
+pub(super) fn selected_watch_occurrence(capture: &mut TraceCapture, spec: &TraceWatchSpec) -> bool {
     let count = capture
         .watch_occurrence_counts
         .entry(spec.id.clone())
@@ -259,24 +284,24 @@ enum CheckpointSiteKind {
 /// before execution: only a direct near branch has a static target, and
 /// `target_rva` is set only when that target lies inside the image.
 #[derive(Clone, Copy, Debug)]
-struct CheckpointSite {
-    address: u64,
-    return_address: u64,
-    pc_rva: u64,
-    target_rva: Option<u64>,
+pub(super) struct CheckpointSite {
+    pub(super) address: u64,
+    pub(super) return_address: u64,
+    pub(super) pc_rva: u64,
+    pub(super) target_rva: Option<u64>,
     kind: CheckpointSiteKind,
-    direct: bool,
+    pub(super) direct: bool,
 }
 
 impl CheckpointSite {
     /// A direct call into the image: the only site `checkpoint_instruction`
     /// arms, so a direct call whose target is outside the image is not one.
-    fn hookable_call(&self) -> bool {
+    pub(super) fn hookable_call(&self) -> bool {
         self.kind == CheckpointSiteKind::Call && self.direct && self.target_rva.is_some()
     }
 }
 
-fn checkpoint_site(
+pub(super) fn checkpoint_site(
     instruction: &iced_x86::Instruction,
     address: u64,
     image_base: u64,
@@ -306,7 +331,7 @@ fn checkpoint_site(
 }
 
 /// Why checkpoint capture cannot arm `watch`, or `None` when it can.
-fn checkpoint_unhookable_reason(
+pub(super) fn checkpoint_unhookable_reason(
     watch: &TraceWatchSpec,
     entry_rva: u64,
     sites: &[CheckpointSite],
@@ -412,7 +437,7 @@ fn arm_selector_entry_watches(
     }
 }
 
-fn checkpoint_instruction(
+pub(super) fn checkpoint_instruction(
     unicorn: &mut Unicorn<'_, GuestState>,
     address: u64,
     image_base: u64,
@@ -495,7 +520,7 @@ fn checkpoint_instruction(
     }
 }
 
-fn trace_instruction(
+pub(super) fn trace_instruction(
     unicorn: &mut Unicorn<'_, GuestState>,
     address: u64,
     size: u32,
@@ -934,7 +959,7 @@ fn trace_arguments(
     .collect()
 }
 
-fn trace_xmm_arguments(unicorn: &Unicorn<'_, GuestState>) -> Vec<TraceXmmValue> {
+pub(super) fn trace_xmm_arguments(unicorn: &Unicorn<'_, GuestState>) -> Vec<TraceXmmValue> {
     [
         ("xmm0", RegisterX86::XMM0),
         ("xmm1", RegisterX86::XMM1),
@@ -946,7 +971,7 @@ fn trace_xmm_arguments(unicorn: &Unicorn<'_, GuestState>) -> Vec<TraceXmmValue> 
     .collect()
 }
 
-fn read_xmm(
+pub(super) fn read_xmm(
     unicorn: &Unicorn<'_, GuestState>,
     register: &'static str,
     id: RegisterX86,
@@ -974,7 +999,7 @@ fn read_xmm(
     })
 }
 
-fn trace_stack_arguments(
+pub(super) fn trace_stack_arguments(
     unicorn: &Unicorn<'_, GuestState>,
     rsp: u64,
     first_offset: u64,
@@ -1002,7 +1027,7 @@ fn trace_stack_arguments(
         .collect()
 }
 
-fn trace_return_value(
+pub(super) fn trace_return_value(
     unicorn: &Unicorn<'_, GuestState>,
     image_base: u64,
     image_end: u64,
@@ -1048,7 +1073,7 @@ fn trace_register_value(
     unicorn.reg_read(register).ok()
 }
 
-fn trace_memory_snapshot(
+pub(super) fn trace_memory_snapshot(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
     size: usize,
@@ -1167,7 +1192,7 @@ fn trace_memory_snapshot(
     }
 }
 
-fn trace_changed_ranges(
+pub(super) fn trace_changed_ranges(
     before: &TraceMemorySnapshot,
     after: &TraceMemorySnapshot,
 ) -> (Vec<TraceChangedRange>, bool) {
@@ -1349,7 +1374,7 @@ fn is_suite_address(address: u64) -> bool {
         .any(|start| (start..start + 0x100).contains(&address))
 }
 
-fn classify_runtime_target(
+pub(super) fn classify_runtime_target(
     unicorn: &Unicorn<'_, GuestState>,
     target: Option<u64>,
 ) -> TraceTargetClassification {
@@ -1441,7 +1466,7 @@ fn capture_runtime_target(
     }
 }
 
-fn advance_runtime_target_lifecycle(state: &mut GuestState, block_address: u64) {
+pub(super) fn advance_runtime_target_lifecycle(state: &mut GuestState, block_address: u64) {
     let should_clear = state.latest_runtime_target.as_ref().is_some_and(|target| {
         block_address != target.source_address && Some(block_address) != target.effective_target
     });
@@ -1563,7 +1588,7 @@ fn iced_ymm_index(register: Register) -> Option<usize> {
     }
 }
 
-fn unicorn_ymm_register(index: usize) -> Option<RegisterX86> {
+pub(super) fn unicorn_ymm_register(index: usize) -> Option<RegisterX86> {
     Some(match index {
         0 => RegisterX86::YMM0,
         1 => RegisterX86::YMM1,
@@ -1586,13 +1611,13 @@ fn unicorn_ymm_register(index: usize) -> Option<RegisterX86> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AvxStateSync {
+pub(super) enum AvxStateSync {
     RegisterUpper(usize),
     AllUpper,
     AllRegisters,
 }
 
-fn native_avx_state_sync(
+pub(super) fn native_avx_state_sync(
     instruction: &iced_x86::Instruction,
     info_factory: &mut InstructionInfoFactory,
 ) -> Option<AvxStateSync> {
@@ -1620,14 +1645,14 @@ fn native_avx_state_sync(
     }
 }
 
-fn discover_avx_state_sync_points(
+pub(super) fn discover_avx_state_sync_points(
     bytes: &[u8],
     address: u64,
 ) -> Result<Vec<(u64, AvxStateSync)>, GuestError> {
     discover_avx_state_sync_points_with_limit(bytes, address, MAX_AVX_STATE_SYNC_POINTS)
 }
 
-fn discover_avx_state_sync_points_with_limit(
+pub(super) fn discover_avx_state_sync_points_with_limit(
     bytes: &[u8],
     address: u64,
     limit: usize,
@@ -1719,7 +1744,7 @@ fn synchronize_native_avx_state(unicorn: &mut Unicorn<'_, GuestState>, sync: Avx
     }
 }
 
-fn install_avx_state_sync_points(
+pub(super) fn install_avx_state_sync_points(
     unicorn: &mut Unicorn<'static, GuestState>,
     points: Vec<(u64, AvxStateSync)>,
 ) -> Result<(), GuestError> {
@@ -1761,7 +1786,7 @@ fn install_avx_state_sync_points(
 // A conservative filter: false means no VEX encoding can start here. Decode
 // remains authoritative for every candidate, including invalid prefix mixes.
 #[cfg(test)]
-fn may_start_vex_instruction(bytes: &[u8]) -> bool {
+pub(super) fn may_start_vex_instruction(bytes: &[u8]) -> bool {
     for &byte in bytes {
         match byte {
             0x26
@@ -1786,7 +1811,7 @@ fn may_start_vex_instruction(bytes: &[u8]) -> bool {
 // Dependency DLLs can contain hundreds of thousands of native VEX writes.
 // Decode them once while loading and queue their exact addresses for Unicorn's
 // translator, avoiding a runtime callback on every instruction in the image.
-fn install_runtime_avx_state_sync(
+pub(super) fn install_runtime_avx_state_sync(
     unicorn: &mut Unicorn<'static, GuestState>,
     points: Vec<(u64, AvxStateSync)>,
 ) -> Result<(), GuestError> {
@@ -1809,7 +1834,7 @@ fn install_runtime_avx_state_sync(
     Ok(())
 }
 
-fn install_translated_avx_state_sync(
+pub(super) fn install_translated_avx_state_sync(
     unicorn: &mut Unicorn<'static, GuestState>,
 ) -> Result<(), GuestError> {
     let mut points: Vec<_> = unicorn
@@ -2089,7 +2114,7 @@ fn emulate_vextractf128(
     finish_avx_fallback(unicorn, instruction, rip)
 }
 
-fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
+pub(super) fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
     let translated_mask = aex_unicorn_buffer::x86_avx_defined_mask(unicorn);
     for index in 0..16 {
         if translated_mask & (1 << index) != 0 {
@@ -2180,7 +2205,9 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
     finish_avx_fallback(unicorn, &instruction, rip)
 }
 
-fn install_avx_fallback(unicorn: &mut Unicorn<'static, GuestState>) -> Result<(), GuestError> {
+pub(super) fn install_avx_fallback(
+    unicorn: &mut Unicorn<'static, GuestState>,
+) -> Result<(), GuestError> {
     uc(
         "install bounded AVX fallback",
         unicorn.add_insn_invalid_hook(emulate_avx_invalid_instruction),
@@ -2188,7 +2215,7 @@ fn install_avx_fallback(unicorn: &mut Unicorn<'static, GuestState>) -> Result<()
     Ok(())
 }
 
-fn discover_image_avx_state_sync_points(
+pub(super) fn discover_image_avx_state_sync_points(
     image: &PeImage,
 ) -> Result<Vec<(u64, AvxStateSync)>, GuestError> {
     let mut points = BTreeMap::new();
@@ -2242,7 +2269,7 @@ fn classify_trace_value(raw: u64, image_base: u64, image_end: u64) -> TraceValue
     }
 }
 
-fn bytes_to_hex(bytes: &[u8]) -> String {
+pub(super) fn bytes_to_hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     // Full-plane watches can contain hundreds of MiB. Reserve once instead of
     // allocating and formatting a temporary String for every input byte.
@@ -2254,7 +2281,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-fn discover_trace_points(image: &PeImage) -> Vec<u64> {
+pub(super) fn discover_trace_points(image: &PeImage) -> Vec<u64> {
     let mut points = Vec::new();
     for section in image
         .section_protections()
@@ -2301,7 +2328,7 @@ fn discover_trace_points(image: &PeImage) -> Vec<u64> {
     points
 }
 
-fn format_trace_event(event: &TraceEvent) -> String {
+pub(super) fn format_trace_event(event: &TraceEvent) -> String {
     let indent = "  ".repeat(event.depth);
     let pc = event
         .pc_rva
@@ -2334,7 +2361,10 @@ struct FunctionAggregate {
     host_callbacks: BTreeSet<String>,
 }
 
-fn aggregate_trace_functions(entry_rva: u64, events: &[TraceEvent]) -> Vec<TraceFunction> {
+pub(super) fn aggregate_trace_functions(
+    entry_rva: u64,
+    events: &[TraceEvent],
+) -> Vec<TraceFunction> {
     let mut functions = BTreeMap::<u64, FunctionAggregate>::new();
     functions.entry(entry_rva).or_default();
     for event in events {

@@ -1,20 +1,26 @@
+use super::callbacks::{read_crt_stdio_c_string, read_vcomp_u64};
+use super::files::read_guest_wide_file_string;
+use super::imports::{LegacyWin64Import, guest_range_has_permission, read_win64_import_argument};
+use super::types::{GuestState, SchedulerYieldReason};
+use super::{BTreeMap, Prot, RegisterX86, Unicorn, VecDeque};
+
 // Kernel synchronization objects belong to this guest process/session; no host handles escape.
 const WINDOWS_KERNEL_OBJECT_BASE: u64 = 0x0000_0006_0000_0000;
 #[derive(Default)]
-struct WindowsKernelObjects {
-    handles: BTreeMap<u64, u64>,
-    objects: BTreeMap<u64, WindowsMutex>,
+pub(super) struct WindowsKernelObjects {
+    pub(super) handles: BTreeMap<u64, u64>,
+    pub(super) objects: BTreeMap<u64, WindowsMutex>,
     semaphores: BTreeMap<u64, WindowsSemaphore>,
-    events: BTreeMap<u64, WindowsEvent>,
-    names: BTreeMap<String, u64>,
-    issued: u64,
+    pub(super) events: BTreeMap<u64, WindowsEvent>,
+    pub(super) names: BTreeMap<String, u64>,
+    pub(super) issued: u64,
 }
-struct WindowsMutex {
-    name: Option<String>,
-    owner: Option<u32>,
-    depth: u32,
+pub(super) struct WindowsMutex {
+    pub(super) name: Option<String>,
+    pub(super) owner: Option<u32>,
+    pub(super) depth: u32,
     abandoned: bool,
-    references: u32,
+    pub(super) references: u32,
 }
 struct WindowsSemaphore {
     name: Option<String>,
@@ -22,15 +28,19 @@ struct WindowsSemaphore {
     maximum: i32,
     references: u32,
 }
-struct WindowsEvent {
-    name: Option<String>,
-    manual_reset: bool,
-    signaled: bool,
-    references: u32,
-    waiters: VecDeque<u32>,
+pub(super) struct WindowsEvent {
+    pub(super) name: Option<String>,
+    pub(super) manual_reset: bool,
+    pub(super) signaled: bool,
+    pub(super) references: u32,
+    pub(super) waiters: VecDeque<u32>,
 }
 impl WindowsKernelObjects {
-    fn create(&mut self, name: Option<String>, owner: Option<u32>) -> Result<(u64, u32), String> {
+    pub(super) fn create(
+        &mut self,
+        name: Option<String>,
+        owner: Option<u32>,
+    ) -> Result<(u64, u32), String> {
         if self.handles.len() >= 4096 || self.issued >= 65536 {
             return Ok((0, 8));
         }
@@ -170,7 +180,7 @@ impl WindowsKernelObjects {
         self.handles.insert(handle, object);
         (handle, 0)
     }
-    fn wait(&mut self, handle: u64, thread: u32, timeout: u32) -> Result<u64, String> {
+    pub(super) fn wait(&mut self, handle: u64, thread: u32, timeout: u32) -> Result<u64, String> {
         let object = self.handles.get(&handle).ok_or("invalid mutex handle")?;
         if let Some(event) = self.events.get_mut(object) {
             if event.signaled {
@@ -217,7 +227,7 @@ impl WindowsKernelObjects {
             }
         }
     }
-    fn release(&mut self, handle: u64, thread: u32) -> Result<(), u32> {
+    pub(super) fn release(&mut self, handle: u64, thread: u32) -> Result<(), u32> {
         let object = self.handles.get(&handle).ok_or(6u32)?;
         let mutex = self.objects.get_mut(object).ok_or(6u32)?;
         if mutex.owner != Some(thread) {
@@ -229,7 +239,7 @@ impl WindowsKernelObjects {
         }
         Ok(())
     }
-    fn close(&mut self, handle: u64) -> Result<(), String> {
+    pub(super) fn close(&mut self, handle: u64) -> Result<(), String> {
         let object = self.handles.remove(&handle).ok_or("invalid mutex close")?;
         if let Some(semaphore) = self.semaphores.get_mut(&object) {
             semaphore.references -= 1;
@@ -264,7 +274,7 @@ impl WindowsKernelObjects {
         }
         Ok(())
     }
-    fn abandon(&mut self, thread: u32) {
+    pub(super) fn abandon(&mut self, thread: u32) {
         for mutex in self.objects.values_mut() {
             if mutex.owner == Some(thread) {
                 mutex.owner = None;
@@ -275,7 +285,7 @@ impl WindowsKernelObjects {
     }
 }
 
-fn emulate_windows_kernel_object(
+pub(super) fn emulate_windows_kernel_object(
     unicorn: &mut Unicorn<'_, GuestState>,
     operation: LegacyWin64Import,
 ) {

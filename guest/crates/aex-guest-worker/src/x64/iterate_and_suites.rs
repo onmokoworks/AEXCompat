@@ -1,4 +1,39 @@
-fn read_guest_u64(
+use super::callbacks::{
+    emulate_ansi_sprintf_literal, emulate_ansi_strcpy_bounded, emulate_strcpy,
+    read_crt_stdio_c_string,
+};
+use super::gpu_suite::PF_PIXEL_FORMAT_GPU_BGRA128;
+use super::imports::guest_range_has_permission;
+use super::libraries::{guest_library_by_name, guest_module_from_address};
+use super::tail::finish_callback;
+use super::types::{
+    AegpMemoryBlock, AegpMemoryHandle, GuestHandle, GuestState, GuestWorld, IterateCallbackPhase,
+    PendingIterate, PendingUnsupportedSuite, SelectorAbortRecord,
+    record_named_unsupported_suite_call, record_suite_request, record_unsupported_suite_call,
+};
+use super::ui_session::ui_suite_address;
+use super::{
+    GuestError, HANDLE_DATA_END, HOST_AEGP_COMPUTE_CACHE_CALLBACKS,
+    HOST_AEGP_COMPUTE_CACHE_SUITE_V1, HOST_AEGP_GET_MAIN_WINDOW, HOST_AEGP_MEMORY_SUITE,
+    HOST_AEGP_REGISTER, HOST_COLOR_PARAM_SUITE, HOST_EFFECT_UI_SUITE_V1, HOST_GPU_DEVICE_SUITE_V1,
+    HOST_HANDLE_SUITE, HOST_ITERATE_FLOAT, HOST_ITERATE_FLOAT_CONTINUE, HOST_ITERATE_FLOAT_SUITE,
+    HOST_ITERATE_ROW_TRAMPOLINE, HOST_ITERATE8, HOST_ITERATE8_CONTINUE,
+    HOST_ITERATE8_UNSUPPORTED_STUBS, HOST_ITERATE16, HOST_ITERATE16_CONTINUE, HOST_ITERATE16_SUITE,
+    HOST_PERSISTENT_BLOB_TOKEN, HOST_PERSISTENT_DATA_CALLBACKS_V3, HOST_PERSISTENT_DATA_SUITE_V3,
+    HOST_PF_ANSI_ACOS, HOST_PF_ANSI_ASIN, HOST_PF_ANSI_ATAN, HOST_PF_ANSI_ATAN2, HOST_PF_ANSI_CEIL,
+    HOST_PF_ANSI_COS, HOST_PF_ANSI_EXP, HOST_PF_ANSI_FABS, HOST_PF_ANSI_FLOOR, HOST_PF_ANSI_FMOD,
+    HOST_PF_ANSI_HYPOT, HOST_PF_ANSI_LOG, HOST_PF_ANSI_LOG10, HOST_PF_ANSI_POW, HOST_PF_ANSI_SIN,
+    HOST_PF_ANSI_SPRINTF, HOST_PF_ANSI_SQRT, HOST_PF_ANSI_STRCPY, HOST_PF_ANSI_STRCPY_BOUNDED,
+    HOST_PF_ANSI_SUITE_V2, HOST_PF_ANSI_TAN, HOST_PF_APP_CALLBACKS_V6, HOST_PF_APP_SUITE_V6,
+    HOST_POINT_PARAM_SUITE, HOST_SET_OPTIONS_BUTTON_NAME, HOST_WORLD_SUITE, HOST_ZERO_PIXEL,
+    MAX_AEGP_MEMORY_BYTES, MAX_AEGP_MEMORY_HANDLES, MAX_ITERATE_PIXELS, MAX_PF_HANDLE_COUNT,
+    MAX_PF_HANDLE_SIZE, MAX_WORLD_COUNT, MAX_WORLD_SIZE, PAGE_SIZE, PF_HANDLE_DATA_BASE,
+    PF_HANDLE_DATA_END, Prot, RegisterX86, STUB_STRIDE, Unicorn, WORLD_DATA_BASE, WORLD_DATA_END,
+    abi, iterate8_suite_table_address, typed_iterate_suite_table_address, uc,
+    unsupported_suite_stub_address, utility_suite_layout, utility_suite_table_address,
+};
+
+pub(super) fn read_guest_u64(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
     description: &str,
@@ -10,7 +45,7 @@ fn read_guest_u64(
     Ok(u64::from_le_bytes(bytes))
 }
 
-fn read_guest_i32(
+pub(super) fn read_guest_i32(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
     description: &str,
@@ -232,19 +267,19 @@ fn finish_iterate(unicorn: &mut Unicorn<'_, GuestState>, result: u64) -> Result<
     Ok(())
 }
 
-fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     emulate_iterate_common(unicorn, false, 4, HOST_ITERATE8_CONTINUE, "Iterate8");
 }
 
-fn emulate_iterate8_origin(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_iterate8_origin(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     emulate_iterate_common(unicorn, true, 4, HOST_ITERATE8_CONTINUE, "Iterate8 origin");
 }
 
-fn emulate_iterate16(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_iterate16(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     emulate_iterate_common(unicorn, false, 8, HOST_ITERATE16_CONTINUE, "Iterate16");
 }
 
-fn emulate_iterate_float(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_iterate_float(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     emulate_iterate_common(
         unicorn,
         false,
@@ -478,7 +513,7 @@ fn emulate_iterate_common(
     }
 }
 
-fn continue_iterate(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn continue_iterate(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let callback_error = unicorn
             .reg_read(RegisterX86::RAX)
@@ -557,7 +592,9 @@ fn continue_iterate(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     }
 }
 
-fn install_iterate8_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+pub(super) fn install_iterate8_suites(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), GuestError> {
     for version in [1u32, 2] {
         let table =
             iterate8_suite_table_address(version as u64).expect("known PF Iterate8 Suite version");
@@ -592,7 +629,9 @@ fn install_iterate8_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
     Ok(())
 }
 
-fn install_typed_iterate_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+pub(super) fn install_typed_iterate_suites(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), GuestError> {
     for (name, table, callback) in [
         ("PF iterate16 Suite", HOST_ITERATE16_SUITE, HOST_ITERATE16),
         (
@@ -612,7 +651,9 @@ fn install_typed_iterate_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result
     Ok(())
 }
 
-fn install_aegp_utility_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+pub(super) fn install_aegp_utility_suites(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), GuestError> {
     for version in [3u32, 5, 7, 11, 13] {
         let (slot_count, register_slot, window_slot) =
             utility_suite_layout(version).expect("known utility suite version");
@@ -686,7 +727,7 @@ fn ansi_cos(value: f64) -> f64 {
     ansi_finite_unary(value, f64::cos)
 }
 
-fn ansi_exp(value: f64) -> f64 {
+pub(super) fn ansi_exp(value: f64) -> f64 {
     ansi_finite_unary(value, f64::exp)
 }
 
@@ -698,7 +739,7 @@ fn ansi_floor(value: f64) -> f64 {
     ansi_finite_unary(value, f64::floor)
 }
 
-fn ansi_log(value: f64) -> f64 {
+pub(super) fn ansi_log(value: f64) -> f64 {
     if value > 0.0 {
         ansi_finite_unary(value, f64::ln)
     } else {
@@ -718,7 +759,7 @@ fn ansi_sin(value: f64) -> f64 {
     ansi_finite_unary(value, f64::sin)
 }
 
-fn ansi_sqrt(value: f64) -> f64 {
+pub(super) fn ansi_sqrt(value: f64) -> f64 {
     if value >= 0.0 {
         ansi_finite_unary(value, f64::sqrt)
     } else {
@@ -730,7 +771,7 @@ fn ansi_tan(value: f64) -> f64 {
     ansi_finite_unary(value, f64::tan)
 }
 
-fn ansi_asin(value: f64) -> f64 {
+pub(super) fn ansi_asin(value: f64) -> f64 {
     if (-1.0..=1.0).contains(&value) {
         ansi_finite_unary(value, f64::asin)
     } else {
@@ -750,7 +791,7 @@ fn ansi_atan2(left: f64, right: f64) -> f64 {
     ansi_finite_binary(left, right, f64::atan2)
 }
 
-fn ansi_fmod(left: f64, right: f64) -> f64 {
+pub(super) fn ansi_fmod(left: f64, right: f64) -> f64 {
     if right == 0.0 {
         0.0
     } else {
@@ -758,11 +799,11 @@ fn ansi_fmod(left: f64, right: f64) -> f64 {
     }
 }
 
-fn ansi_hypot(left: f64, right: f64) -> f64 {
+pub(super) fn ansi_hypot(left: f64, right: f64) -> f64 {
     ansi_finite_binary(left, right, f64::hypot)
 }
 
-fn ansi_pow(left: f64, right: f64) -> f64 {
+pub(super) fn ansi_pow(left: f64, right: f64) -> f64 {
     ansi_finite_binary(left, right, f64::powf)
 }
 
@@ -837,7 +878,7 @@ fn emulate_ansi_numeric_callback(unicorn: &mut Unicorn<'_, GuestState>, address:
     };
 }
 
-fn install_persistent_data_suite_v3(
+pub(super) fn install_persistent_data_suite_v3(
     unicorn: &mut Unicorn<'_, GuestState>,
 ) -> Result<(), GuestError> {
     let mut table = [0u8; 18 * 8];
@@ -992,7 +1033,9 @@ fn emulate_persistent_set_long(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn install_pf_app_suite_v6(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+pub(super) fn install_pf_app_suite_v6(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), GuestError> {
     let mut table = [0u8; 11 * 8];
     for (slot, address) in HOST_PF_APP_CALLBACKS_V6.into_iter().enumerate() {
         table[slot * 8..slot * 8 + 8].copy_from_slice(&address.to_le_bytes());
@@ -1066,7 +1109,9 @@ fn emulate_pf_app_callback_v6(unicorn: &mut Unicorn<'_, GuestState>, slot: usize
     );
 }
 
-fn install_effect_ui_suite_v1(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+pub(super) fn install_effect_ui_suite_v1(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), GuestError> {
     uc(
         "write PF Effect UI Suite v1",
         unicorn.mem_write(
@@ -1118,7 +1163,9 @@ fn emulate_set_options_button_name(unicorn: &mut Unicorn<'_, GuestState>, _: u64
     let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
 }
 
-fn install_pf_ansi_suite_v2(unicorn: &mut Unicorn<'static, GuestState>) -> Result<(), GuestError> {
+pub(super) fn install_pf_ansi_suite_v2(
+    unicorn: &mut Unicorn<'static, GuestState>,
+) -> Result<(), GuestError> {
     for address in [
         HOST_PF_ANSI_ATAN,
         HOST_PF_ANSI_ATAN2,
@@ -1231,7 +1278,7 @@ fn finish_acquire_suite_success(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
-fn image_executable_address(state: &GuestState, address: u64) -> bool {
+pub(super) fn image_executable_address(state: &GuestState, address: u64) -> bool {
     state
         .image_executable_ranges
         .iter()
@@ -1295,7 +1342,10 @@ fn is_msvc_i32_throw_info(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) ->
     unicorn.mem_read(type_name + 16, &mut name).is_ok() && name == *b".H\0"
 }
 
-fn msvc_throw_type_name(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) -> Option<String> {
+pub(super) fn msvc_throw_type_name(
+    unicorn: &Unicorn<'_, GuestState>,
+    throw_info: u64,
+) -> Option<String> {
     const MAX_TYPE_NAME_BYTES: u64 = 128;
 
     let state = unicorn.get_data();
@@ -1359,7 +1409,10 @@ fn msvc_throw_type_name(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) -> O
     None
 }
 
-fn read_msvc_x64_string(unicorn: &Unicorn<'_, GuestState>, object: u64) -> Option<String> {
+pub(super) fn read_msvc_x64_string(
+    unicorn: &Unicorn<'_, GuestState>,
+    object: u64,
+) -> Option<String> {
     const SSO_CAPACITY: u64 = 15;
     const MAX_STRING_BYTES: u64 = 512;
     const MAX_CAPACITY: u64 = 1 << 20;
@@ -1404,7 +1457,7 @@ fn read_msvc_x64_string(unicorn: &Unicorn<'_, GuestState>, object: u64) -> Optio
     Some(sanitized.trim().to_string())
 }
 
-fn cv_exception_message(
+pub(super) fn cv_exception_message(
     unicorn: &Unicorn<'_, GuestState>,
     exception: u64,
     throw_type: &str,
@@ -1428,7 +1481,7 @@ fn cv_exception_message(
     None
 }
 
-fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     if try_emulate_selector_abort(unicorn) {
         return;
     }
@@ -1689,7 +1742,7 @@ fn try_emulate_selector_abort(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
     true
 }
 
-fn read_suite_name(unicorn: &Unicorn<'_, GuestState>, pointer: u64) -> Vec<u8> {
+pub(super) fn read_suite_name(unicorn: &Unicorn<'_, GuestState>, pointer: u64) -> Vec<u8> {
     let mut bytes = Vec::new();
     if pointer == 0 {
         return bytes;
@@ -1715,7 +1768,7 @@ fn read_suite_name(unicorn: &Unicorn<'_, GuestState>, pointer: u64) -> Vec<u8> {
     bytes
 }
 
-fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let name_pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let version = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
     let bytes = read_suite_name(unicorn, name_pointer);
@@ -1901,7 +1954,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
 }
 
-fn install_aegp_compute_cache_suite(
+pub(super) fn install_aegp_compute_cache_suite(
     unicorn: &mut Unicorn<'_, GuestState>,
 ) -> Result<(), GuestError> {
     let mut table = [0u8; 48];
@@ -2006,7 +2059,7 @@ fn emulate_aegp_compute_cache_class_register(
     }
 }
 
-fn emulate_color_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_color_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     const PF_INVALID_INDEX: u64 = 513;
     const PF_UNRECOGNIZED_PARAM_TYPE: u64 = 514;
     const PF_BAD_CALLBACK_PARAM: u64 = 516;
@@ -2082,7 +2135,7 @@ fn emulate_color_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u
     }
 }
 
-fn emulate_aegp_register(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_aegp_register(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
     if output != 0 && unicorn.mem_write(output, &1i32.to_le_bytes()).is_ok() {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
@@ -2091,7 +2144,7 @@ fn emulate_aegp_register(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     }
 }
 
-fn emulate_aegp_get_main_window(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_aegp_get_main_window(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let output = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     if output != 0 && unicorn.mem_write(output, &0u64.to_le_bytes()).is_ok() {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
@@ -2100,7 +2153,10 @@ fn emulate_aegp_get_main_window(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _
     }
 }
 
-fn aegp_stack_arg(unicorn: &Unicorn<'_, GuestState>, offset: u64) -> Result<u64, String> {
+pub(super) fn aegp_stack_arg(
+    unicorn: &Unicorn<'_, GuestState>,
+    offset: u64,
+) -> Result<u64, String> {
     let rsp = unicorn
         .reg_read(RegisterX86::RSP)
         .map_err(|error| format!("AEGP Memory stack pointer: {error}"))?;
@@ -2199,7 +2255,7 @@ fn reclaim_aegp_memory_block(state: &mut GuestState, block: AegpMemoryBlock) {
     state.aegp_memory_free = merged;
 }
 
-fn emulate_aegp_new_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_aegp_new_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let plugin_id = unicorn
             .reg_read(RegisterX86::RCX)
@@ -2267,7 +2323,7 @@ fn emulate_aegp_new_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _:
     }
 }
 
-fn emulate_aegp_free_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_aegp_free_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let can_free = unicorn
         .get_data()
@@ -2293,7 +2349,7 @@ fn emulate_aegp_free_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _
     }
 }
 
-fn emulate_aegp_lock_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_aegp_lock_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
     let data = unicorn
@@ -2319,7 +2375,11 @@ fn emulate_aegp_lock_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _
     }
 }
 
-fn emulate_aegp_unlock_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_aegp_unlock_mem_handle(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    _: u64,
+    _: u32,
+) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let unlocked = unicorn
         .get_data_mut()
@@ -2340,7 +2400,7 @@ fn emulate_aegp_unlock_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
     }
 }
 
-fn emulate_aegp_mem_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_aegp_mem_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
     let size = unicorn
@@ -2358,7 +2418,11 @@ fn emulate_aegp_mem_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _
     }
 }
 
-fn emulate_aegp_resize_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_aegp_resize_mem_handle(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    _: u64,
+    _: u32,
+) {
     let result = (|| {
         let what = unicorn
             .reg_read(RegisterX86::RCX)
@@ -2453,7 +2517,7 @@ fn emulate_aegp_resize_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
     }
 }
 
-fn emulate_point_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_point_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let definition = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
     let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
     if definition == 0 || output == 0 {
@@ -2481,7 +2545,7 @@ fn emulate_point_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u
     let _ = unicorn.reg_write(RegisterX86::RAX, result);
 }
 
-fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let index = unicorn
             .reg_read(RegisterX86::RDX)
@@ -2527,7 +2591,7 @@ fn aligned_pf_region_size(size: u64) -> Result<u64, String> {
         .ok_or_else(|| "PF Handle region size overflow".to_string())
 }
 
-fn validate_pf_handle_budget(
+pub(super) fn validate_pf_handle_budget(
     state: &GuestState,
     size: u64,
     replacing: Option<&GuestHandle>,
@@ -2555,7 +2619,7 @@ fn validate_pf_handle_budget(
     Ok(())
 }
 
-fn find_pf_region(
+pub(super) fn find_pf_region(
     state: &GuestState,
     mapped_size: u64,
     reserved: Option<(u64, u64)>,
@@ -2597,7 +2661,7 @@ fn find_pf_region(
     }
 }
 
-fn emulate_new_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_new_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let size = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX);
     unicorn.get_data_mut().handle_allocations.push(size);
     let allocation = (|| {
@@ -2669,7 +2733,7 @@ fn emulate_new_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     }
 }
 
-fn emulate_lock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_lock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let data = unicorn
         .get_data_mut()
@@ -2691,7 +2755,7 @@ fn emulate_lock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     }
 }
 
-fn emulate_unlock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_unlock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let (valid, release) = {
         let state = unicorn.get_data_mut();
@@ -2737,7 +2801,7 @@ fn unmap_pf_handle(
     }
 }
 
-fn emulate_dispose_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_dispose_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let disposition = {
         let state = unicorn.get_data_mut();
@@ -2769,7 +2833,7 @@ fn emulate_dispose_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
-fn emulate_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     if let Some(size) = unicorn
         .get_data()
@@ -2788,7 +2852,7 @@ fn emulate_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     }
 }
 
-fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let size = unicorn
             .reg_read(RegisterX86::RCX)
@@ -2857,7 +2921,7 @@ fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     let _ = unicorn.reg_write(RegisterX86::RAX, if result.is_ok() { 0 } else { 4 });
 }
 
-fn world_pixel_bytes(pixel_format: i32) -> Option<u64> {
+pub(super) fn world_pixel_bytes(pixel_format: i32) -> Option<u64> {
     match pixel_format as u32 {
         0x6267_7261 => Some(abi::PF_PIXEL_SIZE as u64),
         0x3631_6561 => Some(abi::PF_PIXEL16_SIZE as u64),
@@ -2907,11 +2971,11 @@ fn find_world_region(state: &GuestState, mapped_size: u64) -> Result<u64, String
     }
 }
 
-fn emulate_new_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_new_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     emulate_new_world_common(unicorn, false);
 }
 
-fn emulate_new_world8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_new_world8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     emulate_new_world_common(unicorn, true);
 }
 
@@ -3026,7 +3090,7 @@ fn emulate_new_world_common(unicorn: &mut Unicorn<'_, GuestState>, legacy_argb8:
     let _ = unicorn.reg_write(RegisterX86::RAX, if result.is_ok() { 0 } else { 4 });
 }
 
-fn emulate_dispose_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_dispose_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let world = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
     let result: Result<(), String> = (|| {
         let record = unicorn
@@ -3051,7 +3115,11 @@ fn emulate_dispose_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     let _ = unicorn.reg_write(RegisterX86::RAX, if result.is_ok() { 0 } else { 4 });
 }
 
-fn emulate_get_world_pixel_format(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_get_world_pixel_format(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    _: u64,
+    _: u32,
+) {
     let world = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
     let pixel_format = unicorn

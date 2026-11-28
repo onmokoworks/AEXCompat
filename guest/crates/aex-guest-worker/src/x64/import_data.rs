@@ -1,8 +1,12 @@
+use super::imports::normalize_import_library_name;
+use super::types::GuestEngine;
+use super::{GuestError, PeImage};
+
 impl GuestEngine<'static> {
     // These ABI exports are objects, not functions. Their storage is private to
     // one guest engine and shared by every importing module in that engine.
     // Initial values: Microsoft STL stl/src/ios.cpp.
-    fn resolve_emulated_import_data(
+    pub(super) fn resolve_emulated_import_data(
         &mut self,
         library: &str,
         symbol: &str,
@@ -27,7 +31,7 @@ impl GuestEngine<'static> {
         Ok(Some(address))
     }
 
-    fn link_emulated_import_data(&mut self, image: &PeImage) -> Result<(), GuestError> {
+    pub(super) fn link_emulated_import_data(&mut self, image: &PeImage) -> Result<(), GuestError> {
         for library in image.imports() {
             for symbol in &library.symbols {
                 if let Some(address) =

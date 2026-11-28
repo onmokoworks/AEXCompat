@@ -1,6 +1,13 @@
+use super::callbacks::read_crt_stdio_c_string;
+use super::imports::{guest_range_has_permission, read_win64_import_argument};
+use super::types::GuestState;
+use super::{
+    MAX_CRT_STDIO_ARGUMENTS, MAX_CRT_STDIO_BUFFER_BYTES, MAX_CRT_STDIO_FORMAT_BYTES, Prot, Unicorn,
+};
+
 // Bounded CRT formatting using Win64 va_list slots. Windows
 // long remains 32 bits even though the native macOS ABI uses 64-bit long.
-fn format_guest_stdio(
+pub(super) fn format_guest_stdio(
     unicorn: &Unicorn<'_, GuestState>,
     format: &[u8],
     va_list: u64,
@@ -28,7 +35,7 @@ fn format_guest_stdio(
     format_guest_values(unicorn, format, &mut next, false, true)
 }
 
-fn format_guest_values(
+pub(super) fn format_guest_values(
     unicorn: &Unicorn<'_, GuestState>,
     format: &[u8],
     next: &mut impl FnMut() -> Result<u64, String>,
@@ -328,7 +335,7 @@ fn format_guest_values(
     Ok(out)
 }
 
-fn guest_wsprintf_a(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_wsprintf_a(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     let destination = read_win64_import_argument(unicorn, 0)?;
     let format_address = read_win64_import_argument(unicorn, 1)?;
     let format = read_crt_stdio_c_string(

@@ -1,3 +1,7 @@
+use super::HOST_AREA_SAMPLE8;
+use super::tests_support::{argb8_sampling_fixture, test_engine};
+use super::types::GuestEngine;
+
 #[test]
 fn legacy_area_sample8_ignores_area_and_maps_edge_behaviors() {
     let mut engine = test_engine(&[0xc3]);

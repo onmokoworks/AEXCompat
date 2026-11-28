@@ -1,3 +1,8 @@
+use super::callbacks::{install_double_binary_import, install_double_import};
+use super::imports::{LegacyWin64Import, Win64ImportDispatch, dispatch_win64_import};
+use super::types::GuestState;
+use super::{Arch, Mode, PAGE_SIZE, Prot, RegisterX86, Unicorn};
+
 /// Reproducible raw-bit diagnostic through the same legacy import hooks.
 #[doc(hidden)]
 pub fn f30_import_probe(name: &str, library: &str, count: u64) {

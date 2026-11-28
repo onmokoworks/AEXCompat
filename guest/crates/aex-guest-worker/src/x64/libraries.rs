@@ -1,3 +1,27 @@
+use super::callbacks::allocate_crt_region;
+use super::engine::{PrimaryImportHooks, seal_unicorn_image};
+#[cfg(test)]
+use super::imports::{
+    allocate_process_heap_region, free_process_heap_region, guest_range_has_permission,
+};
+use super::imports::{canonical_import_trace_label, install_win64_import};
+#[cfg(test)]
+use super::iterate_and_suites::msvc_throw_type_name;
+#[cfg(test)]
+use super::trace::unicorn_ymm_register;
+use super::trace::{
+    discover_avx_state_sync_points_with_limit, install_runtime_avx_state_sync,
+    install_translated_avx_state_sync,
+};
+use super::types::{GuestEngine, GuestState, TraceLabel, TraceLabelKind, TraceModule};
+use super::{
+    BTreeMap, BTreeSet, ENVIRONMENT_STRINGS_BASE, GuestError, HOST_ADD_PARAM,
+    MAX_CRT_ALLOCATION_BYTES, MAX_RUNTIME_AVX_STATE_SYNC_POINTS, PAGE_SIZE, PeImage, Prot,
+    RegisterX86, STUB_BASE, STUB_STRIDE, Unicorn, uc,
+};
+#[cfg(test)]
+use super::{CRT_HEAP_BASE, PROCESS_HEAP_HANDLE};
+
 // Keep dependency images outside all lazy heap, PF/world, environment, and
 // thread-stack arenas, even when those regions have not been mapped yet.
 const DEPENDENCY_IMAGE_BASE: u64 = 0x0000_0018_0000_0000;
@@ -213,13 +237,13 @@ fn emulate_sapphire_large_string_assign(
 
 /// A real mapped DLL, pinned for the lifetime of the explicit library set.
 #[derive(Clone)]
-struct GuestLibrary {
-    base: u64,
-    end: u64,
-    exports: BTreeMap<String, u64>,
-    ordinal_exports: BTreeMap<u32, u64>,
-    report: crate::pe::PeReport,
-    initialized: bool,
+pub(super) struct GuestLibrary {
+    pub(super) base: u64,
+    pub(super) end: u64,
+    pub(super) exports: BTreeMap<String, u64>,
+    pub(super) ordinal_exports: BTreeMap<u32, u64>,
+    pub(super) report: crate::pe::PeReport,
+    pub(super) initialized: bool,
 }
 
 fn normalized_library_name(name: &str) -> Result<String, GuestError> {
@@ -243,7 +267,7 @@ fn dependency_parse_batch_len(pending: usize, maximum_workers: usize) -> usize {
     maximum_workers.min(pending)
 }
 
-fn prefer_emulated_dependency_import(library: &str, symbol: &str) -> bool {
+pub(super) fn prefer_emulated_dependency_import(library: &str, symbol: &str) -> bool {
     library.eq_ignore_ascii_case("msvcp140.dll")
         && matches!(
             symbol,
@@ -252,7 +276,7 @@ fn prefer_emulated_dependency_import(library: &str, symbol: &str) -> bool {
         )
 }
 
-fn guest_module_from_address(state: &GuestState, address: u64) -> Option<u64> {
+pub(super) fn guest_module_from_address(state: &GuestState, address: u64) -> Option<u64> {
     state
         .image_region
         .filter(|(start, end)| (*start..*end).contains(&address))
@@ -266,7 +290,10 @@ fn guest_module_from_address(state: &GuestState, address: u64) -> Option<u64> {
         })
 }
 
-fn guest_library_by_name<'a>(state: &'a GuestState, name: &str) -> Option<&'a GuestLibrary> {
+pub(super) fn guest_library_by_name<'a>(
+    state: &'a GuestState,
+    name: &str,
+) -> Option<&'a GuestLibrary> {
     let name = name.replace('\\', "/").to_ascii_lowercase();
     state.loaded_libraries.get(&name).or_else(|| {
         if name.contains('/') {
