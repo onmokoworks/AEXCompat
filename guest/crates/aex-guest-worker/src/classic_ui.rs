@@ -1,4 +1,37 @@
 // Kept separate so the render route never implicitly dispatches UI selectors.
+use aex_abi::x86_64_windows as abi;
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+use crate::pixel::FramePixelFormat;
+
+use super::{
+    ARBITRARY_DEFAULT_HANDLE_OFFSET, ARBITRARY_REFCON_OFFSET, ARBITRARY_VALUE_HANDLE_OFFSET,
+    ArbitraryValue, ClassicError, ClassicHost, PARAM_ANGLE, PARAM_ARBITRARY_DATA, PARAM_CHECKBOX,
+    PARAM_COLOR, PARAM_FIXED_SLIDER, PARAM_FLOAT_SLIDER, PARAM_POINT, PARAM_POINT3D, PARAM_POPUP,
+    PARAM_SLIDER, SetupReport, materialize_default, read_i16, read_i32, read_u32, read_u64,
+    selector_guest_error, write_i32, write_u32, write_u64,
+};
+
+// Local ABI values not emitted by aex-abi: arbitrary selectors and UI event IDs.
+const ARBITRARY_FLAT_SIZE_FUNC: i32 = 3;
+const ARBITRARY_FLATTEN_FUNC: i32 = 4;
+const EVENT_DO_CLICK: i32 = 2;
+const EVENT_DRAG: i32 = 3;
+const EVENT_DRAW: i32 = 4;
+const EVENT_ADJUST_CURSOR: i32 = 9;
+const EVENT_KEY_DOWN: i32 = 10;
+// PF_ContextH is a pointer cell followed by PF_Context in the same allocation.
+const CONTEXT_HANDLE_OFFSET: usize = 0;
+const CONTEXT_VALUE_OFFSET: usize = abi::POINTER_SIZE;
+const CONTEXT_ALLOCATION_SIZE: usize = CONTEXT_VALUE_OFFSET + abi::PF_CONTEXT_SIZE;
+// Context magic and PF_DrawEventInfo fields are absent from the generated contract.
+const CONTEXT_MAGIC: u32 = 0x05ea771e;
+const DRAW_UPDATE_RECT_OFFSET: usize = 0;
+const DRAW_DEPTH_OFFSET: usize = 16;
+// PF_Point's two 32-bit coordinates are not emitted individually by aex-abi.
+const SCREEN_POINT_Y_OFFSET: usize = 4;
+
 impl ClassicHost {
     pub fn begin_ui_session(&mut self, time: i32, scale: u32) -> Result<SetupReport, ClassicError> {
         self.engine.enable_ui_session()?;
@@ -11,7 +44,7 @@ impl ClassicHost {
             1,
             FramePixelFormat::Argb8,
             FramePixelFormat::Argb8,
-            4,
+            abi::PF_PIXEL_SIZE,
             captured.len(),
             &[],
             None,
@@ -28,7 +61,7 @@ impl ClassicHost {
                 let union = abi::PARAM_U_OFFSET;
                 let default = read_u64(&definition, union + ARBITRARY_DEFAULT_HANDLE_OFFSET);
                 if default != 0 {
-                    let id = read_i16(&definition, union);
+                    let id = read_i16(&definition, union + abi::ARBITRARY_ID_OFFSET);
                     let refcon = read_u64(&definition, union + ARBITRARY_REFCON_OFFSET);
                     let handle = self.copy_arbitrary_default(id, refcon, default)?;
                     write_u64(
@@ -47,7 +80,7 @@ impl ClassicHost {
             self.engine
                 .write(resources.parameter_definitions[index], &definition)?;
             self.engine.write_u64(
-                resources.params + (index as u64 + 1) * 8,
+                resources.params + (index as u64 + 1) * abi::POINTER_SIZE as u64,
                 resources.parameter_definitions[index],
             )?;
         }
@@ -70,7 +103,7 @@ impl ClassicHost {
             self.engine.read(*address, &mut bytes)?;
             let kind = read_i32(&bytes, abi::PARAM_PARAM_TYPE_OFFSET);
             let value = if kind == PARAM_ARBITRARY_DATA {
-                let id = read_i16(&bytes, abi::PARAM_U_OFFSET);
+                let id = read_i16(&bytes, abi::PARAM_U_OFFSET + abi::ARBITRARY_ID_OFFSET);
                 let refcon = read_u64(&bytes, abi::PARAM_U_OFFSET + ARBITRARY_REFCON_OFFSET);
                 let handle = read_u64(&bytes, abi::PARAM_U_OFFSET + ARBITRARY_VALUE_HANDLE_OFFSET);
                 if handle == 0 {
@@ -78,10 +111,13 @@ impl ClassicHost {
                 } else {
                     let size_cell = self.engine.allocate(4, 4)?;
                     let code = self.call_arbitrary_callback(
-                        3,
+                        ARBITRARY_FLAT_SIZE_FUNC,
                         id,
                         refcon,
-                        &[(16, handle), (24, size_cell)],
+                        &[
+                            (abi::ARB_FLAT_SIZE_VALUE_OFFSET, handle),
+                            (abi::ARB_FLAT_SIZE_OUTPUT_OFFSET, size_cell),
+                        ],
                     )?;
                     if code != 0 {
                         return Err(ClassicError::Input(format!("FLAT_SIZE returned {code}")));
@@ -96,10 +132,14 @@ impl ClassicHost {
                     }
                     let buffer = self.engine.allocate(size, 8)?;
                     let code = self.call_arbitrary_callback(
-                        4,
+                        ARBITRARY_FLATTEN_FUNC,
                         id,
                         refcon,
-                        &[(16, handle), (24, size as u64), (32, buffer)],
+                        &[
+                            (abi::ARB_FLATTEN_VALUE_OFFSET, handle),
+                            (abi::ARB_FLATTEN_SIZE_OFFSET, size as u64),
+                            (abi::ARB_FLATTEN_BUFFER_OFFSET, buffer),
+                        ],
                     )?;
                     if code != 0 {
                         return Err(ClassicError::Input(format!("FLATTEN returned {code}")));
@@ -110,14 +150,15 @@ impl ClassicHost {
                 }
             } else {
                 let length = match kind {
-                    1 | 2 | 3 | 4 | 5 | 7 => 4,
-                    6 | 10 => 8,
-                    18 => 24,
+                    PARAM_SLIDER | PARAM_FIXED_SLIDER | PARAM_ANGLE | PARAM_CHECKBOX
+                    | PARAM_COLOR | PARAM_POPUP => 4,
+                    PARAM_POINT | PARAM_FLOAT_SLIDER => 8,
+                    PARAM_POINT3D => 24,
                     _ => 0,
                 };
                 serde_json::json!({"bytes":bytes[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET+length]})
             };
-            values.push(serde_json::json!({"slot":index+1,"type":kind,"value":value,"change_flags":read_u32(&bytes,0),"hidden":self.engine.ui_hidden(index+1),
+            values.push(serde_json::json!({"slot":index+1,"type":kind,"value":value,"change_flags":read_u32(&bytes,abi::PARAM_UU_OFFSET),"hidden":self.engine.ui_hidden(index+1),
                 "name_bytes":bytes[abi::PARAM_NAME_OFFSET..abi::PARAM_NAME_OFFSET+abi::PARAM_NAME_SIZE],
                 "ui_flags":read_u32(&bytes,abi::PARAM_UI_FLAGS_OFFSET),
                 "flags":read_u32(&bytes,abi::PARAM_FLAGS_OFFSET)}));
@@ -133,9 +174,17 @@ impl ClassicHost {
             .params;
         let before = self.ui_parameter_snapshot()?;
         self.engine.begin_ui_dispatch();
-        let result = self
-            .engine
-            .call_selector_win64(self.entry, [14, self.input, self.output, params, 0, 0]);
+        let result = self.engine.call_selector_win64(
+            self.entry,
+            [
+                abi::PF_CMD_UPDATE_PARAMS_UI as u64,
+                self.input,
+                self.output,
+                params,
+                0,
+                0,
+            ],
+        );
         let calls = self.engine.end_ui_dispatch();
         let code =
             result.map_err(|source| selector_guest_error("UPDATE_PARAMS_UI", source))? as i32;
@@ -146,7 +195,7 @@ impl ClassicHost {
             });
         }
         Ok(
-            serde_json::json!({"selector":14,"selector_error":code,"before":before,"after":self.ui_parameter_snapshot()?,"calls":calls}),
+            serde_json::json!({"selector":abi::PF_CMD_UPDATE_PARAMS_UI,"selector_error":code,"before":before,"after":self.ui_parameter_snapshot()?,"calls":calls}),
         )
     }
 }
@@ -182,12 +231,19 @@ impl ClassicHost {
             .clone();
         if event.slot == 0
             || event.slot > resources.parameter_definitions.len()
-            || ![2, 3, 4, 9, 10].contains(&event.event)
+            || ![
+                EVENT_DO_CLICK,
+                EVENT_DRAG,
+                EVENT_DRAW,
+                EVENT_ADJUST_CURSOR,
+                EVENT_KEY_DOWN,
+            ]
+            .contains(&event.event)
         {
             return Err(ClassicError::Input("invalid UI event or slot".into()));
         }
-        if (event.event == 10) != event.key_code.is_some()
-            || (event.event != 10 && event.modifiers.is_some())
+        if (event.event == EVENT_KEY_DOWN) != event.key_code.is_some()
+            || (event.event != EVENT_KEY_DOWN && event.modifiers.is_some())
         {
             return Err(ClassicError::Input(
                 "key payload requires keydown event 10".into(),
@@ -201,11 +257,23 @@ impl ClassicHost {
             }
             *address
         } else {
-            let address = self.engine.allocate(80, 8)?;
-            let mut bytes = [0u8; 80];
-            write_u64(&mut bytes, 0, address + 8);
-            write_u32(&mut bytes, 8, 0x05ea771e);
-            write_i32(&mut bytes, 12, event.window_type);
+            let address = self.engine.allocate(CONTEXT_ALLOCATION_SIZE, 8)?;
+            let mut bytes = [0u8; CONTEXT_ALLOCATION_SIZE];
+            write_u64(
+                &mut bytes,
+                CONTEXT_HANDLE_OFFSET,
+                address + CONTEXT_VALUE_OFFSET as u64,
+            );
+            write_u32(
+                &mut bytes,
+                CONTEXT_VALUE_OFFSET + abi::CONTEXT_MAGIC_OFFSET,
+                CONTEXT_MAGIC,
+            );
+            write_i32(
+                &mut bytes,
+                CONTEXT_VALUE_OFFSET + abi::CONTEXT_WINDOW_TYPE_OFFSET,
+                event.window_type,
+            );
             self.engine.write(address, &bytes)?;
             self.ui_contexts
                 .insert(event.context, (address, event.window_type));
@@ -214,12 +282,12 @@ impl ClassicHost {
         let extra = if let Some(address) = self.ui_event_extra {
             address
         } else {
-            let address = self.engine.allocate(208, 8)?;
+            let address = self.engine.allocate(abi::PF_EVENT_EXTRA_SIZE, 8)?;
             self.ui_event_extra = Some(address);
             address
         };
-        let mut bytes = [0u8; 208];
-        if event.event == 3 {
+        let mut bytes = [0u8; abi::PF_EVENT_EXTRA_SIZE];
+        if event.event == EVENT_DRAG {
             let (slot, continuation) = self.ui_drags.get(&event.context).ok_or_else(|| {
                 ClassicError::Input("drag without an active click in this context".into())
             })?;
@@ -228,36 +296,100 @@ impl ClassicHost {
                     "drag slot differs from originating click".into(),
                 ));
             }
-            bytes[40..72].copy_from_slice(continuation);
+            bytes[abi::EVENT_UNION_OFFSET + abi::DO_CLICK_CONTINUE_REFCON_OFFSET
+                ..abi::EVENT_UNION_OFFSET
+                    + abi::DO_CLICK_CONTINUE_REFCON_OFFSET
+                    + abi::DO_CLICK_CONTINUE_REFCON_SIZE]
+                .copy_from_slice(continuation);
         }
-        write_u64(&mut bytes, 0, context);
-        write_i32(&mut bytes, 8, event.event);
-        if event.event == 2 || event.event == 3 {
-            write_i32(&mut bytes, 20, event.x);
-            write_i32(&mut bytes, 24, event.y);
-            write_i32(&mut bytes, 28, event.clicks);
-            bytes[73] = u8::from(event.last);
-        } else if event.event == 10 {
+        write_u64(&mut bytes, abi::EVENT_CONTEXT_OFFSET, context);
+        write_i32(&mut bytes, abi::EVENT_TYPE_OFFSET, event.event);
+        if event.event == EVENT_DO_CLICK || event.event == EVENT_DRAG {
+            write_i32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET + abi::DO_CLICK_SCREEN_POINT_OFFSET,
+                event.x,
+            );
+            write_i32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET + abi::DO_CLICK_SCREEN_POINT_OFFSET + SCREEN_POINT_Y_OFFSET,
+                event.y,
+            );
+            write_i32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET + abi::DO_CLICK_NUM_CLICKS_OFFSET,
+                event.clicks,
+            );
+            bytes[abi::EVENT_UNION_OFFSET + abi::DO_CLICK_LAST_TIME_OFFSET] = u8::from(event.last);
+        } else if event.event == EVENT_KEY_DOWN {
             // Same PF_DoKeyDownEventInfo layout as worker_ui_event_execution.cpp.
-            write_u32(&mut bytes, 16, 1);
-            write_i32(&mut bytes, 20, event.x);
-            write_i32(&mut bytes, 24, event.y);
-            write_u32(&mut bytes, 28, event.key_code.unwrap());
-            write_u32(&mut bytes, 32, event.modifiers.unwrap_or(0));
-        } else if event.event == 9 {
-            write_i32(&mut bytes, 16, event.x);
-            write_i32(&mut bytes, 20, event.y);
+            write_u32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET + abi::KEY_DOWN_WHEN_OFFSET,
+                1,
+            );
+            write_i32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET + abi::KEY_DOWN_SCREEN_POINT_OFFSET,
+                event.x,
+            );
+            write_i32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET + abi::KEY_DOWN_SCREEN_POINT_OFFSET + SCREEN_POINT_Y_OFFSET,
+                event.y,
+            );
+            write_u32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET + abi::KEY_DOWN_KEYCODE_OFFSET,
+                event.key_code.unwrap(),
+            );
+            write_u32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET + abi::KEY_DOWN_MODIFIERS_OFFSET,
+                event.modifiers.unwrap_or(0),
+            );
+        } else if event.event == EVENT_ADJUST_CURSOR {
+            write_i32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET + abi::ADJUST_CURSOR_SCREEN_POINT_OFFSET,
+                event.x,
+            );
+            write_i32(
+                &mut bytes,
+                abi::EVENT_UNION_OFFSET
+                    + abi::ADJUST_CURSOR_SCREEN_POINT_OFFSET
+                    + SCREEN_POINT_Y_OFFSET,
+                event.y,
+            );
         }
-        write_i32(&mut bytes, 80, event.slot as i32);
-        write_i32(&mut bytes, 84, event.area);
+        write_i32(
+            &mut bytes,
+            abi::EVENT_EFFECT_WINDOW_OFFSET + abi::EFFECT_WINDOW_INDEX_OFFSET,
+            event.slot as i32,
+        );
+        write_i32(
+            &mut bytes,
+            abi::EVENT_EFFECT_WINDOW_OFFSET + abi::EFFECT_WINDOW_AREA_OFFSET,
+            event.area,
+        );
         for (index, value) in event.frame.iter().enumerate() {
-            write_i32(&mut bytes, 88 + index * 4, *value);
+            write_i32(
+                &mut bytes,
+                abi::EVENT_EFFECT_WINDOW_OFFSET
+                    + abi::EFFECT_WINDOW_CURRENT_FRAME_OFFSET
+                    + index * 4,
+                *value,
+            );
         }
-        if event.event == 4 {
+        if event.event == EVENT_DRAW {
             for (index, value) in event.frame.iter().enumerate() {
-                write_i32(&mut bytes, 16 + index * 4, *value);
+                write_i32(
+                    &mut bytes,
+                    abi::EVENT_UNION_OFFSET + DRAW_UPDATE_RECT_OFFSET + index * 4,
+                    *value,
+                );
             }
-            write_i32(&mut bytes, 32, 32);
+            write_i32(&mut bytes, abi::EVENT_UNION_OFFSET + DRAW_DEPTH_OFFSET, 32);
         }
         self.engine.write(extra, &bytes)?;
         self.engine
@@ -266,7 +398,14 @@ impl ClassicHost {
         self.engine.begin_ui_dispatch();
         let result = self.engine.call_selector_win64(
             self.entry,
-            [15, self.input, self.output, resources.params, 0, extra],
+            [
+                abi::PF_CMD_EVENT as u64,
+                self.input,
+                self.output,
+                resources.params,
+                0,
+                extra,
+            ],
         );
         let calls = self.engine.end_ui_dispatch();
         let code = result.map_err(|source| selector_guest_error("EVENT", source))? as i32;
@@ -277,16 +416,27 @@ impl ClassicHost {
             });
         }
         self.engine.read(extra, &mut bytes)?;
-        if event.event == 2 && bytes[72] != 0 || event.event == 3 && !event.last {
+        if event.event == EVENT_DO_CLICK
+            && bytes[abi::EVENT_UNION_OFFSET + abi::DO_CLICK_SEND_DRAG_OFFSET] != 0
+            || event.event == EVENT_DRAG && !event.last
+        {
             self.ui_drags.insert(
                 event.context,
-                (event.slot, bytes[40..72].try_into().unwrap()),
+                (
+                    event.slot,
+                    bytes[abi::EVENT_UNION_OFFSET + abi::DO_CLICK_CONTINUE_REFCON_OFFSET
+                        ..abi::EVENT_UNION_OFFSET
+                            + abi::DO_CLICK_CONTINUE_REFCON_OFFSET
+                            + abi::DO_CLICK_CONTINUE_REFCON_SIZE]
+                        .try_into()
+                        .unwrap(),
+                ),
             );
-        } else if event.event == 2 || event.event == 3 {
+        } else if event.event == EVENT_DO_CLICK || event.event == EVENT_DRAG {
             self.ui_drags.remove(&event.context);
         }
         Ok(
-            serde_json::json!({"selector":15,"selector_error":code,"input":event,"before":before,"after":self.ui_parameter_snapshot()?,"calls":calls,"send_drag":bytes[72],"event_out_flags":read_u32(&bytes,204)}),
+            serde_json::json!({"selector":abi::PF_CMD_EVENT,"selector_error":code,"input":event,"before":before,"after":self.ui_parameter_snapshot()?,"calls":calls,"send_drag":bytes[abi::EVENT_UNION_OFFSET + abi::DO_CLICK_SEND_DRAG_OFFSET],"event_out_flags":read_u32(&bytes,abi::EVENT_OUT_FLAGS_OFFSET)}),
         )
     }
 }

@@ -31,9 +31,10 @@ const CMD_SMART_RENDER_GPU: u64 = abi::PF_CMD_SMART_RENDER_GPU as u64;
 const CMD_GPU_DEVICE_SETUP: u64 = abi::PF_CMD_GPU_DEVICE_SETUP as u64;
 const CMD_GPU_DEVICE_SETDOWN: u64 = abi::PF_CMD_GPU_DEVICE_SETDOWN as u64;
 const CMD_ARBITRARY_CALLBACK: u64 = abi::PF_CMD_ARBITRARY_CALLBACK as u64;
-// PF_LayerDef origin fields; mirrored by the native worker's world facade.
+// PF_LayerDef origin fields are absent from aex-abi; mirrored by the native world facade.
 const LAYER_ORIGIN_X_OFFSET: usize = 104;
 const LAYER_ORIGIN_Y_OFFSET: usize = 108;
+// PF_ParamType discriminants are not emitted by aex-abi.
 pub const PARAM_LAYER: i32 = 0;
 const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
@@ -45,25 +46,39 @@ pub(crate) const PARAM_POINT3D: i32 = 18;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
 const PARAM_ARBITRARY_DATA: i32 = 11;
-const ARBITRARY_DEFAULT_HANDLE_OFFSET: usize = 8;
-const ARBITRARY_VALUE_HANDLE_OFFSET: usize = 16;
-const ARBITRARY_REFCON_OFFSET: usize = 24;
+const ARBITRARY_DEFAULT_HANDLE_OFFSET: usize = abi::ARBITRARY_DEFAULT_OFFSET;
+const ARBITRARY_VALUE_HANDLE_OFFSET: usize = abi::ARBITRARY_VALUE_OFFSET;
+const ARBITRARY_REFCON_OFFSET: usize = abi::ARBITRARY_REFCON_OFFSET;
 /// `PF_ArbParamsExtra`: `which_function` at 0, then the per-function union
 /// (`id` at 4, `refconPV` at 8, source handle at 16, destination handle
 /// pointer at 24). The host keeps the COPY destination cell inside the same
 /// scratch block, after the union.
-const ARBITRARY_EXTRA_BYTES: usize = 48;
-const ARBITRARY_EXTRA_ID_OFFSET: usize = 4;
-const ARBITRARY_EXTRA_REFCON_OFFSET: usize = 8;
-const ARBITRARY_EXTRA_HANDLE_OFFSET: usize = 16;
-const ARBITRARY_EXTRA_DESTINATION_POINTER_OFFSET: usize = 24;
+const ARBITRARY_EXTRA_BYTES: usize = abi::PF_ARB_PARAMS_EXTRA_SIZE;
+const ARBITRARY_EXTRA_ID_OFFSET: usize = abi::ARB_EXTRA_ID_OFFSET;
+const ARBITRARY_EXTRA_REFCON_OFFSET: usize = abi::ARB_COPY_REFCON_OFFSET;
+const ARBITRARY_EXTRA_HANDLE_OFFSET: usize = abi::ARB_COPY_SOURCE_OFFSET;
+const ARBITRARY_EXTRA_DESTINATION_POINTER_OFFSET: usize = abi::ARB_COPY_DESTINATION_OFFSET;
+// Host-owned scratch cell, not a PF_ArbParamsExtra field.
 const ARBITRARY_EXTRA_DESTINATION_CELL_OFFSET: usize = 32;
+// Arbitrary callback selectors are not emitted by aex-abi.
 const ARBITRARY_DISPOSE_FUNC: i32 = 1;
 const ARBITRARY_COPY_FUNC: i32 = 2;
+// Parameter fields absent from aex-abi (relative to the parameter union).
 const LAYER_DEFAULT_OFFSET: usize = 116;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
 const POINT_DEFAULT_X_OFFSET: usize = 12;
 const POINT_DEFAULT_Y_OFFSET: usize = 16;
+const POINT_VALUE_X_OFFSET: usize = 0;
+const POINT_VALUE_Y_OFFSET: usize = 4;
+const POINT3D_DEFAULT_OFFSET: usize = 24;
+const FIXED_SLIDER_PRECISION_OFFSET: usize = 88;
+// SPBasicSuite layout and the second pre-render callback are not emitted by aex-abi.
+const SP_BASIC_SUITE_BYTES: usize = 64;
+const SP_BASIC_ACQUIRE_SUITE_OFFSET: usize = 0;
+const SP_BASIC_RELEASE_SUITE_OFFSET: usize = 8;
+const PRE_CALLBACKS_GUID_MIX_IN_PTR_OFFSET: usize = 8;
+// PF_InData.version is two i16 words; aex-abi only emits the enclosing field.
+const VERSION_SUBVERS_OFFSET: usize = 2;
 const CLEANUP_GUEST_ERROR: i32 = -40;
 const OUTPUT_GUARD_BYTES: usize = 64;
 const OUTPUT_GUARD_PATTERN: u8 = 0xa5;
@@ -635,7 +650,7 @@ pub struct ClassicHost {
     global_active: bool,
     sequence_active: bool,
     frame_resources: Option<FrameResources>,
-    ui_drags: BTreeMap<u64, (usize, [u8; 32])>,
+    ui_drags: BTreeMap<u64, (usize, [u8; abi::DO_CLICK_CONTINUE_REFCON_SIZE])>,
     ui_event_extra: Option<u64>,
     ui_contexts: BTreeMap<u64, (u64, i32)>,
     user_changed_extra: Option<u64>,
@@ -746,7 +761,11 @@ impl ClassicHost {
         write_u64(&mut input_bytes, abi::IN_EFFECT_REF_OFFSET, 1);
         write_i32(&mut input_bytes, abi::IN_QUALITY_OFFSET, 1);
         write_i16(&mut input_bytes, abi::IN_VERSION_OFFSET, 13);
-        write_i16(&mut input_bytes, abi::IN_VERSION_OFFSET + 2, 29);
+        write_i16(
+            &mut input_bytes,
+            abi::IN_VERSION_OFFSET + VERSION_SUBVERS_OFFSET,
+            29,
+        );
         write_u32(&mut input_bytes, abi::IN_APPL_ID_OFFSET, 0x4658_5443);
         write_i32(&mut input_bytes, abi::IN_NUM_PARAMS_OFFSET, 1);
         crate::geometry::input(&mut input_bytes);
@@ -799,7 +818,7 @@ impl ClassicHost {
         let input = engine.allocate(abi::PF_IN_DATA_SIZE, 8)?;
         let output = engine.allocate(abi::PF_OUT_DATA_SIZE, 8)?;
         let utils = engine.allocate(abi::PF_UTIL_CALLBACKS_SIZE, 8)?;
-        let pica_basic = engine.allocate(64, 8)?;
+        let pica_basic = engine.allocate(SP_BASIC_SUITE_BYTES, 8)?;
 
         let mut input_bytes = vec![0u8; abi::PF_IN_DATA_SIZE];
         input_bytes[..abi::PF_INTERACT_CALLBACKS_SIZE]
@@ -809,7 +828,11 @@ impl ClassicHost {
         write_u64(&mut input_bytes, abi::IN_EFFECT_REF_OFFSET, 1);
         write_i32(&mut input_bytes, abi::IN_QUALITY_OFFSET, 1);
         write_i16(&mut input_bytes, abi::IN_VERSION_OFFSET, 13);
-        write_i16(&mut input_bytes, abi::IN_VERSION_OFFSET + 2, 29);
+        write_i16(
+            &mut input_bytes,
+            abi::IN_VERSION_OFFSET + VERSION_SUBVERS_OFFSET,
+            29,
+        );
         write_u32(&mut input_bytes, abi::IN_APPL_ID_OFFSET, 0x4658_5443);
         write_i32(&mut input_bytes, abi::IN_NUM_PARAMS_OFFSET, 1);
         write_i32(&mut input_bytes, abi::IN_TIME_STEP_OFFSET, 1);
@@ -826,9 +849,17 @@ impl ClassicHost {
         crate::geometry::input(&mut input_bytes);
         engine.write(input, &input_bytes)?;
         engine.write(output, &vec![0u8; abi::PF_OUT_DATA_SIZE])?;
-        let mut pica_bytes = [0u8; 64];
-        write_u64(&mut pica_bytes, 0, engine.acquire_suite_callback_address());
-        write_u64(&mut pica_bytes, 8, engine.noop_callback_address());
+        let mut pica_bytes = [0u8; SP_BASIC_SUITE_BYTES];
+        write_u64(
+            &mut pica_bytes,
+            SP_BASIC_ACQUIRE_SUITE_OFFSET,
+            engine.acquire_suite_callback_address(),
+        );
+        write_u64(
+            &mut pica_bytes,
+            SP_BASIC_RELEASE_SUITE_OFFSET,
+            engine.noop_callback_address(),
+        );
         engine.write(pica_basic, &pica_bytes)?;
         let utility_bytes = build_utility_callbacks(&engine);
         engine.write(utils, &utility_bytes)?;
@@ -1438,7 +1469,9 @@ impl ClassicHost {
         &mut self,
         definitions: Vec<Vec<u8>>,
     ) -> Result<(), ClassicError> {
-        let params = self.engine.allocate((definitions.len() + 1) * 8, 8)?;
+        let params = self
+            .engine
+            .allocate((definitions.len() + 1) * abi::POINTER_SIZE, 8)?;
         let mut parameter_definitions = Vec::with_capacity(definitions.len());
         for (index, definition) in definitions.into_iter().enumerate() {
             if definition.len() != abi::PF_PARAM_DEF_SIZE {
@@ -1449,7 +1482,7 @@ impl ClassicHost {
             let address = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
             self.engine.write(address, &definition)?;
             self.engine
-                .write_u64(params + ((index + 1) * 8) as u64, address)?;
+                .write_u64(params + ((index + 1) * abi::POINTER_SIZE) as u64, address)?;
             parameter_definitions.push(address);
         }
         let placeholder = self.engine.allocate(1, 1)?;
@@ -2233,7 +2266,7 @@ impl ClassicHost {
                 // default; otherwise the value is a private COPY of it, never
                 // the default handle itself (minihost initialize_arbitrary_values).
                 if default != 0 {
-                    let id = read_i16(&definition, union);
+                    let id = read_i16(&definition, union + abi::ARBITRARY_ID_OFFSET);
                     let refcon = read_u64(&definition, union + ARBITRARY_REFCON_OFFSET);
                     let handle = self.copy_arbitrary_default(id, refcon, default)?;
                     write_u64(
@@ -2342,7 +2375,7 @@ impl ClassicHost {
             let parameter = resources.parameter_definitions[index];
             self.engine.write(parameter, &definition)?;
             self.engine
-                .write_u64(params + ((index + 1) * 8) as u64, parameter)?;
+                .write_u64(params + ((index + 1) * abi::POINTER_SIZE) as u64, parameter)?;
         }
         self.engine
             .configure_parameter_definitions(input_param, resources.parameter_definitions)?;
@@ -2537,10 +2570,10 @@ impl ClassicHost {
             .as_ref()
             .ok_or_else(|| ClassicError::Input("missing host output allocation".into()))?;
         for (offset, size) in [
-            (abi::LAYER_DATA_OFFSET, 8),
-            (abi::LAYER_WIDTH_OFFSET, 4),
-            (abi::LAYER_HEIGHT_OFFSET, 4),
-            (abi::LAYER_ROWBYTES_OFFSET, 4),
+            (abi::LAYER_DATA_OFFSET, abi::LAYER_DATA_SIZE),
+            (abi::LAYER_WIDTH_OFFSET, abi::LAYER_WIDTH_SIZE),
+            (abi::LAYER_HEIGHT_OFFSET, abi::LAYER_HEIGHT_SIZE),
+            (abi::LAYER_ROWBYTES_OFFSET, abi::LAYER_ROWBYTES_SIZE),
             (LAYER_ORIGIN_X_OFFSET, 4),
             (LAYER_ORIGIN_Y_OFFSET, 4),
         ] {
@@ -2723,7 +2756,9 @@ impl ClassicHost {
             return Ok(resources.clone());
         }
         let input_param = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
-        let params = self.engine.allocate((parameter_count + 1) * 8, 8)?;
+        let params = self
+            .engine
+            .allocate((parameter_count + 1) * abi::POINTER_SIZE, 8)?;
         let output_world = self.engine.allocate(abi::PF_LAYER_DEF_SIZE, 8)?;
         let input_pixels = self.engine.allocate(input_alloc_bytes, 64)?;
         let guarded_output_bytes = pixel_bytes
@@ -2891,7 +2926,11 @@ impl ClassicHost {
     ) -> Result<i32, ClassicError> {
         let extra = self.arbitrary_extra()?;
         let mut bytes = vec![0u8; ARBITRARY_EXTRA_BYTES];
-        write_i32(&mut bytes, 0, which_function);
+        write_i32(
+            &mut bytes,
+            abi::ARB_EXTRA_WHICH_FUNCTION_OFFSET,
+            which_function,
+        );
         write_i16(&mut bytes, ARBITRARY_EXTRA_ID_OFFSET, id);
         write_u64(&mut bytes, ARBITRARY_EXTRA_REFCON_OFFSET, refcon);
         for (offset, value) in payload {
@@ -3200,7 +3239,7 @@ impl ClassicHost {
         );
         write_u64(
             &mut pre_callbacks_bytes,
-            8,
+            PRE_CALLBACKS_GUID_MIX_IN_PTR_OFFSET,
             self.engine.noop_callback_address(),
         );
         self.engine.write(pre_callbacks, &pre_callbacks_bytes)?;
@@ -3902,8 +3941,8 @@ fn materialize_default(
             // COPY of the default that ClassicHost obtains through
             // PF_Cmd_ARBITRARY_CALLBACK; it is never the default handle itself,
             // and a null default simply leaves the value uninitialized.
-            definition
-                [union + ARBITRARY_VALUE_HANDLE_OFFSET..union + ARBITRARY_VALUE_HANDLE_OFFSET + 8]
+            definition[union + ARBITRARY_VALUE_HANDLE_OFFSET
+                ..union + ARBITRARY_VALUE_HANDLE_OFFSET + abi::ARBITRARY_VALUE_SIZE]
                 .copy_from_slice(&0u64.to_le_bytes());
         }
         PARAM_POPUP => {
@@ -3936,7 +3975,7 @@ fn materialize_default(
         }
         PARAM_POINT3D => {
             for (component, extent) in [width, height, height].into_iter().enumerate() {
-                let offset = union + 24 + component * 8;
+                let offset = union + POINT3D_DEFAULT_OFFSET + component * 8;
                 let percent = f64::from_le_bytes(
                     definition[offset..offset + 8]
                         .try_into()
@@ -4013,7 +4052,10 @@ fn apply_parameter_value_for_layer(
                 "point parameter components must be finite and typed".into(),
             ));
         }
-        for (offset, value, extent) in [(0, x, width), (4, y, height)] {
+        for (offset, value, extent) in [
+            (POINT_VALUE_X_OFFSET, x, width),
+            (POINT_VALUE_Y_OFFSET, y, height),
+        ] {
             let pixels = if width > 0 && height > 0 {
                 value / 100.0 * f64::from(extent)
             } else {
@@ -4155,7 +4197,7 @@ fn component_descriptor(
             read_i32(definition, union + POINT_DEFAULT_Y_OFFSET) as f64 / 65536.0,
         ],
         PARAM_POINT3D => (0..3)
-            .map(|component| read_f64(definition, union + 24 + component * 8))
+            .map(|component| read_f64(definition, union + POINT3D_DEFAULT_OFFSET + component * 8))
             .collect(),
         _ => return (None, None),
     };
@@ -4191,7 +4233,7 @@ fn numeric_descriptor(
                 Some(fixed(abi::SLIDER_VALID_MAX_OFFSET)),
                 Some(fixed(abi::SLIDER_SLIDER_MIN_OFFSET)),
                 Some(fixed(abi::SLIDER_SLIDER_MAX_OFFSET)),
-                Some(read_i16(definition, union + 88)),
+                Some(read_i16(definition, union + FIXED_SLIDER_PRECISION_OFFSET)),
             )
         }
         PARAM_CHECKBOX => (
@@ -4640,7 +4682,7 @@ mod tests {
     fn materializes_supported_parameter_defaults() {
         let mut slider = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         slider[abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET
-            ..abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET + 4]
+            ..abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET + abi::SLIDER_DEFAULT_SIZE]
             .copy_from_slice(&123i32.to_le_bytes());
         materialize_default(&mut slider, PARAM_FIXED_SLIDER, 32, 20).unwrap();
         assert_eq!(
@@ -4650,7 +4692,9 @@ mod tests {
 
         let mut float_slider = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         float_slider[abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET
-            ..abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET + 4]
+            ..abi::PARAM_U_OFFSET
+                + abi::FLOAT_SLIDER_DEFAULT_OFFSET
+                + abi::FLOAT_SLIDER_DEFAULT_SIZE]
             .copy_from_slice(&5.0f32.to_le_bytes());
         materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER, 32, 20).unwrap();
         assert_eq!(
@@ -4746,12 +4790,14 @@ mod tests {
         let union = abi::PARAM_U_OFFSET;
         let mut arbitrary = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         arbitrary[union..union + 4].copy_from_slice(&[7, 0, 0, 0]);
-        arbitrary
-            [union + ARBITRARY_DEFAULT_HANDLE_OFFSET..union + ARBITRARY_DEFAULT_HANDLE_OFFSET + 8]
+        arbitrary[union + ARBITRARY_DEFAULT_HANDLE_OFFSET
+            ..union + ARBITRARY_DEFAULT_HANDLE_OFFSET + abi::ARBITRARY_DEFAULT_SIZE]
             .copy_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
-        arbitrary[union + ARBITRARY_VALUE_HANDLE_OFFSET..union + ARBITRARY_VALUE_HANDLE_OFFSET + 8]
+        arbitrary[union + ARBITRARY_VALUE_HANDLE_OFFSET
+            ..union + ARBITRARY_VALUE_HANDLE_OFFSET + abi::ARBITRARY_VALUE_SIZE]
             .copy_from_slice(&0x5555_5555_5555_5555u64.to_le_bytes());
-        arbitrary[union + ARBITRARY_REFCON_OFFSET..union + ARBITRARY_REFCON_OFFSET + 8]
+        arbitrary[union + ARBITRARY_REFCON_OFFSET
+            ..union + ARBITRARY_REFCON_OFFSET + abi::ARBITRARY_REFCON_SIZE]
             .copy_from_slice(&0x0fed_cba9_8765_4321u64.to_le_bytes());
 
         materialize_default(&mut arbitrary, PARAM_ARBITRARY_DATA, 32, 20).unwrap();
@@ -4777,7 +4823,8 @@ mod tests {
     fn arbitrary_null_default_leaves_value_uninitialized() {
         let union = abi::PARAM_U_OFFSET;
         let mut arbitrary = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        arbitrary[union + ARBITRARY_VALUE_HANDLE_OFFSET..union + ARBITRARY_VALUE_HANDLE_OFFSET + 8]
+        arbitrary[union + ARBITRARY_VALUE_HANDLE_OFFSET
+            ..union + ARBITRARY_VALUE_HANDLE_OFFSET + abi::ARBITRARY_VALUE_SIZE]
             .copy_from_slice(&0x5555_5555_5555_5555u64.to_le_bytes());
         materialize_default(&mut arbitrary, PARAM_ARBITRARY_DATA, 32, 20).unwrap();
         assert_eq!(
@@ -5358,4 +5405,8 @@ fn resident_watch_configuration_validation() {
     assert_eq!(parse(&single).unwrap()[0].dereference_offset, Some(245760));
 }
 #[cfg(any(not(feature = "native-carrier"), not(target_os = "macos")))]
-include!("classic_ui.rs");
+#[path = "classic_ui.rs"]
+mod classic_ui;
+
+#[cfg(any(not(feature = "native-carrier"), not(target_os = "macos")))]
+pub use classic_ui::UiEvent;

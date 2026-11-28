@@ -62,6 +62,7 @@ const PROT_WRITE: c_int = 0x2;
 const PROT_EXEC: c_int = 0x4;
 const MAP_PRIVATE: c_int = 0x0002;
 const MAP_ANON: c_int = 0x1000;
+// Error codes and PF_ParamType discriminants are not emitted by aex-abi.
 const PF_INVALID_INDEX: u64 = 513;
 const PF_UNRECOGNIZED_PARAM_TYPE: u64 = 514;
 const PF_BAD_CALLBACK_PARAM: u64 = 516;
@@ -69,6 +70,38 @@ const PARAM_TYPE_COLOR: i32 = 5;
 #[cfg(test)]
 const PARAM_TYPE_POINT: i32 = 6;
 const HOST_EFFECT_REF: u64 = 1;
+const PIXEL_FLOAT_BYTES: i32 = abi::PF_PIXEL_FLOAT_SIZE as i32;
+const PIXEL16_BYTES: i32 = abi::PF_PIXEL16_SIZE as i32;
+const PIXEL8_BYTES: i32 = abi::PF_PIXEL_SIZE as i32;
+
+// Suite sizes absent from aex-abi. Tables contain Win64 function pointers.
+const HANDLE_SUITE_BYTES: usize = 48;
+const AEGP_MEMORY_SUITE_BYTES: usize = 64;
+const ITERATE8_SUITE_BYTES: usize = 5 * abi::POINTER_SIZE;
+const WORLD_SUITE_BYTES: usize = 24;
+// PF_CompositeMode and PF_MaskWorld fields are absent from aex-abi.
+const COMPOSITE_MODE_BYTES: usize = 12;
+const COMPOSITE_OPACITY_OFFSET: u64 = 8;
+const COMPOSITE_RGB_ONLY_OFFSET: u64 = 9;
+const COMPOSITE_OPACITY16_OFFSET: u64 = 10;
+const MASK_TRAILER_SIZE: u64 = 12;
+const MASK_OFFSET_X_OFFSET: usize = abi::PF_LAYER_DEF_SIZE;
+const MASK_OFFSET_Y_OFFSET: usize = abi::PF_LAYER_DEF_SIZE + 4;
+const MASK_FLAGS_OFFSET: usize = abi::PF_LAYER_DEF_SIZE + 8;
+// PF_LRect, PF_Point, PF_FixedPoint and PF_FloatPoint components are not emitted.
+const RECT_BYTES: usize = 16;
+const RECT_TOP_OFFSET: usize = 4;
+const RECT_RIGHT_OFFSET: usize = 8;
+const RECT_BOTTOM_OFFSET: usize = 12;
+const POINT_Y_OFFSET: u64 = 2;
+const FIXED_POINT_Y_OFFSET: u64 = 4;
+const FLOAT_POINT_Y_OFFSET: u64 = 8;
+// PF_CheckoutResult is absent from aex-abi (rectangles, PAR, then source size).
+const CHECKOUT_RESULT_BYTES: usize = 76;
+const CHECKOUT_MAX_RECT_OFFSET: usize = 16;
+const CHECKOUT_PIXEL_ASPECT_RATIO_OFFSET: usize = 32;
+const CHECKOUT_REF_WIDTH_OFFSET: usize = 44;
+const CHECKOUT_REF_HEIGHT_OFFSET: usize = 48;
 
 macro_rules! callback_address {
     ($callback:expr) => {
@@ -389,7 +422,7 @@ impl GuestEngine<'static> {
         };
         engine.install_imports(image)?;
         engine.seal_image(image)?;
-        let handle_suite = engine.allocate(48, 8)?;
+        let handle_suite = engine.allocate(HANDLE_SUITE_BYTES, 8)?;
         let callbacks = [
             callback_address!(new_handle),
             callback_address!(lock_handle),
@@ -399,15 +432,18 @@ impl GuestEngine<'static> {
             callback_address!(resize_handle),
         ];
         for (index, callback) in callbacks.into_iter().enumerate() {
-            engine.write_u64(handle_suite + (index * 8) as u64, callback)?;
+            engine.write_u64(handle_suite + (index * abi::POINTER_SIZE) as u64, callback)?;
         }
         engine.state.handle_suite = handle_suite;
-        let aegp_memory_suite = engine.allocate(64, 8)?;
+        let aegp_memory_suite = engine.allocate(AEGP_MEMORY_SUITE_BYTES, 8)?;
         for (index, callback) in native_aegp_memory_callbacks().into_iter().enumerate() {
-            engine.write_u64(aegp_memory_suite + (index * 8) as u64, callback)?;
+            engine.write_u64(
+                aegp_memory_suite + (index * abi::POINTER_SIZE) as u64,
+                callback,
+            )?;
         }
         engine.state.aegp_memory_suite = aegp_memory_suite;
-        let iterate8_suite = engine.allocate(5 * 8, 8)?;
+        let iterate8_suite = engine.allocate(ITERATE8_SUITE_BYTES, 8)?;
         for (slot, callback) in [
             callback_address!(iterate_world8),
             callback_address!(iterate_origin8),
@@ -418,27 +454,27 @@ impl GuestEngine<'static> {
         .into_iter()
         .enumerate()
         {
-            engine.write_u64(iterate8_suite + (slot * 8) as u64, callback)?;
+            engine.write_u64(iterate8_suite + (slot * abi::POINTER_SIZE) as u64, callback)?;
         }
         engine.state.iterate8_suite = iterate8_suite;
         engine.install_typed_iterate_suites()?;
-        let color_param_suite = engine.allocate(8, 8)?;
+        let color_param_suite = engine.allocate(abi::POINTER_SIZE, 8)?;
         engine.write_u64(color_param_suite, callback_address!(color_param_value))?;
         engine.state.color_param_suite = color_param_suite;
-        let point_param_suite = engine.allocate(8, 8)?;
+        let point_param_suite = engine.allocate(abi::POINTER_SIZE, 8)?;
         engine.write_u64(point_param_suite, callback_address!(point_param_value))?;
         engine.state.point_param_suite = point_param_suite;
-        let world_suite = engine.allocate(24, 8)?;
+        let world_suite = engine.allocate(WORLD_SUITE_BYTES, 8)?;
         for (slot, callback) in native_world_callbacks().into_iter().enumerate() {
-            engine.write_u64(world_suite + (slot * 8) as u64, callback)?;
+            engine.write_u64(world_suite + (slot * abi::POINTER_SIZE) as u64, callback)?;
         }
         engine.state.world_suite = world_suite;
         for version in [3u32, 7, 11, 13] {
             let callbacks =
                 native_utility_callbacks(version).expect("known AEGP Utility Suite version");
-            let table = engine.allocate(callbacks.len() * 8, 8)?;
+            let table = engine.allocate(callbacks.len() * abi::POINTER_SIZE, 8)?;
             for (slot, callback) in callbacks.into_iter().enumerate() {
-                engine.write_u64(table + (slot * 8) as u64, callback)?;
+                engine.write_u64(table + (slot * abi::POINTER_SIZE) as u64, callback)?;
             }
             engine.state.utility_suites.insert(version, table);
         }
@@ -606,7 +642,7 @@ impl GuestEngine<'static> {
             (false, callback_address!(iterate_world16)),
             (true, callback_address!(iterate_world_float)),
         ] {
-            let table = self.allocate(8, 8)?;
+            let table = self.allocate(abi::POINTER_SIZE, 8)?;
             self.write_u64(table, callback)?;
             if is_float {
                 self.state.iterate_float_suite = table;
@@ -1178,9 +1214,9 @@ fn native_world_pixel_format(state: &NativeState, world: u64) -> Option<i32> {
                 return None;
             }
             match rowbytes / width {
-                4 => Some(crate::pixel::PF_PIXEL_FORMAT_ARGB32),
-                8 => Some(crate::pixel::PF_PIXEL_FORMAT_ARGB64),
-                16 => Some(crate::pixel::PF_PIXEL_FORMAT_ARGB128),
+                PIXEL8_BYTES => Some(crate::pixel::PF_PIXEL_FORMAT_ARGB32),
+                PIXEL16_BYTES => Some(crate::pixel::PF_PIXEL_FORMAT_ARGB64),
+                PIXEL_FLOAT_BYTES => Some(crate::pixel::PF_PIXEL_FORMAT_ARGB128),
                 _ => None,
             }
         })
@@ -1375,7 +1411,10 @@ struct NativeMaskWorld8 {
 }
 
 fn native_world_typed(state: &NativeState, world: u64, pixel_bytes: usize) -> Option<NativeWorld8> {
-    if !matches!(pixel_bytes, 4 | 8 | 16) {
+    if !matches!(
+        pixel_bytes,
+        abi::PF_PIXEL_SIZE | abi::PF_PIXEL16_SIZE | abi::PF_PIXEL_FLOAT_SIZE
+    ) {
         return None;
     }
     let arena_base = state.arena_end.saturating_sub(ARENA_SIZE as u64);
@@ -1417,7 +1456,6 @@ fn native_world_typed(state: &NativeState, world: u64, pixel_bytes: usize) -> Op
 }
 
 fn native_mask_world8(state: &NativeState, world: u64) -> Option<NativeMaskWorld8> {
-    const MASK_TRAILER_SIZE: u64 = 12;
     if world == 0
         || !native_guest_range_valid(
             state,
@@ -1437,9 +1475,9 @@ fn native_mask_world8(state: &NativeState, world: u64) -> Option<NativeMaskWorld
     let rowbytes = usize::try_from(read_i32(abi::LAYER_ROWBYTES_OFFSET)).ok()?;
     let width = read_i32(abi::LAYER_WIDTH_OFFSET);
     let height = read_i32(abi::LAYER_HEIGHT_OFFSET);
-    let offset_x = read_i32(abi::PF_LAYER_DEF_SIZE);
-    let offset_y = read_i32(abi::PF_LAYER_DEF_SIZE + 4);
-    let flags = read_u32(abi::PF_LAYER_DEF_SIZE + 8);
+    let offset_x = read_i32(MASK_OFFSET_X_OFFSET);
+    let offset_y = read_i32(MASK_OFFSET_Y_OFFSET);
+    let flags = read_u32(MASK_FLAGS_OFFSET);
     if data == 0
         || width <= 0
         || height <= 0
@@ -1509,13 +1547,15 @@ unsafe extern "win64" fn transfer_rect8(
         return PF_BAD_CALLBACK_PARAM;
     }
     with_state(|state| {
-        if !native_guest_range_valid(state, composite_mode, 12) {
+        if !native_guest_range_valid(state, composite_mode, COMPOSITE_MODE_BYTES as u64) {
             return PF_BAD_CALLBACK_PARAM;
         }
         let transfer_mode = unsafe { ptr::read_unaligned(composite_mode as *const i32) };
-        let opacity = unsafe { *((composite_mode + 8) as *const u8) };
-        let rgb_only = unsafe { *((composite_mode + 9) as *const u8) };
-        let opacity16 = unsafe { ptr::read_unaligned((composite_mode + 10) as *const u16) };
+        let opacity = unsafe { *((composite_mode + COMPOSITE_OPACITY_OFFSET) as *const u8) };
+        let rgb_only = unsafe { *((composite_mode + COMPOSITE_RGB_ONLY_OFFSET) as *const u8) };
+        let opacity16 = unsafe {
+            ptr::read_unaligned((composite_mode + COMPOSITE_OPACITY16_OFFSET) as *const u16)
+        };
         if !(0..=2).contains(&transfer_mode) || rgb_only > 1 || opacity16 > 32768 {
             return PF_BAD_CALLBACK_PARAM;
         }
@@ -1537,15 +1577,15 @@ unsafe extern "win64" fn transfer_rect8(
         let bounds = if source_rect == 0 {
             [0, 0, source.width, source.height]
         } else {
-            if !native_guest_range_valid(state, source_rect, 16) {
+            if !native_guest_range_valid(state, source_rect, RECT_BYTES as u64) {
                 return PF_BAD_CALLBACK_PARAM;
             }
             unsafe {
                 [
                     ptr::read_unaligned(source_rect as *const i32),
-                    ptr::read_unaligned((source_rect + 4) as *const i32),
-                    ptr::read_unaligned((source_rect + 8) as *const i32),
-                    ptr::read_unaligned((source_rect + 12) as *const i32),
+                    ptr::read_unaligned((source_rect + RECT_TOP_OFFSET as u64) as *const i32),
+                    ptr::read_unaligned((source_rect + RECT_RIGHT_OFFSET as u64) as *const i32),
+                    ptr::read_unaligned((source_rect + RECT_BOTTOM_OFFSET as u64) as *const i32),
                 ]
             }
         };
@@ -1748,7 +1788,7 @@ unsafe extern "win64" fn iterate_world8(
             refcon,
             pixel_function,
             destination_world,
-            4,
+            abi::PF_PIXEL_SIZE,
         )
     }
 }
@@ -1773,7 +1813,7 @@ unsafe extern "win64" fn iterate_world16(
             refcon,
             pixel_function,
             destination_world,
-            8,
+            abi::PF_PIXEL16_SIZE,
         )
     }
 }
@@ -1798,7 +1838,7 @@ unsafe extern "win64" fn iterate_world_float(
             refcon,
             pixel_function,
             destination_world,
-            16,
+            abi::PF_PIXEL_FLOAT_SIZE,
         )
     }
 }
@@ -1933,7 +1973,7 @@ unsafe extern "win64" fn iterate_origin8(
     // fail-closed until the shared callback runner carries coordinate offsets.
     if origin != 0 {
         let origin_x = unsafe { ptr::read_unaligned(origin as *const i16) };
-        let origin_y = unsafe { ptr::read_unaligned((origin + 2) as *const i16) };
+        let origin_y = unsafe { ptr::read_unaligned((origin + POINT_Y_OFFSET) as *const i16) };
         if origin_x != 0 || origin_y != 0 {
             return 4;
         }
@@ -2008,9 +2048,12 @@ unsafe extern "win64" fn iterate_lut8(
         let tables = [alpha_lut, red_lut, green_lut, blue_lut];
         for y in top..bottom {
             for x in left..right {
-                let input = source.data + y as u64 * source.rowbytes as u64 + x as u64 * 4;
-                let output =
-                    destination.data + y as u64 * destination.rowbytes as u64 + x as u64 * 4;
+                let input = source.data
+                    + y as u64 * source.rowbytes as u64
+                    + x as u64 * abi::PF_PIXEL_SIZE as u64;
+                let output = destination.data
+                    + y as u64 * destination.rowbytes as u64
+                    + x as u64 * abi::PF_PIXEL_SIZE as u64;
                 for (channel, table) in tables.into_iter().enumerate() {
                     let value = unsafe { *((input + channel as u64) as *const u8) };
                     let mapped = if table == 0 {
@@ -2140,14 +2183,14 @@ unsafe extern "win64" fn pre_checkout_layer(
             ));
             return 4;
         };
-        if !native_guest_range_valid(state, result, 76) {
+        if !native_guest_range_valid(state, result, CHECKOUT_RESULT_BYTES as u64) {
             state.callback_error = Some("invalid pre-checkout result pointer".into());
             return 4;
         }
         let mut rectangle = [0, 0, width, height];
         let mut observed_request = rectangle;
         if request != 0 {
-            if !native_guest_range_valid(state, request, 16) {
+            if !native_guest_range_valid(state, request, RECT_BYTES as u64) {
                 state.callback_error = Some("invalid pre-checkout request pointer".into());
                 return 4;
             }
@@ -2171,20 +2214,20 @@ unsafe extern "win64" fn pre_checkout_layer(
             }
         }
         state.pre_checkout_requests.push(observed_request);
-        let mut bytes = [0u8; 76];
+        let mut bytes = [0u8; CHECKOUT_RESULT_BYTES];
         for (offset, value) in rectangle
             .into_iter()
             .enumerate()
             .map(|(index, value)| (index * 4, value))
             .chain([
-            (16, 0),
-            (20, 0),
-            (24, width),
-            (28, height),
-            (32, 1),
-            (36, 1),
-            (44, width),
-            (48, height),
+            (CHECKOUT_MAX_RECT_OFFSET, 0),
+            (CHECKOUT_MAX_RECT_OFFSET + RECT_TOP_OFFSET, 0),
+            (CHECKOUT_MAX_RECT_OFFSET + RECT_RIGHT_OFFSET, width),
+            (CHECKOUT_MAX_RECT_OFFSET + RECT_BOTTOM_OFFSET, height),
+            (CHECKOUT_PIXEL_ASPECT_RATIO_OFFSET, 1),
+            (CHECKOUT_PIXEL_ASPECT_RATIO_OFFSET + 4, 1),
+            (CHECKOUT_REF_WIDTH_OFFSET, width),
+            (CHECKOUT_REF_HEIGHT_OFFSET, height),
         ]) {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
@@ -2224,7 +2267,7 @@ unsafe extern "win64" fn checkout_layer_pixels(
         // check the world out to inspect its descriptor before doing no work.
         // Replaying a registered id is idempotent: it returns the same
         // host-owned world and one checkin closes the token lifetime.
-        if !native_guest_range_valid(state, output, 8) {
+        if !native_guest_range_valid(state, output, abi::POINTER_SIZE as u64) {
             state.callback_error = Some(format!(
                 "invalid checkout-layer-pixels index={} id={checkout_id}",
                 checkout.index
@@ -2572,22 +2615,27 @@ unsafe extern "win64" fn new_world(
         }
         let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
         let flags = crate::pixel::world_flags_for_pixel_bytes(pixel_bytes as usize);
-        definition[abi::LAYER_WORLD_FLAGS_OFFSET..abi::LAYER_WORLD_FLAGS_OFFSET + 4]
+        definition[abi::LAYER_WORLD_FLAGS_OFFSET
+            ..abi::LAYER_WORLD_FLAGS_OFFSET + abi::LAYER_WORLD_FLAGS_SIZE]
             .copy_from_slice(&flags.to_le_bytes());
-        definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+        definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + abi::LAYER_DATA_SIZE]
             .copy_from_slice(&(data as u64).to_le_bytes());
-        definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+        definition
+            [abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + abi::LAYER_ROWBYTES_SIZE]
             .copy_from_slice(&(rowbytes as i32).to_le_bytes());
-        definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+        definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + abi::LAYER_WIDTH_SIZE]
             .copy_from_slice(&width.to_le_bytes());
-        definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+        definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + abi::LAYER_HEIGHT_SIZE]
             .copy_from_slice(&height.to_le_bytes());
         for (index, value) in [0, 0, width, height].into_iter().enumerate() {
             let offset = abi::LAYER_EXTENT_HINT_OFFSET + index * 4;
             definition[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
-        definition[88..92].copy_from_slice(&1i32.to_le_bytes());
-        definition[92..96].copy_from_slice(&1u32.to_le_bytes());
+        definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4
+            ..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + abi::LAYER_PIX_ASPECT_RATIO_SIZE]
+            .copy_from_slice(&1u32.to_le_bytes());
         unsafe {
             ptr::copy_nonoverlapping(
                 definition.as_ptr(),
@@ -2665,14 +2713,16 @@ unsafe extern "win64" fn color_param_value(
         return PF_BAD_CALLBACK_PARAM;
     }
     with_state(|state| {
-        let disk_id = unsafe { ptr::read_unaligned(definition as *const i32) };
+        let disk_id = unsafe {
+            ptr::read_unaligned((definition + abi::PARAM_UU_OFFSET as u64) as *const i32)
+        };
         let param_type = unsafe {
             ptr::read_unaligned((definition + abi::PARAM_PARAM_TYPE_OFFSET as u64) as *const i32)
         };
         let Some(source) = state.params.iter().find(|parameter| {
             parameter
                 .bytes
-                .get(..4)
+                .get(abi::PARAM_UU_OFFSET..abi::PARAM_UU_OFFSET + abi::PARAM_UU_SIZE)
                 .and_then(|bytes| bytes.try_into().ok())
                 .map(i32::from_le_bytes)
                 == Some(disk_id)
@@ -2726,13 +2776,15 @@ unsafe extern "win64" fn point_param_value(
     let x = unsafe { ptr::read_unaligned((definition + abi::PARAM_U_OFFSET as u64) as *const i32) }
         as f64
         / 65536.0;
-    let y =
-        unsafe { ptr::read_unaligned((definition + abi::PARAM_U_OFFSET as u64 + 4) as *const i32) }
-            as f64
-            / 65536.0;
+    let y = unsafe {
+        ptr::read_unaligned(
+            (definition + abi::PARAM_U_OFFSET as u64 + FIXED_POINT_Y_OFFSET) as *const i32,
+        )
+    } as f64
+        / 65536.0;
     unsafe {
         ptr::write_unaligned(output as *mut f64, x);
-        ptr::write_unaligned((output + 8) as *mut f64, y);
+        ptr::write_unaligned((output + FLOAT_POINT_Y_OFFSET) as *mut f64, y);
     }
     0
 }
