@@ -1,7 +1,16 @@
+use super::callbacks::{allocate_crt_region, free_crt_region, read_crt_stdio_c_string};
+use super::files::{GUEST_STREAM_BUFFER_BASE, MAX_GUEST_STREAM_OPENS, finish_guest_stdio};
+use super::imports::{
+    CRT_ERRNO_BASE, LegacyWin64Import, guest_range_has_permission, read_win64_import_argument,
+    set_guest_crt_errno,
+};
+use super::types::{GuestState, WindowsInitOnceState};
+use super::{CRT_LOCALE_HANDLE_BASE, MAX_CRT_STRING_BYTES, PAGE_SIZE, Prot, RegisterX86, Unicorn};
+
 // Native MSVC _Lockit(int) ABI stores an int at this+0 and holds the
 // corresponding recursive runtime lock until destruction. Reference:
 // https://github.com/microsoft/STL/blob/main/stl/src/xlock.cpp
-fn emulate_msvcp_lockit(unicorn: &mut Unicorn<'_, GuestState>, destroy: bool) {
+pub(super) fn emulate_msvcp_lockit(unicorn: &mut Unicorn<'_, GuestState>, destroy: bool) {
     let result = (|| -> Result<(), String> {
         let object = read_win64_import_argument(unicorn, 0)?;
         let permission = if destroy { Prot::READ } else { Prot::WRITE };
@@ -86,7 +95,7 @@ fn emulate_msvcp_lockit(unicorn: &mut Unicorn<'_, GuestState>, destroy: bool) {
     }
 }
 
-fn emulate_msvcp_codecvt(unicorn: &mut Unicorn<'_, GuestState>, wide_to_narrow: bool) {
+pub(super) fn emulate_msvcp_codecvt(unicorn: &mut Unicorn<'_, GuestState>, wide_to_narrow: bool) {
     let result = (|| -> Result<u64, String> {
         let from = read_win64_import_argument(unicorn, 2)?;
         let from_end = read_win64_import_argument(unicorn, 3)?;
@@ -146,7 +155,7 @@ fn emulate_msvcp_codecvt(unicorn: &mut Unicorn<'_, GuestState>, wide_to_narrow: 
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_global_memory_status_ex(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_global_memory_status_ex(unicorn: &mut Unicorn<'_, GuestState>) {
     const STRUCT_BYTES: u64 = 64;
     const GIB: u64 = 1024 * 1024 * 1024;
     let result = (|| -> Result<u64, String> {
@@ -185,7 +194,10 @@ fn emulate_global_memory_status_ex(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_init_once(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_init_once(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
     const CHECK_ONLY: u32 = 1;
     const ASYNC: u32 = 2;
     const INIT_FAILED: u32 = 4;
@@ -297,7 +309,7 @@ fn emulate_init_once(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin
 // The CRT locale lock is recursive and shared with _Lockit(_LOCK_LOCALE=0).
 // See Microsoft STL xlock.cpp and yvals.h. Contention stays explicit until
 // blocking guest-thread scheduling is available for this internal CRT API.
-fn emulate_crt_locale_lock(unicorn: &mut Unicorn<'_, GuestState>, release: bool) {
+pub(super) fn emulate_crt_locale_lock(unicorn: &mut Unicorn<'_, GuestState>, release: bool) {
     let result = (|| -> Result<u64, String> {
         let thread = unicorn.get_data().current_windows_thread_id;
         let current = unicorn.get_data().msvcp_lockit_locks[0];
@@ -328,7 +340,7 @@ fn emulate_crt_locale_lock(unicorn: &mut Unicorn<'_, GuestState>, release: bool)
 // Microsoft setlocale/_wsetlocale: NULL queries the current category. All CRT
 // categories start in C. Non-C mutation must not silently leave ctype in C.
 // https://learn.microsoft.com/cpp/c-runtime-library/reference/setlocale-wsetlocale
-fn emulate_crt_setlocale(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
+pub(super) fn emulate_crt_setlocale(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
     let result = (|| -> Result<u64, String> {
         let category = read_win64_import_argument(unicorn, 0)? as i32;
         let locale = read_win64_import_argument(unicorn, 1)?;
@@ -376,7 +388,7 @@ fn emulate_crt_setlocale(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
 // UCRT ctype.h permits signed-char indexing down to -127. Reserve -128 too;
 // all negative entries (including EOF -1) and high bytes are unclassified in C.
 // Mask ABI: Microsoft WinSDK ucrt/corecrt_wctype.h; _BLANK excludes tab.
-fn emulate_crt_pctype(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_pctype(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         if let Some(address) = unicorn.get_data().crt_pctype_buffer {
             return Ok(address);
@@ -426,7 +438,7 @@ fn emulate_crt_pctype(unicorn: &mut Unicorn<'_, GuestState>) {
 // ___lc_locale_name_func returns wchar_t*[6], indexed by LC_ALL..LC_TIME.
 // UCRT nlsdata.cpp initializes all six Windows locale names to NULL for C;
 // these differ from the printable "C" strings returned by setlocale.
-fn emulate_crt_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         if let Some(address) = unicorn.get_data().crt_locale_names_buffer {
             return Ok(address);
@@ -473,14 +485,14 @@ fn crt_lconv_address(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, Strin
     Ok(address)
 }
 
-fn emulate_crt_localeconv(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_localeconv(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = crt_lconv_address(unicorn);
     finish_guest_stdio(unicorn, result);
 }
 
 // UCRT allocates these colon-delimited C-locale tables for the caller, which
 // releases them through the ordinary CRT heap.
-fn emulate_crt_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
+pub(super) fn emulate_crt_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
     const DAYS: &[u8] =
         b":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday\0";
     const MONTHS: &[u8] = b":Jan:January:Feb:February:Mar:March:Apr:April:May:May:Jun:June:Jul:July:Aug:August:Sep:September:Oct:October:Nov:November:Dec:December\0";
@@ -497,7 +509,7 @@ fn emulate_crt_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_wide_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
+pub(super) fn emulate_crt_wide_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
     const DAYS: &str =
         ":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday";
     const MONTHS: &str = ":Jan:January:Feb:February:Mar:March:Apr:April:May:May:Jun:June:Jul:July:Aug:August:Sep:September:Oct:October:Nov:November:Dec:December";
@@ -518,7 +530,7 @@ fn emulate_crt_wide_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bo
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_time_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_time_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
     const NAMES: [&str; 43] = [
         "Sun",
         "Mon",
@@ -605,11 +617,14 @@ fn emulate_crt_time_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
 // UCRT exposes both values as pointers to process-global integers. In the C
 // locale their code pages are zero; returning the integer itself breaks callers
 // that immediately dereference the ABI result.
-fn supported_crt_locale(unicorn: &Unicorn<'_, GuestState>, locale: u64) -> bool {
+pub(super) fn supported_crt_locale(unicorn: &Unicorn<'_, GuestState>, locale: u64) -> bool {
     locale == 0 || unicorn.get_data().crt_locales.contains(&locale)
 }
 
-fn emulate_crt_locale_object(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_crt_locale_object(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
     let result = (|| -> Result<u64, String> {
         if operation == LegacyWin64Import::CrtFreeLocale {
             let locale = read_win64_import_argument(unicorn, 0)?;

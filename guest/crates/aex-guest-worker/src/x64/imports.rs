@@ -1,12 +1,94 @@
+use super::acl::{GuestObjectSecurity, acl_read, emulate_windows_acl, read_guest_object_security};
+use super::callbacks::{
+    MAX_POPUP_CHOICE_PAGES, POPUP_CHOICES_BASE, allocate_crt_region, deterministic_i32_stub,
+    deterministic_import_i32, deterministic_u64_stub, emulate_crt_aligned_free,
+    emulate_crt_aligned_malloc, emulate_crt_atoi, emulate_crt_free, emulate_crt_malloc,
+    emulate_crt_memchr, emulate_crt_memcmp, emulate_crt_memory_copy, emulate_crt_realloc,
+    emulate_crt_strcat, emulate_crt_strchr, emulate_crt_strcmp, emulate_crt_strcpy,
+    emulate_crt_strdup, emulate_crt_strerror, emulate_crt_stricmp, emulate_crt_strlen,
+    emulate_crt_strncat, emulate_crt_strncmp, emulate_crt_strrchr, emulate_crt_strstr,
+    emulate_crt_strtod, emulate_crt_strtof, emulate_crt_strtol, emulate_crt_strtoul,
+    emulate_crt_wcstombs, emulate_fdclass, emulate_memset, emulate_message_box,
+    emulate_msvcp_mutex_destroy, emulate_msvcp_mutex_init, emulate_msvcp_mutex_lock,
+    emulate_msvcp_mutex_unlock, emulate_rt_dynamic_cast, emulate_stdio_common_vsnprintf_s,
+    emulate_stdio_common_vsprintf, emulate_stdio_common_vsprintf_s, emulate_stdio_common_vsscanf,
+    emulate_strncpy, emulate_vcomp_for_dynamic_init, emulate_vcomp_for_dynamic_next,
+    emulate_vcomp_for_static_simple_init, emulate_vcomp_fork, emulate_vcomp_set_num_threads,
+    emulate_vcruntime_exception_copy, emulate_vcruntime_exception_destroy,
+    emulate_windows_hook_api, emulate_windows_timer_api, ensure_crt_heap_mapping, free_crt_region,
+    install_atan2f_import, install_double_binary_import, install_double_import,
+    install_float_binary_import, install_float_import, install_floorf_import, install_fmodf_import,
+    install_log2f_import, install_lround_import, install_lroundf_import, install_roundf_import,
+    install_unsupported_import_trap, msvc_udt_by_value_return_import, read_bounded_crt_c_string,
+    read_crt_stdio_c_string, read_vcomp_u64,
+};
+use super::environment::{
+    GUEST_ENVIRONMENT_BORROWED_BYTES, emulate_crt_putenv, emulate_crt_putenv_s,
+    emulate_crt_wenviron, emulate_crt_wgetenv, guest_environment_block_w, guest_environment_value,
+    guest_getenv_buffer,
+};
+use super::files::{
+    create_guest_directory, emulate_acrt_iob_func, emulate_crt_descriptor,
+    emulate_crt_stream_position, emulate_fopen, emulate_fsopen, emulate_get_stream_buffer_pointers,
+    emulate_guest_file_search, emulate_guest_stdio, emulate_wfopen, emulate_wfsopen,
+    finish_guest_stdio, guest_file_attributes_ex, guest_file_name, guest_fullpath, guest_rename,
+    guest_stat64i32, guest_volume_information, open_guest_stream, set_guest_file_attributes_a,
+};
+use super::iterate_and_suites::{emulate_cxx_throw_exception, image_executable_address};
+use super::libraries::{guest_library_by_name, guest_module_from_address};
+use super::lockit::{
+    emulate_crt_locale_lock, emulate_crt_locale_names, emulate_crt_locale_object,
+    emulate_crt_localeconv, emulate_crt_pctype, emulate_crt_setlocale,
+    emulate_crt_time_locale_names, emulate_crt_time_names, emulate_crt_wide_time_names,
+    emulate_global_memory_status_ex, emulate_init_once, emulate_msvcp_codecvt,
+    emulate_msvcp_lockit,
+};
+use super::mutex::emulate_windows_kernel_object;
+use super::network::{guest_freeaddrinfo_local, guest_get_adapters_addresses, guest_inet_ntop};
+use super::network::{guest_get_adapters_info, guest_getaddrinfo_local};
+use super::opencl_imports::install_opencl_import_bridge;
+use super::printf::guest_wsprintf_a;
+use super::sid::emulate_windows_sid;
+use super::types::{
+    GuestState, PendingCrtInitterm, PendingFlsFree, PendingWindowsThread, SchedulerMainWait,
+    SchedulerYieldReason, WindowsFlsSlot, WindowsSrwLock, WindowsThread,
+};
+use super::windows_files::{finish_windows_file_api, guest_create_file, guest_windows_file_io};
+use super::{
+    AtomicOrdering, BTreeSet, CRT_HEAP_BASE, CRT_HEAP_END, CrtHeapError, ENVIRONMENT_STRINGS_BASE,
+    ENVIRONMENT_STRINGS_END, ENVIRONMENT_STRINGS_NAMESPACE_SIZE, ERROR_ACCESS_DENIED,
+    ERROR_ENVVAR_NOT_FOUND, ERROR_FILE_NOT_FOUND, ERROR_FILENAME_EXCED_RANGE,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_MOD_NOT_FOUND,
+    ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, ERROR_PROC_NOT_FOUND,
+    GuestError, HEAP_ALLOC_ALLOWED_FLAGS, HEAP_GENERATE_EXCEPTIONS, HEAP_NO_SERIALIZE,
+    HEAP_REALLOC_ALLOWED_FLAGS, HEAP_REALLOC_IN_PLACE_ONLY, HEAP_ZERO_MEMORY,
+    HOST_CREATE_THREAD_CONTINUE, HOST_CRT_INITTERM_CONTINUE, HOST_DYNAMIC_FLS_ALLOC,
+    HOST_ENVIRONMENT_VALUE, HOST_FLS_FREE_CONTINUE, HOST_INITIALIZE_CONDITION_VARIABLE,
+    HOST_SLEEP_CONDITION_VARIABLE_CS, HOST_WAKE_ALL_CONDITION_VARIABLE,
+    HOST_WAKE_CONDITION_VARIABLE, HRESULT_E_INVALIDARG, MAX_CRT_INITIALIZERS,
+    MAX_CRT_ONEXIT_TABLES, MAX_CRT_STRING_BYTES, MAX_PROCESS_PRNG_BYTES,
+    MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS, MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION,
+    MAX_WINDOWS_CONDITION_VARIABLES, MAX_WINDOWS_CRITICAL_SECTION_RECURSION,
+    MAX_WINDOWS_CRITICAL_SECTIONS, MAX_WINDOWS_ENVIRONMENT_NAME_BYTES, MAX_WINDOWS_FLS_SLOTS,
+    MAX_WINDOWS_MODULE_REFERENCES, MAX_WINDOWS_SRW_LOCKS, MAX_WINDOWS_SRW_WAITERS,
+    MAX_WINDOWS_THREADS, MAX_WINDOWS_TLS_SLOTS, MSVCP_EXCEPTION_PTR_BYTES,
+    NEXT_ENVIRONMENT_STRINGS_NAMESPACE, NEXT_PRIVATE_HEAP_TOKEN, PAGE_SIZE,
+    PRIVATE_HEAP_TOKEN_BASE, PROCESS_HEAP_HANDLE, Prot, RETURN_ADDRESS, RegisterX86, STACK_SIZE,
+    Unicorn, WINDOWS_CRITICAL_SECTION_BYTES, WINDOWS_KERNEL32_MODULE_TOKEN, WINDOWS_MAX_PATH_BYTES,
+    WINDOWS_NTDLL_MODULE_TOKEN, WINDOWS_STANDARD_ERROR_TOKEN, WINDOWS_STANDARD_INPUT_TOKEN,
+    WINDOWS_STANDARD_OUTPUT_TOKEN, WINDOWS_THREAD_HANDLE_BASE, WINDOWS_THREAD_STACK_BASE,
+    WINDOWS_THREAD_STACK_STRIDE, uc,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GpuImportLibrary {
+pub(super) enum GpuImportLibrary {
     OpenCl,
     Cuda,
     DirectX,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OpenClBridgeSymbol {
+pub(super) enum OpenClBridgeSymbol {
     CreateProgramWithSource,
     BuildProgram,
     CreateKernel,
@@ -17,7 +99,7 @@ enum OpenClBridgeSymbol {
 
 // The guest CRT remains in its initial C locale; locale mutation is unsupported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CrtAsciiClass {
+pub(super) enum CrtAsciiClass {
     Alpha,
     Digit,
     Graph,
@@ -29,7 +111,7 @@ enum CrtAsciiClass {
 }
 
 impl CrtAsciiClass {
-    fn contains(self, byte: u8) -> bool {
+    pub(super) fn contains(self, byte: u8) -> bool {
         match self {
             Self::Alpha => byte.is_ascii_alphabetic(),
             Self::Digit => byte.is_ascii_digit(),
@@ -44,7 +126,7 @@ impl CrtAsciiClass {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LegacyWin64Import {
+pub(super) enum LegacyWin64Import {
     Malloc,
     Realloc,
     Calloc,
@@ -382,7 +464,7 @@ enum LegacyWin64Import {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Win64ImportDispatch {
+pub(super) enum Win64ImportDispatch {
     LegacyImplemented(LegacyWin64Import),
     OpenClBridge(OpenClBridgeSymbol),
     UnsupportedGpuLibrary(GpuImportLibrary),
@@ -390,7 +472,7 @@ enum Win64ImportDispatch {
     UnsupportedVcomp,
 }
 
-const MAX_WIN64_IMPORT_ARGUMENTS: usize = 12;
+pub(super) const MAX_WIN64_IMPORT_ARGUMENTS: usize = 12;
 
 // Keep CUDA classification on explicit DLL names and versioned family stems.
 // A broad `cu*`/`nv*` rule would turn unrelated imports into GPU traps.
@@ -429,7 +511,7 @@ const VERSIONED_NPP_64_DLL_FAMILIES: &[&str] = &[
     "nppist", "nppisu", "nppitc", "npps",
 ];
 
-fn normalize_import_library_name(library: &str) -> String {
+pub(super) fn normalize_import_library_name(library: &str) -> String {
     library
         .trim()
         .rsplit(['/', '\\'])
@@ -541,7 +623,7 @@ fn opencl_bridge_symbol(symbol: &str) -> Option<OpenClBridgeSymbol> {
     }
 }
 
-fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
+pub(super) fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
     // GPU libraries take precedence over legacy symbol-only emulation. This
     // prevents, for example, opencl.dll!malloc from accidentally receiving the
     // CRT allocator solely because its export name happens to match.
@@ -1704,11 +1786,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
     Win64ImportDispatch::LegacyImplemented(legacy)
 }
 
-fn canonical_import_trace_label(library: &str, symbol: &str) -> String {
+pub(super) fn canonical_import_trace_label(library: &str, symbol: &str) -> String {
     format!("{}!{symbol}", normalize_import_library_name(library))
 }
 
-fn install_win64_import(
+pub(super) fn install_win64_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     stub: u64,
     library: &str,
@@ -4511,7 +4593,7 @@ fn emulate_crt_initterm(unicorn: &mut Unicorn<'_, GuestState>, stop_on_error: bo
     }
 }
 
-fn continue_crt_initterm(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn continue_crt_initterm(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| -> Result<(), String> {
         let rsp = unicorn
             .reg_read(RegisterX86::RSP)
@@ -4671,13 +4753,14 @@ fn read_windows_environment_name(
     ))
 }
 
-fn deterministic_guest_environment_value(name: &[u8]) -> Option<&'static [u8]> {
+pub(super) fn deterministic_guest_environment_value(name: &[u8]) -> Option<&'static [u8]> {
     deterministic_guest_environment_entries()
         .iter()
         .find_map(|(candidate, value)| name.eq_ignore_ascii_case(candidate).then_some(*value))
 }
 
-fn deterministic_guest_environment_entries() -> &'static [(&'static [u8], &'static [u8])] {
+pub(super) fn deterministic_guest_environment_entries() -> &'static [(&'static [u8], &'static [u8])]
+{
     // Keep this sorted case-insensitively, matching the ordering of a Windows
     // environment block and the allowlist used by GetEnvironmentVariableA/W.
     &[
@@ -4686,7 +4769,7 @@ fn deterministic_guest_environment_entries() -> &'static [(&'static [u8], &'stat
     ]
 }
 
-fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), String> {
+pub(super) fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), String> {
     if state.environment_strings_base == 0 {
         let namespace = NEXT_ENVIRONMENT_STRINGS_NAMESPACE
             .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |value| {
@@ -5760,7 +5843,7 @@ fn is_dependent_vowel_mark(character: char) -> bool {
         == IndicSyllabicCategory::VowelDependent
 }
 
-fn encode_shift_jis_with_default(input: &str, default: u8) -> (Vec<u8>, bool) {
+pub(super) fn encode_shift_jis_with_default(input: &str, default: u8) -> (Vec<u8>, bool) {
     let mut output = Vec::with_capacity(input.len());
     let mut used_default = false;
     for character in input.chars() {
@@ -5780,7 +5863,7 @@ fn encode_shift_jis_with_default(input: &str, default: u8) -> (Vec<u8>, bool) {
     (output, used_default)
 }
 
-fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let name_pointer = read_win64_import_argument(unicorn, 0)?;
         let buffer = read_win64_import_argument(unicorn, 1)?;
@@ -5825,7 +5908,7 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_get_environment_variable_w(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_environment_variable_w(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let name_pointer = read_win64_import_argument(unicorn, 0)?;
         let buffer = read_win64_import_argument(unicorn, 1)?;
@@ -5978,7 +6061,7 @@ fn emulate_format_message_a(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64
     Ok(written as u64)
 }
 
-fn emulate_set_thread_error_mode(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_set_thread_error_mode(unicorn: &mut Unicorn<'_, GuestState>) {
     const VALID_ERROR_MODE_FLAGS: u32 = 0x0000_8003;
     let result = (|| -> Result<bool, String> {
         let new_mode = read_win64_import_argument(unicorn, 0)? as u32;
@@ -6032,7 +6115,7 @@ fn retain_windows_module_reference(unicorn: &mut Unicorn<'_, GuestState>, module
     true
 }
 
-fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
     const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
     const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
     const LOAD_LIBRARY_SEARCH_FLAGS: u32 = 0x0000_1f00;
@@ -6127,7 +6210,7 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<Option<u64>, String> {
         let path_pointer = read_win64_import_argument(unicorn, 0)?;
         if path_pointer == 0 {
@@ -6273,7 +6356,7 @@ fn write_null_msvcp_exception_ptr(
         .map_err(|error| format!("MSVC exception_ptr {label} write failed: {error}"))
 }
 
-fn emulate_msvcp_exception_ptr(
+pub(super) fn emulate_msvcp_exception_ptr(
     unicorn: &mut Unicorn<'_, GuestState>,
     operation: LegacyWin64Import,
 ) {
@@ -7013,7 +7096,7 @@ fn emulate_load_library_w(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn install_windows_condition_variable_callbacks(
+pub(super) fn install_windows_condition_variable_callbacks(
     unicorn: &mut Unicorn<'static, GuestState>,
 ) -> Result<(), GuestError> {
     for address in [
@@ -7062,7 +7145,7 @@ fn install_windows_condition_variable_callbacks(
     Ok(())
 }
 
-fn install_dynamic_windows_import_callbacks(
+pub(super) fn install_dynamic_windows_import_callbacks(
     unicorn: &mut Unicorn<'static, GuestState>,
 ) -> Result<(), GuestError> {
     uc(
@@ -7229,7 +7312,7 @@ fn emulate_windows_condition_variable(unicorn: &mut Unicorn<'_, GuestState>, ope
     }
 }
 
-fn record_windows_address_waiter(
+pub(super) fn record_windows_address_waiter(
     state: &mut GuestState,
     address: u64,
     thread_id: u32,
@@ -7582,7 +7665,7 @@ fn emulate_windows_condition_variable_srw(
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
     // Use the current wall clock. A fixed historical date would invalidate
     // observations of expiration, licensing, and other time-dependent logic.
     let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
@@ -7604,7 +7687,7 @@ fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_get_system_info(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_system_info(unicorn: &mut Unicorn<'_, GuestState>) {
     const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
     const PROCESSOR_AMD_X8664: u32 = 8664;
     const WINDOWS_MAXIMUM_APPLICATION_ADDRESS: u64 = 0x0000_7fff_fffe_ffff;
@@ -7631,7 +7714,7 @@ fn emulate_get_system_info(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
     const STARTUP_INFO_W_SIZE: usize = 104;
     let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
         if output == 0 {
@@ -7679,7 +7762,7 @@ fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_rtl_capture_context(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_rtl_capture_context(unicorn: &mut Unicorn<'_, GuestState>) {
     const CONTEXT_SIZE: usize = 0x4d0;
     const CONTEXT_AMD64_FULL_WITH_SEGMENTS: u32 = 0x0010_000f;
     const INTEGER_REGISTERS: [(RegisterX86, usize); 16] = [
@@ -7876,7 +7959,7 @@ fn emulate_rtl_capture_context(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_get_cp_info(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_cp_info(unicorn: &mut Unicorn<'_, GuestState>) {
     const CP_ACP: u32 = 0;
     const CP_SHIFT_JIS: u32 = 932;
     const CP_INFO_SIZE: usize = 20;
@@ -7940,7 +8023,7 @@ fn emulate_get_cp_info(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_get_std_handle(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_std_handle(unicorn: &mut Unicorn<'_, GuestState>) {
     const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
     const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
     const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
@@ -7958,7 +8041,7 @@ fn emulate_get_std_handle(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, returned);
 }
 
-fn emulate_get_console_mode(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_console_mode(unicorn: &mut Unicorn<'_, GuestState>) {
     let _handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
     let _mode_output = read_win64_import_argument(unicorn, 1).unwrap_or_default();
     // The synthetic standard streams intentionally model redirected endpoints,
@@ -7969,7 +8052,7 @@ fn emulate_get_console_mode(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
-fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
     const FILE_TYPE_UNKNOWN: u64 = 0;
     const FILE_TYPE_CHAR: u64 = 2;
     const FILE_TYPE_PIPE: u64 = 3;
@@ -8315,14 +8398,14 @@ fn read_strncpy_s_source(
     Ok(bytes)
 }
 
-fn trim_leading_crt_mode_spaces(mut value: &[u8]) -> &[u8] {
+pub(super) fn trim_leading_crt_mode_spaces(mut value: &[u8]) -> &[u8] {
     while let Some(rest) = value.strip_prefix(b" ") {
         value = rest;
     }
     value
 }
 
-fn valid_fopen_mode(mode: &[u8]) -> bool {
+pub(super) fn valid_fopen_mode(mode: &[u8]) -> bool {
     let mode = trim_leading_crt_mode_spaces(mode);
     let Some((&first, suffix)) = mode.split_first() else {
         return false;
@@ -8407,7 +8490,7 @@ fn valid_fopen_mode(mode: &[u8]) -> bool {
     encoding[encoding_length..].iter().all(|byte| *byte == b' ')
 }
 
-fn guest_range_has_permission(
+pub(super) fn guest_range_has_permission(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
     length: u64,
@@ -8558,12 +8641,12 @@ fn emulate_nt_write_file(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(status));
 }
 
-fn emulate_create_file_w(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_create_file_w(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = guest_create_file(unicorn, true);
     finish_windows_file_api(unicorn, result);
 }
 
-fn emulate_find_first_file_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_find_first_file_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
     const INVALID_HANDLE_VALUE: u64 = u64::MAX;
     const MAX_PATH_UNITS: usize = 32_767;
     const WIN32_FIND_DATA_W_SIZE: u64 = 592;
@@ -8657,7 +8740,7 @@ fn emulate_find_first_file_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_get_command_line_a(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_command_line_a(unicorn: &mut Unicorn<'_, GuestState>) {
     let pointer = unicorn.get_data().windows_command_line_a;
     if pointer == 0 {
         if unicorn.get_data().callback_error.is_none() {
@@ -8671,7 +8754,7 @@ fn emulate_get_command_line_a(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
 }
 
-fn emulate_get_command_line_w(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_command_line_w(unicorn: &mut Unicorn<'_, GuestState>) {
     let pointer = unicorn.get_data().windows_command_line_w;
     if pointer == 0 {
         if unicorn.get_data().callback_error.is_none() {
@@ -8685,7 +8768,7 @@ fn emulate_get_command_line_w(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
 }
 
-fn emulate_process_prng(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_process_prng(unicorn: &mut Unicorn<'_, GuestState>) {
     // ProcessPrng fills a guest buffer with process-scoped random bytes.
     // Use a deterministic process-local stream so calls receive distinct bytes
     // while render results remain reproducible across hosts.
@@ -8874,7 +8957,7 @@ fn emulate_process_heap(unicorn: &mut Unicorn<'_, GuestState>, operation: Legacy
     }
 }
 
-fn allocate_process_heap_region(
+pub(super) fn allocate_process_heap_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     handle: u64,
     size: u64,
@@ -8906,7 +8989,7 @@ fn allocate_process_heap_region(
     Ok(pointer)
 }
 
-fn free_process_heap_region(
+pub(super) fn free_process_heap_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     handle: u64,
     pointer: u64,
@@ -9142,7 +9225,10 @@ fn fail_windows_thread_callback(unicorn: &mut Unicorn<'_, GuestState>, error: St
     let _ = unicorn.emu_stop();
 }
 
-fn restore_windows_thread_context(state: &mut GuestState, pending: &PendingWindowsThread) {
+pub(super) fn restore_windows_thread_context(
+    state: &mut GuestState,
+    pending: &PendingWindowsThread,
+) {
     for (index, value) in &pending.caller_tls_values {
         if let Some(slot) = state.windows_tls_slots.get_mut(index) {
             *slot = *value;
@@ -9166,7 +9252,7 @@ fn restore_windows_thread_context(state: &mut GuestState, pending: &PendingWindo
     state.current_windows_thread_id = pending.caller_thread_id;
 }
 
-fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| -> Result<(), String> {
         let rsp = unicorn
             .reg_read(RegisterX86::RSP)
@@ -9435,7 +9521,7 @@ fn emulate_switch_to_thread(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
     const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
     const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
@@ -9843,7 +9929,7 @@ fn emulate_windows_thread_lifecycle(
     let _ = unicorn.reg_write(RegisterX86::RAX, returned);
 }
 
-fn emulate_query_performance_counter(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_query_performance_counter(unicorn: &mut Unicorn<'_, GuestState>) {
     let origin = *unicorn
         .get_data_mut()
         .performance_counter_origin
@@ -9859,7 +9945,7 @@ fn emulate_query_performance_counter(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_query_performance_frequency(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_query_performance_frequency(unicorn: &mut Unicorn<'_, GuestState>) {
     // Monotonic host elapsed time is expressed in 100 ns ticks. Its epoch is
     // private to the guest engine and independent of wall-clock corrections.
     emulate_query_performance_value(unicorn, "QueryPerformanceFrequency", 10_000_000);
@@ -9899,7 +9985,7 @@ fn set_fls_error(unicorn: &mut Unicorn<'_, GuestState>, error: String, returned:
     let _ = unicorn.reg_write(RegisterX86::RAX, returned);
 }
 
-fn emulate_tls(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_tls(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     const TLS_OUT_OF_INDEXES: u64 = u32::MAX as u64;
     const ERROR_SUCCESS: u32 = 0;
     const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
@@ -9959,7 +10045,7 @@ fn fls_index_argument(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u32, Stri
     Ok(read_win64_import_argument(unicorn, 0)? as u32)
 }
 
-fn emulate_fls(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_fls(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
         match operation {
             LegacyWin64Import::FlsAlloc => {
@@ -10100,7 +10186,7 @@ fn emulate_fls_free(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn continue_fls_free(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn continue_fls_free(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| -> Result<(), String> {
         let rsp = unicorn
             .reg_read(RegisterX86::RSP)
@@ -10123,7 +10209,7 @@ fn continue_fls_free(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     }
 }
 
-fn emulate_initialize_slist_head(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_initialize_slist_head(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
         if output == 0 {
             return Err("InitializeSListHead output pointer is null".to_string());
@@ -10139,11 +10225,11 @@ fn emulate_initialize_slist_head(unicorn: &mut Unicorn<'_, GuestState>) {
 
 const WINDOWS_WSADATA_X64_SIZE: u64 = 408;
 const WINDOWS_WSA_VERSION_2_2: u16 = 0x0202;
-const WINDOWS_WSAEFAULT: u32 = 10_014;
-const WINDOWS_WSAEPROCLIM: u32 = 10_067;
-const WINDOWS_WSAVERNOTSUPPORTED: u32 = 10_092;
-const WINDOWS_WSANOTINITIALISED: u32 = 10_093;
-const MAX_WINDOWS_SOCKET_STARTUPS: u32 = 1_024;
+pub(super) const WINDOWS_WSAEFAULT: u32 = 10_014;
+pub(super) const WINDOWS_WSAEPROCLIM: u32 = 10_067;
+pub(super) const WINDOWS_WSAVERNOTSUPPORTED: u32 = 10_092;
+pub(super) const WINDOWS_WSANOTINITIALISED: u32 = 10_093;
+pub(super) const MAX_WINDOWS_SOCKET_STARTUPS: u32 = 1_024;
 
 fn emulate_wsa_startup(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u32, String> {
@@ -10219,7 +10305,7 @@ fn emulate_rtl_pc_to_file_header(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, module);
 }
 
-fn emulate_raise_exception(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_raise_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     const EXCEPTION_NONCONTINUABLE: u32 = 0x1;
     const EXCEPTION_MAXIMUM_PARAMETERS: u32 = 15;
     let result = (|| -> Result<String, String> {
@@ -10271,7 +10357,7 @@ fn emulate_raise_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.emu_stop();
 }
 
-fn read_win64_import_argument(
+pub(super) fn read_win64_import_argument(
     unicorn: &Unicorn<'_, GuestState>,
     index: usize,
 ) -> Result<u64, String> {
@@ -10478,7 +10564,7 @@ fn emulate_set_security_descriptor_dacl(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn windows_filetime(time: std::time::SystemTime) -> Result<u64, String> {
+pub(super) fn windows_filetime(time: std::time::SystemTime) -> Result<u64, String> {
     const UNIX_EPOCH_FILETIME: u128 = 116_444_736_000_000_000;
     let ticks = match time.duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => UNIX_EPOCH_FILETIME.checked_add(duration.as_nanos() / 100),
@@ -10489,7 +10575,7 @@ fn windows_filetime(time: std::time::SystemTime) -> Result<u64, String> {
 }
 
 // UCRT __time64_t supports UTC dates from 1970 through the end of 3000.
-fn crt_time64_seconds(time: std::time::SystemTime) -> i64 {
+pub(super) fn crt_time64_seconds(time: std::time::SystemTime) -> i64 {
     time.duration_since(std::time::UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_secs())
@@ -11110,7 +11196,10 @@ const WINDOWS_HOSTENT_BASE: u64 = 0xa00000000;
 const WINDOWS_HOSTENT_SLOT_SIZE: u64 = 65536;
 const MAX_WINDOWS_HOSTENT_SLOTS: u64 = 1024;
 
-fn release_guest_hostent(unicorn: &mut Unicorn<'_, GuestState>, thread: u32) -> Result<(), String> {
+pub(super) fn release_guest_hostent(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    thread: u32,
+) -> Result<(), String> {
     if let Some(address) = unicorn
         .get_data()
         .windows_hostent_buffers
@@ -11128,7 +11217,7 @@ fn release_guest_hostent(unicorn: &mut Unicorn<'_, GuestState>, thread: u32) -> 
     Ok(())
 }
 
-fn serialize_guest_hostent(
+pub(super) fn serialize_guest_hostent(
     host: &aex_host_identity::resolver::Ipv4Host,
     base: u64,
 ) -> Result<Vec<u8>, String> {
@@ -11185,7 +11274,7 @@ fn serialize_guest_hostent(
     Ok(bytes)
 }
 
-fn store_guest_hostent(
+pub(super) fn store_guest_hostent(
     unicorn: &mut Unicorn<'_, GuestState>,
     host: &aex_host_identity::resolver::Ipv4Host,
 ) -> Result<u64, String> {
@@ -11268,10 +11357,10 @@ fn guest_gethostbyname(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, Str
     }
 }
 
-const CRT_ERRNO_BASE: u64 = 0xb00000000;
+pub(super) const CRT_ERRNO_BASE: u64 = 0xb00000000;
 const MAX_CRT_ERRNO_SLOTS: u64 = 4096;
 
-fn get_guest_crt_errno(unicorn: &Unicorn<'_, GuestState>) -> Result<u32, String> {
+pub(super) fn get_guest_crt_errno(unicorn: &Unicorn<'_, GuestState>) -> Result<u32, String> {
     let state = unicorn.get_data();
     if let Some(address) = state
         .crt_errno_buffers
@@ -11290,7 +11379,10 @@ fn get_guest_crt_errno(unicorn: &Unicorn<'_, GuestState>) -> Result<u32, String>
     }
 }
 
-fn set_guest_crt_errno(unicorn: &mut Unicorn<'_, GuestState>, value: u32) -> Result<(), String> {
+pub(super) fn set_guest_crt_errno(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    value: u32,
+) -> Result<(), String> {
     let state = unicorn.get_data();
     if let Some(address) = state
         .crt_errno_buffers
@@ -11928,7 +12020,7 @@ fn describe_unavailable_shell_execute(
     ))
 }
 
-fn format_crt_ctime(fields: [i32; 9]) -> Result<String, String> {
+pub(super) fn format_crt_ctime(fields: [i32; 9]) -> Result<String, String> {
     let [second, minute, hour, day, month, year, weekday, _, _] = fields;
     let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     let months = [

@@ -1,4 +1,35 @@
-fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
+use super::files::{
+    GUEST_STREAM_BUFFER_BASE, MAX_GUEST_STREAM_OPENS, finish_guest_stdio,
+    read_guest_wide_file_string,
+};
+use super::imports::{
+    LegacyWin64Import, guest_range_has_permission, read_win64_import_argument, set_guest_crt_errno,
+};
+use super::iterate_and_suites::{
+    aegp_stack_arg, read_guest_i32, read_guest_u64, world_pixel_bytes,
+};
+use super::libraries::guest_module_from_address;
+use super::lockit::supported_crt_locale;
+use super::printf::format_guest_stdio;
+use super::tail::finish_callback;
+use super::types::{
+    CustomUiRegistration, GuestParam, GuestState, MsvcpMutex, SmartCheckout, VcompDynamicLoop,
+    VcruntimeExceptionData, record_smart_checkout_disk_id_fallback, resolve_layer_parameter_offset,
+};
+use super::{
+    CALLBACK_REJECTED, CRT_HEAP_BASE, CRT_HEAP_END, CRT_MEMORY_COPY_CHUNK, CrtHeap, CrtHeapError,
+    DATA_SIZE, ENVIRONMENT_STRINGS_NAMESPACE_SIZE, GUEST_FLOORF, GUEST_FLOORF_CODE, GUEST_ROUNDF,
+    GUEST_ROUNDF_CODE, GuestError, HOST_COPY, MAX_CRT_HEAP_BYTES, MAX_CRT_MEMORY_COPY_BYTES,
+    MAX_CRT_STDIO_BUFFER_BYTES, MAX_CRT_STDIO_FORMAT_BYTES, MAX_CRT_STRING_BYTES,
+    MAX_MSVCP_MUTEX_RECURSION, MAX_MSVCP_MUTEXES, MAX_SMART_CHECKOUT_IDS,
+    MAX_VCOMP_REQUESTED_THREADS, MAX_WINDOWS_HOOKS, MAX_WORLD_DIMENSION, MAX_WORLD_SIZE,
+    MSVCP_MUTEX_BYTES, MSVCP_MUTEX_RECURSIVE, MSVCP_MUTEX_TRY, MSVCP_THRD_BUSY,
+    OBSERVED_MSVCP_MUTEX_TYPE, PAGE_SIZE, Prot, RETURN_ADDRESS, RegisterX86, RegistrationPointers,
+    Unicorn, VCRUNTIME_EXCEPTION_DATA_BYTES, WINDOWS_HOOK_HANDLE_BASE, abi, decode_registration,
+    uc,
+};
+
+pub(super) fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let index = unicorn
             .reg_read(RegisterX86::RDX)
@@ -44,7 +75,7 @@ fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_register_ui(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_register_ui(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let registration = (|| -> Result<Option<CustomUiRegistration>, String> {
         let effect_ref = unicorn
             .reg_read(RegisterX86::RCX)
@@ -116,7 +147,7 @@ fn emulate_register_ui(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     }
 }
 
-fn capture_plugin_data_registration(
+pub(super) fn capture_plugin_data_registration(
     unicorn: &mut Unicorn<'_, GuestState>,
     includes_support_url: bool,
 ) {
@@ -201,7 +232,10 @@ fn read_vcomp_register(
         .map_err(|error| format!("VCOMP register read failed: {error}"))
 }
 
-fn read_vcomp_u64(unicorn: &Unicorn<'_, GuestState>, address: u64) -> Result<u64, String> {
+pub(super) fn read_vcomp_u64(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+) -> Result<u64, String> {
     let bytes = unicorn
         .mem_read_as_vec(address, 8)
         .map_err(|error| format!("VCOMP memory read at {address:#x} failed: {error}"))?;
@@ -223,7 +257,7 @@ fn write_vcomp_i32(
         .map_err(|error| format!("VCOMP memory write at {address:#x} failed: {error}"))
 }
 
-fn emulate_vcomp_set_num_threads(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_vcomp_set_num_threads(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), String> {
         let requested = read_vcomp_register(unicorn, RegisterX86::RCX)? as u32 as i32;
         if !(1..=MAX_VCOMP_REQUESTED_THREADS).contains(&requested) {
@@ -242,7 +276,7 @@ fn emulate_vcomp_set_num_threads(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
-fn emulate_vcomp_fork(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_vcomp_fork(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), String> {
         let worker_count = read_vcomp_register(unicorn, RegisterX86::RCX)?;
         if worker_count != 1 {
@@ -311,7 +345,7 @@ fn emulate_vcomp_fork(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_vcomp_for_dynamic_init(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_vcomp_for_dynamic_init(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), String> {
         let schedule = read_vcomp_register(unicorn, RegisterX86::RCX)?;
         let lower = read_vcomp_register(unicorn, RegisterX86::RDX)? as u32 as i32;
@@ -347,7 +381,7 @@ fn emulate_vcomp_for_dynamic_init(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_vcomp_for_dynamic_next(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_vcomp_for_dynamic_next(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), String> {
         let lower_output = read_vcomp_register(unicorn, RegisterX86::RCX)?;
         let upper_output = read_vcomp_register(unicorn, RegisterX86::RDX)?;
@@ -387,7 +421,7 @@ fn emulate_vcomp_for_dynamic_next(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_vcomp_for_static_simple_init(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_vcomp_for_static_simple_init(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), String> {
         let lower = read_vcomp_register(unicorn, RegisterX86::RCX)? as u32 as i32;
         let upper = read_vcomp_register(unicorn, RegisterX86::RDX)? as u32 as i32;
@@ -410,7 +444,7 @@ fn emulate_vcomp_for_static_simple_init(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn install_float_import(
+pub(super) fn install_float_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
     name: &'static str,
@@ -435,7 +469,7 @@ fn install_float_import(
     .map(|_| ())
 }
 
-fn install_log2f_import(
+pub(super) fn install_log2f_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
 ) -> Result<(), GuestError> {
@@ -459,7 +493,7 @@ fn install_log2f_import(
     .map(|_| ())
 }
 
-fn install_roundf_import(
+pub(super) fn install_roundf_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
 ) -> Result<(), GuestError> {
@@ -481,7 +515,7 @@ fn install_roundf_import(
     Ok(())
 }
 
-fn install_floorf_import(
+pub(super) fn install_floorf_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
 ) -> Result<(), GuestError> {
@@ -503,7 +537,7 @@ fn install_floorf_import(
     Ok(())
 }
 
-fn deterministic_import_i32(name: &str) -> Option<i32> {
+pub(super) fn deterministic_import_i32(name: &str) -> Option<i32> {
     match name {
         // The emulator is deliberately single-threaded. Returning one keeps
         // OpenMP-aware kernels deterministic while preserving the API's
@@ -513,12 +547,12 @@ fn deterministic_import_i32(name: &str) -> Option<i32> {
     }
 }
 
-fn deterministic_i32_stub(value: i32) -> [u8; 6] {
+pub(super) fn deterministic_i32_stub(value: i32) -> [u8; 6] {
     let bytes = value.to_le_bytes();
     [0xb8, bytes[0], bytes[1], bytes[2], bytes[3], 0xc3]
 }
 
-fn deterministic_u64_stub(value: u64) -> [u8; 11] {
+pub(super) fn deterministic_u64_stub(value: u64) -> [u8; 11] {
     let bytes = value.to_le_bytes();
     [
         0x48, 0xb8, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -526,7 +560,7 @@ fn deterministic_u64_stub(value: u64) -> [u8; 11] {
     ]
 }
 
-pub(super) fn msvc_udt_by_value_return_import(symbol: &str) -> bool {
+pub(crate) fn msvc_udt_by_value_return_import(symbol: &str) -> bool {
     // These MSVC decorations identify a class/struct returned by value. Win64
     // passes hidden return storage for nontrivial objects, so the scalar-zero
     // fallback cannot initialize the result and must not let execution continue.
@@ -555,7 +589,7 @@ pub(super) fn msvc_udt_by_value_return_import(symbol: &str) -> bool {
     false
 }
 
-fn install_unsupported_import_trap(
+pub(super) fn install_unsupported_import_trap(
     unicorn: &mut Unicorn<'_, GuestState>,
     stub: u64,
     library: String,
@@ -573,7 +607,7 @@ fn install_unsupported_import_trap(
     Ok(())
 }
 
-fn install_float_binary_import(
+pub(super) fn install_float_binary_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
     name: &'static str,
@@ -601,7 +635,7 @@ fn install_float_binary_import(
     .map(|_| ())
 }
 
-fn install_atan2f_import(
+pub(super) fn install_atan2f_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
 ) -> Result<(), GuestError> {
@@ -691,7 +725,7 @@ fn deterministic_fmodf(left: f32, right: f32) -> f32 {
     f32::from_bits((left_bits & SIGN) | magnitude)
 }
 
-fn install_fmodf_import(
+pub(super) fn install_fmodf_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
 ) -> Result<(), GuestError> {
@@ -732,7 +766,7 @@ fn normalized_f32_significand(bits: u32) -> (u32, i32) {
     }
 }
 
-fn install_double_import(
+pub(super) fn install_double_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
     name: &'static str,
@@ -758,7 +792,7 @@ fn install_double_import(
     .map(|_| ())
 }
 
-fn emulate_fdclass(unicorn: &mut Unicorn<'_, GuestState>, float: bool) {
+pub(super) fn emulate_fdclass(unicorn: &mut Unicorn<'_, GuestState>, float: bool) {
     let result = (|| -> Result<u64, String> {
         let xmm = unicorn
             .reg_read_long(RegisterX86::XMM0)
@@ -806,7 +840,7 @@ fn windows_lround(value: f64) -> i32 {
     }
 }
 
-fn install_lround_import(
+pub(super) fn install_lround_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
 ) -> Result<(), GuestError> {
@@ -845,7 +879,7 @@ fn windows_lroundf(value: f32) -> i32 {
     }
 }
 
-fn install_lroundf_import(
+pub(super) fn install_lroundf_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
 ) -> Result<(), GuestError> {
@@ -870,7 +904,7 @@ fn install_lroundf_import(
     .map(|_| ())
 }
 
-fn install_double_binary_import(
+pub(super) fn install_double_binary_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
     name: &'static str,
@@ -898,7 +932,7 @@ fn install_double_binary_import(
     .map(|_| ())
 }
 
-fn emulate_crt_malloc(unicorn: &mut Unicorn<'_, GuestState>, calloc: bool) {
+pub(super) fn emulate_crt_malloc(unicorn: &mut Unicorn<'_, GuestState>, calloc: bool) {
     let requested_size = if calloc {
         let count = unicorn.reg_read(RegisterX86::RCX);
         let element_size = unicorn.reg_read(RegisterX86::RDX);
@@ -925,7 +959,7 @@ fn emulate_crt_malloc(unicorn: &mut Unicorn<'_, GuestState>, calloc: bool) {
     let _ = unicorn.reg_write(RegisterX86::RAX, pointer.unwrap_or(0));
 }
 
-fn read_bounded_crt_c_string(
+pub(super) fn read_bounded_crt_c_string(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
     limit: u64,
@@ -951,7 +985,7 @@ fn read_bounded_crt_c_string(
     Err(format!("{label} source exceeds {limit} bytes"))
 }
 
-fn duplicate_crt_string(
+pub(super) fn duplicate_crt_string(
     unicorn: &mut Unicorn<'_, GuestState>,
     source: u64,
     limit: u64,
@@ -969,7 +1003,7 @@ fn duplicate_crt_string(
     Ok(pointer)
 }
 
-fn emulate_crt_strdup(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strdup(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = unicorn
             .reg_read(RegisterX86::RCX)
@@ -992,7 +1026,7 @@ fn emulate_crt_strdup(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn allocate_crt_region(
+pub(super) fn allocate_crt_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     size: u64,
 ) -> Result<u64, CrtHeapError> {
@@ -1016,7 +1050,9 @@ fn allocate_crt_region(
     result
 }
 
-fn ensure_crt_heap_mapping(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), CrtHeapError> {
+pub(super) fn ensure_crt_heap_mapping(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), CrtHeapError> {
     if !unicorn.get_data().crt_heap_mapped {
         unicorn
             .mem_map(CRT_HEAP_BASE, MAX_CRT_HEAP_BYTES, Prot::READ | Prot::WRITE)
@@ -1026,7 +1062,7 @@ fn ensure_crt_heap_mapping(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
     Ok(())
 }
 
-fn allocate_aligned_crt_region(
+pub(super) fn allocate_aligned_crt_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     size: u64,
     alignment: u64,
@@ -1052,7 +1088,10 @@ fn allocate_aligned_crt_region(
     Ok(pointer)
 }
 
-fn free_crt_region(unicorn: &mut Unicorn<'_, GuestState>, pointer: u64) -> Result<(), String> {
+pub(super) fn free_crt_region(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    pointer: u64,
+) -> Result<(), String> {
     unicorn
         .get_data_mut()
         .crt_heap
@@ -1073,7 +1112,7 @@ fn free_aligned_crt_region(
     Ok(())
 }
 
-fn emulate_crt_aligned_malloc(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_aligned_malloc(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, CrtHeapError> {
         let size = unicorn
             .reg_read(RegisterX86::RCX)
@@ -1088,7 +1127,7 @@ fn emulate_crt_aligned_malloc(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, result.unwrap_or(0));
 }
 
-fn emulate_crt_aligned_free(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_aligned_free(unicorn: &mut Unicorn<'_, GuestState>) {
     let pointer = match unicorn.reg_read(RegisterX86::RCX) {
         Ok(pointer) => pointer,
         Err(error) => {
@@ -1109,7 +1148,7 @@ fn emulate_crt_aligned_free(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
-fn emulate_extended_alloc(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_extended_alloc(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let (output, size) = match (
         unicorn.reg_read(RegisterX86::RCX),
         unicorn.reg_read(RegisterX86::RDX),
@@ -1144,7 +1183,7 @@ fn emulate_extended_alloc(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
-fn emulate_extended_free(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_extended_free(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let pointer_address = unicorn
             .reg_read(RegisterX86::RCX)
@@ -1165,7 +1204,7 @@ fn emulate_extended_free(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     finish_callback(unicorn, result);
 }
 
-fn emulate_extended_lookup(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_extended_lookup(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let id = match unicorn.reg_read(RegisterX86::RDX) {
         Ok(id) => id as i32,
         Err(error) => {
@@ -1189,7 +1228,7 @@ fn emulate_extended_lookup(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
     let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
 }
 
-fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
     let pointer = match unicorn.reg_read(RegisterX86::RCX) {
         Ok(pointer) => pointer,
         Err(error) => {
@@ -1209,7 +1248,10 @@ fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
-fn emulate_windows_hook_api(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_windows_hook_api(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
     let result = (|| -> Result<u64, String> {
         match operation {
             LegacyWin64Import::SetWindowsHookExA => {
@@ -1264,7 +1306,10 @@ fn emulate_windows_hook_api(unicorn: &mut Unicorn<'_, GuestState>, operation: Le
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_windows_timer_api(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_windows_timer_api(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
     let result = (|| -> Result<u64, String> {
         let window = read_win64_import_argument(unicorn, 0)?;
         let requested_id = read_win64_import_argument(unicorn, 1)?;
@@ -1312,7 +1357,7 @@ fn emulate_windows_timer_api(unicorn: &mut Unicorn<'_, GuestState>, operation: L
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_message_box(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
+pub(super) fn emulate_message_box(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
     let result = (|| -> Result<u64, String> {
         let text_pointer = read_win64_import_argument(unicorn, 1)?;
         let caption_pointer = read_win64_import_argument(unicorn, 2)?;
@@ -1353,7 +1398,7 @@ fn emulate_message_box(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let pointer = unicorn
             .reg_read(RegisterX86::RCX)
@@ -1427,7 +1472,7 @@ fn emulate_crt_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_memset(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_memset(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn
             .reg_read(RegisterX86::RCX)
@@ -1458,7 +1503,7 @@ fn emulate_memset(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_memory_copy(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_memory_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn
             .reg_read(RegisterX86::RCX)
@@ -1522,7 +1567,7 @@ fn emulate_crt_memory_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let destination = read_win64_import_argument(unicorn, 0)?;
         let source = read_win64_import_argument(unicorn, 1)?;
@@ -1569,7 +1614,7 @@ fn emulate_crt_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
         // Tracked allocations occupy either the regular CRT heap or this
@@ -1661,7 +1706,7 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_strstr(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strstr(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
         let needle_pointer = read_win64_import_argument(unicorn, 1)?;
@@ -1731,7 +1776,7 @@ fn emulate_crt_strstr(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_memchr(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_memchr(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let source = unicorn
             .reg_read(RegisterX86::RCX)
@@ -1835,7 +1880,7 @@ fn compare_crt_memory(
     Ok(0)
 }
 
-fn emulate_crt_memcmp(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_memcmp(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<i32, String> {
         let left = unicorn
             .reg_read(RegisterX86::RCX)
@@ -1863,7 +1908,7 @@ fn emulate_crt_memcmp(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn read_crt_stdio_c_string(
+pub(super) fn read_crt_stdio_c_string(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
     limit: u64,
@@ -1874,7 +1919,7 @@ fn read_crt_stdio_c_string(
     Ok(bytes)
 }
 
-fn scan_crt_stdio_c_string(
+pub(super) fn scan_crt_stdio_c_string(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
     limit: u64,
@@ -1914,7 +1959,7 @@ fn scan_crt_stdio_c_string(
     Err(format!("stdio {label} exceeds {limit} bytes"))
 }
 
-fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<i32, String> {
         let left = read_win64_import_argument(unicorn, 0)?;
         let right = read_win64_import_argument(unicorn, 1)?;
@@ -2003,7 +2048,7 @@ fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_strncmp(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strncmp(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<i32, String> {
         let left = read_win64_import_argument(unicorn, 0)?;
         let right = read_win64_import_argument(unicorn, 1)?;
@@ -2064,7 +2109,7 @@ fn emulate_crt_strncmp(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_stricmp(unicorn: &mut Unicorn<'_, GuestState>, bounded: bool) {
+pub(super) fn emulate_crt_stricmp(unicorn: &mut Unicorn<'_, GuestState>, bounded: bool) {
     let result = (|| -> Result<i32, String> {
         let limit = if bounded {
             let count = read_win64_import_argument(unicorn, 2)?;
@@ -2139,7 +2184,7 @@ fn emulate_crt_stricmp(unicorn: &mut Unicorn<'_, GuestState>, bounded: bool) {
     }
 }
 
-fn emulate_crt_wcstombs(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_wcstombs(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let destination = read_win64_import_argument(unicorn, 0)?;
         let source = read_win64_import_argument(unicorn, 1)?;
@@ -2192,11 +2237,11 @@ fn emulate_crt_wcstombs(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_stdio_common_vsnprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_stdio_common_vsnprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
     emulate_stdio_common_printf(unicorn, true);
 }
 
-fn emulate_stdio_common_vsprintf(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_stdio_common_vsprintf(unicorn: &mut Unicorn<'_, GuestState>) {
     emulate_stdio_common_printf(unicorn, false);
 }
 
@@ -2368,7 +2413,7 @@ fn read_msvcp_mutex_object(
     Ok(object)
 }
 
-fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "init")?;
         let mutex_type = read_win64_import_argument(unicorn, 1)? as u32;
@@ -2397,7 +2442,7 @@ fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_msvcp_mutex_callback(unicorn, result);
 }
 
-fn emulate_msvcp_mutex_lock(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_msvcp_mutex_lock(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "lock")?;
         let current_thread_id = unicorn.get_data().current_windows_thread_id;
@@ -2430,7 +2475,7 @@ fn emulate_msvcp_mutex_lock(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_msvcp_mutex_callback(unicorn, result);
 }
 
-fn emulate_msvcp_mutex_unlock(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_msvcp_mutex_unlock(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "unlock")?;
         let current_thread_id = unicorn.get_data().current_windows_thread_id;
@@ -2456,7 +2501,7 @@ fn emulate_msvcp_mutex_unlock(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_msvcp_mutex_callback(unicorn, result);
 }
 
-fn emulate_msvcp_mutex_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_msvcp_mutex_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "destroy")?;
         let state = unicorn.get_data_mut();
@@ -2476,7 +2521,7 @@ fn emulate_msvcp_mutex_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_msvcp_mutex_callback(unicorn, result);
 }
 
-fn read_vcruntime_exception_data(
+pub(super) fn read_vcruntime_exception_data(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
     label: &str,
@@ -2504,7 +2549,7 @@ fn read_vcruntime_exception_data(
     Ok(VcruntimeExceptionData { what, do_free })
 }
 
-fn write_vcruntime_exception_data(
+pub(super) fn write_vcruntime_exception_data(
     unicorn: &mut Unicorn<'_, GuestState>,
     address: u64,
     data: VcruntimeExceptionData,
@@ -2535,7 +2580,7 @@ fn finish_vcruntime_exception_callback(
     }
 }
 
-fn emulate_vcruntime_exception_copy(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_vcruntime_exception_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let source_address = read_win64_import_argument(unicorn, 0)?;
         let destination_address = read_win64_import_argument(unicorn, 1)?;
@@ -2603,7 +2648,7 @@ fn emulate_vcruntime_exception_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_vcruntime_exception_callback(unicorn, result);
 }
 
-fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let object = read_win64_import_argument(unicorn, 0)?;
         if object == 0 {
@@ -2747,7 +2792,7 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_vcruntime_exception_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_vcruntime_exception_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let data_address = read_win64_import_argument(unicorn, 0)?;
         let data = read_vcruntime_exception_data(unicorn, data_address, "data")?;
@@ -2788,7 +2833,7 @@ fn emulate_vcruntime_exception_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_vcruntime_exception_callback(unicorn, result);
 }
 
-fn emulate_strncpy(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_strncpy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn
             .reg_read(RegisterX86::RCX)
@@ -2835,7 +2880,7 @@ fn emulate_strncpy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn
             .reg_read(RegisterX86::RCX)
@@ -2876,7 +2921,7 @@ fn emulate_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_ansi_strcpy_bounded(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_ansi_strcpy_bounded(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn
             .reg_read(RegisterX86::RCX)
@@ -2928,7 +2973,7 @@ fn emulate_ansi_strcpy_bounded(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_ansi_sprintf_literal(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_ansi_sprintf_literal(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<Option<Vec<u8>>, String> {
         let destination = unicorn
             .reg_read(RegisterX86::RCX)
@@ -3075,7 +3120,7 @@ fn read_blend_world(
     }))
 }
 
-fn emulate_blend(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_blend(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<bool, String> {
         let first_world = unicorn
             .reg_read(RegisterX86::RDX)
@@ -3216,7 +3261,7 @@ fn emulate_blend(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_copy(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let source = unicorn
             .reg_read(RegisterX86::RDX)
@@ -3276,7 +3321,7 @@ fn emulate_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_fill8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_fill8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let color = unicorn
             .reg_read(RegisterX86::RDX)
@@ -3475,7 +3520,7 @@ fn finish_legacy_sample(unicorn: &mut Unicorn<'_, GuestState>, result: Result<bo
     }
 }
 
-fn emulate_subpixel_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_subpixel_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let Some((fixed_x, fixed_y, params, destination)) =
             legacy_sample_arguments(unicorn, "SubpixelSample8")?
@@ -3531,7 +3576,7 @@ fn emulate_subpixel_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u3
     finish_legacy_sample(unicorn, result);
 }
 
-fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let Some((fixed_x, fixed_y, params, destination)) =
             legacy_sample_arguments(unicorn, "AreaSample8")?
@@ -3648,7 +3693,7 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     finish_legacy_sample(unicorn, result);
 }
 
-fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let effect_ref = unicorn
             .reg_read(RegisterX86::RCX)
@@ -3915,7 +3960,7 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
     finish_legacy_sample(unicorn, result);
 }
 
-fn emulate_get_callback_addr(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_get_callback_addr(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let callback_id = unicorn
             .reg_read(RegisterX86::R9)
@@ -3953,7 +3998,7 @@ fn emulate_get_callback_addr(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u
     }
 }
 
-fn smart_checkout_world(
+pub(super) fn smart_checkout_world(
     unicorn: &mut Unicorn<'_, GuestState>,
     index: i32,
 ) -> Result<(u64, i32, i32), String> {
@@ -4058,7 +4103,7 @@ fn smart_checkout_world(
     Ok((world, width, height))
 }
 
-fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     unicorn.get_data_mut().pre_checkout_calls += 1;
     let result = (|| {
         let index = unicorn
@@ -4232,7 +4277,7 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
     finish_callback(unicorn, result);
 }
 
-fn cropped_checkout_world(
+pub(super) fn cropped_checkout_world(
     unicorn: &mut Unicorn<'_, GuestState>,
     world: u64,
     request_rect: [i32; 4],
@@ -4291,7 +4336,7 @@ fn cropped_checkout_world(
     Ok(world)
 }
 
-fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     unicorn.get_data_mut().checkout_pixels_calls += 1;
     let result = (|| {
         let checkout_id = unicorn
@@ -4338,7 +4383,7 @@ fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, 
     finish_callback(unicorn, result);
 }
 
-fn emulate_checkin_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_checkin_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     unicorn.get_data_mut().checkin_pixels_calls += 1;
     let result = (|| {
         let checkout_id = unicorn
@@ -4364,7 +4409,7 @@ fn emulate_checkin_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _
     finish_callback(unicorn, result);
 }
 
-fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+pub(super) fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     unicorn.get_data_mut().checkout_output_calls += 1;
     let result = (|| {
         let output = unicorn
@@ -4384,7 +4429,7 @@ fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
 
 // C-locale scanf for decimal/hex integers, byte strings and scansets.
 // Other conversions remain explicit compatibility gaps.
-fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let options = read_win64_import_argument(unicorn, 0)?;
         let buffer = read_win64_import_argument(unicorn, 1)?;
@@ -4768,10 +4813,10 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
 // AddParam borrows its input. Persist pointed-to popup text as well as the
 // descriptor, since plug-ins can release temporary text before setup returns.
 // Stored descriptors used for both reports and rendering point at this copy.
-const POPUP_CHOICES_BASE: u64 =
+pub(super) const POPUP_CHOICES_BASE: u64 =
     GUEST_STREAM_BUFFER_BASE + MAX_GUEST_STREAM_OPENS * PAGE_SIZE + 3 * PAGE_SIZE;
-const MAX_POPUP_CHOICE_PAGES: u64 = 4096;
-fn capture_popup_choices(
+pub(super) const MAX_POPUP_CHOICE_PAGES: u64 = 4096;
+pub(super) fn capture_popup_choices(
     unicorn: &mut Unicorn<'_, GuestState>,
     definition: &mut [u8],
 ) -> Result<(), String> {
@@ -4814,7 +4859,7 @@ fn capture_popup_choices(
     Err("popup choice text exceeds the 4096-byte setup bound".into())
 }
 
-fn emulate_crt_strcat(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strcat(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let destination = read_win64_import_argument(unicorn, 0)?;
         let source = read_win64_import_argument(unicorn, 1)?;
@@ -4857,7 +4902,7 @@ fn emulate_crt_strcat(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_strncat(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strncat(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let destination = read_win64_import_argument(unicorn, 0)?;
         let source = read_win64_import_argument(unicorn, 1)?;
@@ -4924,7 +4969,7 @@ fn emulate_crt_strncat(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_strchr(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strchr(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
         let needle = read_win64_import_argument(unicorn, 1)? as u8;
@@ -4972,7 +5017,7 @@ fn emulate_crt_strchr(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_strrchr(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strrchr(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
         let needle = read_win64_import_argument(unicorn, 1)? as u8;
@@ -5058,7 +5103,7 @@ fn scanf_byte_set(format: &[u8], position: &mut usize) -> Result<[bool; 256], St
     Ok(set)
 }
 
-fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
         if source == 0 {
@@ -5125,11 +5170,11 @@ fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_strtol(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strtol(unicorn: &mut Unicorn<'_, GuestState>) {
     emulate_crt_strto(unicorn, true);
 }
 
-fn emulate_crt_strtod(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strtod(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<f64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
         let end_pointer = read_win64_import_argument(unicorn, 1)?;
@@ -5177,7 +5222,7 @@ fn emulate_crt_strtod(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_strtof(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strtof(unicorn: &mut Unicorn<'_, GuestState>) {
     emulate_crt_strtod(unicorn);
     if unicorn.get_data().callback_error.is_none() {
         if let Ok(bits) = unicorn.reg_read(RegisterX86::XMM0) {
@@ -5187,7 +5232,7 @@ fn emulate_crt_strtof(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_strtoul(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strtoul(unicorn: &mut Unicorn<'_, GuestState>) {
     emulate_crt_strto(unicorn, false);
 }
 
@@ -5418,7 +5463,7 @@ fn crt_error_message(error: i32) -> &'static str {
     }
 }
 
-fn emulate_crt_strerror(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_strerror(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let error = read_win64_import_argument(unicorn, 0)? as u32 as i32;
         let message = crt_error_message(error);
@@ -5454,7 +5499,7 @@ fn emulate_crt_strerror(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_stdio_common_vsprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_stdio_common_vsprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let options = read_win64_import_argument(unicorn, 0)?;
         let destination = read_win64_import_argument(unicorn, 1)?;

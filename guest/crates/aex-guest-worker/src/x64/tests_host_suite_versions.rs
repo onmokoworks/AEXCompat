@@ -1,3 +1,8 @@
+use super::tests_support::test_engine;
+use super::trace::classify_runtime_target;
+use super::types::GuestEngine;
+use super::{HOST_ACQUIRE_SUITE, RegisterX86};
+
 // Invoke pointers returned by AcquireSuite, not the implementation directly.
 fn census_suite(engine: &mut GuestEngine<'static>, name: &[u8], version: u64) -> u64 {
     let text = engine.allocate(name.len(), 1).unwrap();

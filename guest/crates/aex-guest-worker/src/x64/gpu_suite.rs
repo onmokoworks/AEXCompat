@@ -1,13 +1,23 @@
+use super::gpu_runtime::{
+    BufferAccess, GpuRuntime, GpuRuntimeBackendKind, ObjectCounts, WgpuRuntimeEvidence,
+};
+use super::iterate_and_suites::{aegp_stack_arg, read_guest_i32, read_guest_u64};
+use super::types::{GuestEngine, GuestState};
+use super::{
+    GuestError, HOST_GPU_DEVICE_SUITE_V1, HOST_GPU_SUITE_CALLBACKS, HashMap, PAGE_SIZE, Prot,
+    RegisterX86, Unicorn, abi,
+};
+
 const PF_ERR_NONE: u64 = 0;
-const PF_ERR_OUT_OF_MEMORY: u64 = 4;
+pub(super) const PF_ERR_OUT_OF_MEMORY: u64 = 4;
 const PF_FIRST_ERR: u64 = 512;
-const PF_ERR_BAD_CALLBACK_PARAM: u64 = PF_FIRST_ERR + 4;
-const PF_GPU_FRAMEWORK_OPENCL: i32 = 1;
-const PF_PIXEL_FORMAT_GPU_BGRA128: i32 = 0x4144_4340;
-const PF_GPU_DEVICE_INFO_SIZE: usize = 56;
+pub(super) const PF_ERR_BAD_CALLBACK_PARAM: u64 = PF_FIRST_ERR + 4;
+pub(super) const PF_GPU_FRAMEWORK_OPENCL: i32 = 1;
+pub(super) const PF_PIXEL_FORMAT_GPU_BGRA128: i32 = 0x4144_4340;
+pub(super) const PF_GPU_DEVICE_INFO_SIZE: usize = 56;
 const GPU_MAX_ALLOCATIONS: usize = 256;
 const GPU_MAX_LIVE_BYTES: usize = 256 * 1024 * 1024;
-const GPU_MAX_WORLD_DIMENSION: i32 = 4096;
+pub(super) const GPU_MAX_WORLD_DIMENSION: i32 = 4096;
 const GPU_HOST_MEMORY_BASE: u64 = 0x0000_0020_0000_0000;
 const GPU_HOST_MEMORY_END: u64 = GPU_HOST_MEMORY_BASE + 0x4000_0000;
 const GPU_WORLD_DESCRIPTOR_BASE: u64 = 0x0000_0021_0000_0000;
@@ -24,11 +34,11 @@ struct GpuHostAllocation {
 }
 
 #[derive(Clone, Debug)]
-struct GpuWorld {
-    device_index: u32,
+pub(super) struct GpuWorld {
+    pub(super) device_index: u32,
     buffer_token: u64,
-    bytes: usize,
-    mapped_bytes: u64,
+    pub(super) bytes: usize,
+    pub(super) mapped_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -57,24 +67,24 @@ struct GpuRenderTransport {
 }
 
 #[derive(Default)]
-struct GpuSuiteState {
+pub(super) struct GpuSuiteState {
     host_allocations: HashMap<u64, GpuHostAllocation>,
-    worlds: HashMap<u64, GpuWorld>,
+    pub(super) worlds: HashMap<u64, GpuWorld>,
     borrowed_worlds: HashMap<u64, BorrowedGpuWorld>,
     transport: Option<GpuRenderTransport>,
-    allocations_created: u64,
-    allocations_freed: u64,
-    upload_bytes: u64,
-    download_bytes: u64,
-    worlds_created: u64,
-    worlds_disposed: u64,
-    invalid_operations: u64,
+    pub(super) allocations_created: u64,
+    pub(super) allocations_freed: u64,
+    pub(super) upload_bytes: u64,
+    pub(super) download_bytes: u64,
+    pub(super) worlds_created: u64,
+    pub(super) worlds_disposed: u64,
+    pub(super) invalid_operations: u64,
     exclusive_access_depth: u32,
-    last_error: Option<String>,
+    pub(super) last_error: Option<String>,
 }
 
 impl GpuSuiteState {
-    fn evidence(&self, runtime: &GpuRuntime) -> GpuSuiteEvidence {
+    pub(super) fn evidence(&self, runtime: &GpuRuntime) -> GpuSuiteEvidence {
         GpuSuiteEvidence {
             allocations_created: self.allocations_created,
             allocations_freed: self.allocations_freed,
@@ -108,7 +118,7 @@ impl GpuSuiteState {
         }
     }
 
-    fn mapped_regions(&self) -> Vec<(u64, u64)> {
+    pub(super) fn mapped_regions(&self) -> Vec<(u64, u64)> {
         self.host_allocations
             .iter()
             .map(|(address, allocation)| (*address, allocation.mapped_bytes))
@@ -120,7 +130,7 @@ impl GpuSuiteState {
             .collect()
     }
 
-    fn clear_for_drop(&mut self) {
+    pub(super) fn clear_for_drop(&mut self) {
         self.host_allocations.clear();
         self.worlds.clear();
         self.borrowed_worlds.clear();
@@ -130,20 +140,20 @@ impl GpuSuiteState {
 }
 
 #[derive(Debug)]
-struct GpuCallbackFailure {
-    code: u64,
-    message: String,
+pub(super) struct GpuCallbackFailure {
+    pub(super) code: u64,
+    pub(super) message: String,
 }
 
 impl GpuCallbackFailure {
-    fn bad(message: impl Into<String>) -> Self {
+    pub(super) fn bad(message: impl Into<String>) -> Self {
         Self {
             code: PF_ERR_BAD_CALLBACK_PARAM,
             message: message.into(),
         }
     }
 
-    fn out_of_memory(message: impl Into<String>) -> Self {
+    pub(super) fn out_of_memory(message: impl Into<String>) -> Self {
         Self {
             code: PF_ERR_OUT_OF_MEMORY,
             message: message.into(),
@@ -151,7 +161,7 @@ impl GpuCallbackFailure {
     }
 }
 
-fn finish_gpu_callback(
+pub(super) fn finish_gpu_callback(
     unicorn: &mut Unicorn<'_, GuestState>,
     result: Result<(), GpuCallbackFailure>,
 ) {
@@ -807,7 +817,7 @@ fn emulate_gpu_get_world_device_index(unicorn: &mut Unicorn<'_, GuestState>, _: 
     finish_gpu_callback(unicorn, result);
 }
 
-fn install_gpu_device_suite(
+pub(super) fn install_gpu_device_suite(
     unicorn: &mut Unicorn<'_, GuestState>,
 ) -> Result<(), unicorn_engine::unicorn_const::uc_error> {
     let callbacks: [fn(&mut Unicorn<'_, GuestState>, u64, u32); 15] = [
@@ -1405,7 +1415,7 @@ impl GuestEngine<'_> {
     }
 }
 
-fn finish_gpu_runtime_shutdown(
+pub(super) fn finish_gpu_runtime_shutdown(
     backend_kind: GpuRuntimeBackendKind,
     counts: ObjectCounts,
     first_error: Option<String>,

@@ -1,3 +1,12 @@
+use super::tests_support::test_engine;
+use super::types::GuestEngine;
+use super::{
+    HOST_PF_ANSI_ACOS, HOST_PF_ANSI_ASIN, HOST_PF_ANSI_ATAN, HOST_PF_ANSI_ATAN2, HOST_PF_ANSI_CEIL,
+    HOST_PF_ANSI_COS, HOST_PF_ANSI_EXP, HOST_PF_ANSI_FABS, HOST_PF_ANSI_FLOOR, HOST_PF_ANSI_FMOD,
+    HOST_PF_ANSI_HYPOT, HOST_PF_ANSI_LOG, HOST_PF_ANSI_LOG10, HOST_PF_ANSI_POW, HOST_PF_ANSI_SIN,
+    HOST_PF_ANSI_SQRT, HOST_PF_ANSI_TAN, RegisterX86, abi,
+};
+
 #[test]
 fn classic_utils_wires_all_ansi_numeric_callbacks_to_working_trampolines() {
     fn call_numeric(engine: &mut GuestEngine<'static>, address: u64, left: f64, right: f64) -> f64 {

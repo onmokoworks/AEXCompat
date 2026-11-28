@@ -1,8 +1,25 @@
+#[cfg(test)]
+use super::gpu_runtime::{
+    BufferAccess, CL_INVALID_KERNEL, CL_INVALID_MEM_OBJECT, GPU_TOKEN_OBJECT_STRIDE, GpuRuntime,
+    ObjectCounts,
+};
+use super::gpu_runtime::{
+    CL_INVALID_ARG_SIZE, CL_INVALID_ARG_VALUE, CL_INVALID_EVENT_WAIT_LIST, CL_INVALID_VALUE,
+    CL_INVALID_WORK_DIMENSION, CL_SUCCESS, OpenClRuntimeError,
+};
+#[cfg(test)]
+use super::imports::MAX_WIN64_IMPORT_ARGUMENTS;
+use super::imports::{OpenClBridgeSymbol, read_win64_import_argument};
+use super::types::GuestState;
+#[cfg(test)]
+use super::{Arch, DATA_BASE, Mode, Prot, STACK_BASE, STACK_SIZE, STUB_BASE, STUB_SIZE};
+use super::{GuestError, PAGE_SIZE, RegisterX86, Unicorn, uc};
+
 const MAX_OPENCL_SOURCE_STRINGS: usize = 1_024;
 const MAX_OPENCL_BUILD_DEVICES: usize = 1;
 const MAX_OPENCL_WORK_DIMENSIONS: usize = 3;
 
-fn install_opencl_import_bridge(
+pub(super) fn install_opencl_import_bridge(
     unicorn: &mut Unicorn<'static, GuestState>,
     stub: u64,
     symbol: OpenClBridgeSymbol,

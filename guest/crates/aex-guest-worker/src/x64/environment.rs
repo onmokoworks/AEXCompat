@@ -1,7 +1,17 @@
+use super::callbacks::read_crt_stdio_c_string;
+use super::files::finish_guest_stdio;
+use super::imports::{
+    deterministic_guest_environment_entries, deterministic_guest_environment_value,
+    environment_strings_range, guest_range_has_permission, read_win64_import_argument,
+    set_guest_crt_errno,
+};
+use super::types::GuestState;
+use super::{BTreeMap, MAX_WINDOWS_ENVIRONMENT_NAME_BYTES, PAGE_SIZE, Prot, RegisterX86, Unicorn};
+
 const MAX_GUEST_ENVIRONMENT_ASSIGNMENT: usize = 4095;
 const MAX_GUEST_ENVIRONMENT_OVERRIDES: usize = 256;
 
-fn guest_environment_value(state: &GuestState, name: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn guest_environment_value(state: &GuestState, name: &[u8]) -> Option<Vec<u8>> {
     let key = name.to_ascii_uppercase();
     if let Some(value) = state.environment_overrides.get(&key) {
         return value.clone();
@@ -9,7 +19,7 @@ fn guest_environment_value(state: &GuestState, name: &[u8]) -> Option<Vec<u8>> {
     deterministic_guest_environment_value(name).map(Vec::from)
 }
 
-fn guest_environment_block_w(state: &GuestState) -> Vec<u8> {
+pub(super) fn guest_environment_block_w(state: &GuestState) -> Vec<u8> {
     let mut entries: BTreeMap<Vec<u8>, Vec<u8>> = deterministic_guest_environment_entries()
         .iter()
         .map(|(name, value)| (name.to_ascii_uppercase(), value.to_vec()))
@@ -34,7 +44,7 @@ fn guest_environment_block_w(state: &GuestState) -> Vec<u8> {
     block
 }
 
-fn guest_getenv_buffer(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_getenv_buffer(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     if let Some(address) = unicorn.get_data().getenv_buffer {
         return Ok(address);
     }
@@ -48,7 +58,7 @@ fn guest_getenv_buffer(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, Str
     Ok(address)
 }
 
-fn emulate_crt_putenv(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_putenv(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), u32> {
         let pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
         if pointer == 0 {
@@ -107,7 +117,7 @@ fn emulate_crt_putenv(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_putenv_s(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_putenv_s(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), u32> {
         let name_pointer = unicorn.reg_read(RegisterX86::RCX).map_err(|_| 22u32)?;
         let value_pointer = unicorn.reg_read(RegisterX86::RDX).map_err(|_| 22u32)?;
@@ -159,12 +169,12 @@ fn emulate_crt_putenv_s(unicorn: &mut Unicorn<'_, GuestState>) {
 // One narrow page followed by independent wide results, each large enough for
 // the maximum supported environment assignment. Results are borrowed for the
 // engine lifetime; querying another variable never invalidates a prior pointer.
-const MAX_GUEST_WGETENV_BUFFERS: usize = MAX_GUEST_ENVIRONMENT_OVERRIDES + 1;
+pub(super) const MAX_GUEST_WGETENV_BUFFERS: usize = MAX_GUEST_ENVIRONMENT_OVERRIDES + 1;
 const GUEST_WENVIRON_BYTES: u64 = 4 * 1024 * 1024;
-const GUEST_ENVIRONMENT_BORROWED_BYTES: u64 =
+pub(super) const GUEST_ENVIRONMENT_BORROWED_BYTES: u64 =
     PAGE_SIZE * (1 + 2 * MAX_GUEST_WGETENV_BUFFERS as u64) + GUEST_WENVIRON_BYTES;
 
-fn emulate_crt_wenviron(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_wenviron(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let (_, base) = environment_strings_range(unicorn.get_data_mut())?;
         let cell = base + PAGE_SIZE * (1 + 2 * MAX_GUEST_WGETENV_BUFFERS as u64);
@@ -227,7 +237,7 @@ fn emulate_crt_wenviron(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_wgetenv(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_crt_wgetenv(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let pointer = read_win64_import_argument(unicorn, 0)?;
         if pointer == 0 {

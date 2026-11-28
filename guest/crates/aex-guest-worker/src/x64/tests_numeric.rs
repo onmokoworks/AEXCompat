@@ -1,3 +1,11 @@
+use super::imports::{Win64ImportDispatch, dispatch_win64_import, install_win64_import};
+use super::tests_support::{TEST_CODE, test_engine};
+use super::types::GuestState;
+use super::{
+    Arch, HOST_DISPOSE_WORLD, HOST_NEW_WORLD, HOST_NEW_WORLD8, Mode, PAGE_SIZE, Prot, RegisterX86,
+    Unicorn, abi,
+};
+
 // Execute instructions, rather than testing the implementation's source text.
 #[test]
 fn sse_nan_operand_order_survives_mxcsr_write() {

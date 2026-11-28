@@ -1,3 +1,10 @@
+use super::tests_support::{TEST_CODE, test_engine};
+use super::types::{CustomUiRegistration, GuestEngine};
+use super::ui_session::{UI_CALLBACK_BASE, UI_SLOTS};
+use super::{
+    BTreeMap, DATA_BASE, HOST_REGISTER_UI, PAGE_SIZE, STUB_STRIDE, TIMEOUT_MICROSECONDS, abi,
+};
+
 fn custom_ui_bytes(values: [i32; 11]) -> [u8; abi::PF_CUSTOM_UI_INFO_SIZE] {
     let mut bytes = [0u8; abi::PF_CUSTOM_UI_INFO_SIZE];
     for (index, value) in values.into_iter().enumerate() {

@@ -1,4 +1,87 @@
-fn seal_unicorn_image(
+use super::callbacks::{
+    capture_add_param, capture_plugin_data_registration, emulate_area_sample8, emulate_blend,
+    emulate_checkin_layer_pixels, emulate_checkout_layer_pixels, emulate_checkout_output,
+    emulate_copy, emulate_extended_alloc, emulate_extended_free, emulate_extended_lookup,
+    emulate_fill8, emulate_get_callback_addr, emulate_pre_checkout_layer, emulate_register_ui,
+    emulate_strcpy, emulate_subpixel_sample8, emulate_transfer_rect8,
+};
+use super::files::GuestFiles;
+use super::gpu_runtime::OpenClBridgeEvidence;
+use super::gpu_suite::install_gpu_device_suite;
+use super::imports::{
+    canonical_import_trace_label, continue_crt_initterm, continue_fls_free,
+    continue_windows_thread, get_guest_crt_errno, install_dynamic_windows_import_callbacks,
+    install_win64_import, install_windows_condition_variable_callbacks,
+    restore_windows_thread_context,
+};
+use super::iterate_and_suites::{
+    continue_iterate, emulate_acquire_suite, emulate_aegp_free_mem_handle,
+    emulate_aegp_get_main_window, emulate_aegp_lock_mem_handle, emulate_aegp_mem_handle_size,
+    emulate_aegp_new_mem_handle, emulate_aegp_register, emulate_aegp_resize_mem_handle,
+    emulate_aegp_unlock_mem_handle, emulate_checkout_param, emulate_color_param_value,
+    emulate_dispose_handle, emulate_dispose_world, emulate_get_world_pixel_format,
+    emulate_handle_size, emulate_iterate_float, emulate_iterate8, emulate_iterate8_origin,
+    emulate_iterate16, emulate_lock_handle, emulate_new_handle, emulate_new_world,
+    emulate_new_world8, emulate_point_param_value, emulate_resize_handle, emulate_unlock_handle,
+    install_aegp_compute_cache_suite, install_aegp_utility_suites, install_effect_ui_suite_v1,
+    install_iterate8_suites, install_persistent_data_suite_v3, install_pf_ansi_suite_v2,
+    install_pf_app_suite_v6, install_typed_iterate_suites,
+};
+use super::tail::{coalesce_census_extents, is_scalar_sse_fp};
+use super::trace::{
+    advance_runtime_target_lifecycle, aggregate_trace_functions, bytes_to_hex,
+    checkpoint_instruction, checkpoint_site, checkpoint_unhookable_reason,
+    discover_image_avx_state_sync_points, discover_trace_points, format_trace_event,
+    install_avx_fallback, install_avx_state_sync_points, install_runtime_avx_state_sync,
+    push_trace_event, read_xmm, trace_changed_ranges, trace_instruction, trace_memory_snapshot,
+};
+use super::types::{
+    CensusBlock, CustomUiRegistration, ExecutionTrace, GuestCensus, GuestEngine, GuestParam,
+    GuestState, ParkedWindowsThread, PendingTraceWatch, SchedulerYieldReason,
+    SmartCheckoutDiskIdFallback, TraceBasicBlock, TraceBranchEdge, TraceCapture,
+    TraceConfiguration, TraceCrashFrame, TraceCrashSnapshot, TraceEvent, TraceExemplars,
+    TraceLabel, TraceLabelKind, TraceMemoryWitness, TraceModule, TraceTruncation, TraceWatchSpec,
+    UnhookableWatch, UnsupportedSuiteCall,
+};
+use super::{
+    AEGP_MEMORY_HANDLE_BASE, Arch, BTreeMap, BTreeSet, DATA_BASE, DATA_SIZE, Decoder,
+    DecoderOptions, Duration, EffectRegistry, FRAME_DATA_BASE, FRAME_DATA_END, GuestError,
+    HANDLE_DATA_BASE, HOST_ACQUIRE_SUITE, HOST_ADD_PARAM, HOST_AEGP_FREE_MEM_HANDLE,
+    HOST_AEGP_GET_MAIN_WINDOW, HOST_AEGP_LOCK_MEM_HANDLE, HOST_AEGP_MEM_HANDLE_SIZE,
+    HOST_AEGP_MEMORY_SUITE, HOST_AEGP_MEMORY_UNSUPPORTED, HOST_AEGP_NEW_MEM_HANDLE,
+    HOST_AEGP_REGISTER, HOST_AEGP_RESIZE_MEM_HANDLE, HOST_AEGP_UNLOCK_MEM_HANDLE, HOST_ANSI_STRCPY,
+    HOST_AREA_SAMPLE8, HOST_BLEND, HOST_CHECKIN_LAYER_PIXELS, HOST_CHECKIN_PARAM,
+    HOST_CHECKOUT_LAYER_PIXELS, HOST_CHECKOUT_OUTPUT, HOST_CHECKOUT_PARAM, HOST_COLOR_PARAM_SUITE,
+    HOST_COLOR_PARAM_VALUE, HOST_COPY, HOST_CREATE_THREAD_CONTINUE, HOST_CRT_INITTERM_CONTINUE,
+    HOST_DISPOSE_HANDLE, HOST_DISPOSE_WORLD, HOST_DYNAMIC_FLS_ALLOC, HOST_EXTENDED_ALLOC,
+    HOST_EXTENDED_FREE, HOST_EXTENDED_LOOKUP, HOST_FILL8, HOST_FLS_FREE_CONTINUE,
+    HOST_GET_CALLBACK_ADDR, HOST_GET_WORLD_PIXEL_FORMAT, HOST_GPU_ACQUIRE_EXCLUSIVE,
+    HOST_GPU_ALLOCATE_DEVICE, HOST_GPU_ALLOCATE_HOST, HOST_GPU_CREATE_WORLD,
+    HOST_GPU_DISPOSE_WORLD, HOST_GPU_FREE_DEVICE, HOST_GPU_FREE_HOST, HOST_GPU_GET_DEVICE_COUNT,
+    HOST_GPU_GET_DEVICE_INFO, HOST_GPU_GET_WORLD_DATA, HOST_GPU_GET_WORLD_DEVICE_INDEX,
+    HOST_GPU_GET_WORLD_SIZE, HOST_GPU_PURGE_DEVICE, HOST_GPU_PURGE_HOST,
+    HOST_GPU_RELEASE_EXCLUSIVE, HOST_HANDLE_SIZE, HOST_HANDLE_SUITE,
+    HOST_INITIALIZE_CONDITION_VARIABLE, HOST_ITERATE_FLOAT, HOST_ITERATE_FLOAT_CONTINUE,
+    HOST_ITERATE_ROW_TRAMPOLINE, HOST_ITERATE8, HOST_ITERATE8_CONTINUE, HOST_ITERATE8_ORIGIN,
+    HOST_ITERATE16, HOST_ITERATE16_CONTINUE, HOST_LOCK_HANDLE, HOST_NEW_HANDLE, HOST_NEW_WORLD,
+    HOST_NEW_WORLD8, HOST_NOOP, HOST_PF_ANSI_ACOS, HOST_PF_ANSI_ASIN, HOST_PF_ANSI_ATAN,
+    HOST_PF_ANSI_ATAN2, HOST_PF_ANSI_CEIL, HOST_PF_ANSI_COS, HOST_PF_ANSI_EXP, HOST_PF_ANSI_FABS,
+    HOST_PF_ANSI_FLOOR, HOST_PF_ANSI_FMOD, HOST_PF_ANSI_HYPOT, HOST_PF_ANSI_LOG,
+    HOST_PF_ANSI_LOG10, HOST_PF_ANSI_POW, HOST_PF_ANSI_SIN, HOST_PF_ANSI_SPRINTF,
+    HOST_PF_ANSI_SQRT, HOST_PF_ANSI_STRCPY, HOST_PF_ANSI_STRCPY_BOUNDED, HOST_PF_ANSI_TAN,
+    HOST_PLUGIN_DATA_V1, HOST_PLUGIN_DATA_V2, HOST_POINT_PARAM_SUITE, HOST_POINT_PARAM_VALUE,
+    HOST_POISON, HOST_PRE_CHECKOUT_LAYER, HOST_REGISTER_UI, HOST_RESIZE_HANDLE,
+    HOST_SLEEP_CONDITION_VARIABLE_CS, HOST_SUBPIXEL_SAMPLE8, HOST_TRANSFER_RECT8,
+    HOST_UNLOCK_HANDLE, HOST_WAKE_ALL_CONDITION_VARIABLE, HOST_WAKE_CONDITION_VARIABLE,
+    HOST_WORLD_SUITE, HOST_ZERO_PIXEL, HashMap, HashSet, ITERATE_ROW_TRAMPOLINE, Instant,
+    MAX_INSTRUCTIONS, MAX_TRACE_BASIC_BLOCKS, MAX_TRACE_BRANCH_EDGES, MAX_TRACE_EVENTS,
+    MAX_TRACE_WATCH_BYTES, MAX_TRACE_WITNESSES, MAX_WINDOWS_THREADS, Mnemonic, Mode, PAGE_SIZE,
+    PF_HANDLE_DATA_BASE, PF_HANDLE_DATA_END, PeImage, Prot, RETURN_ADDRESS, RegisterX86,
+    STACK_BASE, STACK_SIZE, STUB_BASE, STUB_SIZE, STUB_STRIDE, StaticTlsImage,
+    TIMEOUT_MICROSECONDS, TRACE_DISTINCT_FINGERPRINTS, Unicorn, VecDeque, abi, uc,
+};
+
+pub(super) fn seal_unicorn_image(
     unicorn: &mut Unicorn<'static, GuestState>,
     image: &PeImage,
     image_size: u64,
@@ -65,7 +148,7 @@ fn seal_unicorn_image(
     Ok(())
 }
 
-fn initialize_static_tls_image(
+pub(super) fn initialize_static_tls_image(
     unicorn: &mut Unicorn<'static, GuestState>,
     tls: Option<&StaticTlsImage>,
 ) -> Result<u64, GuestError> {
@@ -108,13 +191,13 @@ fn initialize_static_tls_image(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PrimaryImportHooks {
+pub(super) enum PrimaryImportHooks {
     Eager,
     Deferred,
 }
 
 impl GuestEngine<'static> {
-    fn run_process_attach_addresses(
+    pub(super) fn run_process_attach_addresses(
         &mut self,
         image_base: u64,
         tls_callbacks: &[u64],
@@ -190,7 +273,7 @@ impl GuestEngine<'static> {
         Ok(engine)
     }
 
-    fn load_primary(
+    pub(super) fn load_primary(
         image: &PeImage,
         attach: bool,
         import_hooks: PrimaryImportHooks,
@@ -1746,7 +1829,7 @@ impl GuestEngine<'static> {
         result
     }
 
-    fn call_win64_with_timeout(
+    pub(super) fn call_win64_with_timeout(
         &mut self,
         address: u64,
         args: &[u64],
@@ -1755,7 +1838,7 @@ impl GuestEngine<'static> {
         self.call_win64_with_limits(address, args, timeout_microseconds, MAX_INSTRUCTIONS)
     }
 
-    fn call_win64_with_limits(
+    pub(super) fn call_win64_with_limits(
         &mut self,
         address: u64,
         args: &[u64],
@@ -2957,7 +3040,9 @@ impl GuestEngine<'static> {
     }
 }
 
-fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
+pub(super) fn initialize_windows_command_line_a(
+    engine: &mut GuestEngine<'static>,
+) -> Result<(), GuestError> {
     const WINDOWS_COMMAND_LINE_A: &[u8] = b"\"aex-guest-worker.exe\"\0";
     let command_line = engine.allocate(WINDOWS_COMMAND_LINE_A.len(), 1)?;
     engine.write(command_line, WINDOWS_COMMAND_LINE_A)?;
@@ -2965,7 +3050,9 @@ fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Resul
     Ok(())
 }
 
-fn initialize_windows_command_line_w(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
+pub(super) fn initialize_windows_command_line_w(
+    engine: &mut GuestEngine<'static>,
+) -> Result<(), GuestError> {
     const WINDOWS_COMMAND_LINE: &str = "\"aex-guest-worker.exe\"";
     let mut bytes = Vec::with_capacity((WINDOWS_COMMAND_LINE.encode_utf16().count() + 1) * 2);
     for unit in WINDOWS_COMMAND_LINE

@@ -1,6 +1,126 @@
-use super::*;
+use super::Digest;
+use super::acl::read_guest_object_security;
+use super::callbacks::{
+    MAX_POPUP_CHOICE_PAGES, allocate_aligned_crt_region, allocate_crt_region, capture_add_param,
+    capture_plugin_data_registration, capture_popup_choices, cropped_checkout_world,
+    deterministic_i32_stub, deterministic_import_i32, duplicate_crt_string, emulate_area_sample8,
+    emulate_blend, emulate_checkin_layer_pixels, emulate_checkout_layer_pixels, emulate_crt_free,
+    emulate_crt_malloc, emulate_crt_memory_copy, emulate_crt_realloc, emulate_extended_alloc,
+    emulate_extended_free, emulate_extended_lookup, emulate_fill8, emulate_get_callback_addr,
+    emulate_pre_checkout_layer, emulate_register_ui, emulate_subpixel_sample8,
+    emulate_transfer_rect8, emulate_vcomp_for_dynamic_init, emulate_vcomp_for_dynamic_next,
+    emulate_vcomp_for_static_simple_init, emulate_vcomp_fork, free_crt_region,
+    install_unsupported_import_trap, msvc_udt_by_value_return_import, read_crt_stdio_c_string,
+    read_vcruntime_exception_data, smart_checkout_world, write_vcruntime_exception_data,
+};
+use super::engine::{
+    initialize_static_tls_image, initialize_windows_command_line_a,
+    initialize_windows_command_line_w,
+};
+use super::environment::{
+    MAX_GUEST_WGETENV_BUFFERS, guest_environment_block_w, guest_getenv_buffer,
+};
+use super::files::{
+    GUEST_STREAM_BASE, GUEST_STREAM_BUFFER_BASE, GuestConsoleRepeat, GuestFileStream, GuestFiles,
+    MAX_GUEST_DIRECTORIES, MAX_GUEST_STREAM_BYTES, canonical_guest_fullpath, guest_find_records,
+    guest_star_match, open_guest_stream,
+};
+use super::gpu_suite::install_gpu_device_suite;
+use super::imports::{
+    GpuImportLibrary, LegacyWin64Import, MAX_WIN64_IMPORT_ARGUMENTS, MAX_WINDOWS_SOCKET_STARTUPS,
+    OpenClBridgeSymbol, WINDOWS_WSAEFAULT, WINDOWS_WSAEPROCLIM, WINDOWS_WSANOTINITIALISED,
+    WINDOWS_WSAVERNOTSUPPORTED, Win64ImportDispatch, canonical_import_trace_label,
+    continue_crt_initterm, continue_fls_free, continue_windows_thread, crt_time64_seconds,
+    dispatch_win64_import, emulate_create_file_w, emulate_create_thread,
+    emulate_find_first_file_ex_w, emulate_fls, emulate_get_command_line_a,
+    emulate_get_command_line_w, emulate_get_console_mode, emulate_get_cp_info,
+    emulate_get_environment_variable_a, emulate_get_environment_variable_w, emulate_get_file_type,
+    emulate_get_startup_info_w, emulate_get_std_handle, emulate_get_system_info,
+    emulate_get_system_time_as_file_time, emulate_initialize_slist_head, emulate_load_library_a,
+    emulate_load_library_ex_w, emulate_msvcp_exception_ptr, emulate_process_prng,
+    emulate_query_performance_counter, emulate_query_performance_frequency,
+    emulate_raise_exception, emulate_rtl_capture_context, emulate_set_thread_error_mode,
+    emulate_tls, encode_shift_jis_with_default, environment_strings_range, format_crt_ctime,
+    get_guest_crt_errno, guest_range_has_permission, install_dynamic_windows_import_callbacks,
+    install_win64_import, install_windows_condition_variable_callbacks, read_win64_import_argument,
+    record_windows_address_waiter, release_guest_hostent, serialize_guest_hostent,
+    store_guest_hostent, windows_filetime,
+};
+use super::iterate_and_suites::{
+    continue_iterate, cv_exception_message, emulate_acquire_suite, emulate_aegp_free_mem_handle,
+    emulate_aegp_get_main_window, emulate_aegp_lock_mem_handle, emulate_aegp_mem_handle_size,
+    emulate_aegp_new_mem_handle, emulate_aegp_register, emulate_aegp_resize_mem_handle,
+    emulate_aegp_unlock_mem_handle, emulate_checkout_param, emulate_color_param_value,
+    emulate_cxx_throw_exception, emulate_dispose_handle, emulate_dispose_world,
+    emulate_get_world_pixel_format, emulate_handle_size, emulate_iterate_float, emulate_iterate8,
+    emulate_iterate8_origin, emulate_iterate16, emulate_lock_handle, emulate_new_handle,
+    emulate_new_world, emulate_new_world8, emulate_point_param_value, emulate_resize_handle,
+    emulate_unlock_handle, find_pf_region, install_aegp_compute_cache_suite,
+    install_aegp_utility_suites, install_effect_ui_suite_v1, install_iterate8_suites,
+    install_persistent_data_suite_v3, install_pf_ansi_suite_v2, install_pf_app_suite_v6,
+    install_typed_iterate_suites, msvc_throw_type_name, read_msvc_x64_string, read_suite_name,
+    validate_pf_handle_budget,
+};
+use super::libraries::prefer_emulated_dependency_import;
+use super::lockit::supported_crt_locale;
+#[cfg(target_os = "macos")]
+use super::network::native_windows_adapters;
+use super::network::{WindowsAdapter, serialize_windows_adapters};
+#[cfg(target_os = "macos")]
+use super::network::{local_ipv4_addresses, windows_adapters_from_native};
+use super::printf::{format_guest_stdio, format_guest_values};
+#[cfg(test)]
+use super::trace::may_start_vex_instruction;
+use super::trace::{
+    discover_avx_state_sync_points, install_avx_fallback, install_avx_state_sync_points,
+    native_avx_state_sync,
+};
+use super::types::{
+    GuestEngine, GuestHandle, GuestParam, GuestState, LayerParameterResolution, MsvcpMutex,
+    SmartCheckoutDiskIdFallback, TraceLabel, TraceLabelKind, TraceModule, VcruntimeExceptionData,
+    WindowsFlsSlot, record_smart_checkout_disk_id_fallback, resolve_layer_parameter_offset,
+};
+use super::{
+    AEGP_MEMORY_HANDLE_BASE, Arch, BTreeMap, BTreeSet, CRT_MEMORY_COPY_CHUNK, CrtHeapError,
+    DATA_BASE, DATA_SIZE, Decoder, DecoderOptions, Duration, ENVIRONMENT_STRINGS_BASE,
+    ENVIRONMENT_STRINGS_NAMESPACE_SIZE, ERROR_ACCESS_DENIED, ERROR_ENVVAR_NOT_FOUND,
+    ERROR_FILE_NOT_FOUND, ERROR_FILENAME_EXCED_RANGE, ERROR_INSUFFICIENT_BUFFER,
+    ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_MOD_NOT_FOUND, ERROR_NOT_ENOUGH_MEMORY,
+    ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, ERROR_PROC_NOT_FOUND, EffectRegistry,
+    FRAME_DATA_BASE, FRAME_DATA_END, GuestError, HANDLE_DATA_BASE, HEAP_REALLOC_IN_PLACE_ONLY,
+    HEAP_ZERO_MEMORY, HOST_ACQUIRE_SUITE, HOST_ADD_PARAM, HOST_AEGP_FREE_MEM_HANDLE,
+    HOST_AEGP_GET_MAIN_WINDOW, HOST_AEGP_LOCK_MEM_HANDLE, HOST_AEGP_MEM_HANDLE_SIZE,
+    HOST_AEGP_MEMORY_SUITE, HOST_AEGP_MEMORY_UNSUPPORTED, HOST_AEGP_NEW_MEM_HANDLE,
+    HOST_AEGP_REGISTER, HOST_AEGP_RESIZE_MEM_HANDLE, HOST_AEGP_UNLOCK_MEM_HANDLE,
+    HOST_AREA_SAMPLE8, HOST_BLEND, HOST_CHECKIN_LAYER_PIXELS, HOST_CHECKOUT_LAYER_PIXELS,
+    HOST_CHECKOUT_PARAM, HOST_COLOR_PARAM_SUITE, HOST_COLOR_PARAM_VALUE,
+    HOST_CREATE_THREAD_CONTINUE, HOST_CRT_INITTERM_CONTINUE, HOST_DISPOSE_HANDLE,
+    HOST_DISPOSE_WORLD, HOST_DYNAMIC_FLS_ALLOC, HOST_EXTENDED_ALLOC, HOST_EXTENDED_FREE,
+    HOST_EXTENDED_LOOKUP, HOST_FILL8, HOST_FLS_FREE_CONTINUE, HOST_GET_CALLBACK_ADDR,
+    HOST_GET_WORLD_PIXEL_FORMAT, HOST_HANDLE_SIZE, HOST_INITIALIZE_CONDITION_VARIABLE,
+    HOST_ITERATE_FLOAT, HOST_ITERATE_FLOAT_CONTINUE, HOST_ITERATE_FLOAT_SUITE,
+    HOST_ITERATE_ROW_TRAMPOLINE, HOST_ITERATE8, HOST_ITERATE8_CONTINUE, HOST_ITERATE8_ORIGIN,
+    HOST_ITERATE16, HOST_ITERATE16_CONTINUE, HOST_ITERATE16_SUITE, HOST_LOCK_HANDLE,
+    HOST_NEW_HANDLE, HOST_NEW_WORLD, HOST_NEW_WORLD8, HOST_POINT_PARAM_SUITE,
+    HOST_POINT_PARAM_VALUE, HOST_POISON, HOST_PRE_CHECKOUT_LAYER, HOST_REGISTER_UI,
+    HOST_RESIZE_HANDLE, HOST_SLEEP_CONDITION_VARIABLE_CS, HOST_SUBPIXEL_SAMPLE8,
+    HOST_TRANSFER_RECT8, HOST_UNLOCK_HANDLE, HOST_WORLD_SUITE, HRESULT_E_INVALIDARG,
+    ITERATE_ROW_TRAMPOLINE, Instant, InstructionInfoFactory, MAX_CRT_MEMORY_COPY_BYTES,
+    MAX_CRT_STDIO_BUFFER_BYTES, MAX_CRT_STRING_BYTES, MAX_MSVCP_MUTEX_RECURSION, MAX_MSVCP_MUTEXES,
+    MAX_PF_HANDLE_COUNT, MAX_PROCESS_PRNG_BYTES, MAX_VCOMP_REQUESTED_THREADS,
+    MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS, MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION,
+    MAX_WINDOWS_CRITICAL_SECTIONS, MAX_WINDOWS_ENVIRONMENT_NAME_BYTES, MAX_WINDOWS_FLS_SLOTS,
+    MAX_WINDOWS_MODULE_REFERENCES, MAX_WINDOWS_TLS_SLOTS, MSVCP_EXCEPTION_PTR_BYTES,
+    MSVCP_MUTEX_BYTES, MSVCP_MUTEX_TRY, MSVCP_THRD_BUSY, Mnemonic, Mode, OBSERVED_MSVCP_MUTEX_TYPE,
+    PAGE_SIZE, PF_HANDLE_DATA_BASE, PRIVATE_HEAP_TOKEN_BASE, PROCESS_HEAP_HANDLE, Prot,
+    RETURN_ADDRESS, RegisterX86, STACK_BASE, STACK_SIZE, STUB_BASE, STUB_SIZE, Sha256,
+    StaticTlsImage, TIMEOUT_MICROSECONDS, Unicorn, VCRUNTIME_EXCEPTION_DATA_BYTES, VecDeque,
+    WINDOWS_CRITICAL_SECTION_BYTES, WINDOWS_KERNEL32_MODULE_TOKEN, WINDOWS_MAX_PATH_BYTES,
+    WINDOWS_NTDLL_MODULE_TOKEN, WINDOWS_STANDARD_ERROR_TOKEN, WINDOWS_STANDARD_INPUT_TOKEN,
+    WINDOWS_STANDARD_OUTPUT_TOKEN, WINDOWS_THREAD_HANDLE_BASE, WINDOWS_THREAD_STACK_BASE, abi,
+};
 
-const TEST_CODE: u64 = 0x1000_0000;
+pub(super) const TEST_CODE: u64 = 0x1000_0000;
 const TEST_CXX_THROW: u64 = STUB_BASE + 0x80460;
 const TEST_THROW_INFO: u64 = TEST_CODE + 0x800;
 
@@ -100,7 +220,7 @@ fn win64_entry_rsp(argument_count: usize) -> u64 {
     STACK_BASE + STACK_SIZE - frame_bytes
 }
 
-fn test_engine(code: &[u8]) -> GuestEngine<'static> {
+pub(super) fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     let mut unicorn = Unicorn::new_with_data(
         Arch::X86,
         Mode::MODE_64,
@@ -1245,7 +1365,7 @@ fn legacy_blend_is_typed_alias_safe_and_fails_closed() {
     );
 }
 
-fn argb8_sampling_fixture(engine: &mut GuestEngine<'static>) -> (u64, u64, u64) {
+pub(super) fn argb8_sampling_fixture(engine: &mut GuestEngine<'static>) -> (u64, u64, u64) {
     let pixels = engine.allocate(16, 8).unwrap();
     engine
         .write(
@@ -1274,7 +1394,7 @@ fn argb8_sampling_fixture(engine: &mut GuestEngine<'static>) -> (u64, u64, u64) 
     (params, destination, world)
 }
 
-fn argb8_world_fixture(
+pub(super) fn argb8_world_fixture(
     engine: &mut GuestEngine<'static>,
     width: i32,
     height: i32,
@@ -9146,13 +9266,13 @@ fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
     assert!(engine.unicorn.get_data().callback_error.is_none());
 }
 
-fn read_u64(engine: &GuestEngine<'static>, address: u64) -> u64 {
+pub(super) fn read_u64(engine: &GuestEngine<'static>, address: u64) -> u64 {
     let mut bytes = [0u8; 8];
     engine.read(address, &mut bytes).unwrap();
     u64::from_le_bytes(bytes)
 }
 
-fn call_aegp_new_mem_handle(
+pub(super) fn call_aegp_new_mem_handle(
     engine: &mut GuestEngine<'static>,
     callback: u64,
     label: u64,
@@ -9166,7 +9286,7 @@ fn call_aegp_new_mem_handle(
     (result, read_u64(engine, output))
 }
 
-fn aegp_memory_state_snapshot(
+pub(super) fn aegp_memory_state_snapshot(
     engine: &GuestEngine<'static>,
 ) -> (u64, u64, Vec<(u64, u64, u64, u32, u64)>, Vec<(u64, u64)>) {
     let state = engine.unicorn.get_data();

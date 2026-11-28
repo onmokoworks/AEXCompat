@@ -1,3 +1,7 @@
+use super::tests_support::{argb8_world_fixture, test_engine};
+use super::types::GuestEngine;
+use super::{HOST_TRANSFER_RECT8, TIMEOUT_MICROSECONDS};
+
 #[test]
 fn legacy_transfer_rect8_ignores_opacity16_and_clips_source_with_anchor_preserved() {
     let mut engine = test_engine(&[0xc3]);

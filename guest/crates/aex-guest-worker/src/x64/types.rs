@@ -1,3 +1,16 @@
+use super::files::GuestFiles;
+use super::gpu_runtime::GpuRuntime;
+use super::gpu_suite::GpuSuiteState;
+use super::libraries::GuestLibrary;
+use super::mutex::WindowsKernelObjects;
+use super::trace::AvxStateSync;
+use super::ui_session::UiSessionState;
+use super::{
+    BTreeMap, BTreeSet, CRT_HEAP_BASE, CRT_HEAP_END, Context, CrtHeap, EffectRegistry, HashMap,
+    HashSet, MAX_CRT_HEAP_BYTES, MAX_SUITE_REQUESTS, MAX_UNSUPPORTED_SUITE_CALLS, Serialize,
+    UcHookId, Unicorn, VecDeque,
+};
+
 #[derive(Clone, Debug)]
 pub struct GuestParam {
     pub index: i32,
@@ -136,7 +149,7 @@ pub(crate) fn record_suite_request(requests: &mut Vec<String>, request: String) 
     }
 }
 
-fn record_named_unsupported_suite_call(
+pub(super) fn record_named_unsupported_suite_call(
     calls: &mut Vec<UnsupportedSuiteCall>,
     dropped: &mut u64,
     name: &'static str,
@@ -161,170 +174,170 @@ fn record_named_unsupported_suite_call(
 }
 
 #[derive(Clone, Copy)]
-struct WindowsInitOnceState {
-    owner: Option<u32>,
-    context: u64,
-    complete: bool,
+pub(super) struct WindowsInitOnceState {
+    pub(super) owner: Option<u32>,
+    pub(super) context: u64,
+    pub(super) complete: bool,
 }
 
 #[derive(Default)]
-struct GuestState {
-    ui_session: UiSessionState,
-    pointer_encoding_key: Option<u64>,
-    crt_wlocale_buffer: Option<u64>,
-    crt_pctype_buffer: Option<u64>,
-    crt_locale_names_buffer: Option<u64>,
-    crt_lconv_buffer: Option<u64>,
-    crt_locales: BTreeSet<u64>,
-    next_crt_locale: u64,
-    crt_tm_buffers: BTreeMap<u32, u64>,
-    crt_strerror_buffers: BTreeMap<u32, u64>,
-    windows_hostent_buffers: BTreeMap<u32, u64>,
-    loaded_libraries: BTreeMap<String, GuestLibrary>,
-    sapphire_filebuf_fgetc_return: Option<u64>,
-    params: Vec<GuestParam>,
-    popup_choice_pages: u64,
-    custom_ui_registration: Option<CustomUiRegistration>,
-    callback_error: Option<String>,
-    unsupported_import: Option<(String, String)>,
-    smart_input_world: u64,
-    smart_output_world: u64,
-    smart_width: u32,
-    smart_height: u32,
-    smart_pixel_format: i32,
-    render_pixel_format: i32,
-    smart_current_time: i32,
-    smart_current_time_scale: u32,
-    suite_requests: Vec<String>,
-    options_button_name: Option<Vec<u8>>,
-    persistent_blob_active: bool,
-    persistent_strings: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
-    persistent_longs: HashMap<(Vec<u8>, Vec<u8>), i32>,
-    addrinfo_allocations: HashSet<u64>,
-    unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
-    dropped_unsupported_suite_calls: u64,
-    smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
-    aegp_compute_cache_classes: HashMap<Vec<u8>, [u64; 4]>,
-    selector_dispatch_active: bool,
-    pending_unsupported_suite: Option<PendingUnsupportedSuite>,
-    selector_abort: Option<SelectorAbortRecord>,
-    pre_checkout_calls: u32,
-    pre_checkout_requests: Vec<[i32; 4]>,
-    smart_checkout_ids: HashMap<i32, SmartCheckout>,
-    checkout_pixels_calls: u32,
-    checkin_pixels_calls: u32,
-    checkout_output_calls: u32,
-    input_parameter_definition: u64,
-    parameter_definitions: Vec<u64>,
-    next_handle_data: u64,
-    next_pf_handle_data: u64,
-    image_region: Option<(u64, u64)>,
-    image_executable_ranges: Vec<(u64, u64)>,
-    sealed_image_read_ranges: Vec<(u64, u64)>,
-    sealed_image_reads: bool,
-    latest_runtime_target: Option<TraceRuntimeTarget>,
-    handles: HashMap<u64, GuestHandle>,
-    worlds: HashMap<u64, GuestWorld>,
-    resident_world_formats: HashMap<u64, i32>,
-    cropped_worlds: Vec<u64>,
-    aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
-    aegp_memory_free: Vec<AegpMemoryBlock>,
-    next_aegp_memory_handle: u64,
-    math_calls: Vec<String>,
-    handle_allocations: Vec<u64>,
-    handle_allocation_failures: Vec<String>,
-    census_blocks: HashMap<(u64, u32), u64>,
-    trace: Option<TraceCapture>,
-    trace_labels: HashMap<u64, TraceLabel>,
-    trace_watches: Vec<TraceWatchSpec>,
-    trace_checkpoint_only: bool,
-    pending_iterate: Option<PendingIterate>,
-    vcomp_dynamic_loop: Option<VcompDynamicLoop>,
-    vcomp_requested_threads: Option<u32>,
-    omp_dynamic_requested: Option<bool>,
-    imported_data: BTreeMap<&'static str, u64>,
-    msvcp_mutexes: HashMap<u64, MsvcpMutex>,
-    msvcp_lockit_locks: [Option<(u32, u32)>; 8],
-    msvcp_lockit_objects: HashMap<u64, (i32, u32)>,
-    pending_crt_initterm: Option<PendingCrtInitterm>,
-    crt_onexit_tables: HashMap<u64, Vec<u64>>,
-    crt_terminate_handler: u64,
-    windows_critical_sections: HashMap<u64, u32>,
-    windows_srw_locks: BTreeMap<u64, WindowsSrwLock>,
-    windows_condition_variables: HashSet<u64>,
-    windows_condition_waiters: BTreeMap<u64, VecDeque<u32>>,
-    scheduler_condition_locks: BTreeMap<u32, u64>,
-    windows_address_waiters: BTreeMap<u64, BTreeSet<u32>>,
-    windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
-    windows_tls_slots: BTreeMap<u32, u64>,
-    pending_fls_free: Option<PendingFlsFree>,
-    windows_threads: BTreeMap<u64, WindowsThread>,
-    windows_hooks: BTreeMap<u64, (i32, u64, u64, u32)>,
-    next_windows_hook: u64,
-    windows_timers: BTreeMap<(u64, u64), (u32, u64)>,
-    windows_init_once: BTreeMap<u64, WindowsInitOnceState>,
-    next_windows_timer: u64,
-    windows_message_boxes: Vec<(String, String, u32)>,
-    windows_objects: WindowsKernelObjects,
-    windows_sids: BTreeSet<u64>,
-    windows_sid_issued: u64,
-    windows_acl_allocations: BTreeMap<u64, u64>,
-    windows_acl_issued: u64,
-    next_windows_thread_id: u32,
-    current_windows_thread_id: u32,
-    com_apartments: BTreeMap<u32, (u32, u32)>,
+pub(super) struct GuestState {
+    pub(super) ui_session: UiSessionState,
+    pub(super) pointer_encoding_key: Option<u64>,
+    pub(super) crt_wlocale_buffer: Option<u64>,
+    pub(super) crt_pctype_buffer: Option<u64>,
+    pub(super) crt_locale_names_buffer: Option<u64>,
+    pub(super) crt_lconv_buffer: Option<u64>,
+    pub(super) crt_locales: BTreeSet<u64>,
+    pub(super) next_crt_locale: u64,
+    pub(super) crt_tm_buffers: BTreeMap<u32, u64>,
+    pub(super) crt_strerror_buffers: BTreeMap<u32, u64>,
+    pub(super) windows_hostent_buffers: BTreeMap<u32, u64>,
+    pub(super) loaded_libraries: BTreeMap<String, GuestLibrary>,
+    pub(super) sapphire_filebuf_fgetc_return: Option<u64>,
+    pub(super) params: Vec<GuestParam>,
+    pub(super) popup_choice_pages: u64,
+    pub(super) custom_ui_registration: Option<CustomUiRegistration>,
+    pub(super) callback_error: Option<String>,
+    pub(super) unsupported_import: Option<(String, String)>,
+    pub(super) smart_input_world: u64,
+    pub(super) smart_output_world: u64,
+    pub(super) smart_width: u32,
+    pub(super) smart_height: u32,
+    pub(super) smart_pixel_format: i32,
+    pub(super) render_pixel_format: i32,
+    pub(super) smart_current_time: i32,
+    pub(super) smart_current_time_scale: u32,
+    pub(super) suite_requests: Vec<String>,
+    pub(super) options_button_name: Option<Vec<u8>>,
+    pub(super) persistent_blob_active: bool,
+    pub(super) persistent_strings: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
+    pub(super) persistent_longs: HashMap<(Vec<u8>, Vec<u8>), i32>,
+    pub(super) addrinfo_allocations: HashSet<u64>,
+    pub(super) unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    pub(super) dropped_unsupported_suite_calls: u64,
+    pub(super) smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
+    pub(super) aegp_compute_cache_classes: HashMap<Vec<u8>, [u64; 4]>,
+    pub(super) selector_dispatch_active: bool,
+    pub(super) pending_unsupported_suite: Option<PendingUnsupportedSuite>,
+    pub(super) selector_abort: Option<SelectorAbortRecord>,
+    pub(super) pre_checkout_calls: u32,
+    pub(super) pre_checkout_requests: Vec<[i32; 4]>,
+    pub(super) smart_checkout_ids: HashMap<i32, SmartCheckout>,
+    pub(super) checkout_pixels_calls: u32,
+    pub(super) checkin_pixels_calls: u32,
+    pub(super) checkout_output_calls: u32,
+    pub(super) input_parameter_definition: u64,
+    pub(super) parameter_definitions: Vec<u64>,
+    pub(super) next_handle_data: u64,
+    pub(super) next_pf_handle_data: u64,
+    pub(super) image_region: Option<(u64, u64)>,
+    pub(super) image_executable_ranges: Vec<(u64, u64)>,
+    pub(super) sealed_image_read_ranges: Vec<(u64, u64)>,
+    pub(super) sealed_image_reads: bool,
+    pub(super) latest_runtime_target: Option<TraceRuntimeTarget>,
+    pub(super) handles: HashMap<u64, GuestHandle>,
+    pub(super) worlds: HashMap<u64, GuestWorld>,
+    pub(super) resident_world_formats: HashMap<u64, i32>,
+    pub(super) cropped_worlds: Vec<u64>,
+    pub(super) aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
+    pub(super) aegp_memory_free: Vec<AegpMemoryBlock>,
+    pub(super) next_aegp_memory_handle: u64,
+    pub(super) math_calls: Vec<String>,
+    pub(super) handle_allocations: Vec<u64>,
+    pub(super) handle_allocation_failures: Vec<String>,
+    pub(super) census_blocks: HashMap<(u64, u32), u64>,
+    pub(super) trace: Option<TraceCapture>,
+    pub(super) trace_labels: HashMap<u64, TraceLabel>,
+    pub(super) trace_watches: Vec<TraceWatchSpec>,
+    pub(super) trace_checkpoint_only: bool,
+    pub(super) pending_iterate: Option<PendingIterate>,
+    pub(super) vcomp_dynamic_loop: Option<VcompDynamicLoop>,
+    pub(super) vcomp_requested_threads: Option<u32>,
+    pub(super) omp_dynamic_requested: Option<bool>,
+    pub(super) imported_data: BTreeMap<&'static str, u64>,
+    pub(super) msvcp_mutexes: HashMap<u64, MsvcpMutex>,
+    pub(super) msvcp_lockit_locks: [Option<(u32, u32)>; 8],
+    pub(super) msvcp_lockit_objects: HashMap<u64, (i32, u32)>,
+    pub(super) pending_crt_initterm: Option<PendingCrtInitterm>,
+    pub(super) crt_onexit_tables: HashMap<u64, Vec<u64>>,
+    pub(super) crt_terminate_handler: u64,
+    pub(super) windows_critical_sections: HashMap<u64, u32>,
+    pub(super) windows_srw_locks: BTreeMap<u64, WindowsSrwLock>,
+    pub(super) windows_condition_variables: HashSet<u64>,
+    pub(super) windows_condition_waiters: BTreeMap<u64, VecDeque<u32>>,
+    pub(super) scheduler_condition_locks: BTreeMap<u32, u64>,
+    pub(super) windows_address_waiters: BTreeMap<u64, BTreeSet<u32>>,
+    pub(super) windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
+    pub(super) windows_tls_slots: BTreeMap<u32, u64>,
+    pub(super) pending_fls_free: Option<PendingFlsFree>,
+    pub(super) windows_threads: BTreeMap<u64, WindowsThread>,
+    pub(super) windows_hooks: BTreeMap<u64, (i32, u64, u64, u32)>,
+    pub(super) next_windows_hook: u64,
+    pub(super) windows_timers: BTreeMap<(u64, u64), (u32, u64)>,
+    pub(super) windows_init_once: BTreeMap<u64, WindowsInitOnceState>,
+    pub(super) next_windows_timer: u64,
+    pub(super) windows_message_boxes: Vec<(String, String, u32)>,
+    pub(super) windows_objects: WindowsKernelObjects,
+    pub(super) windows_sids: BTreeSet<u64>,
+    pub(super) windows_sid_issued: u64,
+    pub(super) windows_acl_allocations: BTreeMap<u64, u64>,
+    pub(super) windows_acl_issued: u64,
+    pub(super) next_windows_thread_id: u32,
+    pub(super) current_windows_thread_id: u32,
+    pub(super) com_apartments: BTreeMap<u32, (u32, u32)>,
     // Process defaults (service count, authentication level, impersonation level).
     // No COM transport may operate without implementing these security settings.
-    com_security: Option<(i32, u32, u32)>,
-    pending_windows_thread: Option<PendingWindowsThread>,
-    windows_last_error: u32,
-    crt_errno: u32,
-    last_crt_heap_failure: Option<(u64, String)>,
-    crt_errno_buffers: BTreeMap<u32, u64>,
-    crt_random_states: BTreeMap<u32, u32>,
-    registry: crate::guest_registry::GuestRegistry,
-    guest_files: GuestFiles,
-    performance_counter_origin: Option<std::time::Instant>,
-    windows_module_refcounts: HashMap<u64, u32>,
-    windows_pinned_modules: HashSet<u64>,
-    windows_thread_error_mode: u32,
-    windows_socket_startups: u32,
-    windows_private_heaps: BTreeMap<u64, BTreeSet<u64>>,
-    scheduler_yield_reason: Option<SchedulerYieldReason>,
-    scheduler_resume_rip: u64,
-    scheduler_ready_hint: bool,
-    scheduler_woken_threads: VecDeque<u32>,
-    scheduler_virtual_tick: u64,
-    scheduler_switches_remaining: u64,
-    scheduler_wait_deadline: Option<u64>,
-    scheduler_main_wait: Option<SchedulerMainWait>,
-    scheduler_child_completed: bool,
-    scheduler_resume_active: bool,
-    scheduler_parent_context: Option<Context>,
-    windows_command_line_a: u64,
-    windows_command_line_w: u64,
-    environment_strings_base: u64,
-    environment_overrides: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    getenv_buffer: Option<u64>,
-    wgetenv_buffers: BTreeMap<Vec<u8>, u64>,
-    wenviron_cell: Option<u64>,
-    process_prng_state: u64,
-    plugin_data_registry: EffectRegistry,
-    plugin_data_error: Option<String>,
-    crt_heap: CrtHeap,
-    crt_heap_mapped: bool,
-    extended_strings: HashMap<i32, u64>,
-    extended_empty_string: u64,
-    extended_string_table_valid: bool,
-    avx_fallback_instructions: u64,
-    avx_defined_ymm: [bool; 16],
-    avx_state_sync_points: HashMap<u64, AvxStateSync>,
-    gpu_runtime: GpuRuntime,
-    gpu_suite: GpuSuiteState,
+    pub(super) com_security: Option<(i32, u32, u32)>,
+    pub(super) pending_windows_thread: Option<PendingWindowsThread>,
+    pub(super) windows_last_error: u32,
+    pub(super) crt_errno: u32,
+    pub(super) last_crt_heap_failure: Option<(u64, String)>,
+    pub(super) crt_errno_buffers: BTreeMap<u32, u64>,
+    pub(super) crt_random_states: BTreeMap<u32, u32>,
+    pub(super) registry: crate::guest_registry::GuestRegistry,
+    pub(super) guest_files: GuestFiles,
+    pub(super) performance_counter_origin: Option<std::time::Instant>,
+    pub(super) windows_module_refcounts: HashMap<u64, u32>,
+    pub(super) windows_pinned_modules: HashSet<u64>,
+    pub(super) windows_thread_error_mode: u32,
+    pub(super) windows_socket_startups: u32,
+    pub(super) windows_private_heaps: BTreeMap<u64, BTreeSet<u64>>,
+    pub(super) scheduler_yield_reason: Option<SchedulerYieldReason>,
+    pub(super) scheduler_resume_rip: u64,
+    pub(super) scheduler_ready_hint: bool,
+    pub(super) scheduler_woken_threads: VecDeque<u32>,
+    pub(super) scheduler_virtual_tick: u64,
+    pub(super) scheduler_switches_remaining: u64,
+    pub(super) scheduler_wait_deadline: Option<u64>,
+    pub(super) scheduler_main_wait: Option<SchedulerMainWait>,
+    pub(super) scheduler_child_completed: bool,
+    pub(super) scheduler_resume_active: bool,
+    pub(super) scheduler_parent_context: Option<Context>,
+    pub(super) windows_command_line_a: u64,
+    pub(super) windows_command_line_w: u64,
+    pub(super) environment_strings_base: u64,
+    pub(super) environment_overrides: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub(super) getenv_buffer: Option<u64>,
+    pub(super) wgetenv_buffers: BTreeMap<Vec<u8>, u64>,
+    pub(super) wenviron_cell: Option<u64>,
+    pub(super) process_prng_state: u64,
+    pub(super) plugin_data_registry: EffectRegistry,
+    pub(super) plugin_data_error: Option<String>,
+    pub(super) crt_heap: CrtHeap,
+    pub(super) crt_heap_mapped: bool,
+    pub(super) extended_strings: HashMap<i32, u64>,
+    pub(super) extended_empty_string: u64,
+    pub(super) extended_string_table_valid: bool,
+    pub(super) avx_fallback_instructions: u64,
+    pub(super) avx_defined_ymm: [bool; 16],
+    pub(super) avx_state_sync_points: HashMap<u64, AvxStateSync>,
+    pub(super) gpu_runtime: GpuRuntime,
+    pub(super) gpu_suite: GpuSuiteState,
 }
 
 impl GuestState {
-    fn seal_image_reads(&mut self) {
+    pub(super) fn seal_image_reads(&mut self) {
         let mut ranges = Vec::with_capacity(self.loaded_libraries.len() + 1);
         ranges.extend(self.image_region);
         ranges.extend(
@@ -348,7 +361,7 @@ impl GuestState {
         self.sealed_image_reads = true;
     }
 
-    fn sealed_image_contains(&self, address: u64, inclusive_end: u64) -> bool {
+    pub(super) fn sealed_image_contains(&self, address: u64, inclusive_end: u64) -> bool {
         if !self.sealed_image_reads {
             return false;
         }
@@ -374,216 +387,216 @@ pub struct CustomUiRegistration {
 }
 
 #[derive(Clone, Debug)]
-struct PendingUnsupportedSuite {
-    name: String,
-    version: u64,
-    acquire_error: i32,
-    caller_rsp: u64,
-    return_address: u64,
+pub(super) struct PendingUnsupportedSuite {
+    pub(super) name: String,
+    pub(super) version: u64,
+    pub(super) acquire_error: i32,
+    pub(super) caller_rsp: u64,
+    pub(super) return_address: u64,
 }
 
 #[derive(Clone, Debug)]
-struct SelectorAbortRecord {
-    error: i32,
-    suite: PendingUnsupportedSuite,
+pub(super) struct SelectorAbortRecord {
+    pub(super) error: i32,
+    pub(super) suite: PendingUnsupportedSuite,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct SmartCheckout {
-    index: i32,
-    world: u64,
-    checked_out: bool,
+pub(super) struct SmartCheckout {
+    pub(super) index: i32,
+    pub(super) world: u64,
+    pub(super) checked_out: bool,
 }
 
 #[derive(Clone, Debug)]
-struct VcompDynamicLoop {
-    current: i32,
-    upper: i32,
-    chunk: i32,
-    exhausted: bool,
+pub(super) struct VcompDynamicLoop {
+    pub(super) current: i32,
+    pub(super) upper: i32,
+    pub(super) chunk: i32,
+    pub(super) exhausted: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct MsvcpMutex {
-    mutex_type: u32,
-    owner_thread_id: Option<u32>,
-    lock_count: u32,
+pub(super) struct MsvcpMutex {
+    pub(super) mutex_type: u32,
+    pub(super) owner_thread_id: Option<u32>,
+    pub(super) lock_count: u32,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct WindowsSrwLock {
-    owner: Option<u32>,
-    waiters: VecDeque<u32>,
+pub(super) struct WindowsSrwLock {
+    pub(super) owner: Option<u32>,
+    pub(super) waiters: VecDeque<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct VcruntimeExceptionData {
-    what: u64,
-    do_free: bool,
+pub(super) struct VcruntimeExceptionData {
+    pub(super) what: u64,
+    pub(super) do_free: bool,
 }
 
 #[derive(Clone, Debug)]
-struct PendingCrtInitterm {
-    functions: Vec<u64>,
-    next: usize,
-    return_address: u64,
-    continuation_rsp: u64,
-    stop_on_error: bool,
+pub(super) struct PendingCrtInitterm {
+    pub(super) functions: Vec<u64>,
+    pub(super) next: usize,
+    pub(super) return_address: u64,
+    pub(super) continuation_rsp: u64,
+    pub(super) stop_on_error: bool,
 }
 
 #[derive(Clone, Debug)]
-struct WindowsThread {
-    id: u32,
-    start: u64,
-    parameter: u64,
-    suspended: bool,
-    completed: bool,
-    exit_code: u32,
-    handle_open: bool,
-    stack_base: u64,
-    stack_size: u64,
-    stack_mapped: bool,
+pub(super) struct WindowsThread {
+    pub(super) id: u32,
+    pub(super) start: u64,
+    pub(super) parameter: u64,
+    pub(super) suspended: bool,
+    pub(super) completed: bool,
+    pub(super) exit_code: u32,
+    pub(super) handle_open: bool,
+    pub(super) stack_base: u64,
+    pub(super) stack_size: u64,
+    pub(super) stack_mapped: bool,
 }
 
 #[derive(Clone, Debug)]
-struct PendingWindowsThread {
-    handle: u64,
-    return_address: u64,
-    continuation_rsp: u64,
-    callback_return_rsp: u64,
-    caller_tls_values: BTreeMap<u32, u64>,
-    caller_fls_values: BTreeMap<u32, u64>,
-    caller_last_error: u32,
-    caller_crt_errno: u32,
-    caller_thread_error_mode: u32,
-    caller_thread_id: u32,
-    completion_return: u64,
-    caller_teb_stack: [u8; 16],
-    exit_code: Option<u32>,
-    fls_pass: u32,
-    fls_processed: BTreeSet<u32>,
+pub(super) struct PendingWindowsThread {
+    pub(super) handle: u64,
+    pub(super) return_address: u64,
+    pub(super) continuation_rsp: u64,
+    pub(super) callback_return_rsp: u64,
+    pub(super) caller_tls_values: BTreeMap<u32, u64>,
+    pub(super) caller_fls_values: BTreeMap<u32, u64>,
+    pub(super) caller_last_error: u32,
+    pub(super) caller_crt_errno: u32,
+    pub(super) caller_thread_error_mode: u32,
+    pub(super) caller_thread_id: u32,
+    pub(super) completion_return: u64,
+    pub(super) caller_teb_stack: [u8; 16],
+    pub(super) exit_code: Option<u32>,
+    pub(super) fls_pass: u32,
+    pub(super) fls_processed: BTreeSet<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct WindowsFlsSlot {
-    callback: u64,
-    value: u64,
+pub(super) struct WindowsFlsSlot {
+    pub(super) callback: u64,
+    pub(super) value: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PendingFlsFree {
-    index: u32,
-    return_address: u64,
-    continuation_rsp: u64,
+pub(super) struct PendingFlsFree {
+    pub(super) index: u32,
+    pub(super) return_address: u64,
+    pub(super) continuation_rsp: u64,
 }
 
 #[derive(Clone, Debug)]
-struct PendingIterate {
-    caller_rsp: u64,
-    return_address: u64,
-    refcon: u64,
-    pixel_function: u64,
-    source_data: u64,
-    source_rowbytes: u64,
-    source_width: i32,
-    source_height: i32,
-    zero_outside_source: bool,
-    destination_data: u64,
-    destination_rowbytes: u64,
-    left: i32,
-    right: i32,
-    bottom: i32,
-    x: i32,
-    y: i32,
-    origin_x: i32,
-    origin_y: i32,
-    pixel_bytes: u64,
-    continuation: u64,
-    callback_name: &'static str,
-    callback_phase: IterateCallbackPhase,
-    scheduled_pixels: i32,
-    abort_function: u64,
-    progress_function: u64,
-    effect_ref: u64,
-    progress_base: i32,
-    progress_final: i32,
-    top: i32,
+pub(super) struct PendingIterate {
+    pub(super) caller_rsp: u64,
+    pub(super) return_address: u64,
+    pub(super) refcon: u64,
+    pub(super) pixel_function: u64,
+    pub(super) source_data: u64,
+    pub(super) source_rowbytes: u64,
+    pub(super) source_width: i32,
+    pub(super) source_height: i32,
+    pub(super) zero_outside_source: bool,
+    pub(super) destination_data: u64,
+    pub(super) destination_rowbytes: u64,
+    pub(super) left: i32,
+    pub(super) right: i32,
+    pub(super) bottom: i32,
+    pub(super) x: i32,
+    pub(super) y: i32,
+    pub(super) origin_x: i32,
+    pub(super) origin_y: i32,
+    pub(super) pixel_bytes: u64,
+    pub(super) continuation: u64,
+    pub(super) callback_name: &'static str,
+    pub(super) callback_phase: IterateCallbackPhase,
+    pub(super) scheduled_pixels: i32,
+    pub(super) abort_function: u64,
+    pub(super) progress_function: u64,
+    pub(super) effect_ref: u64,
+    pub(super) progress_base: i32,
+    pub(super) progress_final: i32,
+    pub(super) top: i32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum IterateCallbackPhase {
+pub(super) enum IterateCallbackPhase {
     Pixel,
     Progress,
     Abort,
 }
 
 #[derive(Clone, Debug)]
-struct GuestHandle {
-    data: u64,
-    size: u64,
-    locks: u32,
-    pending_dispose: bool,
-    handle_region: u64,
-    data_region: u64,
-    data_mapped_size: u64,
+pub(super) struct GuestHandle {
+    pub(super) data: u64,
+    pub(super) size: u64,
+    pub(super) locks: u32,
+    pub(super) pending_dispose: bool,
+    pub(super) handle_region: u64,
+    pub(super) data_region: u64,
+    pub(super) data_mapped_size: u64,
 }
 
 #[derive(Clone, Debug)]
-struct GuestWorld {
-    pixel_format: i32,
-    size: u64,
-    data_region: u64,
-    data_mapped_size: u64,
+pub(super) struct GuestWorld {
+    pub(super) pixel_format: i32,
+    pub(super) size: u64,
+    pub(super) data_region: u64,
+    pub(super) data_mapped_size: u64,
 }
 
 #[derive(Clone, Debug)]
-struct AegpMemoryHandle {
-    data: u64,
-    size: u64,
-    locks: u32,
-    end: u64,
+pub(super) struct AegpMemoryHandle {
+    pub(super) data: u64,
+    pub(super) size: u64,
+    pub(super) locks: u32,
+    pub(super) end: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct AegpMemoryBlock {
-    data: u64,
-    end: u64,
+pub(super) struct AegpMemoryBlock {
+    pub(super) data: u64,
+    pub(super) end: u64,
 }
 
 pub struct GuestEngine<'a> {
-    unicorn: Unicorn<'a, GuestState>,
-    scheduled_windows_threads: BTreeMap<u32, ParkedWindowsThread>,
-    scheduler_ready: VecDeque<u32>,
-    scheduler_deferred_ready: VecDeque<u32>,
-    parked_main_context: Option<Context>,
-    next_data: u64,
-    next_import_stub: u64,
-    image_base: u64,
-    image_end: u64,
-    census_hook: Option<UcHookId>,
-    trace_hooks: Vec<UcHookId>,
-    trace_points: Vec<u64>,
-    image_sha256: String,
-    entry_export: String,
-    trace_modules: Vec<TraceModule>,
-    primary_attached: bool,
-    primary_poisoned: bool,
+    pub(super) unicorn: Unicorn<'a, GuestState>,
+    pub(super) scheduled_windows_threads: BTreeMap<u32, ParkedWindowsThread>,
+    pub(super) scheduler_ready: VecDeque<u32>,
+    pub(super) scheduler_deferred_ready: VecDeque<u32>,
+    pub(super) parked_main_context: Option<Context>,
+    pub(super) next_data: u64,
+    pub(super) next_import_stub: u64,
+    pub(super) image_base: u64,
+    pub(super) image_end: u64,
+    pub(super) census_hook: Option<UcHookId>,
+    pub(super) trace_hooks: Vec<UcHookId>,
+    pub(super) trace_points: Vec<u64>,
+    pub(super) image_sha256: String,
+    pub(super) entry_export: String,
+    pub(super) trace_modules: Vec<TraceModule>,
+    pub(super) primary_attached: bool,
+    pub(super) primary_poisoned: bool,
 }
 
-struct ParkedWindowsThread {
-    crt_errno: u32,
-    context: Context,
-    pending: PendingWindowsThread,
-    tls_values: BTreeMap<u32, u64>,
-    fls_values: BTreeMap<u32, u64>,
-    last_error: u32,
-    thread_error_mode: u32,
-    teb_stack: [u8; 16],
-    wait_deadline: Option<u64>,
+pub(super) struct ParkedWindowsThread {
+    pub(super) crt_errno: u32,
+    pub(super) context: Context,
+    pub(super) pending: PendingWindowsThread,
+    pub(super) tls_values: BTreeMap<u32, u64>,
+    pub(super) fls_values: BTreeMap<u32, u64>,
+    pub(super) last_error: u32,
+    pub(super) thread_error_mode: u32,
+    pub(super) teb_stack: [u8; 16],
+    pub(super) wait_deadline: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SchedulerYieldReason {
+pub(super) enum SchedulerYieldReason {
     Voluntary,
     AddressWait,
     SrwLock,
@@ -592,10 +605,10 @@ enum SchedulerYieldReason {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct SchedulerMainWait {
-    address: u64,
-    deadline: Option<u64>,
-    woken: bool,
+pub(super) struct SchedulerMainWait {
+    pub(super) address: u64,
+    pub(super) deadline: Option<u64>,
+    pub(super) woken: bool,
 }
 
 impl Drop for GuestEngine<'_> {
@@ -633,62 +646,62 @@ impl Drop for GuestEngine<'_> {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum TraceLabelKind {
+pub(super) enum TraceLabelKind {
     Import,
     HostCallback,
 }
 
 #[derive(Clone, Debug)]
-struct TraceLabel {
-    kind: TraceLabelKind,
-    name: String,
+pub(super) struct TraceLabel {
+    pub(super) kind: TraceLabelKind,
+    pub(super) name: String,
 }
 
 #[derive(Debug)]
-struct TraceCapture {
-    selector: String,
-    entry_rva: u64,
-    events: Vec<TraceEvent>,
-    return_stack: Vec<u64>,
-    function_stack: Vec<Option<u64>>,
-    call_rsp_stack: Vec<u64>,
-    call_id_stack: Vec<u64>,
-    next_call_id: u64,
-    watch_specs: Vec<TraceWatchSpec>,
-    watch_occurrence_counts: HashMap<String, u64>,
-    watch_stack: Vec<Vec<PendingTraceWatch>>,
-    selector_watches: Vec<PendingTraceWatch>,
-    checkpoint_returns: HashMap<u64, Vec<PendingTraceWatch>>,
-    unhookable_watches: Vec<UnhookableWatch>,
-    witnesses: Vec<TraceMemoryWitness>,
-    dropped_witnesses: u64,
-    reserved_watch_bytes: usize,
-    reserved_watch_count: usize,
-    basic_blocks: HashMap<(u64, u32), u64>,
-    branch_edges: HashMap<(u64, u64), u64>,
-    dropped_basic_blocks: u64,
-    dropped_branch_edges: u64,
-    previous_block: Option<u64>,
-    event_index: HashMap<TraceEventKey, usize>,
-    event_fingerprints: HashMap<usize, HashSet<u64>>,
-    known_function_entries: HashSet<u64>,
-    truncated: bool,
-    dropped_events: u64,
-    checkpoint_only: bool,
+pub(super) struct TraceCapture {
+    pub(super) selector: String,
+    pub(super) entry_rva: u64,
+    pub(super) events: Vec<TraceEvent>,
+    pub(super) return_stack: Vec<u64>,
+    pub(super) function_stack: Vec<Option<u64>>,
+    pub(super) call_rsp_stack: Vec<u64>,
+    pub(super) call_id_stack: Vec<u64>,
+    pub(super) next_call_id: u64,
+    pub(super) watch_specs: Vec<TraceWatchSpec>,
+    pub(super) watch_occurrence_counts: HashMap<String, u64>,
+    pub(super) watch_stack: Vec<Vec<PendingTraceWatch>>,
+    pub(super) selector_watches: Vec<PendingTraceWatch>,
+    pub(super) checkpoint_returns: HashMap<u64, Vec<PendingTraceWatch>>,
+    pub(super) unhookable_watches: Vec<UnhookableWatch>,
+    pub(super) witnesses: Vec<TraceMemoryWitness>,
+    pub(super) dropped_witnesses: u64,
+    pub(super) reserved_watch_bytes: usize,
+    pub(super) reserved_watch_count: usize,
+    pub(super) basic_blocks: HashMap<(u64, u32), u64>,
+    pub(super) branch_edges: HashMap<(u64, u64), u64>,
+    pub(super) dropped_basic_blocks: u64,
+    pub(super) dropped_branch_edges: u64,
+    pub(super) previous_block: Option<u64>,
+    pub(super) event_index: HashMap<TraceEventKey, usize>,
+    pub(super) event_fingerprints: HashMap<usize, HashSet<u64>>,
+    pub(super) known_function_entries: HashSet<u64>,
+    pub(super) truncated: bool,
+    pub(super) dropped_events: u64,
+    pub(super) checkpoint_only: bool,
 }
 
 #[derive(Clone, Debug)]
-struct PendingTraceWatch {
-    spec_id: String,
-    register: &'static str,
-    call_id: Option<u64>,
-    function_rva: Option<u64>,
-    pc_rva: Option<u64>,
-    address: u64,
-    before: TraceMemorySnapshot,
-    image_coordinate: Option<[u32; 2]>,
-    image_row_offset: Option<u64>,
-    image_format: Option<&'static str>,
+pub(super) struct PendingTraceWatch {
+    pub(super) spec_id: String,
+    pub(super) register: &'static str,
+    pub(super) call_id: Option<u64>,
+    pub(super) function_rva: Option<u64>,
+    pub(super) pc_rva: Option<u64>,
+    pub(super) address: u64,
+    pub(super) before: TraceMemorySnapshot,
+    pub(super) image_coordinate: Option<[u32; 2]>,
+    pub(super) image_row_offset: Option<u64>,
+    pub(super) image_format: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -912,14 +925,14 @@ pub struct TraceCrashSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct TraceEventKey {
-    depth: usize,
-    kind: &'static str,
-    function_rva: Option<u64>,
-    pc_rva: Option<u64>,
-    target_rva: Option<u64>,
-    name: Option<String>,
-    call_kind: Option<&'static str>,
+pub(super) struct TraceEventKey {
+    pub(super) depth: usize,
+    pub(super) kind: &'static str,
+    pub(super) function_rva: Option<u64>,
+    pub(super) pc_rva: Option<u64>,
+    pub(super) target_rva: Option<u64>,
+    pub(super) name: Option<String>,
+    pub(super) call_kind: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize)]

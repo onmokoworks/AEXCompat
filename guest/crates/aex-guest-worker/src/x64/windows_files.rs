@@ -1,19 +1,28 @@
+use super::Digest;
+use super::files::{
+    GuestFiles, MAX_GUEST_FILE_BYTES, MAX_GUEST_STREAM_BYTES, canonical_guest_fullpath,
+    finish_guest_stdio,
+};
+use super::imports::{LegacyWin64Import, guest_range_has_permission, read_win64_import_argument};
+use super::types::{GuestState, TraceModule};
+use super::{Prot, RegisterX86, Sha256, Unicorn};
+
 // Session-owned Windows file handles for explicitly mounted read-only assets.
 // Separate token space from CRT FILE pointers; issued handles are never reused.
 const WINDOWS_ASSET_HANDLE_BASE: u64 = 0xc00000000;
-struct WindowsAssetFile {
-    name: String,
-    bytes: Box<[u8]>,
-    position: u64,
-    readable: bool,
-    inheritable: bool,
-    share_read_access: bool,
-    share: u32,
-    null_device: bool,
+pub(super) struct WindowsAssetFile {
+    pub(super) name: String,
+    pub(super) bytes: Box<[u8]>,
+    pub(super) position: u64,
+    pub(super) readable: bool,
+    pub(super) inheritable: bool,
+    pub(super) share_read_access: bool,
+    pub(super) share: u32,
+    pub(super) null_device: bool,
 }
 
 impl GuestFiles {
-    fn open_windows_asset(
+    pub(super) fn open_windows_asset(
         &mut self,
         name: &str,
         readable: bool,
@@ -127,7 +136,7 @@ impl GuestFiles {
         Ok(Ok(handle))
     }
 
-    fn close_windows_asset(&mut self, handle: u64) -> Result<(), u32> {
+    pub(super) fn close_windows_asset(&mut self, handle: u64) -> Result<(), u32> {
         let Some(file) = self.windows_files.remove(&handle) else {
             return Err(6);
         };
@@ -136,7 +145,7 @@ impl GuestFiles {
     }
 }
 
-fn finish_windows_file_api(
+pub(super) fn finish_windows_file_api(
     unicorn: &mut Unicorn<'_, GuestState>,
     result: Result<(u64, u32), String>,
 ) {
@@ -152,7 +161,7 @@ fn finish_windows_file_api(
     finish_guest_stdio(unicorn, result);
 }
 
-fn guest_create_file(
+pub(super) fn guest_create_file(
     unicorn: &mut Unicorn<'_, GuestState>,
     wide: bool,
 ) -> Result<(u64, u32), String> {
@@ -299,7 +308,7 @@ fn guest_create_file(
     }
 }
 
-fn guest_windows_file_io(
+pub(super) fn guest_windows_file_io(
     unicorn: &mut Unicorn<'_, GuestState>,
     operation: LegacyWin64Import,
 ) -> Result<(u64, u32), String> {

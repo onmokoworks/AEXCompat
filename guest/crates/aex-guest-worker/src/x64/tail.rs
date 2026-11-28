@@ -1,4 +1,7 @@
-fn finish_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), String>) {
+use super::types::{CensusBlock, CensusExtent, GuestState};
+use super::{Mnemonic, RegisterX86, Unicorn};
+
+pub(super) fn finish_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), String>) {
     match result {
         Ok(()) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
@@ -11,7 +14,7 @@ fn finish_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), Str
     }
 }
 
-fn is_scalar_sse_fp(mnemonic: Mnemonic) -> bool {
+pub(super) fn is_scalar_sse_fp(mnemonic: Mnemonic) -> bool {
     matches!(
         mnemonic,
         Mnemonic::Addss
@@ -41,7 +44,7 @@ fn is_scalar_sse_fp(mnemonic: Mnemonic) -> bool {
     )
 }
 
-fn coalesce_census_extents(
+pub(super) fn coalesce_census_extents(
     blocks: &[CensusBlock],
     image_base: u64,
     total_dynamic_instructions: u64,

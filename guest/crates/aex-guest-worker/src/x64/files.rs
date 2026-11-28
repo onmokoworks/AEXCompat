@@ -1,40 +1,59 @@
+use super::Digest;
+use super::acl::acl_read;
+use super::callbacks::{allocate_crt_region, free_crt_region, read_crt_stdio_c_string};
+use super::imports::{
+    LegacyWin64Import, guest_range_has_permission, read_win64_import_argument, set_guest_crt_errno,
+    trim_leading_crt_mode_spaces, valid_fopen_mode, windows_filetime,
+};
+use super::types::{GuestEngine, GuestState, TraceModule};
+use super::windows_files::WindowsAssetFile;
+use super::{
+    BTreeMap, BTreeSet, GuestError, MAX_CRT_STRING_BYTES, PAGE_SIZE, Prot, RegisterX86, Sha256,
+    Unicorn, WORLD_DATA_END,
+};
+
 // Explicit read-only guest assets. Guest path strings never become host paths.
-const MAX_GUEST_FILE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_GUEST_STREAM_BYTES: usize = 128 * 1024 * 1024;
-const GUEST_STREAM_BASE: u64 = WORLD_DATA_END;
-const MAX_GUEST_STREAM_OPENS: u64 = 4096;
-const GUEST_STREAM_BUFFER_BASE: u64 = GUEST_STREAM_BASE + MAX_GUEST_STREAM_OPENS * PAGE_SIZE;
+pub(super) const MAX_GUEST_FILE_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const MAX_GUEST_STREAM_BYTES: usize = 128 * 1024 * 1024;
+pub(super) const GUEST_STREAM_BASE: u64 = WORLD_DATA_END;
+pub(super) const MAX_GUEST_STREAM_OPENS: u64 = 4096;
+pub(super) const GUEST_STREAM_BUFFER_BASE: u64 =
+    GUEST_STREAM_BASE + MAX_GUEST_STREAM_OPENS * PAGE_SIZE;
 
 #[derive(Default)]
-struct GuestFiles {
-    sources: BTreeMap<String, std::path::PathBuf>,
-    directories: BTreeSet<String>,
-    directory_dacls: BTreeMap<String, Vec<u8>>,
-    directory_times: BTreeMap<String, [std::time::SystemTime; 3]>,
-    directory_attributes: BTreeMap<String, u32>,
-    streams: BTreeMap<u64, GuestFileStream>,
-    descriptors: BTreeMap<i32, GuestFileStream>,
+pub(super) struct GuestFiles {
+    pub(super) sources: BTreeMap<String, std::path::PathBuf>,
+    pub(super) directories: BTreeSet<String>,
+    pub(super) directory_dacls: BTreeMap<String, Vec<u8>>,
+    pub(super) directory_times: BTreeMap<String, [std::time::SystemTime; 3]>,
+    pub(super) directory_attributes: BTreeMap<String, u32>,
+    pub(super) streams: BTreeMap<u64, GuestFileStream>,
+    pub(super) descriptors: BTreeMap<i32, GuestFileStream>,
     descriptor_modes: BTreeMap<i32, i32>,
     next_descriptor: i32,
-    next_stream: u64,
+    pub(super) next_stream: u64,
     standard_streams: [Option<u64>; 3],
-    live_bytes: usize,
-    reports: Vec<TraceModule>,
-    searches: BTreeMap<u64, GuestFileSearch>,
+    pub(super) live_bytes: usize,
+    pub(super) reports: Vec<TraceModule>,
+    pub(super) searches: BTreeMap<u64, GuestFileSearch>,
     next_search: u64,
-    windows_files: BTreeMap<u64, WindowsAssetFile>,
-    next_windows_file: u64,
+    pub(super) windows_files: BTreeMap<u64, WindowsAssetFile>,
+    pub(super) next_windows_file: u64,
 }
 
 #[derive(Default)]
-struct GuestConsoleRepeat {
+pub(super) struct GuestConsoleRepeat {
     last_write: Vec<u8>,
     suppressed: u64,
     announced: u64,
 }
 
 impl GuestConsoleRepeat {
-    fn write(&mut self, bytes: &[u8], output: &mut impl std::io::Write) -> std::io::Result<()> {
+    pub(super) fn write(
+        &mut self,
+        bytes: &[u8],
+        output: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
         if self.last_write == bytes {
             self.suppressed = self.suppressed.saturating_add(1);
             if self.suppressed.is_power_of_two() {
@@ -52,7 +71,7 @@ impl GuestConsoleRepeat {
         Ok(())
     }
 
-    fn flush(&mut self, output: &mut impl std::io::Write) -> std::io::Result<()> {
+    pub(super) fn flush(&mut self, output: &mut impl std::io::Write) -> std::io::Result<()> {
         if self.suppressed != self.announced {
             self.write_summary(output)?;
         }
@@ -70,20 +89,20 @@ impl GuestConsoleRepeat {
     }
 }
 
-struct GuestFileStream {
-    name: Option<String>,
-    bytes: Vec<u8>,
-    position: usize,
-    readable: bool,
-    share_read_access: bool,
-    eof: bool,
-    buffer_state: Option<u64>,
-    fast_buffer: Option<u64>,
-    console_repeat: GuestConsoleRepeat,
+pub(super) struct GuestFileStream {
+    pub(super) name: Option<String>,
+    pub(super) bytes: Vec<u8>,
+    pub(super) position: usize,
+    pub(super) readable: bool,
+    pub(super) share_read_access: bool,
+    pub(super) eof: bool,
+    pub(super) buffer_state: Option<u64>,
+    pub(super) fast_buffer: Option<u64>,
+    pub(super) console_repeat: GuestConsoleRepeat,
 }
 
 #[track_caller]
-fn guest_file_name(name: &str) -> Result<String, String> {
+pub(super) fn guest_file_name(name: &str) -> Result<String, String> {
     if name.is_empty() || name.len() > 1024 || !name.is_ascii() || name.contains('\0') {
         return Err("unsupported guest asset path encoding or length".into());
     }
@@ -123,7 +142,7 @@ impl GuestFiles {
             .map_err(|error| format!("guest console flush failed: {error}"))
     }
 
-    fn record_directory_creation(&mut self, name: &str) {
+    pub(super) fn record_directory_creation(&mut self, name: &str) {
         let now = std::time::SystemTime::now();
         let mut directory = Some(name);
         while let Some(path) = directory {
@@ -139,7 +158,7 @@ impl GuestFiles {
         }
     }
 
-    fn directory_exists(&self, name: &str) -> bool {
+    pub(super) fn directory_exists(&self, name: &str) -> bool {
         let prefix = format!("{name}/");
         self.directories.contains(name)
             || self
@@ -149,14 +168,14 @@ impl GuestFiles {
             || self.sources.keys().any(|path| path.starts_with(&prefix))
     }
 
-    fn from_environment() -> Result<Self, GuestError> {
+    pub(super) fn from_environment() -> Result<Self, GuestError> {
         match std::env::var_os("AEXCOMPAT_GUEST_FILES") {
             Some(path) => Self::from_manifest(std::path::Path::new(&path)),
             None => Ok(Self::default()),
         }
     }
 
-    fn from_manifest(path: &std::path::Path) -> Result<Self, GuestError> {
+    pub(super) fn from_manifest(path: &std::path::Path) -> Result<Self, GuestError> {
         use std::io::Read;
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -335,7 +354,7 @@ fn open_guest_stream_with_share(
     Ok((token, 0))
 }
 
-fn open_guest_stream(
+pub(super) fn open_guest_stream(
     unicorn: &mut Unicorn<'_, GuestState>,
     filename: &[u8],
     mode: &[u8],
@@ -346,7 +365,7 @@ fn open_guest_stream(
 // Standard FILE objects have stable identities, including after fclose. The
 // worker has no guest stdin input; stdout/stderr are output-only. Output calls
 // remain explicit unsupported imports until their capture semantics are provided.
-fn emulate_crt_stream_position(
+pub(super) fn emulate_crt_stream_position(
     unicorn: &mut Unicorn<'_, GuestState>,
     operation: LegacyWin64Import,
 ) {
@@ -441,7 +460,10 @@ fn emulate_crt_stream_position(
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_descriptor(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_crt_descriptor(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
     let result = (|| -> Result<u64, String> {
         if let LegacyWin64Import::CrtOpen(wide) = operation {
             let path = read_win64_import_argument(unicorn, 0)?;
@@ -587,7 +609,7 @@ fn emulate_crt_descriptor(unicorn: &mut Unicorn<'_, GuestState>, operation: Lega
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let index = read_win64_import_argument(unicorn, 0)? as u32 as usize;
         if index >= 3 {
@@ -631,7 +653,7 @@ fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
 // _get_stream_buffer_pointers returns addresses of the FILE's char* base,
 // char* cursor and int remaining-count cells, not the buffer values themselves.
 // The current guest streams are unbuffered: all three values start at zero.
-fn emulate_get_stream_buffer_pointers(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_get_stream_buffer_pointers(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let token = read_win64_import_argument(unicorn, 0)?;
         let outputs = [
@@ -741,7 +763,7 @@ fn require_unbuffered_guest_stream(
     Ok(())
 }
 
-fn emulate_fopen(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_fopen(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let name = read_win64_import_argument(unicorn, 0)?;
         let mode = read_win64_import_argument(unicorn, 1)?;
@@ -760,7 +782,10 @@ fn emulate_fopen(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin64Import) {
+pub(super) fn emulate_guest_stdio(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    import: LegacyWin64Import,
+) {
     let result = (|| -> Result<u64, String> {
         if import == LegacyWin64Import::Fflush {
             use std::io::Write;
@@ -1071,7 +1096,10 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
     finish_guest_stdio(unicorn, result);
 }
 
-fn finish_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, result: Result<u64, String>) {
+pub(super) fn finish_guest_stdio(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    result: Result<u64, String>,
+) {
     match result {
         Ok(value) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, value);
@@ -1085,12 +1113,12 @@ fn finish_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, result: Result<u64,
     }
 }
 
-struct GuestFileSearch {
-    records: Vec<[u8; 320]>,
-    position: usize,
+pub(super) struct GuestFileSearch {
+    pub(super) records: Vec<[u8; 320]>,
+    pub(super) position: usize,
 }
 
-fn guest_star_match(pattern: &[u8], name: &[u8]) -> bool {
+pub(super) fn guest_star_match(pattern: &[u8], name: &[u8]) -> bool {
     // A trailing DOS dot-star also matches an absent extension.
     if let Some(prefix) = pattern.strip_suffix(b".*") {
         if guest_star_match(prefix, name) {
@@ -1126,7 +1154,10 @@ fn canonical_guest_search_name(query: &str) -> Result<String, String> {
     guest_file_name(std::str::from_utf8(&path).unwrap())
 }
 
-fn guest_find_records(files: &GuestFiles, query: &str) -> Result<Vec<[u8; 320]>, String> {
+pub(super) fn guest_find_records(
+    files: &GuestFiles,
+    query: &str,
+) -> Result<Vec<[u8; 320]>, String> {
     let query = canonical_guest_search_name(query)?;
     let (directory, pattern) = query
         .rsplit_once('/')
@@ -1201,7 +1232,10 @@ fn guest_find_records(files: &GuestFiles, query: &str) -> Result<Vec<[u8; 320]>,
     Ok(records)
 }
 
-fn emulate_guest_file_search(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+pub(super) fn emulate_guest_file_search(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
     let result = (|| -> Result<u64, String> {
         let first = operation == LegacyWin64Import::FindFirstFileA;
         let token_or_name = read_win64_import_argument(unicorn, 0)?;
@@ -1288,9 +1322,9 @@ fn emulate_guest_file_search(unicorn: &mut Unicorn<'_, GuestState>, operation: L
     finish_guest_stdio(unicorn, result);
 }
 
-const MAX_GUEST_DIRECTORIES: usize = 4096;
+pub(super) const MAX_GUEST_DIRECTORIES: usize = 4096;
 
-fn create_guest_directory(
+pub(super) fn create_guest_directory(
     unicorn: &mut Unicorn<'_, GuestState>,
     wide: bool,
 ) -> Result<u64, String> {
@@ -1428,7 +1462,9 @@ fn create_guest_directory(
     Ok(1)
 }
 
-fn set_guest_file_attributes_a(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn set_guest_file_attributes_a(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<u64, String> {
     let path = read_win64_import_argument(unicorn, 0)?;
     let attributes = read_win64_import_argument(unicorn, 1)? as u32;
     if path == 0 {
@@ -1480,7 +1516,10 @@ fn inherit_guest_directory_dacl(parent: &Vec<u8>) -> Vec<u8> {
 
 // Windows _stat64i32: 32-bit dev/size, 16-bit inode/mode/link/uid/gid,
 // padding at 14..16, and three 64-bit times at 24, 32, 40.
-fn guest_stat64i32(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) -> Result<u64, String> {
+pub(super) fn guest_stat64i32(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    wide: bool,
+) -> Result<u64, String> {
     let path = read_win64_import_argument(unicorn, 0)?;
     let output = read_win64_import_argument(unicorn, 1)?;
     if path == 0 || output == 0 {
@@ -1631,7 +1670,7 @@ fn guest_stat_record(files: &GuestFiles, text: &str, record: &mut [u8; 48]) -> R
 // environment variables never participate in guest path resolution.
 const GUEST_INITIAL_CURRENT_DIRECTORY: &str = "C:\\";
 
-fn canonical_guest_fullpath(path: &[u8]) -> Result<Vec<u8>, String> {
+pub(super) fn canonical_guest_fullpath(path: &[u8]) -> Result<Vec<u8>, String> {
     if !path.is_ascii() || path.contains(&0) {
         return Err("_fullpath unsupported path encoding".into());
     }
@@ -1693,7 +1732,7 @@ fn canonical_guest_fullpath(path: &[u8]) -> Result<Vec<u8>, String> {
     Ok(result.into_bytes())
 }
 
-fn guest_fullpath(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_fullpath(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     let output = read_win64_import_argument(unicorn, 0)?;
     let input = read_win64_import_argument(unicorn, 1)?;
     let capacity = read_win64_import_argument(unicorn, 2)?;
@@ -1748,7 +1787,7 @@ fn guest_fullpath(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> 
     Ok(destination)
 }
 
-fn read_guest_wide_file_string(
+pub(super) fn read_guest_wide_file_string(
     unicorn: &Unicorn<'_, GuestState>,
     pointer: u64,
     limit: u64,
@@ -1777,7 +1816,7 @@ fn read_guest_wide_file_string(
     unreachable!()
 }
 
-fn emulate_wfopen(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_wfopen(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let name = read_win64_import_argument(unicorn, 0)?;
         let mode = read_win64_import_argument(unicorn, 1)?;
@@ -1798,7 +1837,7 @@ fn emulate_wfopen(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_wfsopen(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_wfsopen(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let name = read_win64_import_argument(unicorn, 0)?;
         let mode = read_win64_import_argument(unicorn, 1)?;
@@ -1833,7 +1872,7 @@ fn emulate_wfsopen(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_fsopen(unicorn: &mut Unicorn<'_, GuestState>) {
+pub(super) fn emulate_fsopen(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let name = read_win64_import_argument(unicorn, 0)?;
         let mode = read_win64_import_argument(unicorn, 1)?;
@@ -1862,7 +1901,9 @@ fn emulate_fsopen(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn guest_volume_information(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_volume_information(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<u64, String> {
     let root = read_win64_import_argument(unicorn, 0)?;
     let path = if root == 0 {
         GUEST_INITIAL_CURRENT_DIRECTORY.as_bytes().to_vec()
@@ -1883,7 +1924,7 @@ fn guest_volume_information(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64
     Ok(0)
 }
 
-fn guest_rename(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+pub(super) fn guest_rename(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     let old = read_win64_import_argument(unicorn, 0)?;
     let new = read_win64_import_argument(unicorn, 1)?;
     if old == 0 || new == 0 {
@@ -1914,7 +1955,7 @@ fn guest_rename(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
 }
 
 impl GuestFiles {
-    fn rename_directory(&mut self, old: &str, new: &str) -> Result<u32, String> {
+    pub(super) fn rename_directory(&mut self, old: &str, new: &str) -> Result<u32, String> {
         if !self.sources.contains_key(old) && !self.directory_exists(old) {
             return Ok(2);
         }
@@ -1996,7 +2037,7 @@ impl GuestFiles {
     }
 }
 
-fn guest_file_attributes_ex(
+pub(super) fn guest_file_attributes_ex(
     unicorn: &mut Unicorn<'_, GuestState>,
     wide: bool,
 ) -> Result<u64, String> {
