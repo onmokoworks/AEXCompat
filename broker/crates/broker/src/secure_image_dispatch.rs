@@ -56,8 +56,8 @@ fn worker_arguments(kind: WorkerKind, rest: &[String]) -> Vec<String> {
     arguments
 }
 
-/// A trust decision made before dispatch. This type never derives trust from
-/// the current contents of `path`.
+/// A selected image and its recorded identity. The historical type name does
+/// not make the recorded digest an approval gate for in-place dispatch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovedImageArtifact {
     pub path: PathBuf,
@@ -70,15 +70,13 @@ pub struct SecureImageDispatch<'a> {
     pub worker_kind: WorkerKind,
     pub plugin: ApprovedImageArtifact,
     pub dependencies: Vec<ApprovedImageArtifact>,
-    /// In-place load mode (issue #751): non-empty switches the dispatch from
-    /// sealed staging to loading the plug-in at `plugin.path` itself, with
-    /// these directories admitted into the worker's DLL search set so the
-    /// dependency closure resolves from where it actually lives. Mutually
-    /// exclusive with `dependencies` (the closure is the loader's job here)
-    /// and with sealed resources (the plug-in's own directory already holds
-    /// its data files). On this route the broker does not re-read
-    /// `plugin.expected_sha256`/`expected_size`; the identity record is the
-    /// argv sha256 the worker verifies against the bytes it actually loads.
+    /// Directories added to the worker's DLL search set. Requires at least one
+    /// validated absolute directory. Dispatch always loads `plugin.path` in place;
+    /// `dependencies` must be empty because the loader resolves the closure.
+    /// Plug-in data stays at its real location, except executable-relative
+    /// GPU kernel assets copied alongside the staged worker. In-place dispatch
+    /// records the loaded identity without enforcing `plugin.expected_sha256`
+    /// or `expected_size` as a launch precondition.
     pub dependency_search_dirs: Vec<PathBuf>,
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
@@ -128,9 +126,9 @@ pub(crate) fn dispatch_secure_gpu_image_session_on_current_desktop(
     dispatch_secure_image_session_on_current_desktop(input, session)
 }
 
-/// Session variant of `dispatch_secure_image`: the same admission pipeline
-/// (sealed plugin tree, dependency authentication, local worker admission),
-/// but the worker keeps running with the inherited session transport.
+/// Session variant of `dispatch_secure_image`: the same in-place plug-in
+/// loading, validated dependency search directories, and local worker staging,
+/// with the worker kept running over the inherited session transport.
 /// `input.timeout` is unused here: a session is bounded per frame by the
 /// caller's deadline, not per launch.
 #[cfg(windows)]
@@ -212,15 +210,10 @@ fn dispatch_secure_image_session_with_policy(
     Ok(process)
 }
 
-/// The shared session launch boundary for the single-plugin and cluster
-/// session dispatchers: admits the local worker binary exactly once per
-/// launch (the staged copy must still match the admitted bytes) and hands
-/// the sealed tree to the desktop-policy-aware session launch.
-#[cfg(windows)]
-#[allow(clippy::too_many_arguments)]
 /// In-place cluster session dispatch (issue #751, `cluster-manifest-v2`):
-/// the manifest names each plug-in by its real absolute path plus SHA-256 and
-/// carries the validated dependency search directories; nothing is staged.
+/// the manifest names each plug-in by its real absolute path plus recorded
+/// SHA-256 and carries the validated dependency search directories. Plug-ins
+/// load in place; the local worker is staged for the session's lifetime.
 /// The transport document is what the worker reads at launch (before any
 /// plug-in code runs), so it rides the launch struct and must outlive the
 /// session.
@@ -440,8 +433,8 @@ fn strip_extended_prefix(path: &Path) -> PathBuf {
 }
 
 /// The shared precondition of both in-place dispatch shapes (issue #751):
-/// the closure is the loader's job, so approved dependency artifacts and
-/// sealed resources cannot ride an in-place launch.
+/// the closure is the loader's job, so dependency artifacts must be empty and
+/// the plug-in must have an absolute path.
 fn validate_in_place_input(
     dependencies: &[ApprovedImageArtifact],
     plugin: &ApprovedImageArtifact,
@@ -541,8 +534,8 @@ struct AdmittedLocalWorker {
 /// identity binds the staged copy that actually executes to the bytes observed
 /// here; the build tree itself is the trust root, because anyone who can
 /// replace the worker binary can equally rebuild the broker that dispatches
-/// it. Receipt-driven flows keep supplying an externally pinned identity
-/// through `secure_launch` and do not pass through this admission.
+/// it. Selection-file flows observe the worker identity in `load_v2_load_tree`
+/// and supply that observation through `secure_launch` instead.
 fn admit_local_worker(repository: &Path, path: &Path) -> io::Result<AdmittedLocalWorker> {
     let bytes = std::fs::read(path).map_err(|error| {
         io::Error::new(error.kind(), "local worker binary is missing or unreadable")
