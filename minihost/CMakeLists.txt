@@ -338,6 +338,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_ae_channel_runtime.cpp
     src/worker_pf_state_runtime.cpp
     src/worker_report.cpp
+    src/worker_cluster_effect_state.cpp
     src/worker_cluster_manifest.cpp
     src/worker_request_parser.cpp
     src/worker_render_session.cpp
@@ -444,6 +445,16 @@ target_compile_definitions(worker_classic_suite_report_selftest PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_classic_suite_report_selftest PRIVATE src)
 target_link_libraries(worker_classic_suite_report_selftest PRIVATE
+    bcrypt aexcompat_trace_writer)
+
+add_executable(worker_cluster_effect_state_selftest
+    ../tests/native/worker_cluster_effect_state_selftest.cpp
+    $<TARGET_OBJECTS:aex_worker_runtime_core>)
+target_compile_features(worker_cluster_effect_state_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_cluster_effect_state_selftest PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_cluster_effect_state_selftest PRIVATE src)
+target_link_libraries(worker_cluster_effect_state_selftest PRIVATE
     bcrypt aexcompat_trace_writer)
 
 add_executable(worker_suite_registry_selftest

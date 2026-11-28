@@ -166,6 +166,7 @@
 #include "worker_report.hpp"
 #include "worker_render_session.hpp"
 #include "worker_cluster_manifest.hpp"
+#include "worker_cluster_effect_state.hpp"
 #include "worker_request_parser.hpp"
 #include "strict_json.hpp"
 #include "worker_invocation_orchestration.hpp"
