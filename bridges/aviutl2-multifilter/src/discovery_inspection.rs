@@ -1,3 +1,42 @@
+use super::ae_builtin_categories::ae_builtin_category;
+use super::discovery_cache::{
+    BuildFingerprint, CacheEntry, CachedClosure, CachedPluginDataEffect, ClusterFallback,
+    DISCOVERY_SHUTDOWN, DependencyConfig, DiscoveredPluginKind, FilterCtx, ItemReader,
+    MAX_DISCOVERY_PARALLELISM, PluginDataIdentity, ProvidedSuite, build_fingerprint,
+    cached_dependencies, cached_matching_registered_runtime_roots, cached_missing,
+    cached_provenance, companion_providers_for, decode_plugin_data_bytes,
+    inspection_failure_classification, inspection_failure_diagnostics, is_api_set,
+    is_registerable_effect, negative_entry, search_roots_for,
+};
+use super::pipl_category::{filter_label, pipl_category};
+use super::runtime::{build_item, layer_slots_of, render_callback, unique_item_names};
+use super::{
+    CLUSTER_INSPECT_DEADLINE, CLUSTER_REGISTRY, ClusterMember, MAX_CLUSTER_MODULE_BOUND,
+    MAX_CLUSTER_PLUGINS, SESSION_MAPS, hex_lower, wide_leak,
+};
+use aexcompat_broker::companion_manifest::ApprovedCompanion;
+use aexcompat_broker::image_render::{
+    InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
+    initialize_experimental_aegp_in_place, inspect_experimental_cleanup_contained_in_place,
+    inspect_experimental_in_place, inspect_experimental_in_place_plugin_data_effect,
+};
+use aexcompat_broker::plugin_dependency_closure::survey_dependency_closure;
+use aexcompat_broker::render_session::{
+    DiscoverySession, InPlaceDiscoverySessionOpenRequest, InspectOutcome, PluginDataEffectSelector,
+    RenderSession, SessionOpenRequest,
+};
+use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
+use aviutl2_sys::filter2::{FILTER_PLUGIN_TABLE, FILTER_PROC_VIDEO};
+use aviutl2_sys::plugin2::HOST_APP_TABLE;
+use libffi::middle::{Cif, Closure, Type};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
 /// Discovery state for the in-place-only route (#816).
 struct PreparedDiscovery {
     entry: CacheEntry,
@@ -225,7 +264,9 @@ fn finish_one_shot_in_place(
     entry
 }
 
-fn plugin_data_identities(diagnostics: &serde_json::Value) -> Result<Vec<PluginDataIdentity>, ()> {
+pub(super) fn plugin_data_identities(
+    diagnostics: &serde_json::Value,
+) -> Result<Vec<PluginDataIdentity>, ()> {
     let Some(plugin_data) = diagnostics.get("plugin_data") else {
         return Ok(Vec::new());
     };
@@ -299,7 +340,7 @@ fn plugin_data_identities(diagnostics: &serde_json::Value) -> Result<Vec<PluginD
     Ok(identities)
 }
 
-fn selected_plugin_data_identity_matches(
+pub(super) fn selected_plugin_data_identity_matches(
     diagnostics: &serde_json::Value,
     expected: &PluginDataIdentity,
 ) -> bool {
@@ -314,7 +355,7 @@ fn selected_plugin_data_identity_matches(
             == Some(u64::from(expected.index))
 }
 
-fn inspection_is_load_failure(error: &std::io::Error) -> bool {
+pub(super) fn inspection_is_load_failure(error: &std::io::Error) -> bool {
     let Some(diagnostics) = inspection_failure_diagnostics(error) else {
         return false;
     };
@@ -330,7 +371,7 @@ fn inspection_is_load_failure(error: &std::io::Error) -> bool {
 }
 
 #[derive(Debug, PartialEq)]
-enum RuntimeRootResolution {
+pub(super) enum RuntimeRootResolution {
     Resolved(Vec<PathBuf>),
     Ambiguous {
         basename: String,
@@ -380,7 +421,7 @@ fn runtime_root_resolution_error(resolution: &RuntimeRootResolution) -> std::io:
 /// one registered provider; ambiguity fails closed because AddDllDirectory does
 /// not define precedence between multiple USER_DIRS providers. Re-survey after
 /// every admitted root so transitive runtime dependencies reach a fixed point.
-fn registered_runtime_retry_roots(
+pub(super) fn registered_runtime_retry_roots(
     plugin: &Path,
     initial_roots: &[PathBuf],
     mut resolve: impl FnMut(
@@ -748,7 +789,7 @@ fn inspect_report_failure_fields(
 /// present but null when the failure is unclassified (`identity_changed`,
 /// `hash_unavailable`), so a reader can tell "unclassified by design" from
 /// "no diagnostics recorded".
-fn cluster_inspect_error_diagnostics(
+pub(super) fn cluster_inspect_error_diagnostics(
     classification: Option<&str>,
     error_kind: &str,
     exit_code: Option<i64>,
@@ -779,7 +820,7 @@ fn cluster_inspect_error_diagnostics(
 /// the broker maps to `InspectError`. Either way the entry records why it
 /// stayed negative (issue #1063): a `status: ok` report the host could not
 /// use is otherwise indistinguishable from no report at all.
-fn fill_entry_from_inspect_report(entry: &mut CacheEntry, report: &serde_json::Value) {
+pub(super) fn fill_entry_from_inspect_report(entry: &mut CacheEntry, report: &serde_json::Value) {
     let unusable = |reason: &str| {
         let mut diagnostics = serde_json::Map::new();
         diagnostics.insert("classification".to_owned(), serde_json::Value::Null);
@@ -841,7 +882,7 @@ fn demanded_suites_from_report(report: &serde_json::Value) -> Vec<ProvidedSuite>
         .collect()
 }
 
-fn merge_demanded_suites_from_report(
+pub(super) fn merge_demanded_suites_from_report(
     demanded: &mut Vec<ProvidedSuite>,
     report: &serde_json::Value,
 ) -> bool {
@@ -867,7 +908,7 @@ fn merge_demanded_suites(
     true
 }
 
-fn finish_companion_demand_probe(
+pub(super) fn finish_companion_demand_probe(
     entry: &mut CacheEntry,
     probed_suites: Vec<ProvidedSuite>,
 ) -> bool {
@@ -879,14 +920,14 @@ fn finish_companion_demand_probe(
     true
 }
 
-fn reject_plugin_data_bundle(entry: &mut CacheEntry) {
+pub(super) fn reject_plugin_data_bundle(entry: &mut CacheEntry) {
     entry.ok = false;
     entry.plugin_data_effect = None;
     entry.additional_effects.clear();
     entry.closure_identity = None;
 }
 
-fn confirmed_plugin_data_demands<T>(
+pub(super) fn confirmed_plugin_data_demands<T>(
     effects: &[(Option<PluginDataEffectSelector>, bool, u32)],
     mut provider_free: impl FnMut(
         Option<&PluginDataEffectSelector>,
@@ -912,7 +953,9 @@ fn confirmed_plugin_data_demands<T>(
     Some(confirmed)
 }
 
-fn companion_demand_from_probe_report(close: &serde_json::Value) -> Option<Vec<ProvidedSuite>> {
+pub(super) fn companion_demand_from_probe_report(
+    close: &serde_json::Value,
+) -> Option<Vec<ProvidedSuite>> {
     let bounded_report = close.get("final_report").is_some_and(|report| {
         report.get("missing_suites").is_some()
             && report.get("missing_suites_truncated") == Some(&serde_json::Value::Bool(false))
@@ -929,22 +972,22 @@ fn companion_demand_from_probe_report(close: &serde_json::Value) -> Option<Vec<P
 /// One unit of discovery work (issue #405): with the same worker budget as
 /// before, the work items are same-closure clusters (one DiscoverySession
 /// sweep) and singleton plug-ins (the legacy per-plugin inspect).
-enum DiscoveryTask {
+pub(super) enum DiscoveryTask {
     Single(usize),
     Cluster(Vec<usize>),
 }
 
 /// What the planner needs to know about one prepared plug-in: its validated
 /// in-place search-root identity, when one could be established.
-struct PlannedMember {
-    identity: Option<String>,
+pub(super) struct PlannedMember {
+    pub(super) identity: Option<String>,
 }
 
 /// Groups prepared plug-ins by validated identity. Groups within the manifest
 /// bound share one session; every other validated member uses a one-member
 /// session so its cleanup-crash checkpoint has the same authenticated launch
 /// boundary. Only unresolved identities remain on the one-shot path.
-fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
+pub(super) fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
     let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut first_seen: Vec<&str> = Vec::new();
     for (index, member) in members.iter().enumerate() {
@@ -990,7 +1033,10 @@ fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
 /// admission, one Adobe runtime init per chunk) while restoring the parallel
 /// sweep the staged planner got from its many closure identities. A one-member
 /// tail remains a session so the checkpoint contract does not change by size.
-fn shard_in_place_clusters(tasks: Vec<DiscoveryTask>, parallelism: usize) -> Vec<DiscoveryTask> {
+pub(super) fn shard_in_place_clusters(
+    tasks: Vec<DiscoveryTask>,
+    parallelism: usize,
+) -> Vec<DiscoveryTask> {
     let parallelism = parallelism.max(1);
     let mut sharded = Vec::with_capacity(tasks.len());
     for task in tasks {
@@ -1010,7 +1056,7 @@ fn shard_in_place_clusters(tasks: Vec<DiscoveryTask>, parallelism: usize) -> Vec
 
 /// Decodes a 64-hex SHA-256 (as stored in `CacheEntry.sha`) into raw bytes
 /// for a launch-approved artifact.
-fn decode_sha256_hex(text: &str) -> Option<[u8; 32]> {
+pub(super) fn decode_sha256_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
@@ -1470,7 +1516,7 @@ fn discover_cluster_in_place(
 /// mid-sweep falls the not-yet-processed members back to the per-plugin path
 /// with a structured `cluster_fallback` note, and a close-time audit
 /// rejection redoes every session-inspected member per-plugin.
-fn normalize_parameters_for_cache(parameters: &mut [InteractiveParameter]) {
+pub(super) fn normalize_parameters_for_cache(parameters: &mut [InteractiveParameter]) {
     for parameter in parameters {
         let minimum = parameter.minimum.is_finite().then_some(parameter.minimum);
         let maximum = parameter.maximum.is_finite().then_some(parameter.maximum);
@@ -1510,7 +1556,7 @@ pub fn discover_all_for_diagnostics(
         .collect()
 }
 
-fn plan_discovery_tasks(
+pub(super) fn plan_discovery_tasks(
     planned: &[PlannedMember],
     parallelism: usize,
     diagnostic_one_shot: bool,
@@ -1708,7 +1754,7 @@ fn diagnostic_discovery(path: PathBuf, entry: CacheEntry) -> DiagnosticDiscovery
 /// A panic in any task (arbitrary third-party AEX) is caught and turned into
 /// negative entries, so one bad plug-in cannot abort the process by
 /// unwinding out of the scoped thread.
-fn discover_all(
+pub(super) fn discover_all(
     repository: &Path,
     paths: &[PathBuf],
     dependency: &DependencyConfig,
@@ -1717,7 +1763,7 @@ fn discover_all(
     discover_all_with_progress(repository, paths, dependency, build, false, &|_| {})
 }
 
-fn discover_all_with_progress(
+pub(super) fn discover_all_with_progress(
     repository: &Path,
     paths: &[PathBuf],
     dependency: &DependencyConfig,
@@ -1874,7 +1920,7 @@ fn discover_all_with_progress(
 /// This deliberately runs after all discovery chunks have been merged: an
 /// effect and its sibling AEGP provider may land on opposite chunk boundaries.
 /// Returns whether any cache entry changed.
-fn complete_companion_demand_probes(
+pub(super) fn complete_companion_demand_probes(
     repository: &Path,
     completed: &mut HashMap<String, CacheEntry>,
 ) -> bool {
@@ -1981,7 +2027,9 @@ fn complete_companion_demand_probes(
     changed
 }
 
-fn companion_demand_probe_targets(completed: &HashMap<String, CacheEntry>) -> Vec<String> {
+pub(super) fn companion_demand_probe_targets(
+    completed: &HashMap<String, CacheEntry>,
+) -> Vec<String> {
     let provider_parents: std::collections::HashSet<PathBuf> = completed
         .iter()
         .filter(|(_, entry)| {
@@ -2031,11 +2079,11 @@ fn companion_demand_probe_targets(completed: &HashMap<String, CacheEntry>) -> Ve
 /// like a generated name (`Threshold (Effects).aex`) can be renamed by an
 /// unrelated collision too.
 #[cfg(test)]
-fn unique_filter_names(plugins: &[PathBuf], also_known: &[PathBuf]) -> Vec<String> {
+pub(super) fn unique_filter_names(plugins: &[PathBuf], also_known: &[PathBuf]) -> Vec<String> {
     stable_filter_names(plugins, also_known, &vec![None; plugins.len()])
 }
 
-fn stable_filter_names(
+pub(super) fn stable_filter_names(
     plugins: &[PathBuf],
     also_known: &[PathBuf],
     remembered: &[Option<String>],
@@ -2100,11 +2148,11 @@ fn stable_filter_names(
         .collect()
 }
 
-fn valid_registered_name(name: &str) -> bool {
+pub(super) fn valid_registered_name(name: &str) -> bool {
     !name.is_empty() && name.encode_utf16().count() <= 255 && !name.chars().any(char::is_control)
 }
 
-fn bounded_filter_name(name: &str) -> String {
+pub(super) fn bounded_filter_name(name: &str) -> String {
     let mut result = String::new();
     let mut units = 0usize;
     for ch in name.chars() {
@@ -2118,7 +2166,7 @@ fn bounded_filter_name(name: &str) -> String {
     result
 }
 
-fn remember_secondary_filter_names(
+pub(super) fn remember_secondary_filter_names(
     cache: &mut HashMap<String, CacheEntry>,
     names: &HashMap<(String, u32), String>,
 ) -> bool {
@@ -2141,7 +2189,7 @@ fn remember_secondary_filter_names(
 }
 
 #[cfg(test)]
-fn remembered_filter_names(
+pub(super) fn remembered_filter_names(
     plugins: &[PathBuf],
     cache: &HashMap<String, CacheEntry>,
 ) -> Vec<Option<String>> {
@@ -2167,7 +2215,7 @@ fn remembered_filter_names(
         .collect()
 }
 
-fn remember_filter_names(
+pub(super) fn remember_filter_names(
     cache: &mut HashMap<String, CacheEntry>,
     plugins: &[PathBuf],
     names: &[String],
@@ -2186,7 +2234,7 @@ fn remember_filter_names(
 }
 
 /// The plug-in's file stem, or `AEX` when it has none or is not UTF-8.
-fn filter_stem(plugin: &Path) -> &str {
+pub(super) fn filter_stem(plugin: &Path) -> &str {
     plugin
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -2196,7 +2244,11 @@ fn filter_stem(plugin: &Path) -> &str {
 /// Computes the exact initial menu label handed to AviUtl2. Keeping the
 /// PiPL/PluginData category, bundled-effect fallback, and configured language
 /// in one planner prevents discovery and registration from drifting apart.
-fn registration_label(plugin: &Path, entry: &CacheEntry, japanese_categories: bool) -> String {
+pub(super) fn registration_label(
+    plugin: &Path,
+    entry: &CacheEntry,
+    japanese_categories: bool,
+) -> String {
     filter_label(
         entry
             .category
@@ -2209,7 +2261,7 @@ fn registration_label(plugin: &Path, entry: &CacheEntry, japanese_categories: bo
 /// Registers one discovered AEX as an AviUtl2 filter. Runs on the RegisterPlugin
 /// (host callback) thread only. `name` comes from [`unique_filter_names`], which
 /// is what keeps the host from being handed two filters under one name.
-fn dependency_for_discovered_entry(
+pub(super) fn dependency_for_discovered_entry(
     dependency: &DependencyConfig,
     entry: &CacheEntry,
 ) -> DependencyConfig {
@@ -2223,7 +2275,7 @@ fn dependency_for_discovered_entry(
     resolved
 }
 
-fn register_discovered(
+pub(super) fn register_discovered(
     host: *mut HOST_APP_TABLE,
     repository: &Path,
     plugin: &Path,

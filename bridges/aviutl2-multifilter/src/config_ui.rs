@@ -1,3 +1,25 @@
+use super::discovery_cache::{
+    Config, collect_aex, config_path, load_cache, load_config, resolve_scan_dirs, strip_aex_ext,
+};
+use super::{
+    ENV_CONFIG, ENV_DEPENDENCY_DIRS, ENV_DIR, ENV_REPOSITORY, log_info, log_warn, wide_leak,
+};
+use aviutl2_sys::plugin2::HOST_APP_TABLE;
+use std::path::{Path, PathBuf};
+use windows_sys::Win32::Foundation::{
+    HINSTANCE as WsHINSTANCE, HWND as WsHWND, LPARAM, RECT, WPARAM,
+};
+use windows_sys::Win32::UI::Controls::{
+    ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_WIDTH, LVCOLUMNW,
+    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMCOUNT, LVM_GETITEMSTATE, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVS_EX_CHECKBOXES,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    DialogBoxIndirectParamW, EndDialog, GetClientRect, GetDlgItem, GetSystemMetrics,
+    GetWindowTextLengthW, GetWindowTextW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW,
+    SM_CXVSCROLL, SendMessageW, SetDlgItemTextW, SetWindowLongPtrW, WM_COMMAND, WM_INITDIALOG,
+};
+
 // Settings dialog (issue #855): edit the TOML config from inside AviUtl2.
 //
 // `register_config_menu` puts an entry in AviUtl2's settings menu; picking it
@@ -14,36 +36,22 @@
 // the file at load, so an active override is called out in the dialog rather
 // than silently making a saved value appear to do nothing.
 
-use windows_sys::Win32::Foundation::{
-    HINSTANCE as WsHINSTANCE, HWND as WsHWND, LPARAM, RECT, WPARAM,
-};
-use windows_sys::Win32::UI::Controls::{
-    ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_WIDTH, LVCOLUMNW,
-    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMCOUNT, LVM_GETITEMSTATE, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVS_EX_CHECKBOXES,
-};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DialogBoxIndirectParamW, EndDialog, GetClientRect, GetDlgItem, GetSystemMetrics,
-    GetWindowTextLengthW, GetWindowTextW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW,
-    SM_CXVSCROLL, SendMessageW, SetDlgItemTextW, SetWindowLongPtrW, WM_COMMAND, WM_INITDIALOG,
-};
-
 /// The values shown in (and read back from) the dialog, all as text. List
 /// fields hold one entry per line. A pure model, so the text⇄config mapping is
 /// testable without a window.
 #[derive(PartialEq, Debug)]
-struct ConfigForm {
+pub(super) struct ConfigForm {
     /// `dir` + `dirs` folded together (the dialog has no reason to preserve the
     /// single-folder spelling; a save rewrites it as `dirs`).
-    dirs: String,
-    dependency_dirs: String,
-    ignore: String,
-    repository: String,
+    pub(super) dirs: String,
+    pub(super) dependency_dirs: String,
+    pub(super) ignore: String,
+    pub(super) repository: String,
     /// Empty means "no ceiling", matching the absent TOML key.
-    module_limit: String,
-    byte_limit: String,
+    pub(super) module_limit: String,
+    pub(super) byte_limit: String,
     /// Menu-category display language (issue #876): true = 日本語.
-    japanese_categories: bool,
+    pub(super) japanese_categories: bool,
 }
 
 impl Default for ConfigForm {
@@ -63,23 +71,23 @@ impl Default for ConfigForm {
 
 /// A validated edit, ready to merge into the TOML document.
 #[derive(PartialEq, Debug)]
-struct ConfigEdit {
-    dirs: Vec<String>,
-    dependency_dirs: Vec<String>,
-    ignore: Vec<String>,
-    repository: Option<String>,
-    dependency_module_limit: Option<usize>,
-    dependency_byte_limit: Option<u64>,
-    category_language: Option<String>,
+pub(super) struct ConfigEdit {
+    pub(super) dirs: Vec<String>,
+    pub(super) dependency_dirs: Vec<String>,
+    pub(super) ignore: Vec<String>,
+    pub(super) repository: Option<String>,
+    pub(super) dependency_module_limit: Option<usize>,
+    pub(super) dependency_byte_limit: Option<u64>,
+    pub(super) category_language: Option<String>,
 }
 
 /// One known effect in the ignore checklist (issue #858).
 #[derive(PartialEq, Debug)]
-struct IgnoreRow {
+pub(super) struct IgnoreRow {
     /// The file stem the ignore list matches on, in a spelling seen on disk.
-    name: String,
+    pub(super) name: String,
     /// Whether the current ignore list matches it (= the checkbox state).
-    ignored: bool,
+    pub(super) ignored: bool,
 }
 
 /// The checklist rows for `known` effect paths under the current `ignore`
@@ -89,7 +97,7 @@ struct IgnoreRow {
 /// evidence). Rows are deduplicated by stem (ignore matching is stem-based
 /// and case-insensitive, so two same-stem AEX in different folders are one
 /// decision) and sorted for the display.
-fn ignore_rows(known: &[PathBuf], ignore: &[String]) -> (Vec<IgnoreRow>, Vec<String>) {
+pub(super) fn ignore_rows(known: &[PathBuf], ignore: &[String]) -> (Vec<IgnoreRow>, Vec<String>) {
     let mut stems: Vec<&str> = known
         .iter()
         .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str()))
@@ -120,7 +128,7 @@ fn ignore_rows(known: &[PathBuf], ignore: &[String]) -> (Vec<IgnoreRow>, Vec<Str
 /// The saved ignore list: every checked row plus the manual lines, minus
 /// duplicates (a manual line naming a checked effect, with or without the
 /// `.aex` spelling).
-fn compose_ignore(checked: Vec<String>, manual: &str) -> Vec<String> {
+pub(super) fn compose_ignore(checked: Vec<String>, manual: &str) -> Vec<String> {
     let mut ignore = checked;
     for entry in parse_lines(manual) {
         if !ignore
@@ -171,7 +179,7 @@ fn join_lines<S: AsRef<str>>(entries: impl IntoIterator<Item = S>) -> String {
 /// The dialog's initial contents, from the config as the file spells it (env
 /// overrides excluded — the dialog edits the file, and the overrides are
 /// reported separately by [`env_override_note`]).
-fn form_from_config(config: &Config) -> ConfigForm {
+pub(super) fn form_from_config(config: &Config) -> ConfigForm {
     let dirs = config.dir.iter().chain(&config.dirs);
     ConfigForm {
         dirs: join_lines(dirs.map(|dir| dir.to_string_lossy())),
@@ -196,7 +204,7 @@ fn form_from_config(config: &Config) -> ConfigForm {
 
 /// Validates the dialog text into an edit. Error strings face the user (the
 /// dialog is Japanese-labelled, so these are too).
-fn parse_form(form: &ConfigForm) -> Result<ConfigEdit, String> {
+pub(super) fn parse_form(form: &ConfigForm) -> Result<ConfigEdit, String> {
     let module_limit = parse_limit::<usize>(&form.module_limit, "依存 DLL 数の上限")?;
     let byte_limit = parse_limit::<u64>(&form.byte_limit, "依存 DLL 合計バイト数の上限")?;
     // TOML integers are i64; a larger value would be written as a wrapped
@@ -293,7 +301,7 @@ fn set_optional<V: Into<toml_edit::Value>>(
 /// The new file text, plus whether the existing text had to be abandoned
 /// because it does not parse (the caller then backs the original up rather
 /// than silently destroying whatever it was).
-fn merged_config_text(existing: &str, edit: &ConfigEdit) -> (String, bool) {
+pub(super) fn merged_config_text(existing: &str, edit: &ConfigEdit) -> (String, bool) {
     match apply_edit(existing, edit) {
         Ok(text) => (text, false),
         Err(_) => {
@@ -328,7 +336,7 @@ fn save_config_edit(edit: &ConfigEdit) -> Result<(PathBuf, Option<PathBuf>), Str
 /// The file half of a save, separated from [`config_path`] resolution and the
 /// host logging so the backup/staged-write behaviour is testable against a
 /// plain path (the log buffer is process-global state a test must not touch).
-fn write_config_edit(path: &Path, edit: &ConfigEdit) -> Result<Option<PathBuf>, String> {
+pub(super) fn write_config_edit(path: &Path, edit: &ConfigEdit) -> Result<Option<PathBuf>, String> {
     let existing = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -411,7 +419,7 @@ struct DialogInit {
 /// Registers the settings-menu entry. Called from `RegisterPlugin` before any
 /// early return: the dialog is how a user fixes the very configuration whose
 /// absence causes those early returns.
-fn register_settings_menu(host: *mut HOST_APP_TABLE) {
+pub(super) fn register_settings_menu(host: *mut HOST_APP_TABLE) {
     // SAFETY: the caller checked `host` for null; the name is leaked for the
     // host's lifetime as every other registration string is.
     unsafe {
@@ -776,7 +784,7 @@ fn item_text(dialog: WsHWND, id: u16) -> String {
 // Style bits, spelled as the SDK spells them (the windows-sys constants for
 // dialog/edit/button styles come in mixed signednesses; the template wants
 // plain u32s).
-const WS_CHILD: u32 = 0x4000_0000;
+pub(super) const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_BORDER: u32 = 0x0080_0000;
 const WS_VSCROLL: u32 = 0x0020_0000;
@@ -784,7 +792,7 @@ const WS_TABSTOP: u32 = 0x0001_0000;
 const WS_POPUP: u32 = 0x8000_0000;
 const WS_CAPTION: u32 = 0x00C0_0000;
 const WS_SYSMENU: u32 = 0x0008_0000;
-const DS_SETFONT: u32 = 0x40;
+pub(super) const DS_SETFONT: u32 = 0x40;
 const DS_MODALFRAME: u32 = 0x80;
 const ES_MULTILINE: u32 = 0x0004;
 const ES_AUTOVSCROLL: u32 = 0x0040;
@@ -813,7 +821,7 @@ enum ItemClass {
 /// Builds the `DLGTEMPLATE` stream. Returned as `Vec<u32>` because the
 /// template must be DWORD-aligned and a `Vec<u16>`'s allocation only promises
 /// two-byte alignment.
-fn build_dialog_template() -> Vec<u32> {
+pub(super) fn build_dialog_template() -> Vec<u32> {
     let mut words: Vec<u16> = Vec::new();
     let mut items: u16 = 0;
 
