@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_smart_finalize.hpp"
 #include "render_subsystem.h"
 #include "worker_handle_runtime.hpp"
@@ -6,6 +7,9 @@
 #include "worker_world_registry.hpp"
 #include <algorithm>
 #include <cstring>
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
 
 namespace aexcompat::worker_runtime::smart_finalize {
 namespace {
@@ -30,8 +34,8 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
       !r.lifecycle || !r.source || !r.guarded || !r.pre_output || !h.close_ui ||
       !h.end_lifecycle || !h.dump_world || !h.sha256 ||
       !h.ui_active) return false;
-  void* pre_render_data = read<void*>(*r.pre_output, 40);
-  if (auto cleanup = read<void(__cdecl*)(void*)>(*r.pre_output, 48)) {
+  void* pre_render_data = read<void*>(*r.pre_output, abi_contract::PRE_OUTPUT_PRE_RENDER_DATA_OFFSET);
+  if (auto cleanup = read<void(__cdecl*)(void*)>(*r.pre_output, abi_offsets::kPreOutputDeletePreRenderData)) {
     invoke_smart_pre_render_cleanup_seh(cleanup, pre_render_data);
   } else if (pre_render_data && handles::host_handle_is_live(pre_render_data)) {
     handles::dispose_handle(reinterpret_cast<void**>(pre_render_data));

@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_case_ownership.hpp"
 #include "worker_drawbot_runtime.hpp"
 #include "worker_pf_progress_info.hpp"
@@ -22,6 +23,9 @@
 #include <vector>
 #include <new>
 #include <unordered_map>
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
 
 namespace aexcompat::l2_detail {
 
@@ -342,10 +346,10 @@ int32_t __cdecl register_custom_ui(void* effect_ref, const void* custom_ui_info)
   std::array<std::byte, 44> bytes{};
   std::memcpy(bytes.data(), custom_ui_info, bytes.size());
   CustomUiRegistration registration{
-      read<uint32_t>(bytes, 4), read<int32_t>(bytes, 8), read<int32_t>(bytes, 12),
-      read<int32_t>(bytes, 16), read<int32_t>(bytes, 20), read<int32_t>(bytes, 24),
-      read<int32_t>(bytes, 28), read<int32_t>(bytes, 32), read<int32_t>(bytes, 36),
-      read<int32_t>(bytes, 40)};
+      read<uint32_t>(bytes, abi_contract::CUSTOM_UI_EVENTS_OFFSET), read<int32_t>(bytes, abi_contract::CUSTOM_UI_COMP_WIDTH_OFFSET), read<int32_t>(bytes, abi_contract::CUSTOM_UI_COMP_HEIGHT_OFFSET),
+      read<int32_t>(bytes, abi_contract::CUSTOM_UI_COMP_ALIGNMENT_OFFSET), read<int32_t>(bytes, abi_contract::CUSTOM_UI_LAYER_WIDTH_OFFSET), read<int32_t>(bytes, abi_contract::CUSTOM_UI_LAYER_HEIGHT_OFFSET),
+      read<int32_t>(bytes, abi_contract::CUSTOM_UI_LAYER_ALIGNMENT_OFFSET), read<int32_t>(bytes, abi_contract::CUSTOM_UI_PREVIEW_WIDTH_OFFSET), read<int32_t>(bytes, abi_contract::CUSTOM_UI_PREVIEW_HEIGHT_OFFSET),
+      read<int32_t>(bytes, abi_contract::CUSTOM_UI_PREVIEW_ALIGNMENT_OFFSET)};
   const auto valid_dimension = [](int32_t value) { return value >= 0 && value <= 8192; };
   if ((registration.events & ~15u) != 0 ||
       !valid_dimension(registration.comp_width) ||
@@ -612,10 +616,10 @@ bool dispatch_render_click(EffectEntry entry, std::array<std::byte, kInSize>& in
   std::vector<void*> params(definitions.size());
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
   std::array<std::byte, 208> extra{};
-  write<void*>(extra, 0, &g_ui_context_pointer);
+  write<void*>(extra, abi_contract::EVENT_CONTEXT_OFFSET, &g_ui_context_pointer);
   g_ui_context.window_type = 2;
   const auto dispatch_lifecycle_event = [&](int32_t event_type, std::size_t result_index) {
-    write<int32_t>(extra, 8, event_type);
+    write<int32_t>(extra, abi_contract::EVENT_TYPE_OFFSET, event_type);
     uint32_t exception_code = 0;
     g_render_ui_lifecycle_errors[result_index] = invoke_entry_seh(entry, kEvent,
         input.data(), output.data(), params.data(), nullptr, extra.data(), &exception_code);
@@ -624,21 +628,25 @@ bool dispatch_render_click(EffectEntry entry, std::array<std::byte, kInSize>& in
   };
   if (!dispatch_lifecycle_event(0, 0) || !dispatch_lifecycle_event(1, 1)) return false;
   g_render_ui_context_active = true;
-  write<int32_t>(extra, 8, 2);
-  write<uint32_t>(extra, 16, 1);
-  write<int32_t>(extra, 20, g_render_click_y);
-  write<int32_t>(extra, 24, g_render_click_x);
-  write<int32_t>(extra, 28, 1);
-  write<int32_t>(extra, 80, 1);
-  write<int32_t>(extra, 84, 2);
+  write<int32_t>(extra, abi_contract::EVENT_TYPE_OFFSET, 2);
+  write<uint32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_WHEN_OFFSET, 1);
+  write<int32_t>(extra,
+      abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_SCREEN_POINT_OFFSET + abi_offsets::kPointHorizontal, g_render_click_y);
+  write<int32_t>(extra,
+      abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_SCREEN_POINT_OFFSET + abi_offsets::kPointVertical, g_render_click_x);
+  write<int32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_contract::DO_CLICK_NUM_CLICKS_OFFSET, 1);
+  write<int32_t>(extra, abi_contract::EVENT_EFFECT_WINDOW_OFFSET + abi_contract::EFFECT_WINDOW_INDEX_OFFSET,
+      1);
+  write<int32_t>(extra, abi_contract::EVENT_EFFECT_WINDOW_OFFSET + abi_contract::EFFECT_WINDOW_AREA_OFFSET,
+      2);
   write_rect(extra.data() + 88, 203, 203);
   uint32_t exception_code = 0;
   g_render_click_error = invoke_entry_seh(entry, kEvent, input.data(), output.data(),
       params.data(), nullptr, extra.data(), &exception_code);
   if (exception_code != 0) g_render_click_error = 512;
-  g_render_click_out_flags = read<int32_t>(extra, 204);
+  g_render_click_out_flags = read<int32_t>(extra, abi_contract::EVENT_OUT_FLAGS_OFFSET);
   g_render_click_changed_value = definitions.size() > 1 &&
-      (read<uint32_t>(definitions[1], 0) & 1u) != 0;
+      (read<uint32_t>(definitions[1], abi_contract::PARAM_UU_OFFSET) & 1u) != 0;
   return g_render_click_error == 0 && (g_render_click_out_flags & 9) == 9 &&
       g_render_click_changed_value && g_app_color_picker_calls == 1 &&
       g_app_invalidate_rect_calls == 1;
@@ -651,10 +659,10 @@ bool dispatch_render_draw(EffectEntry entry, std::array<std::byte, kInSize>& inp
   std::vector<void*> params(definitions.size());
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
   std::array<std::byte, 208> extra{};
-  write<void*>(extra, 0, &g_ui_context_pointer);
+  write<void*>(extra, abi_contract::EVENT_CONTEXT_OFFSET, &g_ui_context_pointer);
   g_ui_context.window_type = 2;
   const auto dispatch_lifecycle_event = [&](int32_t event_type, std::size_t result_index) {
-    write<int32_t>(extra, 8, event_type);
+    write<int32_t>(extra, abi_contract::EVENT_TYPE_OFFSET, event_type);
     uint32_t exception_code = 0;
     g_render_ui_lifecycle_errors[result_index] = invoke_entry_seh(entry, kEvent,
         input.data(), output.data(), params.data(), nullptr, extra.data(), &exception_code);
@@ -663,14 +671,14 @@ bool dispatch_render_draw(EffectEntry entry, std::array<std::byte, kInSize>& inp
   };
   if (!dispatch_lifecycle_event(0, 0) || !dispatch_lifecycle_event(1, 1)) return false;
   g_render_ui_context_active = true;
-  write<int32_t>(extra, 8, 4);
+  write<int32_t>(extra, abi_contract::EVENT_TYPE_OFFSET, 4);
   write_rect(extra.data() + 16, 203, 203);
-  write<int32_t>(extra, 32, 32);
+  write<int32_t>(extra, abi_contract::EVENT_UNION_OFFSET + abi_offsets::kDrawDepth, 32);
   uint32_t exception_code = 0;
   g_render_draw_error = invoke_entry_seh(entry, kEvent, input.data(), output.data(),
       params.data(), nullptr, extra.data(), &exception_code);
   if (exception_code != 0) g_render_draw_error = 512;
-  g_render_draw_out_flags = read<int32_t>(extra, 204);
+  g_render_draw_out_flags = read<int32_t>(extra, abi_contract::EVENT_OUT_FLAGS_OFFSET);
   return g_render_draw_error == 0 && (g_render_draw_out_flags & 1) != 0 &&
       (g_drawbot_paint_rect_calls + g_drawbot_fill_path_calls +
        g_drawbot_stroke_path_calls + g_overlay_stroke_path_calls) > 0 &&
@@ -694,10 +702,10 @@ bool close_render_ui_context(EffectEntry entry, std::array<std::byte, kInSize>& 
   std::vector<void*> params(definitions.size());
   for (std::size_t i = 0; i < definitions.size(); ++i) params[i] = definitions[i].data();
   std::array<std::byte, 208> extra{};
-  write<void*>(extra, 0, &g_ui_context_pointer);
+  write<void*>(extra, abi_contract::EVENT_CONTEXT_OFFSET, &g_ui_context_pointer);
   for (const auto [event_type, result_index] :
        std::array<std::pair<int32_t, std::size_t>, 2>{{{5, 2}, {6, 3}}}) {
-    write<int32_t>(extra, 8, event_type);
+    write<int32_t>(extra, abi_contract::EVENT_TYPE_OFFSET, event_type);
     uint32_t exception_code = 0;
     g_render_ui_lifecycle_errors[result_index] = invoke_entry_seh(entry, kEvent,
         input.data(), output.data(), params.data(), nullptr, extra.data(), &exception_code);

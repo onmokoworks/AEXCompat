@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstring>
 
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+
 namespace aexcompat::l2_detail {
 bool apply_parameter_animation(
     worker_runtime::parameter_execution::Definitions&, int32_t, uint32_t);
@@ -55,8 +57,8 @@ Plan prepare(const Context& context, const Request& request) {
   constexpr uint32_t kWideTimeInput = 1u << 1;
   constexpr uint32_t kAutomaticWideTimeInput = 1u << 17;
   state.wide_time_checkout_allowed =
-      (read<uint32_t>(output, 96) & kWideTimeInput) != 0 ||
-      (read<uint32_t>(output, 400) & kAutomaticWideTimeInput) != 0;
+      (read<uint32_t>(output, abi_contract::OUT_OUT_FLAGS_OFFSET) & kWideTimeInput) != 0 ||
+      (read<uint32_t>(output, abi_contract::OUT_OUT_FLAGS2_OFFSET) & kAutomaticWideTimeInput) != 0;
   state.current_time = request.external_current_time;
   state.current_time_scale = request.external_time_scale;
   state.rejected_temporal_checkouts = 0;

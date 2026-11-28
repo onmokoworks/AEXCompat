@@ -1,7 +1,10 @@
+#include "generated/aex_abi_contract.hpp"
 #include "worker_pf_color_selftests.hpp"
 
 #include "worker_pf_suites_internal.hpp"
 #include "worker_parameter_execution.hpp"
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
 
 namespace aexcompat::l2_detail {
 bool parse_parameter_payload(const wchar_t*, worker_runtime::parameters::RequestedAssignments&);
@@ -17,7 +20,7 @@ namespace {
 
 constexpr int32_t kPfBadCallbackParam = 516;
 constexpr std::size_t kParamSize = worker_runtime::parameters::kDefinitionSize;
-constexpr std::size_t kParamType = 12;
+constexpr std::size_t kParamType = abi_contract::PARAM_PARAM_TYPE_OFFSET;
 
 Hooks g_hooks{};
 
@@ -123,7 +126,7 @@ bool verify_pf_color_param_suite() {
       acquired == g_hooks.color_param_suite1;
   auto definition = [](const ParamRecord& record, bool current) {
     std::array<std::byte, kParamSize> bytes{};
-    write<int32_t>(bytes, 0, record.disk_id);
+    write<int32_t>(bytes, abi_contract::PARAM_UU_OFFSET, record.disk_id);
     write<int32_t>(bytes, kParamType, record.type);
     const auto& color = current ? record.current_color : record.default_color;
     std::memcpy(bytes.data() + 56, color.data(), color.size());
@@ -158,7 +161,7 @@ bool verify_pf_color_param_suite() {
   // no longer the lookup key. by_id short-circuits to end() and the value scan
   // carries it to the same colour.
   auto unknown_id = collided;
-  write<int32_t>(unknown_id, 0, 7777);
+  write<int32_t>(unknown_id, abi_contract::PARAM_UU_OFFSET, 7777);
   ok = ok && g_hooks.floating_point_from_color(g_hooks.effect, unknown_id.data(), &out) == 0 &&
       out.alpha == 50.0f / 255.0f && out.red == 60.0f / 255.0f &&
       out.green == 70.0f / 255.0f && out.blue == 80.0f / 255.0f;

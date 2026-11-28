@@ -1,3 +1,4 @@
+#include "generated/aex_abi_contract.hpp"
 #include <windows.h>
 #include <bcrypt.h>
 #include <d3d12.h>
@@ -176,5 +177,8 @@
 
 // Split as textual implementation fragments to preserve this ABI-sensitive
 // worker as one translation unit while keeping each handwritten file reviewable.
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+
 #include "l2_main_support.inc"
 #include "l2_main_entry.inc"

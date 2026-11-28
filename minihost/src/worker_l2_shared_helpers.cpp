@@ -1,3 +1,4 @@
+#include "generated/aex_abi_contract.hpp"
 #include <windows.h>
 #include <bcrypt.h>
 
@@ -30,6 +31,9 @@
 // time comparison, parameter-animation evaluation, the guarded global/sequence
 // selector invokers, diagnostic escaping/hashing, and the world-dump telemetry
 // wrappers. Effect identity stays in l2_main behind a cross-TU extern.
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+
 namespace aexcompat::l2_detail {
 
 using namespace aexcompat::pf_state_runtime;
@@ -98,14 +102,14 @@ bool write_animation_value(std::array<std::byte, kParamSize> &definition,
       if (!std::isfinite(key.scalar) || std::floor(key.scalar) != key.scalar ||
           key.scalar < INT32_MIN || key.scalar > INT32_MAX)
         return false;
-      write<int32_t>(definition, 56, static_cast<int32_t>(key.scalar));
+      write<int32_t>(definition, abi_contract::PARAM_U_OFFSET, static_cast<int32_t>(key.scalar));
     } else if (param.type == 2) {
       const double encoded = key.scalar * 65536.0;
       if (encoded < INT32_MIN || encoded > INT32_MAX)
         return false;
-      write<int32_t>(definition, 56, static_cast<int32_t>(std::round(encoded)));
+      write<int32_t>(definition, abi_contract::PARAM_U_OFFSET, static_cast<int32_t>(std::round(encoded)));
     } else if (param.type == 10) {
-      write<double>(definition, 56, key.scalar);
+      write<double>(definition, abi_contract::PARAM_U_OFFSET, key.scalar);
     } else {
       return false;
     }
@@ -121,7 +125,7 @@ bool write_animation_value(std::array<std::byte, kParamSize> &definition,
       return false;
     for (int component = 0; component < component_count; ++component) {
       if (param.type == 18) {
-        write<double>(definition, 56 + component * 8,
+        write<double>(definition, abi_contract::PARAM_U_OFFSET + component * sizeof(double),
                       animation_component_value(param, component,
                                                 key.components[component]));
       } else {
@@ -131,7 +135,7 @@ bool write_animation_value(std::array<std::byte, kParamSize> &definition,
             65536.0;
         if (encoded < INT32_MIN || encoded > INT32_MAX)
           return false;
-        write<int32_t>(definition, 56 + component * 4,
+        write<int32_t>(definition, abi_contract::PARAM_U_OFFSET + component * sizeof(int32_t),
                        static_cast<int32_t>(std::round(encoded)));
       }
     }

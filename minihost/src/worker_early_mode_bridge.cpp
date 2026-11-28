@@ -1,3 +1,4 @@
+#include "worker_abi_offsets.hpp"
 #include "worker_early_mode_bridge.hpp"
 
 #include "worker_handle_runtime.hpp"
@@ -10,6 +11,10 @@
 // Early-mode hook adapters moved from worker_main (issue #165): every
 // adapter reads the bridge and forwards into the same worker-entry owned
 // helpers as before.
+
+namespace abi_contract = aexcompat::abi::x86_64_windows;
+namespace abi_offsets = aexcompat::worker_abi_offsets;
+
 namespace aexcompat::l2_detail {
 
 using namespace aexcompat::worker_runtime::parameter_execution;
@@ -87,10 +92,10 @@ void* early_mode_external_dependencies(void* opaque, int32_t check_type,
                                        int32_t* error, uint32_t* exception) {
   const auto& b = *static_cast<EarlyModeBridge*>(opaque);
   std::array<std::byte, 16> extra{};
-  write<int32_t>(extra, 0, check_type);
+  write<int32_t>(extra, abi_offsets::kExternalDependenciesCheckType, check_type);
   *error = invoke_entry_seh(b.entry, kGetExternalDependencies, b.input->data(), b.output->data(),
                             nullptr, nullptr, extra.data(), exception);
-  return read<void**>(extra, 8);
+  return read<void**>(extra, abi_contract::EXTERNAL_DEPENDENCIES_HANDLE_OFFSET);
 }
 bool early_mode_handle_is_live(void*, void* handle) { return host_handle_is_live(static_cast<void**>(handle)); }
 uint64_t early_mode_handle_size(void*, void* handle) { return handle_size(static_cast<void**>(handle)); }
