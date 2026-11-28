@@ -1,3 +1,5 @@
+use super::ucrt_sinf;
+
 // Frozen original-UCRT observations from OLM F27c, not host libm expectations.
 // tools/ucrt_math_probe/rosetta/results-f27c/sinf-first.csv.gz SHA256 0392d26de3e5e4af6e807cb6a0a614472b2d3e75e171c26e0eca1b7ca4d2cb75
 // tools/ucrt_math_probe/rosetta/results-f27c/paper-results.json SHA256 3c84ea10bfe8fa1ab701377eee46ec6bdae8668c258e29d5a51ab462395ece5f

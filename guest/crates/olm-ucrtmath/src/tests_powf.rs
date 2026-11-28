@@ -1,3 +1,5 @@
+use super::ucrt_powf;
+
 // Frozen original-UCRT observations from OLM F27c, not host libm expectations.
 // tools/ucrt_math_probe/rosetta/results-f27c/powf-first.csv.gz SHA256 18a2deda50af7fcc23bb11e7f77a50254000fc2bca819aac4b39484de724a21a
 // tools/ucrt_math_probe/rosetta/results-f27c/paper-results.json SHA256 3c84ea10bfe8fa1ab701377eee46ec6bdae8668c258e29d5a51ab462395ece5f

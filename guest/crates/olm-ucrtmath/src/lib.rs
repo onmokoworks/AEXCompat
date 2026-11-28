@@ -34,23 +34,23 @@ pub fn powf(x: f32, y: f32) -> f32 {
 }
 
 #[cfg(test)]
-include!("tests_expf.rs");
+mod tests_expf;
 
 #[cfg(test)]
-include!("tests_atan2f.rs");
+mod tests_atan2f;
 
 pub fn pow(x: f64, y: f64) -> f64 {
     unsafe { ucrt_pow(x, y, mode()) }
 }
 
 #[cfg(test)]
-include!("tests_powf.rs");
+mod tests_powf;
 
 #[cfg(test)]
-include!("tests_sinf.rs");
+mod tests_sinf;
 
 #[cfg(test)]
-include!("tests_cosf.rs");
+mod tests_cosf;
 
 #[test]
 fn log2f_ieee_boundaries() {
