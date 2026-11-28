@@ -2411,12 +2411,15 @@ fn repository_root() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+#[path = "macos_transport_tests.rs"]
+mod transport_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use aexcompat_broker::render_fixture::FixtureCheckpoint;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
-    include!("macos_transport_tests.rs");
 
     fn fixture_resident_child() -> Child {
         let mut command = Command::new("/bin/sleep");

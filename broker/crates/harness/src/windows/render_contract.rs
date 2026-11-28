@@ -1,5 +1,13 @@
+use super::preflight::{TaskResult, decode_sha256};
+use super::viewer::decode_preview_image;
+use eframe::egui;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum TaskKind {
+pub(super) enum TaskKind {
     #[default]
     Generic,
     IdentifyAex,
@@ -7,7 +15,7 @@ enum TaskKind {
     RenderChain,
 }
 
-fn prepare_render_preview(
+pub(super) fn prepare_render_preview(
     success: bool,
     operation: Option<&str>,
     output: Option<&Path>,
@@ -21,7 +29,7 @@ fn prepare_render_preview(
     Ok(Some((output.to_path_buf(), image)))
 }
 
-fn report_ui_output_failure(body: &str, error: &str) -> String {
+pub(super) fn report_ui_output_failure(body: &str, error: &str) -> String {
     let mut report = serde_json::from_str::<serde_json::Value>(body)
         .unwrap_or_else(|_| serde_json::json!({ "native_report": body }));
     if !report.is_object() {
@@ -39,7 +47,7 @@ fn report_ui_output_failure(body: &str, error: &str) -> String {
     serde_json::to_string_pretty(&report).unwrap_or_else(|_| error.to_owned())
 }
 
-fn native_failure_status(operation: Option<&str>, body: &str) -> &'static str {
+pub(super) fn native_failure_status(operation: Option<&str>, body: &str) -> &'static str {
     if operation == Some("render_image") {
         let report = serde_json::from_str::<serde_json::Value>(body).ok();
         if report
@@ -60,7 +68,7 @@ fn native_failure_status(operation: Option<&str>, body: &str) -> &'static str {
     "Failed safely"
 }
 
-fn visible_report_summary(body: &str) -> Option<String> {
+pub(super) fn visible_report_summary(body: &str) -> Option<String> {
     if let Ok(report) = serde_json::from_str::<serde_json::Value>(body) {
         for pointer in ["/ui_output/error", "/error", "/message"] {
             if let Some(message) = report.pointer(pointer).and_then(serde_json::Value::as_str) {
@@ -87,7 +95,7 @@ fn visible_text_summary(value: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_input_fingerprint(
+pub(super) fn render_input_fingerprint(
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
     smart_render: bool,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
@@ -122,7 +130,7 @@ fn render_input_fingerprint(
     .to_string()
 }
 
-fn receive_task_result(receiver: &Receiver<TaskResult>) -> Option<TaskResult> {
+pub(super) fn receive_task_result(receiver: &Receiver<TaskResult>) -> Option<TaskResult> {
     match receiver.try_recv() {
         Ok(result) => Some(result),
         Err(mpsc::TryRecvError::Empty) => None,
@@ -143,7 +151,7 @@ fn receive_task_result(receiver: &Receiver<TaskResult>) -> Option<TaskResult> {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum ParameterInspectionState {
+pub(super) enum ParameterInspectionState {
     #[default]
     NotSelected,
     Loading,
@@ -154,7 +162,7 @@ enum ParameterInspectionState {
     Failed,
 }
 
-fn parameter_inspection_state(
+pub(super) fn parameter_inspection_state(
     report: &serde_json::Value,
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
 ) -> Result<ParameterInspectionState, String> {
@@ -180,7 +188,7 @@ fn parameter_inspection_state(
     Ok(ParameterInspectionState::Ready)
 }
 
-fn parameter_inspection_message(
+pub(super) fn parameter_inspection_message(
     state: ParameterInspectionState,
 ) -> Option<(&'static str, &'static str)> {
     match state {
@@ -206,7 +214,7 @@ fn parameter_inspection_message(
     }
 }
 
-fn parameter_inspection_status(
+pub(super) fn parameter_inspection_status(
     state: ParameterInspectionState,
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
     smart_render: bool,
@@ -238,7 +246,7 @@ fn parameter_inspection_status(
     }
 }
 
-fn render_action_enabled(
+pub(super) fn render_action_enabled(
     busy: bool,
     has_selection: bool,
     has_input: bool,
@@ -250,52 +258,52 @@ fn render_action_enabled(
 }
 
 #[derive(Debug, Default, PartialEq)]
-struct RenderDiagnostics {
-    render_path: String,
-    pixel_format: String,
-    worker_classification: String,
-    gpu_fallback_used: bool,
-    gpu_attempt_classification: Option<String>,
-    gpu_failure_stage: Option<String>,
-    final_stages: Vec<String>,
-    gpu_stages: Vec<String>,
+pub(super) struct RenderDiagnostics {
+    pub(super) render_path: String,
+    pub(super) pixel_format: String,
+    pub(super) worker_classification: String,
+    pub(super) gpu_fallback_used: bool,
+    pub(super) gpu_attempt_classification: Option<String>,
+    pub(super) gpu_failure_stage: Option<String>,
+    pub(super) final_stages: Vec<String>,
+    pub(super) gpu_stages: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
-struct FailureDiagnostics {
-    classification: String,
-    failure_stage: Option<String>,
-    exit_code: Option<i64>,
-    elapsed_ms: Option<u64>,
-    selector_error: Option<i64>,
-    missing_suites: Vec<MissingSuite>,
-    last_seh_selector: Option<String>,
-    last_seh_error: Option<i64>,
-    last_seh_exception_code: Option<u64>,
-    stages: Vec<String>,
+pub(super) struct FailureDiagnostics {
+    pub(super) classification: String,
+    pub(super) failure_stage: Option<String>,
+    pub(super) exit_code: Option<i64>,
+    pub(super) elapsed_ms: Option<u64>,
+    pub(super) selector_error: Option<i64>,
+    pub(super) missing_suites: Vec<MissingSuite>,
+    pub(super) last_seh_selector: Option<String>,
+    pub(super) last_seh_error: Option<i64>,
+    pub(super) last_seh_exception_code: Option<u64>,
+    pub(super) stages: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
-struct MissingSuite {
-    name: String,
-    version: i32,
+pub(super) struct MissingSuite {
+    pub(super) name: String,
+    pub(super) version: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct PixelComparison {
-    width: u32,
-    height: u32,
-    differing_pixels: u64,
-    max_channel_error: u8,
-    mean_absolute_error: f64,
+pub(super) struct PixelComparison {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) differing_pixels: u64,
+    pub(super) max_channel_error: u8,
+    pub(super) mean_absolute_error: f64,
 }
 
 impl PixelComparison {
-    fn exact(&self) -> bool {
+    pub(super) fn exact(&self) -> bool {
         self.differing_pixels == 0
     }
 
-    fn report(&self) -> serde_json::Value {
+    pub(super) fn report(&self) -> serde_json::Value {
         serde_json::json!({
             "schema_version": 1,
             "stage": "ae_reference_pixel_comparison",
@@ -311,7 +319,7 @@ impl PixelComparison {
     }
 }
 
-fn compare_images(reference: &Path, output: &Path) -> Result<PixelComparison, String> {
+pub(super) fn compare_images(reference: &Path, output: &Path) -> Result<PixelComparison, String> {
     let reference = image::open(reference)
         .map_err(|error| format!("Reference image could not be decoded: {error}"))?
         .into_rgba8();
@@ -354,7 +362,7 @@ fn compare_images(reference: &Path, output: &Path) -> Result<PixelComparison, St
     })
 }
 
-fn assign_layer_paths(
+pub(super) fn assign_layer_paths(
     parameters: &mut [aexcompat_broker::image_render::InteractiveParameter],
     assignments: &[std::ffi::OsString],
 ) -> Result<(), String> {
@@ -390,7 +398,7 @@ fn assign_layer_paths(
     Ok(())
 }
 
-fn apply_typed_assignments(
+pub(super) fn apply_typed_assignments(
     parameters: &mut Vec<aexcompat_broker::image_render::InteractiveParameter>,
     document: &serde_json::Value,
     request_path: Option<&Path>,
@@ -573,7 +581,7 @@ fn apply_typed_assignments(
     Ok(assigned_slots)
 }
 
-fn apply_typed_render_assignments(
+pub(super) fn apply_typed_render_assignments(
     parameters: &mut Vec<aexcompat_broker::image_render::InteractiveParameter>,
     document: &serde_json::Value,
     request_path: Option<&Path>,
@@ -591,7 +599,9 @@ fn apply_typed_render_assignments(
 
 const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
 
-fn typed_request_render_settings(document: &serde_json::Value) -> Result<Option<String>, String> {
+pub(super) fn typed_request_render_settings(
+    document: &serde_json::Value,
+) -> Result<Option<String>, String> {
     let Some(settings) = document.get("render_settings") else {
         return Ok(None);
     };
@@ -652,12 +662,12 @@ fn typed_request_render_settings(document: &serde_json::Value) -> Result<Option<
     Ok(Some(format!("v1|{premultiplication}|0|-|0|{renderer}")))
 }
 
-struct ConformanceRenderSettingsGuard {
-    previous: Option<std::ffi::OsString>,
+pub(super) struct ConformanceRenderSettingsGuard {
+    pub(super) previous: Option<std::ffi::OsString>,
 }
 
 impl ConformanceRenderSettingsGuard {
-    fn install(encoded: Option<&str>) -> Result<Self, String> {
+    pub(super) fn install(encoded: Option<&str>) -> Result<Self, String> {
         let previous = std::env::var_os(CONFORMANCE_RENDER_SETTINGS_ENV);
         // SAFETY: this guard is installed only by the synchronous CLI path before
         // any render worker thread is spawned, and remains alive until that work joins.
@@ -684,7 +694,7 @@ impl Drop for ConformanceRenderSettingsGuard {
     }
 }
 
-fn typed_request_dependencies(
+pub(super) fn typed_request_dependencies(
     document: &serde_json::Value,
     request_path: &Path,
 ) -> Result<Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>, String> {
@@ -768,7 +778,7 @@ fn typed_request_dependencies(
     Ok(dependencies)
 }
 
-fn typed_request_timing(
+pub(super) fn typed_request_timing(
     document: &serde_json::Value,
 ) -> Result<aexcompat_broker::image_render::RenderTiming, String> {
     let Some(timing) = document.get("timing") else {
@@ -835,7 +845,7 @@ fn typed_request_timing(
     render_timing(frame, duration_frames, time_scale, time_step)
 }
 
-fn typed_request_host_context(
+pub(super) fn typed_request_host_context(
     document: &serde_json::Value,
 ) -> Result<Option<aexcompat_broker::render_request::HostContext>, String> {
     document
@@ -846,7 +856,7 @@ fn typed_request_host_context(
         .map_err(|error| format!("host_context is invalid: {error}"))
 }
 
-fn render_timing(
+pub(super) fn render_timing(
     frame: i32,
     duration_frames: i32,
     time_scale: u32,
@@ -875,7 +885,7 @@ fn render_timing(
     })
 }
 
-fn typed_request_document(
+pub(super) fn typed_request_document(
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
     frame: i32,
     time_scale: u32,
@@ -951,25 +961,25 @@ impl Default for FailureDiagnostics {
 }
 
 #[derive(Debug, Default, PartialEq)]
-struct MatrixCase {
-    render_path: String,
-    pixel_format: String,
-    passed: bool,
-    applicable: bool,
-    classification: String,
-    failure_stage: Option<String>,
-    selector_error: Option<i64>,
-    output_png: Option<String>,
-    output_relation: Option<String>,
-    differing_input_pixels: Option<u64>,
-    error: Option<String>,
-    advertised_depth_supported: Option<bool>,
-    planned_dispatch_pixel_bytes: Option<u64>,
-    dispatch_pixel_bytes: Option<u64>,
-    depth_relation: Option<String>,
+pub(super) struct MatrixCase {
+    pub(super) render_path: String,
+    pub(super) pixel_format: String,
+    pub(super) passed: bool,
+    pub(super) applicable: bool,
+    pub(super) classification: String,
+    pub(super) failure_stage: Option<String>,
+    pub(super) selector_error: Option<i64>,
+    pub(super) output_png: Option<String>,
+    pub(super) output_relation: Option<String>,
+    pub(super) differing_input_pixels: Option<u64>,
+    pub(super) error: Option<String>,
+    pub(super) advertised_depth_supported: Option<bool>,
+    pub(super) planned_dispatch_pixel_bytes: Option<u64>,
+    pub(super) dispatch_pixel_bytes: Option<u64>,
+    pub(super) depth_relation: Option<String>,
 }
 
-fn compatibility_matrix(report: &serde_json::Value) -> Option<Vec<MatrixCase>> {
+pub(super) fn compatibility_matrix(report: &serde_json::Value) -> Option<Vec<MatrixCase>> {
     (report.get("stage")?.as_str()? == "effect_compatibility_matrix").then(|| {
         report["cases"]
             .as_array()
@@ -1002,7 +1012,7 @@ fn compatibility_matrix(report: &serde_json::Value) -> Option<Vec<MatrixCase>> {
     })
 }
 
-fn depth_render_classification(
+pub(super) fn depth_render_classification(
     requested: u64,
     planned: u64,
     captured: u64,
@@ -1015,7 +1025,7 @@ fn depth_render_classification(
     }
 }
 
-fn matrix_success_classification(
+pub(super) fn matrix_success_classification(
     report: &serde_json::Value,
     requested_bytes: u64,
 ) -> (&'static str, &'static str, bool, bool, Option<&'static str>) {
@@ -1056,7 +1066,7 @@ fn matrix_success_classification(
     )
 }
 
-fn run_effect_matrix(
+pub(super) fn run_effect_matrix(
     repository: &Path,
     plugin_path: &Path,
     hash: &str,
@@ -1240,7 +1250,7 @@ fn json_after_marker(text: &str, marker: &str) -> Option<serde_json::Value> {
         .ok()
 }
 
-fn typed_failure_document(message: &str) -> Option<serde_json::Value> {
+pub(super) fn typed_failure_document(message: &str) -> Option<serde_json::Value> {
     let diagnostics = json_after_marker(message, "diagnostics=")
         .or_else(|| json_after_marker(message, "worker report unavailable: "))
         .or_else(|| {
@@ -1267,7 +1277,7 @@ fn typed_failure_document(message: &str) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(document))
 }
 
-fn emit_typed_failure(message: &str) {
+pub(super) fn emit_typed_failure(message: &str) {
     if let Some(document) = typed_failure_document(message)
         && let Ok(encoded) = serde_json::to_string(&document)
     {
@@ -1276,7 +1286,7 @@ fn emit_typed_failure(message: &str) {
     eprintln!("{message}");
 }
 
-fn emit_typed_failure_with_parameter_metadata(
+pub(super) fn emit_typed_failure_with_parameter_metadata(
     message: &str,
     parameter_metadata: &serde_json::Value,
 ) {
@@ -1293,7 +1303,9 @@ fn emit_typed_failure_with_parameter_metadata(
     eprintln!("{message}");
 }
 
-fn host_request_validation_failure(parameter_metadata: &serde_json::Value) -> serde_json::Value {
+pub(super) fn host_request_validation_failure(
+    parameter_metadata: &serde_json::Value,
+) -> serde_json::Value {
     serde_json::json!({
         "classification": "host_validation_error",
         "failure_stage": "request_validation",
@@ -1301,7 +1313,10 @@ fn host_request_validation_failure(parameter_metadata: &serde_json::Value) -> se
     })
 }
 
-fn emit_host_request_validation_failure(message: &str, parameter_metadata: &serde_json::Value) {
+pub(super) fn emit_host_request_validation_failure(
+    message: &str,
+    parameter_metadata: &serde_json::Value,
+) {
     let document = host_request_validation_failure(parameter_metadata);
     if let Ok(encoded) = serde_json::to_string(&document) {
         println!("{encoded}");
@@ -1309,7 +1324,7 @@ fn emit_host_request_validation_failure(message: &str, parameter_metadata: &serd
     eprintln!("{message}");
 }
 
-fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
+pub(super) fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
     let diagnostics = json_after_marker(message, "diagnostics=")
         .or_else(|| json_after_marker(message, "worker report unavailable: "))?;
     let report = json_after_marker(message, "report=");
@@ -1412,7 +1427,7 @@ fn failure_diagnostics(message: &str) -> Option<FailureDiagnostics> {
     })
 }
 
-fn valid_suite_name(name: &str) -> bool {
+pub(super) fn valid_suite_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 96
         && name
@@ -1420,7 +1435,7 @@ fn valid_suite_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-'))
 }
 
-fn matrix_error_summary(message: &str) -> String {
+pub(super) fn matrix_error_summary(message: &str) -> String {
     if let Some(report) = json_after_marker(message, "report=") {
         if report["smart_render_supported"].as_bool() == Some(false) {
             return "AEX did not advertise SmartFX render support".into();
@@ -1453,7 +1468,7 @@ fn completed_stages(diagnostics: Option<&serde_json::Value>) -> Vec<String> {
         .collect()
 }
 
-fn render_diagnostics(report: &serde_json::Value) -> Option<RenderDiagnostics> {
+pub(super) fn render_diagnostics(report: &serde_json::Value) -> Option<RenderDiagnostics> {
     (report.get("stage")?.as_str()? == "interactive_image_render").then(|| {
         let gpu_attempt = report.get("gpu_attempt").filter(|value| !value.is_null());
         RenderDiagnostics {
@@ -1487,14 +1502,14 @@ fn render_diagnostics(report: &serde_json::Value) -> Option<RenderDiagnostics> {
 /// The error UPDATE_PARAMS_UI returned on the supervised-parameter route,
 /// when it ran and failed. The worker then drops what it wrote and keeps the
 /// USER_CHANGED_PARAM result (#1858).
-fn update_params_ui_failure(report: &serde_json::Value) -> Option<i64> {
+pub(super) fn update_params_ui_failure(report: &serde_json::Value) -> Option<i64> {
     report
         .get("update_params_ui_error")
         .and_then(serde_json::Value::as_i64)
         .filter(|error| *error != 0 && *error != -1)
 }
 
-fn apply_dynamic_ui_report(
+pub(super) fn apply_dynamic_ui_report(
     parameters: &mut [aexcompat_broker::image_render::InteractiveParameter],
     report: &serde_json::Value,
 ) -> bool {

@@ -1,3 +1,42 @@
+use super::effect_chain::{EffectChainSlot, chain_raw_extension};
+use super::live_session::{
+    InspectedRenderCapability, inspected_render_capability, interactive_selection_failure,
+    selected_interactive_session_selection,
+};
+#[cfg(windows)]
+use super::live_session::{
+    LiveCommand, LiveRenderRequest, LiveSessionHandle, spawn_live_session_thread,
+};
+use super::preflight::{
+    AdjacentImportDiscovery, DiagnosticHistory, DispatchIdentity, MissingSuiteAggregate,
+    PreflightImportWarning, Selection, SessionDependency, TaskResult, aggregate_missing_suites,
+    decode_sha256, diagnostic_details, diagnostic_summary, discover_adjacent_imports,
+    load_diagnostic_history, persist_diagnostic, persist_preflight_warnings, read_bounded_pe,
+};
+use super::render_contract::{
+    FailureDiagnostics, MatrixCase, ParameterInspectionState, PixelComparison, RenderDiagnostics,
+    TaskKind, apply_dynamic_ui_report, apply_typed_assignments, compare_images,
+    compatibility_matrix, failure_diagnostics, native_failure_status, parameter_inspection_message,
+    parameter_inspection_state, parameter_inspection_status, prepare_render_preview,
+    receive_task_result, render_action_enabled, render_diagnostics, render_input_fingerprint,
+    render_timing, report_ui_output_failure, run_effect_matrix, typed_request_document,
+    typed_request_host_context, typed_request_timing, update_params_ui_failure,
+    visible_report_summary,
+};
+use super::ui::{AexUiKit, UiLanguage};
+use super::viewer::{
+    PREVIEW_TEXTURE_OPTIONS, canonical_deverbatim, is_supported_input_image, load_preview,
+    show_preview, show_viewer_texture,
+};
+use eframe::egui;
+use eframe::egui::{Color32, RichText};
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant, SystemTime};
+use std::{fs, thread};
+
 const COLUMN_HEADER_HEIGHT: f32 = 84.0;
 
 fn analysis_action_button(
@@ -10,19 +49,20 @@ fn analysis_action_button(
         .on_hover_text(help)
 }
 
-use crate::gui_state::{reset_all, reset_parameter};
+use crate::gui_state::{MAX_EFFECT_CHAIN_STAGES, reset_all, reset_parameter};
 use crate::shared_ui::AegpRoundtripAction;
 
-type AegpRoundtripDispatch = fn(&Path, &Path, &str) -> std::io::Result<serde_json::Value>;
+pub(super) type AegpRoundtripDispatch =
+    fn(&Path, &Path, &str) -> std::io::Result<serde_json::Value>;
 
 #[derive(Clone, Copy)]
-struct AegpRoundtripSpec {
-    operation: &'static str,
-    dispatch: AegpRoundtripDispatch,
+pub(super) struct AegpRoundtripSpec {
+    pub(super) operation: &'static str,
+    pub(super) dispatch: AegpRoundtripDispatch,
 }
 
 impl AegpRoundtripAction {
-    fn spec(self) -> AegpRoundtripSpec {
+    pub(super) fn spec(self) -> AegpRoundtripSpec {
         match self {
             Self::Keyframes => AegpRoundtripSpec {
                 operation: "dispatch_aegp_keyframe_roundtrip",
@@ -45,7 +85,7 @@ impl AegpRoundtripAction {
         }
     }
 
-    fn status(self) -> &'static str {
+    pub(super) fn status(self) -> &'static str {
         match self {
             Self::Keyframes => "Running the AEGP keyframe roundtrip in isolation...",
             Self::Seek => "Running the AEGP current-time roundtrip in isolation...",
@@ -55,7 +95,7 @@ impl AegpRoundtripAction {
     }
 }
 
-fn show_aegp_roundtrip_actions(
+pub(super) fn show_aegp_roundtrip_actions(
     ui: &mut egui::Ui,
     busy: bool,
     ui_kit: &AexUiKit,
@@ -108,7 +148,7 @@ fn fit_size_to_aspect(available: egui::Vec2, aspect: f32) -> egui::Vec2 {
     egui::vec2(width, width / aspect)
 }
 
-fn normalize_inspected_ui_parameters(
+pub(super) fn normalize_inspected_ui_parameters(
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
 ) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
     parameters
@@ -131,7 +171,7 @@ fn normalize_inspected_ui_parameters(
         .collect()
 }
 
-fn parameters_for_native_action(
+pub(super) fn parameters_for_native_action(
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
     defaults: &[aexcompat_broker::image_render::InteractiveParameter],
 ) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
@@ -159,7 +199,7 @@ fn parameters_for_native_action(
         .collect()
 }
 
-fn canonical_runtime_dependency_root(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn canonical_runtime_dependency_root(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("Runtime dependency folder must be an absolute path.".into());
     }
@@ -177,13 +217,13 @@ fn canonical_runtime_dependency_root(path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn same_windows_path(left: &Path, right: &Path) -> bool {
+pub(super) fn same_windows_path(left: &Path, right: &Path) -> bool {
     left.as_os_str()
         .to_string_lossy()
         .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
 }
 
-fn approved_dependency_search_dirs(
+pub(super) fn approved_dependency_search_dirs(
     plugin_path: &Path,
     dependencies: &[aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact],
     runtime_roots: &[PathBuf],
@@ -212,90 +252,91 @@ fn approved_dependency_search_dirs(
     Ok(roots)
 }
 
-struct HarnessApp {
-    ui_kit: AexUiKit,
-    licenses: crate::licenses::LicenseWindow,
-    repository: PathBuf,
-    selection: Option<Selection>,
-    effect_chain: Vec<EffectChainSlot>,
-    active_effect: usize,
-    chain_render_fingerprint: Option<String>,
-    session_approved: bool,
-    dependencies: Vec<SessionDependency>,
-    approved_dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
-    runtime_dependency_roots: Vec<PathBuf>,
-    approval_check: bool,
-    trust_rebuilds: bool,
-    selection_stale: bool,
-    last_identity_check: Instant,
-    input_image: Option<PathBuf>,
-    audio_input: Option<PathBuf>,
-    audio_effect_only: bool,
-    input_preview: Option<egui::TextureHandle>,
-    output_image: Option<PathBuf>,
-    preview: Option<egui::TextureHandle>,
-    reference_image: Option<PathBuf>,
-    reference_preview: Option<egui::TextureHandle>,
-    viewer_open: bool,
-    viewer_mode: u8,
-    viewer_zoom: f32,
-    viewer_pan: egui::Vec2,
-    show_analysis_panel: bool,
-    analysis_panel_width: f32,
-    pixel_comparison: Option<Result<PixelComparison, String>>,
-    parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
-    parameter_defaults: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+pub(super) struct HarnessApp {
+    pub(super) ui_kit: AexUiKit,
+    pub(super) licenses: crate::licenses::LicenseWindow,
+    pub(super) repository: PathBuf,
+    pub(super) selection: Option<Selection>,
+    pub(super) effect_chain: Vec<EffectChainSlot>,
+    pub(super) active_effect: usize,
+    pub(super) chain_render_fingerprint: Option<String>,
+    pub(super) session_approved: bool,
+    pub(super) dependencies: Vec<SessionDependency>,
+    pub(super) approved_dependencies:
+        Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
+    pub(super) runtime_dependency_roots: Vec<PathBuf>,
+    pub(super) approval_check: bool,
+    pub(super) trust_rebuilds: bool,
+    pub(super) selection_stale: bool,
+    pub(super) last_identity_check: Instant,
+    pub(super) input_image: Option<PathBuf>,
+    pub(super) audio_input: Option<PathBuf>,
+    pub(super) audio_effect_only: bool,
+    pub(super) input_preview: Option<egui::TextureHandle>,
+    pub(super) output_image: Option<PathBuf>,
+    pub(super) preview: Option<egui::TextureHandle>,
+    pub(super) reference_image: Option<PathBuf>,
+    pub(super) reference_preview: Option<egui::TextureHandle>,
+    pub(super) viewer_open: bool,
+    pub(super) viewer_mode: u8,
+    pub(super) viewer_zoom: f32,
+    pub(super) viewer_pan: egui::Vec2,
+    pub(super) show_analysis_panel: bool,
+    pub(super) analysis_panel_width: f32,
+    pub(super) pixel_comparison: Option<Result<PixelComparison, String>>,
+    pub(super) parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    pub(super) parameter_defaults: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     /// Group (topic) slots twirled closed in Effect Controls.
-    collapsed_groups: std::collections::BTreeSet<u32>,
-    parameter_inspection_state: ParameterInspectionState,
-    host_context: Option<aexcompat_broker::render_request::HostContext>,
-    smart_render: bool,
-    smart_render_advertised: Option<bool>,
-    smart_render_capability: Option<InspectedRenderCapability>,
-    smart_render_manual_override: bool,
-    pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
-    gpu_backend: aexcompat_broker::image_render::RenderGpuBackend,
-    frame: i32,
-    frames_per_second: u32,
-    frame_time_step: i32,
-    duration_frames: i32,
-    custom_ui_click_point: [u16; 2],
-    custom_ui_click_color: [f32; 4],
-    apply_custom_ui_click_to_render: bool,
-    apply_custom_ui_draw_to_render: bool,
-    custom_ui_drag_end: [u16; 2],
-    custom_ui_drag_steps: u8,
-    custom_ui_keycode: u32,
-    custom_ui_key_modifiers: u16,
-    busy: bool,
-    rendering: bool,
-    status: String,
-    report: String,
-    render_diagnostics: Option<RenderDiagnostics>,
-    failure_diagnostics: Option<FailureDiagnostics>,
-    matrix_results: Vec<MatrixCase>,
-    receiver: Option<Receiver<TaskResult>>,
-    task_kind: TaskKind,
-    inspect_after_refresh: bool,
-    diagnostic_history: DiagnosticHistory,
-    missing_suite_aggregate: MissingSuiteAggregate,
-    preflight_warnings: Vec<PreflightImportWarning>,
-    diagnostic_warning: Option<String>,
-    live_render: bool,
-    pending_parameter_slot: Option<u32>,
-    pending_live_render: bool,
-    live_render_due: Option<Instant>,
-    render_after_parameter_change: bool,
+    pub(super) collapsed_groups: std::collections::BTreeSet<u32>,
+    pub(super) parameter_inspection_state: ParameterInspectionState,
+    pub(super) host_context: Option<aexcompat_broker::render_request::HostContext>,
+    pub(super) smart_render: bool,
+    pub(super) smart_render_advertised: Option<bool>,
+    pub(super) smart_render_capability: Option<InspectedRenderCapability>,
+    pub(super) smart_render_manual_override: bool,
+    pub(super) pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
+    pub(super) gpu_backend: aexcompat_broker::image_render::RenderGpuBackend,
+    pub(super) frame: i32,
+    pub(super) frames_per_second: u32,
+    pub(super) frame_time_step: i32,
+    pub(super) duration_frames: i32,
+    pub(super) custom_ui_click_point: [u16; 2],
+    pub(super) custom_ui_click_color: [f32; 4],
+    pub(super) apply_custom_ui_click_to_render: bool,
+    pub(super) apply_custom_ui_draw_to_render: bool,
+    pub(super) custom_ui_drag_end: [u16; 2],
+    pub(super) custom_ui_drag_steps: u8,
+    pub(super) custom_ui_keycode: u32,
+    pub(super) custom_ui_key_modifiers: u16,
+    pub(super) busy: bool,
+    pub(super) rendering: bool,
+    pub(super) status: String,
+    pub(super) report: String,
+    pub(super) render_diagnostics: Option<RenderDiagnostics>,
+    pub(super) failure_diagnostics: Option<FailureDiagnostics>,
+    pub(super) matrix_results: Vec<MatrixCase>,
+    pub(super) receiver: Option<Receiver<TaskResult>>,
+    pub(super) task_kind: TaskKind,
+    pub(super) inspect_after_refresh: bool,
+    pub(super) diagnostic_history: DiagnosticHistory,
+    pub(super) missing_suite_aggregate: MissingSuiteAggregate,
+    pub(super) preflight_warnings: Vec<PreflightImportWarning>,
+    pub(super) diagnostic_warning: Option<String>,
+    pub(super) live_render: bool,
+    pub(super) pending_parameter_slot: Option<u32>,
+    pub(super) pending_live_render: bool,
+    pub(super) live_render_due: Option<Instant>,
+    pub(super) render_after_parameter_change: bool,
     /// Command channel into the background session thread (issue #107); the
     /// resident worker lives on the other side of it. Dropped with the app,
     /// which closes the session gracefully. The session transport is
     /// Windows-only; other targets keep the one-shot path.
     #[cfg(windows)]
-    live_session: Option<LiveSessionHandle>,
+    pub(super) live_session: Option<LiveSessionHandle>,
 }
 
 impl HarnessApp {
-    fn new(repository: PathBuf) -> Self {
+    pub(super) fn new(repository: PathBuf) -> Self {
         let missing_suite_aggregate = aggregate_missing_suites(&repository);
         Self {
             ui_kit: AexUiKit::default(),
@@ -376,18 +417,18 @@ impl HarnessApp {
         }
     }
 
-    fn clear_render_output(&mut self) {
+    pub(super) fn clear_render_output(&mut self) {
         self.output_image = None;
         self.preview = None;
         self.pixel_comparison = None;
     }
 
-    fn invalidate_render_output(&mut self) {
+    pub(super) fn invalidate_render_output(&mut self) {
         self.clear_render_output();
         self.viewer_mode = 0;
     }
 
-    fn close_selected_aex(&mut self) {
+    pub(super) fn close_selected_aex(&mut self) {
         self.close_live_session();
         self.selection = None;
         self.session_approved = false;
@@ -425,7 +466,7 @@ impl HarnessApp {
         self.report.clear();
     }
 
-    fn current_render_input_fingerprint(&self) -> String {
+    pub(super) fn current_render_input_fingerprint(&self) -> String {
         render_input_fingerprint(
             &self.parameters,
             self.smart_render,
@@ -447,7 +488,7 @@ impl HarnessApp {
     /// Tells the session thread to close the resident worker. Required
     /// whenever the AEX selection or its approval changes: the worker must
     /// not outlive the selection it was opened for.
-    fn close_live_session(&mut self) {
+    pub(super) fn close_live_session(&mut self) {
         #[cfg(windows)]
         if let Some(handle) = &self.live_session {
             if handle.sender.send(LiveCommand::Close).is_err() {
@@ -874,7 +915,7 @@ impl HarnessApp {
         });
     }
 
-    fn spawn<F>(&mut self, work: F)
+    pub(super) fn spawn<F>(&mut self, work: F)
     where
         F: FnOnce() -> Result<(String, Option<PathBuf>), String> + Send + 'static,
     {
@@ -905,7 +946,7 @@ impl HarnessApp {
         self.task_kind = TaskKind::Generic;
     }
 
-    fn spawn_native<F>(&mut self, operation: &'static str, work: F)
+    pub(super) fn spawn_native<F>(&mut self, operation: &'static str, work: F)
     where
         F: FnOnce() -> Result<(String, Option<PathBuf>), String> + Send + 'static,
     {
@@ -948,7 +989,7 @@ impl HarnessApp {
         self.choose_aex_path(path);
     }
 
-    fn choose_aex_path(&mut self, path: PathBuf) {
+    pub(super) fn choose_aex_path(&mut self, path: PathBuf) {
         self.status = "Computing AEX identity...".into();
         self.spawn(move || {
             let bytes = read_bounded_pe(&path)?;
@@ -1079,7 +1120,7 @@ impl HarnessApp {
         self.load_input_path(ctx, path);
     }
 
-    fn load_input_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+    pub(super) fn load_input_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         match load_preview(ctx, "input", &path) {
             Ok(preview) => {
                 self.input_image = Some(path);
@@ -1227,7 +1268,7 @@ impl HarnessApp {
         };
     }
 
-    fn refresh_aex(&mut self) {
+    pub(super) fn refresh_aex(&mut self) {
         let Some(selected) = &self.selection else {
             return;
         };
@@ -1300,7 +1341,7 @@ impl HarnessApp {
         }
     }
 
-    fn check_selected_identity(&mut self) {
+    pub(super) fn check_selected_identity(&mut self) {
         if self.last_identity_check.elapsed() < Duration::from_millis(500) {
             return;
         }
@@ -1866,7 +1907,7 @@ impl HarnessApp {
         }
     }
 
-    fn render_to(&mut self, output: PathBuf) {
+    pub(super) fn render_to(&mut self, output: PathBuf) {
         if !self.chain_edit_ready() {
             return;
         }
@@ -2399,8 +2440,11 @@ impl HarnessApp {
         self.dispatch_aegp_roundtrip_with(action, action.spec().dispatch);
     }
 
-    fn dispatch_aegp_roundtrip_with<F>(&mut self, action: AegpRoundtripAction, dispatch: F)
-    where
+    pub(super) fn dispatch_aegp_roundtrip_with<F>(
+        &mut self,
+        action: AegpRoundtripAction,
+        dispatch: F,
+    ) where
         F: FnOnce(&Path, &Path, &str) -> std::io::Result<serde_json::Value> + Send + 'static,
     {
         let Some(selection) = &self.selection else {
@@ -2564,7 +2608,7 @@ impl HarnessApp {
         }
     }
 
-    fn queue_parameter_transition(&mut self, slot: u32, supervised: bool, now: Instant) {
+    pub(super) fn queue_parameter_transition(&mut self, slot: u32, supervised: bool, now: Instant) {
         if supervised {
             self.pending_parameter_slot = Some(slot);
             self.live_render_due = Some(now + std::time::Duration::from_millis(500));
@@ -2574,7 +2618,7 @@ impl HarnessApp {
         }
     }
 
-    fn reset_all_parameters(&mut self, now: Instant) -> bool {
+    pub(super) fn reset_all_parameters(&mut self, now: Instant) -> bool {
         if !reset_all(&mut self.parameters, &self.parameter_defaults) {
             return false;
         }
@@ -2605,7 +2649,7 @@ impl HarnessApp {
         }
     }
 
-    fn poll(&mut self, ctx: &egui::Context) {
+    pub(super) fn poll(&mut self, ctx: &egui::Context) {
         let result = self.receiver.as_ref().and_then(receive_task_result);
         let Some(mut result) = result else {
             if self.busy {

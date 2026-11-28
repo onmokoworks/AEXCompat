@@ -1,3 +1,9 @@
+use super::render_contract::{
+    ConformanceRenderSettingsGuard, apply_typed_render_assignments, typed_request_dependencies,
+    typed_request_host_context, typed_request_render_settings, typed_request_timing,
+};
+use std::path::{Path, PathBuf};
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IndependentBatchManifest {
@@ -91,7 +97,10 @@ fn batch_output_identity(path: &Path) -> Result<String, String> {
     Ok(parent.join(name).to_string_lossy().to_lowercase())
 }
 
-fn run_independent_case_batch(repository: &Path, path: &Path) -> Result<serde_json::Value, String> {
+pub(super) fn run_independent_case_batch(
+    repository: &Path,
+    path: &Path,
+) -> Result<serde_json::Value, String> {
     use aexcompat_broker::image_render::{IndependentCaseBatch, RenderPixelFormat};
     let started = std::time::Instant::now();
     let manifest = parse_batch_manifest(&read_batch_document(path, 1024 * 1024)?)?;
